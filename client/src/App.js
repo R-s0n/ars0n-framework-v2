@@ -622,7 +622,7 @@ function App() {
       }
 
       try {
-        const response = await fetch('http://localhost:8080/scopetarget/add', {
+        const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/add`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
