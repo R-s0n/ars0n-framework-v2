@@ -23,7 +23,7 @@ const ScopeTargetDetails = () => {
 
     const fetchScopeTarget = async () => {
         try {
-            const response = await fetch(`http://localhost:8080/scopetarget/${id}`);
+            const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${id}`);
             if (!response.ok) throw new Error('Failed to fetch scope target');
             const data = await response.json();
             setScopeTarget(data);
