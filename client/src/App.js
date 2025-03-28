@@ -9,6 +9,8 @@ import { AssetfinderResultsModal } from './modals/assetfinderModals.js';
 import { SubfinderResultsModal } from './modals/subfinderModals.js';
 import { ShuffleDNSResultsModal } from './modals/shuffleDNSModals.js';
 import ScreenshotResultsModal from './modals/ScreenshotResultsModal.js';
+import SettingsModal from './modals/SettingsModal.js';
+import ExportModal from './modals/ExportModal.js';
 import Ars0nFrameworkHeader from './components/ars0nFrameworkHeader.js';
 import ManageScopeTargets from './components/manageScopeTargets.js';
 import fetchAmassScans from './utils/fetchAmassScans.js';
@@ -196,6 +198,7 @@ function App() {
   const [dnsRecords, setDnsRecords] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [showActiveModal, setShowActiveModal] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
   const [selections, setSelections] = useState({
     type: '',
     inputText: '',
@@ -285,11 +288,18 @@ function App() {
   const [showROIReport, setShowROIReport] = useState(false);
   const [selectedTargetURL, setSelectedTargetURL] = useState(null);
   const [shuffleDNSCustomScans, setShuffleDNSCustomScans] = useState([]);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
 
   const handleCloseSubdomainsModal = () => setShowSubdomainsModal(false);
   const handleCloseCloudDomainsModal = () => setShowCloudDomainsModal(false);
   const handleCloseUniqueSubdomainsModal = () => setShowUniqueSubdomainsModal(false);
   const handleCloseMetaDataModal = () => setShowMetaDataModal(false);
+  const handleCloseSettingsModal = () => {
+    setShowSettingsModal(false);
+  };
+  const handleCloseExportModal = () => {
+    setShowExportModal(false);
+  };
 
   useEffect(() => {
     fetchScopeTargets();
@@ -1200,9 +1210,44 @@ function App() {
     setShowROIReport(false);
   };
 
+  const handleOpenSettingsModal = () => {
+    setShowSettingsModal(true);
+  };
+
+  const handleOpenExportModal = () => {
+    setShowExportModal(true);
+  };
+
+  // Add scroll position restoration
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      sessionStorage.setItem('scrollPosition', window.scrollY.toString());
+    };
+
+    const restoreScrollPosition = () => {
+      const scrollPosition = sessionStorage.getItem('scrollPosition');
+      if (scrollPosition) {
+        window.scrollTo({
+          top: parseInt(scrollPosition, 10),
+          behavior: 'smooth'
+        });
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    restoreScrollPosition();
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, []);
+
   return (
     <Container data-bs-theme="dark" className="App" style={{ padding: '20px' }}>
-      <Ars0nFrameworkHeader />
+      <Ars0nFrameworkHeader 
+        onSettingsClick={handleOpenSettingsModal} 
+        onExportClick={handleOpenExportModal}
+      />
 
       <ToastContainer 
         position="bottom-center"
@@ -1260,6 +1305,16 @@ function App() {
         activeTarget={activeTarget}
         handleActiveSelect={handleActiveSelect}
         handleDelete={handleDelete}
+      />
+
+      <SettingsModal
+        show={showSettingsModal}
+        handleClose={handleCloseSettingsModal}
+      />
+
+      <ExportModal
+        show={showExportModal}
+        handleClose={handleCloseExportModal}
       />
 
       <Modal data-bs-theme="dark" show={showScanHistoryModal} onHide={handleCloseScanHistoryModal} size="xl">

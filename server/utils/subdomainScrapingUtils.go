@@ -605,7 +605,14 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 	log.Printf("[INFO] Starting GAU scan for domain %s (scan ID: %s)", domain, scanID)
 	startTime := time.Now()
 
-	cmd := exec.Command(
+	// Get rate limit and custom HTTP settings
+	rateLimit := GetGauRateLimit()
+	_, _ = GetCustomHTTPSettings() // GAU doesn't support custom headers or user agent
+	log.Printf("[INFO] Using rate limit of %d for GAU scan", rateLimit)
+	log.Printf("[DEBUG] Note: GAU does not support custom headers or user agent")
+
+	// Build base command
+	dockerCmd := []string{
 		"docker", "run", "--rm",
 		"sxcurity/gau:latest",
 		domain,
@@ -616,9 +623,12 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 		"--threads", "10",
 		"--timeout", "60",
 		"--retries", "2",
-	)
+	}
 
-	log.Printf("[INFO] Executing command: %s", cmd.String())
+	// Note: GAU does not support custom headers or user agent
+	cmd := exec.Command(dockerCmd[0], dockerCmd[1:]...)
+
+	log.Printf("[INFO] Executing command: %s", strings.Join(dockerCmd, " "))
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -630,7 +640,7 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 	if err != nil {
 		log.Printf("[ERROR] GAU scan failed for %s: %v", domain, err)
 		log.Printf("[ERROR] stderr output: %s", stderr.String())
-		UpdateGauScanStatus(scanID, "error", "", stderr.String(), cmd.String(), execTime)
+		UpdateGauScanStatus(scanID, "error", "", stderr.String(), strings.Join(dockerCmd, " "), execTime)
 		return
 	}
 
@@ -644,7 +654,7 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 	// Check if we have actual results
 	if result == "" {
 		// Try a second attempt with different flags
-		cmd = exec.Command(
+		dockerCmd = []string{
 			"docker", "run", "--rm",
 			"sxcurity/gau:latest",
 			domain,
@@ -653,12 +663,15 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 			"--threads", "5",
 			"--timeout", "30",
 			"--retries", "3",
-		)
+		}
 
-		log.Printf("[INFO] No results from first attempt, trying second attempt with command: %s", cmd.String())
+		log.Printf("[INFO] No results from first attempt, trying second attempt with command: %s", strings.Join(dockerCmd, " "))
 
 		stdout.Reset()
 		stderr.Reset()
+		cmd = exec.Command(dockerCmd[0], dockerCmd[1:]...)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
 		err = cmd.Run()
 
 		if err == nil {
@@ -666,7 +679,7 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 		}
 	}
 
-	UpdateGauScanStatus(scanID, "success", result, stderr.String(), cmd.String(), execTime)
+	UpdateGauScanStatus(scanID, "success", result, stderr.String(), strings.Join(dockerCmd, " "), execTime)
 	log.Printf("[INFO] Scan status updated for scan %s", scanID)
 }
 

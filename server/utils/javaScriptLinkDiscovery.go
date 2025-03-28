@@ -90,6 +90,11 @@ func executeAndParseGoSpiderScan(scanID, domain string) {
 	log.Printf("[INFO] Starting GoSpider scan for domain %s (scan ID: %s)", domain, scanID)
 	startTime := time.Now()
 
+	// Get custom HTTP settings
+	customUserAgent, customHeader := GetCustomHTTPSettings()
+	log.Printf("[DEBUG] Custom User Agent: %s", customUserAgent)
+	log.Printf("[DEBUG] Custom Header: %s", customHeader)
+
 	var httpxResults string
 	err := dbPool.QueryRow(context.Background(), `
 		SELECT result FROM httpx_scans 
@@ -158,6 +163,16 @@ func executeAndParseGoSpiderScan(scanID, domain string) {
 			"--json",
 			"-v",
 		)
+
+		// Add custom user agent if specified
+		if customUserAgent != "" {
+			cmd.Args = append(cmd.Args, "--user-agent", customUserAgent)
+		}
+
+		// Add custom header if specified
+		if customHeader != "" {
+			cmd.Args = append(cmd.Args, "--header", customHeader)
+		}
 
 		commands = append(commands, cmd.String())
 		log.Printf("[DEBUG] Executing command: %s", cmd.String())

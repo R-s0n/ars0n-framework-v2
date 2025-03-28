@@ -8,6 +8,12 @@ Ars0n Framework v2
     <em>Coming DEFCON 2025 (hopefully...probably.....feelin' pretty good about it right now... 🙏)</em>
 </p>
 
+<div align="center">
+  <a href="https://www.youtube.com/watch?v=u-yPpd0UH8w">
+    <img src="thumbnail.png" width="600px" alt="Youtube Thumbnail" style="border-radius: 12px;">
+  </a>
+</div>
+
 <p align="center">
     <a href="https://github.com/owasp-amass/amass">Amass</a> - Advanced attack surface mapping and asset discovery tool for security research<br>
     <a href="https://github.com/projectdiscovery/subfinder">Subfinder</a> - Fast and reliable subdomain enumeration tool with multiple data sources<br>
@@ -60,6 +66,22 @@ Ars0n Framework v2
     <img src="meta.png" alt="Screenshot of Framework" width="800">
     <img src="meta2.png" alt="Screenshot of Framework" width="800">
     <img src="meta3.png" alt="Screenshot of Framework" width="800">
+</p>
+
+<p align="center">
+    Adjust the concurrency and rate limiting for each individual tool to perfectly dial in your scanning strategy!
+</p>
+
+<p align="center">
+    <img src="rate-limiting.png" alt="Screenshot of Framework" width="800">
+</p>
+
+<p align="center">
+    Export your scan results to a CSV and use the data however you would like!
+</p>
+
+<p align="center">
+    <img src="export.png" alt="Screenshot of Framework" width="800">
 </p>
 
 <p align="right">~ by rs0n w/ ❤️</p>

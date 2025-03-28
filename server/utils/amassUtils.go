@@ -577,6 +577,10 @@ func ExecuteAndParseAmassScan(scanID, domain string) {
 	log.Printf("[INFO] Starting Amass scan for domain %s (scan ID: %s)", domain, scanID)
 	startTime := time.Now()
 
+	// Get the rate limit from settings
+	rateLimit := GetAmassRateLimit()
+	log.Printf("[INFO] Using rate limit of %d for Amass scan", rateLimit)
+
 	cmd := exec.Command(
 		"docker", "run", "--rm",
 		"caffix/amass",
@@ -588,6 +592,7 @@ func ExecuteAndParseAmassScan(scanID, domain string) {
 		"185.228.168.9", "185.228.169.9", "76.76.19.19", "76.223.122.150",
 		"198.101.242.72", "176.103.130.130", "176.103.130.131",
 		"94.140.14.14", "94.140.15.15", "1.0.0.1", "77.88.8.8", "77.88.8.1",
+		"-rf", fmt.Sprintf("%d", rateLimit),
 	)
 
 	log.Printf("[INFO] Executing command: %s", cmd.String())

@@ -85,6 +85,11 @@ func ExecuteAndParseNucleiScreenshotScan(scanID, domain string) {
 	log.Printf("[INFO] Starting Nuclei screenshot scan execution for scan ID: %s", scanID)
 	startTime := time.Now()
 
+	// Get custom HTTP settings
+	customUserAgent, customHeader := GetCustomHTTPSettings()
+	log.Printf("[DEBUG] Custom User Agent: %s", customUserAgent)
+	log.Printf("[DEBUG] Custom Header: %s", customHeader)
+
 	// Get scope target ID and latest httpx results
 	var scopeTargetID string
 	err := dbPool.QueryRow(context.Background(),
@@ -137,12 +142,26 @@ func ExecuteAndParseNucleiScreenshotScan(scanID, domain string) {
 		return
 	}
 
-	// Prepare docker command
-	cmd := exec.Command(
+	// Build base command
+	cmdArgs := []string{
 		"docker", "exec", "ars0n-framework-v2-nuclei-1",
 		"bash", "-c",
-		fmt.Sprintf("echo '%s' > /urls.txt && nuclei -t /root/nuclei-templates/headless/screenshot.yaml -list /urls.txt -headless", strings.Join(urls, "\n")),
-	)
+	}
+
+	nucleiCmd := fmt.Sprintf("echo '%s' > /urls.txt && nuclei -t /root/nuclei-templates/headless/screenshot.yaml -list /urls.txt -headless", strings.Join(urls, "\n"))
+
+	// Add custom headers if specified
+	if customHeader != "" {
+		nucleiCmd += fmt.Sprintf(" -H '%s'", customHeader)
+	}
+
+	// Add custom user agent via header if specified
+	if customUserAgent != "" {
+		nucleiCmd += fmt.Sprintf(" -H 'User-Agent: %s'", customUserAgent)
+	}
+
+	cmdArgs = append(cmdArgs, nucleiCmd)
+	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	log.Printf("[INFO] Prepared Nuclei command for scan ID %s: %s", scanID, cmd.String())
 
 	var stdout, stderr bytes.Buffer

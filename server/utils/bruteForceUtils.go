@@ -138,6 +138,10 @@ func ExecuteAndParseShuffleDNSWithWordlist(scanID, wordlist string) {
 	log.Printf("[INFO] Starting ShuffleDNS scan with wordlist (scan ID: %s)", scanID)
 	startTime := time.Now()
 
+	// Get the rate limit from settings
+	rateLimit := GetShuffleDNSRateLimit()
+	log.Printf("[INFO] Using ShuffleDNS rate limit: %d", rateLimit)
+
 	// Create temporary directory for wordlist and resolvers
 	tempDir := "/tmp/shuffledns-temp"
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
@@ -164,6 +168,7 @@ func ExecuteAndParseShuffleDNSWithWordlist(scanID, wordlist string) {
 		"-r", "/app/wordlists/resolvers.txt",
 		"-silent",
 		"-massdns", "/usr/local/bin/massdns",
+		"-t", fmt.Sprintf("%d", rateLimit),
 		"-mode", "bruteforce",
 	)
 
@@ -214,6 +219,10 @@ func ExecuteAndParseShuffleDNSScan(scanID, domain string) {
 	log.Printf("[INFO] Starting ShuffleDNS scan for domain %s (scan ID: %s)", domain, scanID)
 	startTime := time.Now()
 
+	// Get the rate limit from settings
+	rateLimit := GetShuffleDNSRateLimit()
+	log.Printf("[INFO] Using ShuffleDNS rate limit: %d", rateLimit)
+
 	// Create temporary directory for wordlist and resolvers
 	tempDir := "/tmp/shuffledns-temp"
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
@@ -240,6 +249,7 @@ func ExecuteAndParseShuffleDNSScan(scanID, domain string) {
 		"-r", "/app/wordlists/resolvers.txt",
 		"-silent",
 		"-massdns", "/usr/local/bin/massdns",
+		"-t", fmt.Sprintf("%d", rateLimit),
 		"-mode", "bruteforce",
 	)
 
@@ -438,6 +448,10 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 	log.Printf("[DEBUG] ScanID: %s, Domain: %s", scanID, domain)
 	startTime := time.Now()
 
+	// Get custom HTTP settings
+	customUserAgent, _ := GetCustomHTTPSettings() // CeWL only supports user agent
+	log.Printf("[DEBUG] Custom User Agent: %s", customUserAgent)
+
 	// First, get all live web servers from the latest httpx scan
 	var httpxResults string
 	err := dbPool.QueryRow(context.Background(), `
@@ -495,8 +509,8 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 		// Remove www. from URL if present
 		cleanURL := strings.Replace(result.URL, "www.", "", 1)
 
-		// Run CeWL directly on the URL
-		cmd := exec.Command(
+		// Build CeWL command
+		cmdArgs := []string{
 			"docker", "exec",
 			"ars0n-framework-v2-cewl-1",
 			"ruby", "/app/cewl.rb",
@@ -505,7 +519,14 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 			"-m", "5",
 			"-c",
 			"--with-numbers",
-		)
+		}
+
+		// Add custom user agent if specified
+		if customUserAgent != "" {
+			cmdArgs = append(cmdArgs, "--ua", customUserAgent)
+		}
+
+		cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
