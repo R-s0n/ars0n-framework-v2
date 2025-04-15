@@ -1,11 +1,7 @@
 import { Modal, Container, Row, Col, Table, Badge, Card } from 'react-bootstrap';
 
 const calculateROIScore = (targetURL) => {
-  console.log('\n==================== ROI SCORE CALCULATION ====================');
-  console.log(`Target URL: ${targetURL.url}`);
-  console.log('----------------------------------------------------------');
   let score = 50;
-  console.log('➕ Base Score: 50');
   
   const sslIssues = [
     targetURL.has_deprecated_tls,
@@ -18,7 +14,6 @@ const calculateROIScore = (targetURL) => {
   
   if (sslIssues > 0) {
     score += sslIssues * 25;
-    console.log(`➕ ${sslIssues * 25} points (${sslIssues} SSL issues)`);
   }
   
   let katanaCount = 0;
@@ -41,7 +36,6 @@ const calculateROIScore = (targetURL) => {
 
   if (katanaCount > 0) {
     score += katanaCount;
-    console.log(`➕ ${katanaCount} points (${katanaCount} crawled endpoints)`);
   }
 
   let ffufCount = 0;
@@ -62,13 +56,11 @@ const calculateROIScore = (targetURL) => {
     const extraEndpoints = ffufCount - 3;
     const fuzzPoints = Math.min(15, extraEndpoints * 3);
     score += fuzzPoints;
-    console.log(`➕ ${fuzzPoints} points (${extraEndpoints} fuzzed endpoints above threshold of 3)`);
   }
   
   const techCount = targetURL.technologies?.length || 0;
   if (techCount > 0) {
     score += techCount * 3;
-    console.log(`➕ ${techCount * 3} points (${techCount} technologies)`);
   }
   
   if (targetURL.status_code === 200 && katanaCount > 10) {
@@ -83,7 +75,6 @@ const calculateROIScore = (targetURL) => {
       
       if (!hasCSP) {
         score += 10;
-        console.log('➕ 10 points (missing CSP with >10 endpoints)');
       }
     } catch (error) {
       console.error('Error checking CSP header:', error);
@@ -102,16 +93,12 @@ const calculateROIScore = (targetURL) => {
     
     if (hasCachingHeaders) {
       score += 10;
-      console.log('➕ 10 points (has caching headers)');
     }
   } catch (error) {
     console.error('Error checking caching headers:', error);
   }
   
   const finalScore = Math.max(0, Math.round(score));
-  console.log('----------------------------------------------------------');
-  console.log(`🎯 Final Score: ${finalScore}`);
-  console.log('==========================================================\n');
   
   return finalScore;
 };
@@ -191,8 +178,6 @@ const TargetSection = ({ targetURL, roiScore }) => {
   // Calculate ROI score based on the same logic as the backend
   const calculateLocalROIScore = () => {
     let score = 50;
-    console.log(`\nLocal ROI Score for ${targetURL.url}:`);
-    console.log('Starting score: 50');
     
     const sslIssues = [
       targetURL.has_deprecated_tls,
@@ -205,26 +190,21 @@ const TargetSection = ({ targetURL, roiScore }) => {
     
     if (sslIssues > 0) {
       score += sslIssues * 25;
-      console.log(`+${sslIssues * 25} (${sslIssues} SSL issues)`);
     }
     
     if (katanaResults > 0) {
       score += katanaResults;
-      console.log(`+${katanaResults} (${katanaResults} crawled endpoints)`);
     }
     
     if (targetURL.status_code === 404) {
       score += 50;
-      console.log('+50 (404 status code)');
     } else if (ffufResults > 0) {
       score += ffufResults * 2;
-      console.log(`+${ffufResults * 2} (${ffufResults} ffuf endpoints)`);
     }
     
     const techCount = targetURL.technologies?.length || 0;
     if (techCount > 0) {
       score += techCount * 3;
-      console.log(`+${techCount * 3} (${techCount} technologies)`);
     }
     
     if (targetURL.status_code === 200 && katanaResults > 10) {
@@ -239,7 +219,6 @@ const TargetSection = ({ targetURL, roiScore }) => {
         
         if (!hasCSP) {
           score += 10;
-          console.log('+10 (missing CSP with >10 endpoints)');
         }
       } catch (error) {
         console.error('Error checking CSP header:', error);
@@ -258,14 +237,12 @@ const TargetSection = ({ targetURL, roiScore }) => {
       
       if (hasCachingHeaders) {
         score += 10;
-        console.log('+10 (has caching headers)');
       }
     } catch (error) {
       console.error('Error checking caching headers:', error);
     }
     
     const finalScore = Math.max(0, Math.round(score));
-    console.log(`Final score: ${finalScore}\n`);
     
     return finalScore;
   };
@@ -282,7 +259,7 @@ const TargetSection = ({ targetURL, roiScore }) => {
               <div className="d-flex justify-content-between align-items-center mb-4">
                 <div className="d-flex align-items-center">
                   <div className="display-4 text-danger me-3">{displayScore}</div>
-                  <div className="h3 mb-0 text-white">{targetURL.url}</div>
+                  <div className="h3 mb-0 text-white"><a href={targetURL.url} target="_blank" rel="noopener noreferrer">{targetURL.url}</a></div>
                 </div>
               </div>
               <Table className="table-dark">

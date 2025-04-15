@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Modal, Table, Nav, Tab } from 'react-bootstrap';
+import { Modal, Table, Nav, Tab, Alert } from 'react-bootstrap';
 
 export const GauResultsModal = ({
   showGauResultsModal,
@@ -68,6 +68,20 @@ export const GauResultsModal = ({
         <Modal.Title className="text-danger">GAU Results</Modal.Title>
       </Modal.Header>
       <Modal.Body>
+        {gauResults?.status === 'processing' && (
+          <Alert variant="info" className="mb-3">
+            <Alert.Heading>Processing Large Result Set</Alert.Heading>
+            <p>
+              GAU has found over 1000 URLs and is currently processing them to reduce the dataset. 
+              The results will be available once processing is complete. This may take a few minutes for very large result sets.
+            </p>
+            <hr />
+            <p className="mb-0">
+              The system will automatically filter the results to show one URL per unique subdomain to make the results more manageable.
+            </p>
+          </Alert>
+        )}
+        
         <Tab.Container defaultActiveKey="subdomains">
           <Nav variant="tabs" className="mb-3">
             <Nav.Item>

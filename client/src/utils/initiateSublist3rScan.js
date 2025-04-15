@@ -8,13 +8,13 @@ const initiateSublist3rScan = async (
 ) => {
   if (!activeTarget || !activeTarget.scope_target) {
     console.error('No active target or invalid target format');
-    return;
+    return { success: false, error: 'No active target or invalid target format' };
   }
 
   const domain = activeTarget.scope_target.replace('*.', '');
   if (!domain) {
     console.error('Invalid domain');
-    return;
+    return { success: false, error: 'Invalid domain' };
   }
 
   try {
@@ -39,21 +39,24 @@ const initiateSublist3rScan = async (
 
     const data = await response.json();
 
-    // Start monitoring the scan status
-    monitorSublist3rScanStatus(
-      activeTarget,
-      setSublist3rScans,
-      setMostRecentSublist3rScan,
-      setIsSublist3rScanning,
-      setMostRecentSublist3rScanStatus
-    );
+    // Start monitoring the scan status if monitoring function is provided
+    if (monitorSublist3rScanStatus) {
+      monitorSublist3rScanStatus(
+        activeTarget,
+        setSublist3rScans,
+        setMostRecentSublist3rScan,
+        setIsSublist3rScanning,
+        setMostRecentSublist3rScanStatus
+      );
+    }
 
-    return data;
+    return { success: true, data };
   } catch (error) {
     console.error('Error initiating Sublist3r scan:', error);
     setIsSublist3rScanning(false);
     setMostRecentSublist3rScan(null);
     setMostRecentSublist3rScanStatus(null);
+    return { success: false, error: error.message };
   }
 };
 

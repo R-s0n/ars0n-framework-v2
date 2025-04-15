@@ -39,13 +39,15 @@ const initiateGauScan = async (
     const data = await response.json();
     setIsGauScanning(true);
 
-    monitorGauScanStatus(
-      activeTarget,
-      setGauScans,
-      setMostRecentGauScan,
-      setIsGauScanning,
-      setMostRecentGauScanStatus
-    );
+    if (monitorGauScanStatus) {
+      monitorGauScanStatus(
+        activeTarget,
+        setGauScans,
+        setMostRecentGauScan,
+        setIsGauScanning,
+        setMostRecentGauScanStatus
+      );
+    }
 
     return data;
   } catch (error) {

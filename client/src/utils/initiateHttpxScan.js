@@ -33,13 +33,15 @@ const initiateHttpxScan = async (
     console.log(data);
     setIsHttpxScanning(true);
 
-    monitorHttpxScanStatus(
-      activeTarget,
-      setHttpxScans,
-      setMostRecentHttpxScan,
-      setIsHttpxScanning,
-      setMostRecentHttpxScanStatus
-    );
+    if (monitorHttpxScanStatus) {
+      monitorHttpxScanStatus(
+        activeTarget,
+        setHttpxScans,
+        setMostRecentHttpxScan,
+        setIsHttpxScanning,
+        setMostRecentHttpxScanStatus
+      );
+    }
 
     return data;
   } catch (error) {

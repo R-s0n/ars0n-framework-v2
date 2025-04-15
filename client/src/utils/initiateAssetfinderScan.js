@@ -8,13 +8,13 @@ const initiateAssetfinderScan = async (
 ) => {
   if (!activeTarget || !activeTarget.scope_target) {
     console.error('No active target or invalid target format');
-    return;
+    return { success: false, error: 'No active target or invalid target format' };
   }
 
   const domain = activeTarget.scope_target.replace('*.', '');
   if (!domain) {
     console.error('Invalid domain');
-    return;
+    return { success: false, error: 'Invalid domain' };
   }
 
   try {
@@ -40,20 +40,23 @@ const initiateAssetfinderScan = async (
     const data = await response.json();
 
     // Start monitoring the scan status
-    monitorAssetfinderScanStatus(
-      activeTarget,
-      setAssetfinderScans,
-      setMostRecentAssetfinderScan,
-      setIsAssetfinderScanning,
-      setMostRecentAssetfinderScanStatus
-    );
+    if (monitorAssetfinderScanStatus) {
+      monitorAssetfinderScanStatus(
+        activeTarget,
+        setAssetfinderScans,
+        setMostRecentAssetfinderScan,
+        setIsAssetfinderScanning,
+        setMostRecentAssetfinderScanStatus
+      );
+    }
 
-    return data;
+    return { success: true, data };
   } catch (error) {
     console.error('Error initiating Assetfinder scan:', error);
     setIsAssetfinderScanning(false);
     setMostRecentAssetfinderScan(null);
     setMostRecentAssetfinderScanStatus(null);
+    return { success: false, error: error.message };
   }
 };
 

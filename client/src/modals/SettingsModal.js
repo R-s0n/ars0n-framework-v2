@@ -212,45 +212,45 @@ function SettingsModal({ show, handleClose }) {
               <Col sm={9}>
                 <Tab.Content>
                   <Tab.Pane eventKey="rate-limits">
-                    <h5 className="text-danger mb-3">Tool Rate Limits</h5>
-                    <p className="text-white-50 small mb-4">
-                      Adjust the rate limits for each tool to balance between speed and avoiding rate limiting by target servers.
-                      Higher values = faster scans, but may trigger rate limiting or IP blocks.
-                    </p>
-                    
-                    <Accordion className="mb-4">
-                      <Accordion.Item eventKey="0">
-                        <Accordion.Header>About Rate Limiting</Accordion.Header>
-                        <Accordion.Body>
-                          <p className="text-white-50 small">
-                            Rate limiting controls how aggressively each tool sends requests to target servers or APIs. 
-                            Setting appropriate rate limits is crucial for:
-                          </p>
-                          <ul className="text-white-50 small">
-                            <li><strong>Avoiding IP blocks:</strong> Many services will temporarily block your IP if you send too many requests too quickly</li>
-                            <li><strong>Bypassing WAFs:</strong> Web Application Firewalls often trigger on high-volume scanning</li>
-                            <li><strong>Respecting API limits:</strong> Many tools use APIs with strict rate limits</li>
-                            <li><strong>Staying stealthy:</strong> Lower rate limits help avoid detection during security testing</li>
-                          </ul>
-                          <p className="text-white-50 small">
-                            <strong>Note:</strong> The exact implementation of rate limiting varies by tool. Some use requests per second, 
-                            others use concurrent connections, and some use a combination of both.
-                          </p>
-                        </Accordion.Body>
-                      </Accordion.Item>
-                    </Accordion>
-                    
-                    {renderSlider('amass', 'Amass', 1, 50, 1, toolDescriptions.amass)}
-                    {renderSlider('httpx', 'HTTPX', 50, 500, 10, toolDescriptions.httpx)}
-                    {renderSlider('subfinder', 'Subfinder', 1, 100, 1, toolDescriptions.subfinder)}
-                    {renderSlider('gau', 'GAU', 1, 50, 1, toolDescriptions.gau)}
-                    {renderSlider('sublist3r', 'Sublist3r', 1, 50, 1, toolDescriptions.sublist3r)}
-                    {renderSlider('ctl', 'CTL', 1, 50, 1, toolDescriptions.ctl)}
-                    {renderSlider('shuffledns', 'ShuffleDNS', 1000, 20000, 1000, toolDescriptions.shuffledns)}
-                    {renderSlider('cewl', 'CeWL', 1, 50, 1, toolDescriptions.cewl)}
-                    {renderSlider('gospider', 'GoSpider', 1, 20, 1, toolDescriptions.gospider)}
-                    {renderSlider('subdomainizer', 'Subdomainizer', 1, 20, 1, toolDescriptions.subdomainizer)}
-                    {renderSlider('nuclei_screenshot', 'Nuclei Screenshot', 1, 100, 1, toolDescriptions.nuclei_screenshot)}
+            <h5 className="text-danger mb-3">Tool Rate Limits</h5>
+            <p className="text-white-50 small mb-4">
+              Adjust the rate limits for each tool to balance between speed and avoiding rate limiting by target servers.
+              Higher values = faster scans, but may trigger rate limiting or IP blocks.
+            </p>
+            
+            <Accordion className="mb-4">
+              <Accordion.Item eventKey="0">
+                <Accordion.Header>About Rate Limiting</Accordion.Header>
+                <Accordion.Body>
+                  <p className="text-white-50 small">
+                    Rate limiting controls how aggressively each tool sends requests to target servers or APIs. 
+                    Setting appropriate rate limits is crucial for:
+                  </p>
+                  <ul className="text-white-50 small">
+                    <li><strong>Avoiding IP blocks:</strong> Many services will temporarily block your IP if you send too many requests too quickly</li>
+                    <li><strong>Bypassing WAFs:</strong> Web Application Firewalls often trigger on high-volume scanning</li>
+                    <li><strong>Respecting API limits:</strong> Many tools use APIs with strict rate limits</li>
+                    <li><strong>Staying stealthy:</strong> Lower rate limits help avoid detection during security testing</li>
+                  </ul>
+                  <p className="text-white-50 small">
+                    <strong>Note:</strong> The exact implementation of rate limiting varies by tool. Some use requests per second, 
+                    others use concurrent connections, and some use a combination of both.
+                  </p>
+                </Accordion.Body>
+              </Accordion.Item>
+            </Accordion>
+            
+            {renderSlider('amass', 'Amass', 1, 50, 1, toolDescriptions.amass)}
+            {renderSlider('httpx', 'HTTPX', 50, 500, 10, toolDescriptions.httpx)}
+            {renderSlider('subfinder', 'Subfinder', 1, 100, 1, toolDescriptions.subfinder)}
+            {renderSlider('gau', 'GAU', 1, 50, 1, toolDescriptions.gau)}
+            {renderSlider('sublist3r', 'Sublist3r', 1, 50, 1, toolDescriptions.sublist3r)}
+            {renderSlider('ctl', 'CTL', 1, 50, 1, toolDescriptions.ctl)}
+            {renderSlider('shuffledns', 'ShuffleDNS', 1000, 20000, 1000, toolDescriptions.shuffledns)}
+            {renderSlider('cewl', 'CeWL', 1, 50, 1, toolDescriptions.cewl)}
+            {renderSlider('gospider', 'GoSpider', 1, 20, 1, toolDescriptions.gospider)}
+            {renderSlider('subdomainizer', 'Subdomainizer', 1, 20, 1, toolDescriptions.subdomainizer)}
+            {renderSlider('nuclei_screenshot', 'Nuclei Screenshot', 1, 100, 1, toolDescriptions.nuclei_screenshot)}
                   </Tab.Pane>
                   <Tab.Pane eventKey="custom-http">
                     <h5 className="text-danger mb-3">Custom HTTP Settings</h5>

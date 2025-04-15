@@ -27,13 +27,18 @@ const initiateMetaDataScan = async (
     }
 
     setIsMetaDataScanning(true);
-    monitorMetaDataScanStatus(
-      activeTarget,
-      setMetaDataScans,
-      setMostRecentMetaDataScan,
-      setIsMetaDataScanning,
-      setMostRecentMetaDataScanStatus
-    );
+    
+    if (monitorMetaDataScanStatus) {
+      monitorMetaDataScanStatus(
+        activeTarget,
+        setMetaDataScans,
+        setMostRecentMetaDataScan,
+        setIsMetaDataScanning,
+        setMostRecentMetaDataScanStatus
+      );
+    }
+    
+    return { success: true };
   } catch (error) {
     console.error('Error initiating Nuclei SSL scan:', error);
     setIsMetaDataScanning(false);

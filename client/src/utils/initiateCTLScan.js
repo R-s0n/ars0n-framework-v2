@@ -31,13 +31,15 @@ const initiateCTLScan = async (
     const data = await response.json();
     setIsCTLScanning(true);
 
-    monitorCTLScanStatus(
-      activeTarget,
-      setCTLScans,
-      setMostRecentCTLScan,
-      setIsCTLScanning,
-      setMostRecentCTLScanStatus
-    );
+    if (monitorCTLScanStatus) {
+      monitorCTLScanStatus(
+        activeTarget,
+        setCTLScans,
+        setMostRecentCTLScan,
+        setIsCTLScanning,
+        setMostRecentCTLScanStatus
+      );
+    }
 
     return data;
   } catch (error) {

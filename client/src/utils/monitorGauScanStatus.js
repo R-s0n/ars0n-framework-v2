@@ -28,7 +28,7 @@ const monitorGauScanStatus = async (
       setMostRecentGauScan(mostRecentScan);
       setMostRecentGauScanStatus(mostRecentScan.status);
 
-      if (mostRecentScan.status === 'pending') {
+      if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'processing') {
         setIsGauScanning(true);
         setTimeout(() => {
           monitorGauScanStatus(

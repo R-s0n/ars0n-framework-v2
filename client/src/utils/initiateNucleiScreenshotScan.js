@@ -16,13 +16,17 @@ const initiateNucleiScreenshotScan = async (activeTarget, monitorNucleiScreensho
     const data = await response.json();
     setIsNucleiScreenshotScanning(true);
 
-    monitorNucleiScreenshotScanStatus(
-      activeTarget,
-      setNucleiScreenshotScans,
-      setMostRecentNucleiScreenshotScan,
-      setIsNucleiScreenshotScanning,
-      setMostRecentNucleiScreenshotScanStatus
-    );
+    if (monitorNucleiScreenshotScanStatus) {
+      monitorNucleiScreenshotScanStatus(
+        activeTarget,
+        setNucleiScreenshotScans,
+        setMostRecentNucleiScreenshotScan,
+        setIsNucleiScreenshotScanning,
+        setMostRecentNucleiScreenshotScanStatus
+      );
+    }
+
+    return data;
 
   } catch (error) {
     console.error('Error starting Nuclei screenshot scan:', error);

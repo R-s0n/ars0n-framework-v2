@@ -39,13 +39,15 @@ const initiateSubfinderScan = async (
 
     const data = await response.json();
 
-    monitorSubfinderScanStatus(
-      activeTarget,
-      setSubfinderScans,
-      setMostRecentSubfinderScan,
-      setIsSubfinderScanning,
-      setMostRecentSubfinderScanStatus
-    );
+    if (monitorSubfinderScanStatus) {
+      monitorSubfinderScanStatus(
+        activeTarget,
+        setSubfinderScans,
+        setMostRecentSubfinderScan,
+        setIsSubfinderScanning,
+        setMostRecentSubfinderScanStatus
+      );
+    }
 
     return data;
   } catch (error) {
