@@ -6,12 +6,12 @@ function ManageScopeTargets({
   activeTarget, 
   scopeTargets, 
   getTypeIcon,
-  onQuickScan,
+  onAutoScan,
   onBalancedScan,
   onFullScan,
   onYOLOScan,
-  isQuickScanning,
-  quickScanCurrentStep,
+  isAutoScanning,
+  autoScanCurrentStep,
   mostRecentGauScanStatus
 }) {
   // Helper function to display a human-readable step name
@@ -34,6 +34,19 @@ function ManageScopeTargets({
       .join(' ');
       
     return words;
+  };
+
+  // Get a user-friendly name for the current scan
+  const getScanStatusText = () => {
+    if (!isAutoScanning) return "";
+    
+    if (autoScanCurrentStep === 'idle' || !autoScanCurrentStep) {
+      return "Preparing...";
+    } else if (autoScanCurrentStep === 'completed') {
+      return "Scan Complete";
+    } else {
+      return `Running: ${formatStepName(autoScanCurrentStep)}`;
+    }
   };
 
   return (
@@ -68,23 +81,63 @@ function ManageScopeTargets({
                   <Button 
                     variant="outline-danger" 
                     className="flex-fill" 
-                    onClick={onQuickScan}
-                    disabled={isQuickScanning}
+                    onClick={onAutoScan}
+                    disabled={isAutoScanning}
                   >
                     <div className="btn-content">
-                      {isQuickScanning ? (
+                      {isAutoScanning ? (
                         <>
                           <div className="spinner"></div>
-                          {quickScanCurrentStep && quickScanCurrentStep !== 'idle' && quickScanCurrentStep !== 'completed' && (
-                            <span className="ms-2">{formatStepName(quickScanCurrentStep)}</span>
-                          )}
+                          <span className="ms-2">{getScanStatusText()}</span>
                         </>
                       ) : 'Quick Scan'}
                     </div>
                   </Button>
-                  <Button variant="outline-danger" className="flex-fill" onClick={onBalancedScan}>Balanced Scan</Button>
-                  <Button variant="outline-danger" className="flex-fill" onClick={onFullScan}>Full Scan</Button>
-                  <Button variant="outline-danger" className="flex-fill" onClick={onYOLOScan}>YOLO Scan</Button>
+                  <Button 
+                    variant="outline-danger" 
+                    className="flex-fill" 
+                    onClick={onBalancedScan}
+                    disabled={isAutoScanning}
+                  >
+                    <div className="btn-content">
+                      {isAutoScanning ? (
+                        <>
+                          <div className="spinner"></div>
+                          <span className="ms-2">{getScanStatusText()}</span>
+                        </>
+                      ) : 'Balanced Scan'}
+                    </div>
+                  </Button>
+                  <Button 
+                    variant="outline-danger" 
+                    className="flex-fill" 
+                    onClick={onFullScan}
+                    disabled={isAutoScanning}
+                  >
+                    <div className="btn-content">
+                      {isAutoScanning ? (
+                        <>
+                          <div className="spinner"></div>
+                          <span className="ms-2">{getScanStatusText()}</span>
+                        </>
+                      ) : 'Full Scan'}
+                    </div>
+                  </Button>
+                  <Button 
+                    variant="outline-danger" 
+                    className="flex-fill" 
+                    onClick={onYOLOScan}
+                    disabled={isAutoScanning}
+                  >
+                    <div className="btn-content">
+                      {isAutoScanning ? (
+                        <>
+                          <div className="spinner"></div>
+                          <span className="ms-2">{getScanStatusText()}</span>
+                        </>
+                      ) : 'YOLO Scan'}
+                    </div>
+                  </Button>
                 </div>
               </Card.Body>
             </Card>
