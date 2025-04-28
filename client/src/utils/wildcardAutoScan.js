@@ -36,12 +36,12 @@ const waitForScanCompletion = async (scanType, targetId, setIsScanning, setMostR
     new Promise((resolve) => {
       const startTime = Date.now();
       const maxWaitTime = 10 * 60 * 1000; // 10 minutes maximum wait
-      const hardMaxWaitTime = 15 * 60 * 1000; // 15 minutes absolute maximum
+      const hardMaxWaitTime = 60 * 60 * 1000; // 60 minutes absolute maximum
       let attempts = 0;
       
       // Add a hard timeout as safety
       const hardTimeout = setTimeout(() => {
-        debugTrace(`HARD TIMEOUT: ${scanType} scan exceeded maximum wait time of 15 minutes`);
+        debugTrace(`HARD TIMEOUT: ${scanType} scan exceeded maximum wait time of 60 minutes`);
         setIsScanning(false);
         resolve({ status: 'hard_timeout', message: 'Hard scan timeout exceeded' });
       }, hardMaxWaitTime);
@@ -203,7 +203,8 @@ const startAutoScan = async (
   if (!activeTarget) return;
   
   // Initialize auto scan state - don't clear previous state until we're done
-  debugTrace(`Starting ${scanType} scan for target ID: ${activeTarget.id}`);
+  debugTrace(`*** STARTING ${scanType.toUpperCase()} SCAN for target ID: ${activeTarget.id} ***`);
+  console.log(`User selected scan type: ${scanType.toUpperCase()}`);
   setIsAutoScanning(true);
   setAutoScanCurrentStep(AUTO_SCAN_STEPS.IDLE);
   setAutoScanTargetId(activeTarget.id);
@@ -216,12 +217,45 @@ const startAutoScan = async (
   try {
     const steps = getAutoScanSteps();
     
-    debugTrace(`Running a full scan with all ${steps.length} steps`);
+    // Determine which steps to execute based on the scan type
+    let stepsToRun = [];
     
-    // Execute each step in sequence - always run all steps regardless of scan type
-    for (let i = 0; i < steps.length; i++) {
-      const step = steps[i];
-      debugTrace(`Starting step ${i+1}/${steps.length}: ${step.name}`);
+    // Prepare for scan-specific functionality
+    switch(scanType) {
+      case SCAN_TYPES.QUICK:
+        debugTrace('Running QUICK scan - basic subdomain enumeration only');
+        // For now, run all steps until we implement type-specific behavior
+        stepsToRun = steps;
+        break;
+        
+      case SCAN_TYPES.BALANCED:
+        debugTrace('Running BALANCED scan - more comprehensive subdomain discovery');
+        // For now, run all steps until we implement type-specific behavior
+        stepsToRun = steps;
+        break;
+        
+      case SCAN_TYPES.FULL:
+        debugTrace('Running FULL scan - extensive scanning with most tools');
+        // For now, run all steps until we implement type-specific behavior
+        stepsToRun = steps;
+        break;
+        
+      case SCAN_TYPES.YOLO:
+        debugTrace('Running YOLO scan - maximum coverage with all available tools');
+        stepsToRun = steps;
+        break;
+        
+      default:
+        debugTrace(`Unknown scan type: ${scanType}, defaulting to QUICK scan`);
+        stepsToRun = steps;
+    }
+    
+    debugTrace(`Will run ${stepsToRun.length} steps for ${scanType.toUpperCase()} scan`);
+    
+    // Execute each step in sequence
+    for (let i = 0; i < stepsToRun.length; i++) {
+      const step = stepsToRun[i];
+      debugTrace(`Starting step ${i+1}/${stepsToRun.length}: ${step.name}`);
       
       // Make sure we update the current step in localStorage AND in state before executing the action
       try {
@@ -234,25 +268,65 @@ const startAutoScan = async (
         
         await step.action();
         debugTrace(`Completed step ${step.name}`);
-      } catch (error) {
+    } catch (error) {
         debugTrace(`Error in step ${step.name}: ${error.message}`);
       }
       
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
     
-    debugTrace(`All steps completed`);
+    debugTrace(`All steps completed for ${scanType.toUpperCase()} scan`);
   } catch (error) {
     debugTrace(`ERROR during ${scanType} scan: ${error.message}`);
   } finally {
     // Only clear the localStorage at the very end when we're completely done
-    debugTrace("Auto Scan session finalizing - setting state to COMPLETED");
+    debugTrace(`${scanType.toUpperCase()} scan finalizing - setting state to COMPLETED`);
     setIsAutoScanning(false);
     setAutoScanCurrentStep(AUTO_SCAN_STEPS.COMPLETED);
     localStorage.setItem('autoScanCurrentStep', AUTO_SCAN_STEPS.COMPLETED);
     debugTrace("localStorage updated: autoScanCurrentStep=" + AUTO_SCAN_STEPS.COMPLETED);
-    debugTrace("Auto Scan session ended");
+    debugTrace(`${scanType.toUpperCase()} scan ended`);
   }
 };
 
-export { startAutoScan, waitForScanCompletion, AUTO_SCAN_STEPS, SCAN_TYPES, debugTrace }; 
+// Helper function to determine which steps should be run for a specific scan type
+const getScanStepsForType = (scanType, allSteps) => {
+  switch(scanType) {
+    case SCAN_TYPES.QUICK:
+      // Quick scan: Only runs basic tools
+      return allSteps.filter(step => 
+        [AUTO_SCAN_STEPS.SUBLIST3R, AUTO_SCAN_STEPS.ASSETFINDER].includes(step.name)
+      );
+      
+    case SCAN_TYPES.BALANCED:
+      // Balanced scan: Quick + additional tools
+      return allSteps.filter(step => 
+        [
+          AUTO_SCAN_STEPS.SUBLIST3R, 
+          AUTO_SCAN_STEPS.ASSETFINDER,
+          AUTO_SCAN_STEPS.GAU,
+          AUTO_SCAN_STEPS.CTL,
+          AUTO_SCAN_STEPS.CONSOLIDATE,
+          AUTO_SCAN_STEPS.HTTPX
+        ].includes(step.name)
+      );
+      
+    case SCAN_TYPES.FULL:
+      // Full scan: Balanced + more tools
+      return allSteps.filter(step => 
+        ![AUTO_SCAN_STEPS.METADATA].includes(step.name) // Include all except METADATA
+      );
+      
+    case SCAN_TYPES.YOLO:
+      // YOLO scan: Run everything
+      return allSteps;
+      
+    default:
+      console.warn(`Unknown scan type: ${scanType}, defaulting to QUICK`);
+      return allSteps.filter(step => 
+        [AUTO_SCAN_STEPS.SUBLIST3R, AUTO_SCAN_STEPS.ASSETFINDER].includes(step.name)
+      );
+  }
+};
+
+export { startAutoScan, waitForScanCompletion, AUTO_SCAN_STEPS, SCAN_TYPES, debugTrace, getScanStepsForType }; 

@@ -556,14 +556,24 @@ function App() {
         }
       }
       
-      // Execute all remaining steps starting from the stored step
-      const stepsToRun = steps.slice(startFromIndex);
-      debugTrace(`Resuming scan from step ${fromStep} (index ${startFromIndex}), will run ${stepsToRun.length} steps`);
+      console.log(`Resuming ${scanType.toUpperCase()} scan from step ${fromStep}`);
+      
+      // Determine which steps to run based on scan type (for future implementation)
+      let stepsToRun = steps.slice(startFromIndex);
+      
+      // In the future, we'll filter steps based on scan type
+      // For now, execute all remaining steps from the current position
+      debugTrace(`Resuming ${scanType.toUpperCase()} scan from step ${fromStep} (index ${startFromIndex}), will run ${stepsToRun.length} steps`);
       
       // Execute steps from the determined starting point
       for (let i = 0; i < stepsToRun.length; i++) {
         try {
-          console.log(`Executing resumed step ${i+1}/${stepsToRun.length}: ${stepsToRun[i].name}`);
+          console.log(`Executing resumed ${scanType.toUpperCase()} scan step ${i+1}/${stepsToRun.length}: ${stepsToRun[i].name}`);
+          
+          // Update the current step in localStorage
+          setAutoScanCurrentStep(stepsToRun[i].name);
+          localStorage.setItem('autoScanCurrentStep', stepsToRun[i].name);
+          
           await stepsToRun[i].action();
         } catch (error) {
           debugTrace(`Error in step ${i+1}/${stepsToRun.length}: ${error.message}`);
@@ -573,11 +583,12 @@ function App() {
       }
       
     } catch (error) {
-      debugTrace(`Error resuming Auto Scan: ${error.message}`);
+      debugTrace(`Error resuming ${scanType.toUpperCase()} scan: ${error.message}`);
     } finally {
       setIsAutoScanning(false);
       setAutoScanCurrentStep(AUTO_SCAN_STEPS.COMPLETED);
       localStorage.setItem('autoScanCurrentStep', AUTO_SCAN_STEPS.COMPLETED);
+      console.log(`${scanType.toUpperCase()} scan completed`);
     }
   };
 

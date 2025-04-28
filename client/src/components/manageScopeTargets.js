@@ -38,7 +38,9 @@ function ManageScopeTargets({
 
   // Get a user-friendly name for the current scan
   const getScanStatusText = () => {
-    if (!isAutoScanning) return "";
+    if (!isAutoScanning) {
+      return "No scan running";
+    }
     
     if (autoScanCurrentStep === 'idle' || !autoScanCurrentStep) {
       return "Preparing...";
@@ -47,6 +49,13 @@ function ManageScopeTargets({
     } else {
       return `Running: ${formatStepName(autoScanCurrentStep)}`;
     }
+  };
+  
+  // Get which scan button is currently active based on localStorage
+  const getActiveScanType = () => {
+    if (!isAutoScanning) return "";
+    const scanType = localStorage.getItem('autoScanType') || 'quick';
+    return scanType.charAt(0).toUpperCase() + scanType.slice(1); // Capitalize first letter
   };
 
   return (
@@ -77,63 +86,71 @@ function ManageScopeTargets({
                     <img src={getTypeIcon(activeTarget.type)} alt={activeTarget.type} style={{ width: '30px' }} />
                   </span>
                 </Card.Text>
-                <div className="d-flex justify-content-between gap-2 mt-3">
+                
+                {/* Status indicator - always visible */}
+                <div className="text-center mb-3">
+                  <span className="text-danger">
+                    {isAutoScanning ? `${getActiveScanType()} Scan: ${getScanStatusText()}` : "Ready to scan"}
+                  </span>
+                </div>
+                {/* Man, this is shit code...  "outline-danger" : "outline-danger"  I gotta fix this in beta */}
+                <div className="d-flex justify-content-between gap-2">
                   <Button 
-                    variant="outline-danger" 
+                    variant={isAutoScanning && getActiveScanType() === 'Quick' ? "outline-danger" : "outline-danger"}
                     className="flex-fill" 
                     onClick={onAutoScan}
                     disabled={isAutoScanning}
                   >
                     <div className="btn-content">
-                      {isAutoScanning ? (
+                      {isAutoScanning && getActiveScanType() === 'Quick' ? (
                         <>
                           <div className="spinner"></div>
-                          <span className="ms-2">{getScanStatusText()}</span>
+                          {/* <span className="ms-2">Quick Scan</span> */}
                         </>
                       ) : 'Quick Scan'}
                     </div>
                   </Button>
                   <Button 
-                    variant="outline-danger" 
+                    variant={isAutoScanning && getActiveScanType() === 'Balanced' ? "outline-danger" : "outline-danger"}
                     className="flex-fill" 
                     onClick={onBalancedScan}
                     disabled={isAutoScanning}
                   >
                     <div className="btn-content">
-                      {isAutoScanning ? (
+                      {isAutoScanning && getActiveScanType() === 'Balanced' ? (
                         <>
                           <div className="spinner"></div>
-                          <span className="ms-2">{getScanStatusText()}</span>
+                          {/* <span className="ms-2">Balanced Scan</span> */}
                         </>
                       ) : 'Balanced Scan'}
                     </div>
                   </Button>
                   <Button 
-                    variant="outline-danger" 
+                    variant={isAutoScanning && getActiveScanType() === 'Full' ? "outline-danger" : "outline-danger"}
                     className="flex-fill" 
                     onClick={onFullScan}
                     disabled={isAutoScanning}
                   >
                     <div className="btn-content">
-                      {isAutoScanning ? (
+                      {isAutoScanning && getActiveScanType() === 'Full' ? (
                         <>
                           <div className="spinner"></div>
-                          <span className="ms-2">{getScanStatusText()}</span>
+                          {/* <span className="ms-2">Full Scan</span> */}
                         </>
                       ) : 'Full Scan'}
                     </div>
                   </Button>
                   <Button 
-                    variant="outline-danger" 
+                    variant={isAutoScanning && getActiveScanType() === 'Yolo' ? "outline-danger" : "outline-danger"}
                     className="flex-fill" 
                     onClick={onYOLOScan}
                     disabled={isAutoScanning}
                   >
                     <div className="btn-content">
-                      {isAutoScanning ? (
+                      {isAutoScanning && getActiveScanType() === 'Yolo' ? (
                         <>
                           <div className="spinner"></div>
-                          <span className="ms-2">{getScanStatusText()}</span>
+                          {/* <span className="ms-2">YOLO Scan</span> */}
                         </>
                       ) : 'YOLO Scan'}
                     </div>
