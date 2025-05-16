@@ -1,9 +1,16 @@
-FROM golang:1.21-alpine
+FROM alpine:edge
 
-# Install required packages
-RUN apk add --no-cache git gcc musl-dev docker
+# Add community + testing for Go 1.24, then install Go and tools
+RUN echo "https://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories && \
+    echo "https://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories && \
+    apk update && \
+    apk add --no-cache go git gcc musl-dev docker
 
-# Install httpx
+# Setup Go environment
+ENV GOPATH=/go
+ENV PATH=$GOPATH/bin:/usr/local/go/bin:$PATH
+
+# Install latest httpx (needs Go >= 1.23)
 RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 
 WORKDIR /app
@@ -13,8 +20,7 @@ RUN go mod download
 
 COPY . .
 
-RUN mkdir -p /app/temp
-RUN chmod -R 777 /app/temp
+RUN mkdir -p /app/temp && chmod -R 777 /app/temp
 
 RUN go build -o main .
 

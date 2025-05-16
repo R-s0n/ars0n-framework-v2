@@ -1,0 +1,52 @@
+version: "3.9"
+
+services:
+  assetfinder:
+    build: ./docker/assetfinder
+    image: codesec/assetfinder:latest
+
+  sublist3r:
+    build: ./docker/sublist3r
+    image: codesec/sublist3r:latest
+
+  subfinder:
+    build: ./docker/subfinder
+    image: codesec/subfinder:latest
+
+  shuffledns:
+    build: ./docker/shuffledns
+    image: codesec/shuffledns:latest
+
+  cewl:
+    build: ./docker/cewl
+    image: codesec/cewl:latest
+
+  gospider:
+    build:
+      context: .
+      dockerfile: docker/gospider/Dockerfile
+    image: codesec/gospider:latest
+
+  subdomainizer:
+    build:
+      context: .
+      dockerfile: docker/subdomainizer/Dockerfile
+    image: codesec/subdomainizer:latest
+
+  nuclei:
+    build: ./docker/nuclei
+    image: codesec/nuclei:latest
+
+  katana:
+    build:
+      context: ./docker/katana
+      dockerfile: Dockerfile
+    image: codesec/katana:latest
+
+  httpx:
+    build: ./docker/httpx
+    image: codesec/httpx:latest
+
+  ffuf:
+    build: ./docker/ffuf
+    image: codesec/ffuf:latest

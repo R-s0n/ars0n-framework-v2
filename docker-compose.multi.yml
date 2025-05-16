@@ -1,0 +1,93 @@
+version: "3.9"
+
+services:
+  assetfinder:
+    build:
+      context: ./docker/assetfinder
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: codesec/assetfinder:latest
+
+  sublist3r:
+    build:
+      context: ./docker/sublist3r
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: codesec/sublist3r:latest
+
+  subfinder:
+    build:
+      context: ./docker/subfinder
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: codesec/subfinder:latest
+
+  shuffledns:
+    build:
+      context: ./docker/shuffledns
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: codesec/shuffledns:latest
+
+  cewl:
+    build:
+      context: ./docker/cewl
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: codesec/cewl:latest
+
+  gospider:
+    build:
+      context: .
+      dockerfile: docker/gospider/Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: codesec/gospider:latest
+
+  subdomainizer:
+    build:
+      context: .
+      dockerfile: docker/subdomainizer/Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: codesec/subdomainizer:latest
+
+  nuclei:
+    build:
+      context: ./docker/nuclei
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: codesec/nuclei:latest
+
+  katana:
+    build:
+      context: ./docker/katana
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: codesec/katana:latest
+
+  httpx:
+    build:
+      context: ./docker/httpx
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: codesec/httpx:latest
+
+  ffuf:
+    build:
+      context: ./docker/ffuf
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: codesec/ffuf:latest
