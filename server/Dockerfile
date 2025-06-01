@@ -1,4 +1,4 @@
-FROM golang:1.21-alpine
+FROM golang:1.23-alpine
 
 # Install required packages
 RUN apk add --no-cache git gcc musl-dev docker
