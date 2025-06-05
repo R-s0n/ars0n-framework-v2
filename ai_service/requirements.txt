@@ -4,6 +4,6 @@ pydantic==2.1.1
 python-multipart==0.0.6
 requests==2.31.0
 numpy==1.25.1
-transformers==4.31.0
+transformers==4.50.0
 torch==2.0.1
 accelerate==0.20.3 
