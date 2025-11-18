@@ -49,7 +49,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: ars0n
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
