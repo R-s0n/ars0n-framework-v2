@@ -6,7 +6,8 @@ RUN apt-get update && \
     git clone https://github.com/digininja/CeWL.git /app && \
     cd /app && \
     gem install bundler && \
-    bundle install --system && \
+    bundle config set path.system true && \
+    bundle install && \
     chmod +x /app/cewl.rb && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
