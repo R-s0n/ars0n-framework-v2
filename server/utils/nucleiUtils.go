@@ -152,6 +152,12 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 	// Prepare Nuclei command arguments
 	var args []string
 	args = append(args, "-list", "/targets.txt", "-jsonl", "-nh", "-o", "/output.jsonl")
+	
+	args = append(args, "-c", "25")
+	args = append(args, "-rl", "150")
+	args = append(args, "-timeout", "10")
+	args = append(args, "-retries", "1")
+	args = append(args, "-bs", "25")
 
 	// Add template categories
 	if len(templates) > 0 {
