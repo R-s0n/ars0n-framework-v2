@@ -22,6 +22,8 @@ services:
       - 8.8.8.8
       - 1.1.1.1
     dns_search: .
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     networks:
       - ars0n-network

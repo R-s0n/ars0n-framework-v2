@@ -270,6 +270,9 @@ func main() {
 	// Live web servers count route
 	r.HandleFunc("/scope-target/{scope_target_id}/live-web-servers-count", getLiveWebServersCount).Methods("GET", "OPTIONS")
 
+	// Burpsuite populate route
+	r.HandleFunc("/burpsuite/populate", populateBurpsuite).Methods("POST", "OPTIONS")
+
 	log.Println("API server started on :8443")
 	http.ListenAndServe(":8443", r)
 }
@@ -2385,6 +2388,36 @@ func getLiveWebServersCount(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"count": count,
+	})
+}
+
+func populateBurpsuite(w http.ResponseWriter, r *http.Request) {
+	var requestBody struct {
+		URLs []string `json:"urls"`
+	}
+
+	err := json.NewDecoder(r.Body).Decode(&requestBody)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if len(requestBody.URLs) == 0 {
+		http.Error(w, "No URLs provided", http.StatusBadRequest)
+		return
+	}
+
+	err = utils.PopulateBurpsuite(requestBody.URLs)
+	if err != nil {
+		log.Printf("[ERROR] Failed to populate Burpsuite: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to populate Burpsuite: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "success",
+		"message": fmt.Sprintf("Successfully populated Burpsuite with %d URLs", len(requestBody.URLs)),
 	})
 }
 
