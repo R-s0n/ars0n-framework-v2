@@ -11,6 +11,7 @@ import { SubfinderResultsModal } from './modals/subfinderModals.js';
 import { ShuffleDNSResultsModal } from './modals/shuffleDNSModals.js';
 import ScreenshotResultsModal from './modals/ScreenshotResultsModal.js';
 import SettingsModal from './modals/SettingsModal.js';
+import ToolsModal from './modals/ToolsModal.js';
 import ExportModal from './modals/ExportModal.js';
 import ImportModal from './modals/ImportModal.js';
 import WelcomeModal from './modals/WelcomeModal.js';
@@ -439,6 +440,7 @@ function App() {
   const [selectedTargetURL, setSelectedTargetURL] = useState(null);
   const [shuffleDNSCustomScans, setShuffleDNSCustomScans] = useState([]);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showToolsModal, setShowToolsModal] = useState(false);
   const [isAutoScanning, setIsAutoScanning] = useState(false);
   const [autoScanCurrentStep, setAutoScanCurrentStep] = useState(AUTO_SCAN_STEPS.IDLE);
   const [autoScanTargetId, setAutoScanTargetId] = useState(null);
@@ -587,6 +589,10 @@ function App() {
   const handleCloseCloudDomainsModal = () => setShowCloudDomainsModal(false);
   const handleCloseUniqueSubdomainsModal = () => setShowUniqueSubdomainsModal(false);
   const handleCloseMetaDataModal = () => setShowMetaDataModal(false);
+  const handleCloseToolsModal = () => {
+    setShowToolsModal(false);
+  };
+
   const handleCloseSettingsModal = () => {
     setShowSettingsModal(false);
     const checkApiKeys = async () => {
@@ -2911,6 +2917,10 @@ function App() {
     setShowSettingsModal(true);
   };
 
+  const handleOpenToolsModal = () => {
+    setShowToolsModal(true);
+  };
+
   const handleOpenExportModal = () => {
     setShowExportModal(true);
   };
@@ -4317,6 +4327,7 @@ function App() {
       </style>
       <Ars0nFrameworkHeader 
         onSettingsClick={handleOpenSettingsModal} 
+        onToolsClick={handleOpenToolsModal}
         onExportClick={handleOpenExportModal}
         onImportClick={handleOpenImportModal}
       />
@@ -4386,6 +4397,11 @@ function App() {
         handleClose={handleCloseSettingsModal}
         initialTab={settingsModalInitialTab}
         onApiKeyDeleted={handleApiKeyDeleted}
+      />
+
+      <ToolsModal
+        show={showToolsModal}
+        handleClose={handleCloseToolsModal}
       />
 
       <ExportModal
