@@ -68,6 +68,7 @@ import consolidateSubdomains from './utils/consolidateSubdomains.js';
 import fetchConsolidatedSubdomains from './utils/fetchConsolidatedSubdomains.js';
 import consolidateCompanyDomains from './utils/consolidateCompanyDomains.js';
 import consolidateAttackSurface from './utils/consolidateAttackSurface.js';
+import investigateFQDNs from './utils/investigateFQDNs.js';
 import fetchConsolidatedCompanyDomains from './utils/fetchConsolidatedCompanyDomains.js';
 import fetchAttackSurfaceAssetCounts from './utils/fetchAttackSurfaceAssetCounts.js';
 import consolidateNetworkRanges from './utils/consolidateNetworkRanges.js';
@@ -401,6 +402,7 @@ function App() {
   const [consolidatedNetworkRangesCount, setConsolidatedNetworkRangesCount] = useState(0);
   const [isConsolidatingNetworkRanges, setIsConsolidatingNetworkRanges] = useState(false);
   const [isConsolidatingAttackSurface, setIsConsolidatingAttackSurface] = useState(false);
+  const [isInvestigatingFQDNs, setIsInvestigatingFQDNs] = useState(false);
   const [consolidatedAttackSurfaceResult, setConsolidatedAttackSurfaceResult] = useState(null);
   const [attackSurfaceASNsCount, setAttackSurfaceASNsCount] = useState(0);
   const [attackSurfaceNetworkRangesCount, setAttackSurfaceNetworkRangesCount] = useState(0);
@@ -2706,6 +2708,47 @@ function App() {
       console.error('Error during attack surface consolidation:', error);
     } finally {
       setIsConsolidatingAttackSurface(false);
+    }
+  };
+
+  const handleInvestigateFQDNs = async () => {
+    if (!activeTarget) return;
+    
+    setIsInvestigatingFQDNs(true);
+    try {
+      const result = await investigateFQDNs(activeTarget);
+      if (result) {
+        console.log('FQDN investigation result:', result);
+        
+        // Fetch updated counts after investigation
+        try {
+          const response = await fetch(
+            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/attack-surface-asset-counts/${activeTarget.id}`,
+            {
+              method: 'GET',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+            }
+          );
+          
+          if (response.ok) {
+            const data = await response.json();
+            setAttackSurfaceASNsCount(data.asns || 0);
+            setAttackSurfaceNetworkRangesCount(data.network_ranges || 0);
+            setAttackSurfaceIPAddressesCount(data.ip_addresses || 0);
+            setAttackSurfaceLiveWebServersCount(data.live_web_servers || 0);
+            setAttackSurfaceCloudAssetsCount(data.cloud_assets || 0);
+            setAttackSurfaceFQDNsCount(data.fqdns || 0);
+          }
+        } catch (error) {
+          console.error('Error fetching updated asset counts:', error);
+        }
+      }
+    } catch (error) {
+      console.error('Error investigating FQDNs:', error);
+    } finally {
+      setIsInvestigatingFQDNs(false);
     }
   };
 
@@ -5526,6 +5569,18 @@ function App() {
                             <div className="spinner"></div>
                           ) : (
                             'Consolidate'
+                          )}
+                        </Button>
+                        <Button 
+                          variant="outline-danger" 
+                          className="flex-fill" 
+                          onClick={handleInvestigateFQDNs}
+                          disabled={isInvestigatingFQDNs}
+                        >
+                          {isInvestigatingFQDNs ? (
+                            <div className="spinner"></div>
+                          ) : (
+                            'Investigate'
                           )}
                         </Button>
                         <Button variant="outline-danger" className="flex-fill" onClick={handleOpenExploreAttackSurfaceModal}>Explore</Button>

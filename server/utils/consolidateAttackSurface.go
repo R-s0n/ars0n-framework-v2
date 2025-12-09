@@ -195,16 +195,7 @@ func ConsolidateAttackSurface(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[ATTACK SURFACE] Consolidated %d live web servers", liveWebServers)
 
-	log.Printf("[ATTACK SURFACE] Consolidating cloud assets...")
-	cloudAssets, err := consolidateCloudAssets(scopeTargetID)
-	if err != nil {
-		log.Printf("Error consolidating cloud assets: %v", err)
-		http.Error(w, "Failed to consolidate cloud assets", http.StatusInternalServerError)
-		return
-	}
-	log.Printf("[ATTACK SURFACE] Consolidated %d cloud assets", cloudAssets)
-
-	// Consolidate FQDNs
+	// Consolidate FQDNs (before cloud assets so we can parse them for cloud domains)
 	log.Printf("[ATTACK SURFACE] Consolidating FQDNs...")
 	fqdns, err := consolidateFQDNs(scopeTargetID)
 	if err != nil {
@@ -214,15 +205,14 @@ func ConsolidateAttackSurface(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[ATTACK SURFACE] Consolidated %d FQDNs", fqdns)
 
-	// Enrich FQDNs with investigate data (optimized mode with 5-7s timeouts)
-	log.Printf("[ATTACK SURFACE] Enriching FQDNs with investigate data (optimized mode)...")
-	enrichedFqdns, err := enrichFQDNsWithInvestigateData(scopeTargetID)
+	log.Printf("[ATTACK SURFACE] Consolidating cloud assets...")
+	cloudAssets, err := consolidateCloudAssets(scopeTargetID)
 	if err != nil {
-		log.Printf("Error enriching FQDNs with investigate data: %v", err)
-		http.Error(w, "Failed to enrich FQDNs with investigate data", http.StatusInternalServerError)
+		log.Printf("Error consolidating cloud assets: %v", err)
+		http.Error(w, "Failed to consolidate cloud assets", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("[ATTACK SURFACE] Enriched %d FQDNs with investigate data", enrichedFqdns)
+	log.Printf("[ATTACK SURFACE] Consolidated %d cloud assets", cloudAssets)
 
 	// Create comprehensive relationships between assets
 	log.Printf("[ATTACK SURFACE] Creating comprehensive asset relationships...")
@@ -271,6 +261,42 @@ func ConsolidateAttackSurface(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[ATTACK SURFACE]   • FQDNs: %d", fqdns)
 	log.Printf("[ATTACK SURFACE]   • Asset Relationships: %d", relationshipCount)
 	log.Printf("[ATTACK SURFACE]   • Execution Time: %s", executionTime.String())
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+func InvestigateFQDNs(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	scopeTargetID := vars["scope_target_id"]
+
+	if scopeTargetID == "" {
+		http.Error(w, "Missing scope_target_id", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[INVESTIGATE] Starting FQDN investigation for scope target: %s", scopeTargetID)
+	startTime := time.Now()
+
+	enrichedFqdns, err := enrichFQDNsWithInvestigateData(scopeTargetID)
+	if err != nil {
+		log.Printf("Error investigating FQDNs: %v", err)
+		http.Error(w, "Failed to investigate FQDNs", http.StatusInternalServerError)
+		return
+	}
+
+	executionTime := time.Since(startTime)
+
+	result := map[string]interface{}{
+		"enriched_fqdns": enrichedFqdns,
+		"execution_time": executionTime.String(),
+		"investigated_at": time.Now(),
+	}
+
+	log.Printf("[INVESTIGATE] ✅ INVESTIGATION COMPLETE!")
+	log.Printf("[INVESTIGATE] Summary for scope target %s:", scopeTargetID)
+	log.Printf("[INVESTIGATE]   • Enriched FQDNs: %d", enrichedFqdns)
+	log.Printf("[INVESTIGATE]   • Execution Time: %s", executionTime.String())
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
@@ -1552,9 +1578,9 @@ func consolidateCloudAssets(scopeTargetID string) (int, error) {
 				extracted_cloud_domain as domain_name,
 				NULL as url_value,
 				CASE 
-					WHEN extracted_cloud_domain ILIKE '%amazonaws%' OR extracted_cloud_domain ILIKE '%aws%' THEN 'aws'
-					WHEN extracted_cloud_domain ILIKE '%googleapis%' OR extracted_cloud_domain ILIKE '%googleusercontent%' OR extracted_cloud_domain ILIKE '%gcp%' THEN 'gcp'
-					WHEN extracted_cloud_domain ILIKE '%azure%' OR extracted_cloud_domain ILIKE '%microsoft%' THEN 'azure'
+					WHEN extracted_cloud_domain ILIKE '%amazonaws%' OR extracted_cloud_domain ILIKE '%aws%' OR extracted_cloud_domain ILIKE '%awsdns%' OR extracted_cloud_domain ILIKE '%cloudfront%' OR extracted_cloud_domain ILIKE '%s3%' OR extracted_cloud_domain ILIKE '%elasticbeanstalk%' OR extracted_cloud_domain ILIKE '%amplifyapp%' THEN 'aws'
+					WHEN extracted_cloud_domain ILIKE '%googleapis%' OR extracted_cloud_domain ILIKE '%googleusercontent%' OR extracted_cloud_domain ILIKE '%gcp%' OR extracted_cloud_domain ILIKE '%appspot%' OR extracted_cloud_domain ILIKE '%gcloud%' OR extracted_cloud_domain ILIKE '%withgoogle%' THEN 'gcp'
+					WHEN extracted_cloud_domain ILIKE '%azure%' OR extracted_cloud_domain ILIKE '%microsoft%' OR extracted_cloud_domain ILIKE '%windows.net%' OR extracted_cloud_domain ILIKE '%trafficmanager%' OR extracted_cloud_domain ILIKE '%azureedge%' OR extracted_cloud_domain ILIKE '%azurewebsites%' OR extracted_cloud_domain ILIKE '%azure-api%' OR extracted_cloud_domain ILIKE '%cloudapp%' OR extracted_cloud_domain ILIKE '%microsoftonline%' THEN 'azure'
 					WHEN extracted_cloud_domain ILIKE '%digitalocean%' THEN 'digitalocean'
 					WHEN extracted_cloud_domain ILIKE '%cloudflare%' THEN 'cloudflare'
 					ELSE 'unknown'
@@ -1572,9 +1598,9 @@ func consolidateCloudAssets(scopeTargetID string) (int, error) {
 							substring(record from '--> ([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})')
 						-- If it's already a cloud domain, use it directly
 						WHEN record ~ '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$' AND (
-							record ILIKE '%amazonaws%' OR record ILIKE '%aws%'
-							OR record ILIKE '%googleapis%' OR record ILIKE '%googleusercontent%' OR record ILIKE '%gcp%'
-							OR record ILIKE '%azure%' OR record ILIKE '%microsoft%'
+							record ILIKE '%amazonaws%' OR record ILIKE '%aws%' OR record ILIKE '%awsdns%' OR record ILIKE '%cloudfront%' OR record ILIKE '%s3%' OR record ILIKE '%elasticbeanstalk%' OR record ILIKE '%amplifyapp%'
+							OR record ILIKE '%googleapis%' OR record ILIKE '%googleusercontent%' OR record ILIKE '%gcp%' OR record ILIKE '%appspot%' OR record ILIKE '%gcloud%' OR record ILIKE '%withgoogle%'
+							OR record ILIKE '%azure%' OR record ILIKE '%microsoft%' OR record ILIKE '%windows.net%' OR record ILIKE '%trafficmanager%' OR record ILIKE '%azureedge%' OR record ILIKE '%azurewebsites%' OR record ILIKE '%azure-api%' OR record ILIKE '%cloudapp%' OR record ILIKE '%microsoftonline%'
 							OR record ILIKE '%digitalocean%' OR record ILIKE '%cloudflare%'
 						) THEN record
 						ELSE NULL
@@ -1583,9 +1609,9 @@ func consolidateCloudAssets(scopeTargetID string) (int, error) {
 				WHERE scope_target_id = $1::uuid 
 				AND record_type = 'CNAME'
 				AND (
-					record ILIKE '%amazonaws%' OR record ILIKE '%aws%'
-					OR record ILIKE '%googleapis%' OR record ILIKE '%googleusercontent%' OR record ILIKE '%gcp%'
-					OR record ILIKE '%azure%' OR record ILIKE '%microsoft%'
+					record ILIKE '%amazonaws%' OR record ILIKE '%aws%' OR record ILIKE '%awsdns%' OR record ILIKE '%cloudfront%' OR record ILIKE '%s3%' OR record ILIKE '%elasticbeanstalk%' OR record ILIKE '%amplifyapp%'
+					OR record ILIKE '%googleapis%' OR record ILIKE '%googleusercontent%' OR record ILIKE '%gcp%' OR record ILIKE '%appspot%' OR record ILIKE '%gcloud%' OR record ILIKE '%withgoogle%'
+					OR record ILIKE '%azure%' OR record ILIKE '%microsoft%' OR record ILIKE '%windows.net%' OR record ILIKE '%trafficmanager%' OR record ILIKE '%azureedge%' OR record ILIKE '%azurewebsites%' OR record ILIKE '%azure-api%' OR record ILIKE '%cloudapp%' OR record ILIKE '%microsoftonline%'
 					OR record ILIKE '%digitalocean%' OR record ILIKE '%cloudflare%'
 				)
 			) amass_cname_extractions
@@ -1672,9 +1698,9 @@ func consolidateCloudAssets(scopeTargetID string) (int, error) {
 					ELSE NULL
 				END as url_value,
 				CASE 
-					WHEN cloud_asset ILIKE '%amazonaws%' OR cloud_asset ILIKE '%aws%' THEN 'aws'
-					WHEN cloud_asset ILIKE '%googleapis%' OR cloud_asset ILIKE '%googleusercontent%' OR cloud_asset ILIKE '%gcp%' THEN 'gcp'
-					WHEN cloud_asset ILIKE '%azure%' OR cloud_asset ILIKE '%microsoft%' THEN 'azure'
+					WHEN cloud_asset ILIKE '%amazonaws%' OR cloud_asset ILIKE '%aws%' OR cloud_asset ILIKE '%awsdns%' OR cloud_asset ILIKE '%cloudfront%' OR cloud_asset ILIKE '%s3%' OR cloud_asset ILIKE '%elasticbeanstalk%' OR cloud_asset ILIKE '%amplifyapp%' THEN 'aws'
+					WHEN cloud_asset ILIKE '%googleapis%' OR cloud_asset ILIKE '%googleusercontent%' OR cloud_asset ILIKE '%gcp%' OR cloud_asset ILIKE '%appspot%' OR cloud_asset ILIKE '%gcloud%' OR cloud_asset ILIKE '%withgoogle%' THEN 'gcp'
+					WHEN cloud_asset ILIKE '%azure%' OR cloud_asset ILIKE '%microsoft%' OR cloud_asset ILIKE '%windows.net%' OR cloud_asset ILIKE '%trafficmanager%' OR cloud_asset ILIKE '%azureedge%' OR cloud_asset ILIKE '%azurewebsites%' OR cloud_asset ILIKE '%azure-api%' OR cloud_asset ILIKE '%cloudapp%' OR cloud_asset ILIKE '%microsoftonline%' THEN 'azure'
 					WHEN cloud_asset ILIKE '%digitalocean%' THEN 'digitalocean'
 					WHEN cloud_asset ILIKE '%cloudflare%' THEN 'cloudflare'
 					ELSE 'unknown'
@@ -1697,10 +1723,12 @@ func consolidateCloudAssets(scopeTargetID string) (int, error) {
 				AND result IS NOT NULL AND result::jsonb ? 'urls'
 			) github_cloud_data
 			WHERE cloud_asset IS NOT NULL AND cloud_asset != ''
-				AND (cloud_asset ILIKE '%amazonaws%' OR cloud_asset ILIKE '%aws%'
-					OR cloud_asset ILIKE '%googleapis%' OR cloud_asset ILIKE '%googleusercontent%' OR cloud_asset ILIKE '%gcp%'
-					OR cloud_asset ILIKE '%azure%' OR cloud_asset ILIKE '%microsoft%'
-					OR cloud_asset ILIKE '%digitalocean%' OR cloud_asset ILIKE '%cloudflare%')
+				AND (
+					cloud_asset ILIKE '%amazonaws%' OR cloud_asset ILIKE '%aws%' OR cloud_asset ILIKE '%awsdns%' OR cloud_asset ILIKE '%cloudfront%' OR cloud_asset ILIKE '%s3%' OR cloud_asset ILIKE '%elasticbeanstalk%' OR cloud_asset ILIKE '%amplifyapp%'
+					OR cloud_asset ILIKE '%googleapis%' OR cloud_asset ILIKE '%googleusercontent%' OR cloud_asset ILIKE '%gcp%' OR cloud_asset ILIKE '%appspot%' OR cloud_asset ILIKE '%gcloud%' OR cloud_asset ILIKE '%withgoogle%'
+					OR cloud_asset ILIKE '%azure%' OR cloud_asset ILIKE '%microsoft%' OR cloud_asset ILIKE '%windows.net%' OR cloud_asset ILIKE '%trafficmanager%' OR cloud_asset ILIKE '%azureedge%' OR cloud_asset ILIKE '%azurewebsites%' OR cloud_asset ILIKE '%azure-api%' OR cloud_asset ILIKE '%cloudapp%' OR cloud_asset ILIKE '%microsoftonline%'
+					OR cloud_asset ILIKE '%digitalocean%' OR cloud_asset ILIKE '%cloudflare%'
+				)
 			
 			UNION ALL
 			
@@ -1710,9 +1738,9 @@ func consolidateCloudAssets(scopeTargetID string) (int, error) {
 				cloud_domain as domain_name,
 				NULL as url_value,
 				CASE 
-					WHEN cloud_domain ILIKE '%amazonaws%' OR cloud_domain ILIKE '%aws%' THEN 'aws'
-					WHEN cloud_domain ILIKE '%googleapis%' OR cloud_domain ILIKE '%googleusercontent%' OR cloud_domain ILIKE '%gcp%' THEN 'gcp'
-					WHEN cloud_domain ILIKE '%azure%' OR cloud_domain ILIKE '%microsoft%' THEN 'azure'
+					WHEN cloud_domain ILIKE '%amazonaws%' OR cloud_domain ILIKE '%aws%' OR cloud_domain ILIKE '%awsdns%' OR cloud_domain ILIKE '%cloudfront%' OR cloud_domain ILIKE '%s3%' OR cloud_domain ILIKE '%elasticbeanstalk%' OR cloud_domain ILIKE '%amplifyapp%' THEN 'aws'
+					WHEN cloud_domain ILIKE '%googleapis%' OR cloud_domain ILIKE '%googleusercontent%' OR cloud_domain ILIKE '%gcp%' OR cloud_domain ILIKE '%appspot%' OR cloud_domain ILIKE '%gcloud%' OR cloud_domain ILIKE '%withgoogle%' THEN 'gcp'
+					WHEN cloud_domain ILIKE '%azure%' OR cloud_domain ILIKE '%microsoft%' OR cloud_domain ILIKE '%windows.net%' OR cloud_domain ILIKE '%trafficmanager%' OR cloud_domain ILIKE '%azureedge%' OR cloud_domain ILIKE '%azurewebsites%' OR cloud_domain ILIKE '%azure-api%' OR cloud_domain ILIKE '%cloudapp%' OR cloud_domain ILIKE '%microsoftonline%' THEN 'azure'
 					WHEN cloud_domain ILIKE '%digitalocean%' THEN 'digitalocean'
 					WHEN cloud_domain ILIKE '%cloudflare%' THEN 'cloudflare'
 					ELSE 'unknown'
@@ -1727,10 +1755,12 @@ func consolidateCloudAssets(scopeTargetID string) (int, error) {
 				AND result IS NOT NULL AND result::jsonb ? 'subdomains'
 			) security_trails_cloud_data
 			WHERE cloud_domain IS NOT NULL AND cloud_domain != ''
-				AND (cloud_domain ILIKE '%amazonaws%' OR cloud_domain ILIKE '%aws%'
-					OR cloud_domain ILIKE '%googleapis%' OR cloud_domain ILIKE '%googleusercontent%' OR cloud_domain ILIKE '%gcp%'
-					OR cloud_domain ILIKE '%azure%' OR cloud_domain ILIKE '%microsoft%'
-					OR cloud_domain ILIKE '%digitalocean%' OR cloud_domain ILIKE '%cloudflare%')
+				AND (
+					cloud_domain ILIKE '%amazonaws%' OR cloud_domain ILIKE '%aws%' OR cloud_domain ILIKE '%awsdns%' OR cloud_domain ILIKE '%cloudfront%' OR cloud_domain ILIKE '%s3%' OR cloud_domain ILIKE '%elasticbeanstalk%' OR cloud_domain ILIKE '%amplifyapp%'
+					OR cloud_domain ILIKE '%googleapis%' OR cloud_domain ILIKE '%googleusercontent%' OR cloud_domain ILIKE '%gcp%' OR cloud_domain ILIKE '%appspot%' OR cloud_domain ILIKE '%gcloud%' OR cloud_domain ILIKE '%withgoogle%'
+					OR cloud_domain ILIKE '%azure%' OR cloud_domain ILIKE '%microsoft%' OR cloud_domain ILIKE '%windows.net%' OR cloud_domain ILIKE '%trafficmanager%' OR cloud_domain ILIKE '%azureedge%' OR cloud_domain ILIKE '%azurewebsites%' OR cloud_domain ILIKE '%azure-api%' OR cloud_domain ILIKE '%cloudapp%' OR cloud_domain ILIKE '%microsoftonline%'
+					OR cloud_domain ILIKE '%digitalocean%' OR cloud_domain ILIKE '%cloudflare%'
+				)
 			
 			UNION ALL
 			
@@ -1740,9 +1770,9 @@ func consolidateCloudAssets(scopeTargetID string) (int, error) {
 				extracted_cloud_domain as domain_name,
 				NULL as url_value,
 				CASE 
-					WHEN extracted_cloud_domain ILIKE '%amazonaws%' OR extracted_cloud_domain ILIKE '%aws%' THEN 'aws'
-					WHEN extracted_cloud_domain ILIKE '%googleapis%' OR extracted_cloud_domain ILIKE '%googleusercontent%' OR extracted_cloud_domain ILIKE '%gcp%' THEN 'gcp'
-					WHEN extracted_cloud_domain ILIKE '%azure%' OR extracted_cloud_domain ILIKE '%microsoft%' THEN 'azure'
+					WHEN extracted_cloud_domain ILIKE '%amazonaws%' OR extracted_cloud_domain ILIKE '%aws%' OR extracted_cloud_domain ILIKE '%awsdns%' OR extracted_cloud_domain ILIKE '%cloudfront%' OR extracted_cloud_domain ILIKE '%s3%' OR extracted_cloud_domain ILIKE '%elasticbeanstalk%' OR extracted_cloud_domain ILIKE '%amplifyapp%' THEN 'aws'
+					WHEN extracted_cloud_domain ILIKE '%googleapis%' OR extracted_cloud_domain ILIKE '%googleusercontent%' OR extracted_cloud_domain ILIKE '%gcp%' OR extracted_cloud_domain ILIKE '%appspot%' OR extracted_cloud_domain ILIKE '%gcloud%' OR extracted_cloud_domain ILIKE '%withgoogle%' THEN 'gcp'
+					WHEN extracted_cloud_domain ILIKE '%azure%' OR extracted_cloud_domain ILIKE '%microsoft%' OR extracted_cloud_domain ILIKE '%windows.net%' OR extracted_cloud_domain ILIKE '%trafficmanager%' OR extracted_cloud_domain ILIKE '%azureedge%' OR extracted_cloud_domain ILIKE '%azurewebsites%' OR extracted_cloud_domain ILIKE '%azure-api%' OR extracted_cloud_domain ILIKE '%cloudapp%' OR extracted_cloud_domain ILIKE '%microsoftonline%' THEN 'azure'
 					WHEN extracted_cloud_domain ILIKE '%digitalocean%' THEN 'digitalocean'
 					WHEN extracted_cloud_domain ILIKE '%cloudflare%' THEN 'cloudflare'
 					ELSE 'unknown'
@@ -1760,18 +1790,21 @@ func consolidateCloudAssets(scopeTargetID string) (int, error) {
 							substring(record from '--> ([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})')
 						-- If it's already a cloud domain, use it directly
 						WHEN record ~ '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$' AND (
-							record ILIKE '%amazonaws%' OR record ILIKE '%aws%'
-							OR record ILIKE '%googleapis%' OR record ILIKE '%googleusercontent%' OR record ILIKE '%gcp%'
-							OR record ILIKE '%azure%' OR record ILIKE '%microsoft%'
+							record ILIKE '%amazonaws%' OR record ILIKE '%aws%' OR record ILIKE '%awsdns%' OR record ILIKE '%cloudfront%' OR record ILIKE '%s3%' OR record ILIKE '%elasticbeanstalk%' OR record ILIKE '%amplifyapp%'
+							OR record ILIKE '%googleapis%' OR record ILIKE '%googleusercontent%' OR record ILIKE '%gcp%' OR record ILIKE '%appspot%' OR record ILIKE '%gcloud%' OR record ILIKE '%withgoogle%'
+							OR record ILIKE '%azure%' OR record ILIKE '%microsoft%' OR record ILIKE '%windows.net%' OR record ILIKE '%trafficmanager%' OR record ILIKE '%azureedge%' OR record ILIKE '%azurewebsites%' OR record ILIKE '%azure-api%' OR record ILIKE '%cloudapp%' OR record ILIKE '%microsoftonline%'
 							OR record ILIKE '%digitalocean%' OR record ILIKE '%cloudflare%'
 						) THEN record
 						ELSE NULL
 					END as extracted_cloud_domain
 				FROM dnsx_company_dns_records
 				WHERE scope_target_id = $1::uuid AND record_type = 'CNAME'
-				AND (record ILIKE '%amazonaws%' OR record ILIKE '%googleapis%' 
-					OR record ILIKE '%azure%' OR record ILIKE '%digitalocean%' 
-					OR record ILIKE '%cloudflare%')
+				AND (
+					record ILIKE '%amazonaws%' OR record ILIKE '%aws%' OR record ILIKE '%awsdns%' OR record ILIKE '%cloudfront%' OR record ILIKE '%s3%' OR record ILIKE '%elasticbeanstalk%' OR record ILIKE '%amplifyapp%'
+					OR record ILIKE '%googleapis%' OR record ILIKE '%googleusercontent%' OR record ILIKE '%gcp%' OR record ILIKE '%appspot%' OR record ILIKE '%gcloud%' OR record ILIKE '%withgoogle%'
+					OR record ILIKE '%azure%' OR record ILIKE '%microsoft%' OR record ILIKE '%windows.net%' OR record ILIKE '%trafficmanager%' OR record ILIKE '%azureedge%' OR record ILIKE '%azurewebsites%' OR record ILIKE '%azure-api%' OR record ILIKE '%cloudapp%' OR record ILIKE '%microsoftonline%'
+					OR record ILIKE '%digitalocean%' OR record ILIKE '%cloudflare%'
+				)
 				
 				UNION ALL
 				
@@ -1785,68 +1818,156 @@ func consolidateCloudAssets(scopeTargetID string) (int, error) {
 							substring(record from '--> ([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})')
 						-- If it's already a cloud domain, use it directly
 						WHEN record ~ '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$' AND (
-							record ILIKE '%amazonaws%' OR record ILIKE '%aws%'
-							OR record ILIKE '%googleapis%' OR record ILIKE '%googleusercontent%' OR record ILIKE '%gcp%'
-							OR record ILIKE '%azure%' OR record ILIKE '%microsoft%'
+							record ILIKE '%amazonaws%' OR record ILIKE '%aws%' OR record ILIKE '%awsdns%' OR record ILIKE '%cloudfront%' OR record ILIKE '%s3%' OR record ILIKE '%elasticbeanstalk%' OR record ILIKE '%amplifyapp%'
+							OR record ILIKE '%googleapis%' OR record ILIKE '%googleusercontent%' OR record ILIKE '%gcp%' OR record ILIKE '%appspot%' OR record ILIKE '%gcloud%' OR record ILIKE '%withgoogle%'
+							OR record ILIKE '%azure%' OR record ILIKE '%microsoft%' OR record ILIKE '%windows.net%' OR record ILIKE '%trafficmanager%' OR record ILIKE '%azureedge%' OR record ILIKE '%azurewebsites%' OR record ILIKE '%azure-api%' OR record ILIKE '%cloudapp%' OR record ILIKE '%microsoftonline%'
 							OR record ILIKE '%digitalocean%' OR record ILIKE '%cloudflare%'
 						) THEN record
 						ELSE NULL
 					END as extracted_cloud_domain
 				FROM amass_enum_company_dns_records
 				WHERE scope_target_id = $1::uuid AND record_type = 'CNAME'
-				AND (record ILIKE '%amazonaws%' OR record ILIKE '%googleapis%' 
-					OR record ILIKE '%azure%' OR record ILIKE '%digitalocean%' 
-					OR record ILIKE '%cloudflare%')
+				AND (
+					record ILIKE '%amazonaws%' OR record ILIKE '%aws%' OR record ILIKE '%awsdns%' OR record ILIKE '%cloudfront%' OR record ILIKE '%s3%' OR record ILIKE '%elasticbeanstalk%' OR record ILIKE '%amplifyapp%'
+					OR record ILIKE '%googleapis%' OR record ILIKE '%googleusercontent%' OR record ILIKE '%gcp%' OR record ILIKE '%appspot%' OR record ILIKE '%gcloud%' OR record ILIKE '%withgoogle%'
+					OR record ILIKE '%azure%' OR record ILIKE '%microsoft%' OR record ILIKE '%windows.net%' OR record ILIKE '%trafficmanager%' OR record ILIKE '%azureedge%' OR record ILIKE '%azurewebsites%' OR record ILIKE '%azure-api%' OR record ILIKE '%cloudapp%' OR record ILIKE '%microsoftonline%'
+					OR record ILIKE '%digitalocean%' OR record ILIKE '%cloudflare%'
+				)
 			) dns_cloud_data
 			WHERE extracted_cloud_domain IS NOT NULL AND extracted_cloud_domain != ''
 			
 			UNION ALL
 			
-			                              -- 9. Extract cloud domains from raw Amass results (complex relationships)
-                              SELECT DISTINCT
-                                      extracted_cloud_domain as asset_identifier,
-                                      extracted_cloud_domain as domain_name,
-                                      NULL as url_value,
-                                      CASE
-                                              WHEN extracted_cloud_domain ILIKE '%amazonaws%' OR extracted_cloud_domain ILIKE '%aws%' THEN 'aws'
-                                              WHEN extracted_cloud_domain ILIKE '%googleapis%' OR extracted_cloud_domain ILIKE '%googleusercontent%' OR extracted_cloud_domain ILIKE '%gcp%' THEN 'gcp'
-                                              WHEN extracted_cloud_domain ILIKE '%azure%' OR extracted_cloud_domain ILIKE '%microsoft%' THEN 'azure'
-                                              WHEN extracted_cloud_domain ILIKE '%digitalocean%' THEN 'digitalocean'
-                                              WHEN extracted_cloud_domain ILIKE '%cloudflare%' THEN 'cloudflare'
-                                              ELSE 'unknown'
-                                      END as cloud_provider,
-                                      'amass_raw_discovery' as service_type,
-                                      NULL as region_value
-                              FROM (
-                                      SELECT DISTINCT
-                                              CASE
-                                                      -- Extract cloud domain from CNAME relationships like: "domain (FQDN) --> cname_record --> cloud-domain (FQDN)"
-                                                      WHEN raw_output ~ '\(FQDN\) --> cname_record --> ([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}) \(FQDN\)' THEN
-                                                              substring(raw_output from '\(FQDN\) --> cname_record --> ([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}) \(FQDN\)')
-                                                      -- Extract cloud domain from simpler CNAME patterns like: "domain --> cloud-domain"
-                                                      WHEN raw_output ~ '--> ([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' THEN
-                                                              substring(raw_output from '--> ([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})')
-                                                      -- Extract cloud domains that are already in the output (simplified approach)
-                                                      WHEN raw_output ~ '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' AND (
-                                                              raw_output ILIKE '%amazonaws%' OR raw_output ILIKE '%aws%'
-                                                              OR raw_output ILIKE '%googleapis%' OR raw_output ILIKE '%googleusercontent%' OR raw_output ILIKE '%gcp%'
-                                                              OR raw_output ILIKE '%azure%' OR raw_output ILIKE '%microsoft%'
-                                                              OR raw_output ILIKE '%digitalocean%' OR raw_output ILIKE '%cloudflare%'
-                                                      ) THEN
-                                                              -- Use a simpler regex extraction for the first match
-                                                              substring(raw_output from '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})')
-                                                      ELSE NULL
-                                              END as extracted_cloud_domain
-                                      FROM amass_enum_company_domain_results
-                                      WHERE scope_target_id = $1::uuid
-                                      AND (
-                                              raw_output ILIKE '%amazonaws%' OR raw_output ILIKE '%aws%'
-                                              OR raw_output ILIKE '%googleapis%' OR raw_output ILIKE '%googleusercontent%' OR raw_output ILIKE '%gcp%'
-                                              OR raw_output ILIKE '%azure%' OR raw_output ILIKE '%microsoft%'
-                                              OR raw_output ILIKE '%digitalocean%' OR raw_output ILIKE '%cloudflare%'
-                                      )
-                              ) amass_raw_extractions
-                              WHERE extracted_cloud_domain IS NOT NULL AND extracted_cloud_domain != ''
+			-- 8b. DNSx non-CNAME records (A, AAAA, NS, TXT, MX) that contain cloud domains
+			SELECT DISTINCT
+				extracted_cloud_domain as asset_identifier,
+				extracted_cloud_domain as domain_name,
+				NULL as url_value,
+				CASE 
+					WHEN extracted_cloud_domain ILIKE '%amazonaws%' OR extracted_cloud_domain ILIKE '%aws%' OR extracted_cloud_domain ILIKE '%awsdns%' OR extracted_cloud_domain ILIKE '%cloudfront%' OR extracted_cloud_domain ILIKE '%s3%' OR extracted_cloud_domain ILIKE '%elasticbeanstalk%' OR extracted_cloud_domain ILIKE '%amplifyapp%' THEN 'aws'
+					WHEN extracted_cloud_domain ILIKE '%googleapis%' OR extracted_cloud_domain ILIKE '%googleusercontent%' OR extracted_cloud_domain ILIKE '%gcp%' OR extracted_cloud_domain ILIKE '%appspot%' OR extracted_cloud_domain ILIKE '%gcloud%' OR extracted_cloud_domain ILIKE '%withgoogle%' THEN 'gcp'
+					WHEN extracted_cloud_domain ILIKE '%azure%' OR extracted_cloud_domain ILIKE '%microsoft%' OR extracted_cloud_domain ILIKE '%windows.net%' OR extracted_cloud_domain ILIKE '%trafficmanager%' OR extracted_cloud_domain ILIKE '%azureedge%' OR extracted_cloud_domain ILIKE '%azurewebsites%' OR extracted_cloud_domain ILIKE '%azure-api%' OR extracted_cloud_domain ILIKE '%cloudapp%' OR extracted_cloud_domain ILIKE '%microsoftonline%' THEN 'azure'
+					WHEN extracted_cloud_domain ILIKE '%digitalocean%' THEN 'digitalocean'
+					WHEN extracted_cloud_domain ILIKE '%cloudflare%' THEN 'cloudflare'
+					ELSE 'unknown'
+				END as cloud_provider,
+				'dnsx_non_cname_discovery' as service_type,
+				NULL as region_value
+			FROM (
+				SELECT DISTINCT
+					CASE 
+						-- For A/AAAA records, check if the record value itself is a cloud domain
+						WHEN record_type IN ('A', 'AAAA') AND record ~ '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$' AND (
+							record ILIKE '%amazonaws%' OR record ILIKE '%aws%' OR record ILIKE '%awsdns%' OR record ILIKE '%cloudfront%' OR record ILIKE '%s3%' OR record ILIKE '%elasticbeanstalk%' OR record ILIKE '%amplifyapp%'
+							OR record ILIKE '%googleapis%' OR record ILIKE '%googleusercontent%' OR record ILIKE '%gcp%' OR record ILIKE '%appspot%' OR record ILIKE '%gcloud%' OR record ILIKE '%withgoogle%'
+							OR record ILIKE '%azure%' OR record ILIKE '%microsoft%' OR record ILIKE '%windows.net%' OR record ILIKE '%trafficmanager%' OR record ILIKE '%azureedge%' OR record ILIKE '%azurewebsites%' OR record ILIKE '%azure-api%' OR record ILIKE '%cloudapp%' OR record ILIKE '%microsoftonline%'
+							OR record ILIKE '%digitalocean%' OR record ILIKE '%cloudflare%'
+						) THEN record
+						-- For NS, TXT, MX records, extract domain from the record value
+						WHEN record_type IN ('NS', 'TXT', 'MX') AND record ~ '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' THEN
+							CASE
+								WHEN record ~ '([a-zA-Z0-9.-]+\.(amazonaws|aws|awsdns|cloudfront|s3|elasticbeanstalk|amplifyapp)\.[a-zA-Z0-9.-]+)' THEN
+									substring(record from '([a-zA-Z0-9.-]+\.(amazonaws|aws|awsdns|cloudfront|s3|elasticbeanstalk|amplifyapp)\.[a-zA-Z0-9.-]+)')
+								WHEN record ~ '([a-zA-Z0-9.-]+\.(googleapis|googleusercontent|gcp|appspot|gcloud|withgoogle)\.[a-zA-Z0-9.-]+)' THEN
+									substring(record from '([a-zA-Z0-9.-]+\.(googleapis|googleusercontent|gcp|appspot|gcloud|withgoogle)\.[a-zA-Z0-9.-]+)')
+								WHEN record ~ '([a-zA-Z0-9.-]+\.(azure|microsoft|windows\.net|trafficmanager|azureedge|azurewebsites|azure-api|cloudapp|microsoftonline)\.[a-zA-Z0-9.-]+)' THEN
+									substring(record from '([a-zA-Z0-9.-]+\.(azure|microsoft|windows\.net|trafficmanager|azureedge|azurewebsites|azure-api|cloudapp|microsoftonline)\.[a-zA-Z0-9.-]+)')
+								WHEN record ~ '([a-zA-Z0-9.-]+\.(digitalocean|cloudflare)\.[a-zA-Z0-9.-]+)' THEN
+									substring(record from '([a-zA-Z0-9.-]+\.(digitalocean|cloudflare)\.[a-zA-Z0-9.-]+)')
+								ELSE NULL
+							END
+						ELSE NULL
+					END as extracted_cloud_domain
+				FROM dnsx_company_dns_records
+				WHERE scope_target_id = $1::uuid 
+				AND record_type IN ('A', 'AAAA', 'NS', 'TXT', 'MX')
+				AND (
+					record ILIKE '%amazonaws%' OR record ILIKE '%aws%' OR record ILIKE '%awsdns%' OR record ILIKE '%cloudfront%' OR record ILIKE '%s3%' OR record ILIKE '%elasticbeanstalk%' OR record ILIKE '%amplifyapp%'
+					OR record ILIKE '%googleapis%' OR record ILIKE '%googleusercontent%' OR record ILIKE '%gcp%' OR record ILIKE '%appspot%' OR record ILIKE '%gcloud%' OR record ILIKE '%withgoogle%'
+					OR record ILIKE '%azure%' OR record ILIKE '%microsoft%' OR record ILIKE '%windows.net%' OR record ILIKE '%trafficmanager%' OR record ILIKE '%azureedge%' OR record ILIKE '%azurewebsites%' OR record ILIKE '%azure-api%' OR record ILIKE '%cloudapp%' OR record ILIKE '%microsoftonline%'
+					OR record ILIKE '%digitalocean%' OR record ILIKE '%cloudflare%'
+				)
+			) dnsx_non_cname_cloud_data
+			WHERE extracted_cloud_domain IS NOT NULL AND extracted_cloud_domain != ''
+			AND extracted_cloud_domain !~ '^(\d{1,3}\.){3}\d{1,3}$'
+			
+			UNION ALL
+			
+			-- 9. Extract cloud domains from raw Amass results (complex relationships)
+			SELECT DISTINCT
+				extracted_cloud_domain as asset_identifier,
+				extracted_cloud_domain as domain_name,
+				NULL as url_value,
+				CASE
+					WHEN extracted_cloud_domain ILIKE '%amazonaws%' OR extracted_cloud_domain ILIKE '%aws%' OR extracted_cloud_domain ILIKE '%awsdns%' OR extracted_cloud_domain ILIKE '%cloudfront%' OR extracted_cloud_domain ILIKE '%s3%' OR extracted_cloud_domain ILIKE '%elasticbeanstalk%' OR extracted_cloud_domain ILIKE '%amplifyapp%' THEN 'aws'
+					WHEN extracted_cloud_domain ILIKE '%googleapis%' OR extracted_cloud_domain ILIKE '%googleusercontent%' OR extracted_cloud_domain ILIKE '%gcp%' OR extracted_cloud_domain ILIKE '%appspot%' OR extracted_cloud_domain ILIKE '%gcloud%' OR extracted_cloud_domain ILIKE '%withgoogle%' THEN 'gcp'
+					WHEN extracted_cloud_domain ILIKE '%azure%' OR extracted_cloud_domain ILIKE '%microsoft%' OR extracted_cloud_domain ILIKE '%windows.net%' OR extracted_cloud_domain ILIKE '%trafficmanager%' OR extracted_cloud_domain ILIKE '%azureedge%' OR extracted_cloud_domain ILIKE '%azurewebsites%' OR extracted_cloud_domain ILIKE '%azure-api%' OR extracted_cloud_domain ILIKE '%cloudapp%' OR extracted_cloud_domain ILIKE '%microsoftonline%' THEN 'azure'
+					WHEN extracted_cloud_domain ILIKE '%digitalocean%' THEN 'digitalocean'
+					WHEN extracted_cloud_domain ILIKE '%cloudflare%' THEN 'cloudflare'
+					ELSE 'unknown'
+				END as cloud_provider,
+				'amass_raw_discovery' as service_type,
+				NULL as region_value
+			FROM (
+				SELECT DISTINCT
+					CASE
+						-- Extract cloud domain from CNAME relationships like: "domain (FQDN) --> cname_record --> cloud-domain (FQDN)"
+						WHEN raw_output ~ '\(FQDN\) --> cname_record --> ([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}) \(FQDN\)' THEN
+							substring(raw_output from '\(FQDN\) --> cname_record --> ([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}) \(FQDN\)')
+						-- Extract cloud domain from simpler CNAME patterns like: "domain --> cloud-domain"
+						WHEN raw_output ~ '--> ([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' THEN
+							substring(raw_output from '--> ([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})')
+						-- Extract cloud domains that are already in the output (simplified approach)
+						WHEN raw_output ~ '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' AND (
+							raw_output ILIKE '%amazonaws%' OR raw_output ILIKE '%aws%' OR raw_output ILIKE '%awsdns%' OR raw_output ILIKE '%cloudfront%' OR raw_output ILIKE '%s3%' OR raw_output ILIKE '%elasticbeanstalk%' OR raw_output ILIKE '%amplifyapp%'
+							OR raw_output ILIKE '%googleapis%' OR raw_output ILIKE '%googleusercontent%' OR raw_output ILIKE '%gcp%' OR raw_output ILIKE '%appspot%' OR raw_output ILIKE '%gcloud%' OR raw_output ILIKE '%withgoogle%'
+							OR raw_output ILIKE '%azure%' OR raw_output ILIKE '%microsoft%' OR raw_output ILIKE '%windows.net%' OR raw_output ILIKE '%trafficmanager%' OR raw_output ILIKE '%azureedge%' OR raw_output ILIKE '%azurewebsites%' OR raw_output ILIKE '%azure-api%' OR raw_output ILIKE '%cloudapp%' OR raw_output ILIKE '%microsoftonline%'
+							OR raw_output ILIKE '%digitalocean%' OR raw_output ILIKE '%cloudflare%'
+						) THEN
+							-- Use a simpler regex extraction for the first match
+							substring(raw_output from '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})')
+						ELSE NULL
+					END as extracted_cloud_domain
+				FROM amass_enum_company_domain_results
+				WHERE scope_target_id = $1::uuid
+				AND (
+					raw_output ILIKE '%amazonaws%' OR raw_output ILIKE '%aws%' OR raw_output ILIKE '%awsdns%' OR raw_output ILIKE '%cloudfront%' OR raw_output ILIKE '%s3%' OR raw_output ILIKE '%elasticbeanstalk%' OR raw_output ILIKE '%amplifyapp%'
+					OR raw_output ILIKE '%googleapis%' OR raw_output ILIKE '%googleusercontent%' OR raw_output ILIKE '%gcp%' OR raw_output ILIKE '%appspot%' OR raw_output ILIKE '%gcloud%' OR raw_output ILIKE '%withgoogle%'
+					OR raw_output ILIKE '%azure%' OR raw_output ILIKE '%microsoft%' OR raw_output ILIKE '%windows.net%' OR raw_output ILIKE '%trafficmanager%' OR raw_output ILIKE '%azureedge%' OR raw_output ILIKE '%azurewebsites%' OR raw_output ILIKE '%azure-api%' OR raw_output ILIKE '%cloudapp%' OR raw_output ILIKE '%microsoftonline%'
+					OR raw_output ILIKE '%digitalocean%' OR raw_output ILIKE '%cloudflare%'
+				)
+			) amass_raw_extractions
+			WHERE extracted_cloud_domain IS NOT NULL AND extracted_cloud_domain != ''
+			
+			UNION ALL
+			
+			-- 10. Extract cloud domains from consolidated FQDNs (Domain Names list)
+			SELECT DISTINCT
+				fqdn as asset_identifier,
+				fqdn as domain_name,
+				NULL as url_value,
+				CASE
+					WHEN fqdn ILIKE '%amazonaws%' OR fqdn ILIKE '%aws%' OR fqdn ILIKE '%awsdns%' OR fqdn ILIKE '%cloudfront%' OR fqdn ILIKE '%s3%' OR fqdn ILIKE '%elasticbeanstalk%' OR fqdn ILIKE '%amplifyapp%' THEN 'aws'
+					WHEN fqdn ILIKE '%googleapis%' OR fqdn ILIKE '%googleusercontent%' OR fqdn ILIKE '%gcp%' OR fqdn ILIKE '%appspot%' OR fqdn ILIKE '%gcloud%' OR fqdn ILIKE '%withgoogle%' THEN 'gcp'
+					WHEN fqdn ILIKE '%azure%' OR fqdn ILIKE '%microsoft%' OR fqdn ILIKE '%windows.net%' OR fqdn ILIKE '%trafficmanager%' OR fqdn ILIKE '%azureedge%' OR fqdn ILIKE '%azurewebsites%' OR fqdn ILIKE '%azure-api%' OR fqdn ILIKE '%cloudapp%' OR fqdn ILIKE '%microsoftonline%' THEN 'azure'
+					WHEN fqdn ILIKE '%digitalocean%' THEN 'digitalocean'
+					WHEN fqdn ILIKE '%cloudflare%' THEN 'cloudflare'
+					ELSE 'unknown'
+				END as cloud_provider,
+				'consolidated_fqdn_discovery' as service_type,
+				NULL as region_value
+			FROM consolidated_attack_surface_assets
+			WHERE scope_target_id = $1::uuid
+			AND asset_type = 'fqdn'
+			AND fqdn IS NOT NULL
+			AND fqdn != ''
+			AND (
+				fqdn ILIKE '%amazonaws%' OR fqdn ILIKE '%aws%' OR fqdn ILIKE '%awsdns%' OR fqdn ILIKE '%cloudfront%' OR fqdn ILIKE '%s3%' OR fqdn ILIKE '%elasticbeanstalk%' OR fqdn ILIKE '%amplifyapp%'
+				OR fqdn ILIKE '%googleapis%' OR fqdn ILIKE '%googleusercontent%' OR fqdn ILIKE '%gcp%' OR fqdn ILIKE '%appspot%' OR fqdn ILIKE '%gcloud%' OR fqdn ILIKE '%withgoogle%'
+				OR fqdn ILIKE '%azure%' OR fqdn ILIKE '%microsoft%' OR fqdn ILIKE '%windows.net%' OR fqdn ILIKE '%trafficmanager%' OR fqdn ILIKE '%azureedge%' OR fqdn ILIKE '%azurewebsites%' OR fqdn ILIKE '%azure-api%' OR fqdn ILIKE '%cloudapp%' OR fqdn ILIKE '%microsoftonline%'
+				OR fqdn ILIKE '%digitalocean%' OR fqdn ILIKE '%cloudflare%'
+			)
+			AND fqdn !~ '^(\d{1,3}\.){3}\d{1,3}$'
 		) all_cloud_data
 		WHERE asset_identifier IS NOT NULL
 		GROUP BY asset_identifier

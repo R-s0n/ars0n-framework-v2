@@ -126,6 +126,7 @@ func main() {
 	r.HandleFunc("/consolidate-network-ranges/{id}", utils.HandleConsolidateNetworkRanges).Methods("GET", "OPTIONS")
 	r.HandleFunc("/consolidated-network-ranges/{id}", utils.GetConsolidatedNetworkRanges).Methods("GET", "OPTIONS")
 	r.HandleFunc("/consolidate-attack-surface/{scope_target_id}", utils.ConsolidateAttackSurface).Methods("POST", "OPTIONS")
+	r.HandleFunc("/investigate-fqdns/{scope_target_id}", utils.InvestigateFQDNs).Methods("POST", "OPTIONS")
 	r.HandleFunc("/attack-surface-asset-counts/{scope_target_id}", utils.GetAttackSurfaceAssetCounts).Methods("GET", "OPTIONS")
 	r.HandleFunc("/attack-surface-assets/{scope_target_id}", utils.GetAttackSurfaceAssets).Methods("GET", "OPTIONS")
 	r.HandleFunc("/shuffledns/run", utils.RunShuffleDNSScan).Methods("POST", "OPTIONS")

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Modal, Table, Badge, Alert, Tabs, Tab, Card, Row, Col, Button, Spinner } from 'react-bootstrap';
+import { Modal, Table, Badge, Alert, Tabs, Tab, Card, Row, Col, Button, Spinner, Form, InputGroup } from 'react-bootstrap';
 
 const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecentKatanaCompanyScan }) => {
   const [cloudAssets, setCloudAssets] = useState([]);
@@ -11,6 +11,10 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
   const [error, setError] = useState('');
 
   const [lastLoadedScanId, setLastLoadedScanId] = useState(null);
+
+  const [searchFilters, setSearchFilters] = useState([{ searchTerm: '', isNegative: false }]);
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+  const [copySuccess, setCopySuccess] = useState(false);
 
   // Combine all available domains like the config modal
   const combinedDomains = useMemo(() => {
@@ -287,12 +291,142 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
     return 'secondary';
   };
 
+  const copyCloudAssetDomains = async () => {
+    const domains = cloudAssets.map(asset => {
+      return asset.url.replace(/^https?:\/\//, '');
+    }).join('\n');
+
+    try {
+      await navigator.clipboard.writeText(domains);
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 2000);
+    } catch (error) {
+      console.error('Failed to copy to clipboard:', error);
+    }
+  };
+
+  const copySingleDomain = async (domain) => {
+    try {
+      await navigator.clipboard.writeText(domain);
+    } catch (error) {
+      console.error('Failed to copy to clipboard:', error);
+    }
+  };
+
   const getServiceName = (service) => {
     const parts = service.split('_');
     if (parts.length >= 2) {
       return `${parts[0].toUpperCase()} ${parts[1]}`;
     }
     return service.toUpperCase();
+  };
+
+  const getFilteredCloudAssets = () => {
+    const filtered = cloudAssets.filter(asset => {
+      const activeFilters = searchFilters.filter(filter => filter.searchTerm.trim() !== '');
+      
+      if (activeFilters.length > 0) {
+        return activeFilters.every(filter => {
+          const searchTerm = filter.searchTerm.toLowerCase();
+          const cloudAssetFQDN = asset.url.replace(/^https?:\/\//, '');
+          const sourceURL = asset.source_url || asset.url;
+          const serviceName = getServiceName(asset.service);
+          
+          const assetContainsSearch = 
+            (asset.service && asset.service.toLowerCase().includes(searchTerm)) ||
+            (serviceName && serviceName.toLowerCase().includes(searchTerm)) ||
+            (cloudAssetFQDN && cloudAssetFQDN.toLowerCase().includes(searchTerm)) ||
+            (sourceURL && sourceURL.toLowerCase().includes(searchTerm));
+          return filter.isNegative ? !assetContainsSearch : assetContainsSearch;
+        });
+      }
+      
+      return true;
+    });
+
+    return getSortedAssets(filtered);
+  };
+
+  const addSearchFilter = () => {
+    setSearchFilters([...searchFilters, { searchTerm: '', isNegative: false }]);
+  };
+
+  const removeSearchFilter = (index) => {
+    if (searchFilters.length > 1) {
+      const newFilters = searchFilters.filter((_, i) => i !== index);
+      setSearchFilters(newFilters);
+    }
+  };
+
+  const updateSearchFilter = (index, field, value) => {
+    const newFilters = [...searchFilters];
+    newFilters[index][field] = value;
+    setSearchFilters(newFilters);
+  };
+
+  const clearFilters = () => {
+    setSearchFilters([{ searchTerm: '', isNegative: false }]);
+  };
+
+  const handleSort = (key) => {
+    let direction = 'asc';
+    if (sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const getSortedAssets = (assets) => {
+    if (!sortConfig.key) return assets;
+
+    return [...assets].sort((a, b) => {
+      let aValue, bValue;
+
+      if (sortConfig.key === 'service') {
+        aValue = getServiceName(a.service);
+        bValue = getServiceName(b.service);
+      } else if (sortConfig.key === 'cloudAsset') {
+        aValue = a.url.replace(/^https?:\/\//, '');
+        bValue = b.url.replace(/^https?:\/\//, '');
+      } else if (sortConfig.key === 'source') {
+        aValue = a.source_url || a.url;
+        bValue = b.source_url || b.url;
+      } else {
+        aValue = a[sortConfig.key];
+        bValue = b[sortConfig.key];
+      }
+
+      aValue = String(aValue || '').toLowerCase();
+      bValue = String(bValue || '').toLowerCase();
+
+      if (aValue < bValue) {
+        return sortConfig.direction === 'asc' ? -1 : 1;
+      }
+      if (aValue > bValue) {
+        return sortConfig.direction === 'asc' ? 1 : -1;
+      }
+      return 0;
+    });
+  };
+
+  const getSortIcon = (columnKey) => {
+    if (sortConfig.key !== columnKey) {
+      return <i className="bi bi-arrow-down-up text-white-50 ms-1" style={{ fontSize: '0.8rem' }}></i>;
+    }
+    return sortConfig.direction === 'asc' 
+      ? <i className="bi bi-arrow-up text-white ms-1" style={{ fontSize: '0.8rem' }}></i>
+      : <i className="bi bi-arrow-down text-white ms-1" style={{ fontSize: '0.8rem' }}></i>;
+  };
+
+  const getCloudAssetsTitle = () => {
+    const filteredCount = getFilteredCloudAssets().length;
+    const totalCount = cloudAssets.length;
+    const hasActiveFilters = searchFilters.some(filter => filter.searchTerm.trim() !== '');
+    
+    if (hasActiveFilters) {
+      return `Cloud Assets (${filteredCount}/${totalCount})`;
+    }
+    return `Cloud Assets (${totalCount})`;
   };
 
   const handleModalClose = () => {
@@ -302,18 +436,28 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
     setWildcardDomains([]);
     setLiveWebServers([]);
     setLastLoadedScanId(null);
+    setSearchFilters([{ searchTerm: '', isNegative: false }]);
+    setSortConfig({ key: null, direction: 'asc' });
     handleClose();
   };
 
   return (
-    <Modal 
-      show={show} 
-      onHide={handleModalClose} 
-      size="xl" 
-      backdrop={true}
-      className="text-light"
-      contentClassName="bg-dark border-secondary"
-    >
+    <>
+      <style>
+        {`
+          .katana-modal-wide .modal-dialog {
+            max-width: 1400px;
+            width: 95vw;
+          }
+        `}
+      </style>
+      <Modal 
+        show={show} 
+        onHide={handleModalClose} 
+        backdrop={true}
+        className="text-light katana-modal-wide"
+        contentClassName="bg-dark border-secondary"
+      >
       <Modal.Header closeButton className="bg-dark border-secondary">
         <Modal.Title className="text-light">
           Katana Company Scan Results - Cloud Asset Enumeration
@@ -326,6 +470,28 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
       </Modal.Header>
       <Modal.Body className="bg-dark text-light">
         {error && <Alert variant="danger" className="bg-danger bg-opacity-10 border-danger text-light">{error}</Alert>}
+        
+        {cloudAssets.length > 0 && (
+          <div className="mb-3 d-flex justify-content-end">
+            <Button
+              variant={copySuccess ? "success" : "outline-secondary"}
+              size="sm"
+              onClick={copyCloudAssetDomains}
+            >
+              {copySuccess ? (
+                <>
+                  <i className="bi bi-check-circle me-1"></i>
+                  Copied!
+                </>
+              ) : (
+                <>
+                  <i className="bi bi-clipboard me-1"></i>
+                  Copy All Cloud Domains to Clipboard
+                </>
+              )}
+            </Button>
+          </div>
+        )}
         
         {(mostRecentKatanaCompanyScan || cloudAssets.length > 0) && (
           <div className="mb-3">
@@ -350,7 +516,7 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
                     <div className="d-flex align-items-center">
                       <div className="flex-grow-1">
                         <p className="mb-1 text-light"><strong>Cloud Assets:</strong> {cloudAssets.length}</p>
-                        <p className="mb-1 text-light"><strong>AWS:</strong> <Badge bg="warning">{cloudAssets.filter(a => a.service.includes('aws')).length}</Badge></p>
+                        <p className="mb-1 text-light"><strong>AWS:</strong> <Badge bg="warning" style={{ backgroundColor: '#d35400', color: '#fff' }}>{cloudAssets.filter(a => a.service.includes('aws')).length}</Badge></p>
                         <p className="mb-0 text-light"><strong>GCP:</strong> <Badge bg="info">{cloudAssets.filter(a => a.service.includes('gcp')).length}</Badge> <strong>Azure:</strong> <Badge bg="primary">{cloudAssets.filter(a => a.service.includes('azure')).length}</Badge></p>
                       </div>
                       <div className="ms-3">
@@ -452,48 +618,173 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
         )}
 
         <div className="mb-3">
-          <h5 className="text-light">Cloud Assets ({cloudAssets.length})</h5>
+          <h5 className="text-light">{getCloudAssetsTitle()}</h5>
           {isLoading ? (
             <div className="text-center py-4 text-light">Loading cloud assets...</div>
           ) : cloudAssets.length > 0 ? (
-            <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
-              <Table responsive size="sm" variant="dark" className="border-secondary">
-                <thead>
-                  <tr>
-                    <th className="text-light">Service</th>
-                    <th className="text-light">Cloud Asset</th>
-                    <th className="text-light">Source</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {cloudAssets.map((asset, index) => {
-                    // The cloud asset FQDN is stored in asset.url, just remove the protocol
-                    const cloudAssetFQDN = asset.url.replace(/^https?:\/\//, '');
-                    
-                    // Use the source_url field directly from the backend
-                    const sourceURL = asset.source_url || asset.url;
-                    
-                    return (
-                      <tr key={index}>
-                        <td>
-                          <Badge bg={getServiceBadgeVariant(asset.service)}>
-                            {getServiceName(asset.service)}
-                          </Badge>
-                        </td>
-                        <td>
-                          <code className="text-warning">{cloudAssetFQDN}</code>
-                        </td>
-                        <td>
-                          <a href={sourceURL} target="_blank" rel="noopener noreferrer" className="text-decoration-none text-info">
-                            <code className="text-info small">{sourceURL}</code>
-                          </a>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </Table>
-            </div>
+            <>
+              <div className="mb-3">
+                <div className="d-flex justify-content-between align-items-center mb-2">
+                  <Form.Label className="text-white small mb-0">Search Filters</Form.Label>
+                  <div>
+                    <Button 
+                      variant="outline-success" 
+                      size="sm" 
+                      onClick={addSearchFilter}
+                      className="me-2"
+                    >
+                      Add Filter
+                    </Button>
+                    <Button 
+                      variant="outline-danger" 
+                      size="sm" 
+                      onClick={clearFilters}
+                    >
+                      Clear Filters
+                    </Button>
+                  </div>
+                </div>
+                {searchFilters.map((filter, index) => (
+                  <div key={index} className="mb-2">
+                    <InputGroup size="sm">
+                      <Form.Select
+                        value={filter.isNegative ? 'negative' : 'positive'}
+                        onChange={(e) => updateSearchFilter(index, 'isNegative', e.target.value === 'negative')}
+                        style={{ maxWidth: '120px' }}
+                        data-bs-theme="dark"
+                      >
+                        <option value="positive">Contains</option>
+                        <option value="negative">Excludes</option>
+                      </Form.Select>
+                      <Form.Control
+                        type="text"
+                        placeholder="Search service, asset, or source..."
+                        value={filter.searchTerm}
+                        onChange={(e) => updateSearchFilter(index, 'searchTerm', e.target.value)}
+                        data-bs-theme="dark"
+                      />
+                      {searchFilters.length > 1 && (
+                        <Button 
+                          variant="outline-danger" 
+                          size="sm"
+                          onClick={() => removeSearchFilter(index)}
+                        >
+                          ×
+                        </Button>
+                      )}
+                    </InputGroup>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mb-3">
+                <small className="text-white-50">
+                  Showing {getFilteredCloudAssets().length} of {cloudAssets.length} cloud assets
+                </small>
+              </div>
+
+              <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
+                <style>
+                  {`
+                    .sortable-header:hover {
+                      background-color: rgba(220, 53, 69, 0.2) !important;
+                      transition: background-color 0.15s ease-in-out;
+                    }
+                  `}
+                </style>
+                <Table responsive size="sm" variant="dark" className="border-secondary" style={{ tableLayout: 'fixed', width: '100%' }}>
+                  <thead style={{ position: 'sticky', top: 0, zIndex: 10 }}>
+                    <tr>
+                      <th 
+                        className="sortable-header"
+                        style={{ 
+                          backgroundColor: 'var(--bs-dark)', 
+                          width: '15%', 
+                          cursor: 'pointer',
+                          userSelect: 'none'
+                        }}
+                        onClick={() => handleSort('service')}
+                      >
+                        Service{getSortIcon('service')}
+                      </th>
+                      <th 
+                        className="sortable-header"
+                        style={{ 
+                          backgroundColor: 'var(--bs-dark)', 
+                          width: '42.5%', 
+                          cursor: 'pointer',
+                          userSelect: 'none'
+                        }}
+                        onClick={() => handleSort('cloudAsset')}
+                      >
+                        Cloud Asset{getSortIcon('cloudAsset')}
+                      </th>
+                      <th 
+                        className="sortable-header"
+                        style={{ 
+                          backgroundColor: 'var(--bs-dark)', 
+                          width: '42.5%', 
+                          cursor: 'pointer',
+                          userSelect: 'none'
+                        }}
+                        onClick={() => handleSort('source')}
+                      >
+                        Source{getSortIcon('source')}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {getFilteredCloudAssets().map((asset, index) => {
+                      const cloudAssetFQDN = asset.url.replace(/^https?:\/\//, '');
+                      const sourceURL = asset.source_url || asset.url;
+                      
+                      return (
+                        <tr key={index}>
+                          <td>
+                            <Badge 
+                              bg={getServiceBadgeVariant(asset.service)}
+                              style={asset.service.includes('aws') ? { backgroundColor: '#d35400', color: '#fff' } : {}}
+                            >
+                              {getServiceName(asset.service)}
+                            </Badge>
+                          </td>
+                          <td>
+                            <code 
+                              className="text-warning" 
+                              style={{ 
+                                fontFamily: 'monospace', 
+                                fontSize: '0.875rem',
+                                cursor: 'pointer',
+                                userSelect: 'none'
+                              }}
+                              onClick={() => copySingleDomain(cloudAssetFQDN)}
+                              title="Click to copy to clipboard"
+                            >
+                              {cloudAssetFQDN}
+                            </code>
+                          </td>
+                          <td>
+                            <a href={sourceURL} target="_blank" rel="noopener noreferrer" className="text-decoration-none text-info">
+                              <code className="text-info small" style={{ fontFamily: 'monospace' }}>{sourceURL}</code>
+                            </a>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </Table>
+              </div>
+
+              {getFilteredCloudAssets().length === 0 && cloudAssets.length > 0 && (
+                <div className="text-center py-4">
+                  <i className="bi bi-funnel text-white-50" style={{ fontSize: '2rem' }}></i>
+                  <h6 className="text-white-50 mt-2">No cloud assets match the current filters</h6>
+                  <Button variant="outline-secondary" size="sm" onClick={clearFilters}>
+                    Clear Filters
+                  </Button>
+                </div>
+              )}
+            </>
           ) : (
             <div className="text-center py-4 text-light" style={{ opacity: 0.7 }}>
               No cloud assets found.
@@ -515,6 +806,7 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
         )}
       </Modal.Body>
     </Modal>
+    </>
   );
 };
 
