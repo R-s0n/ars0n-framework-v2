@@ -345,14 +345,26 @@ function ToolsModal({ show, handleClose, initialTab = 'burp-populator' }) {
                         />
                       </Form.Group>
                       
-                      <Button 
-                        variant="outline-danger" 
-                        onClick={handleVerify}
-                        className="me-2"
-                      >
-                        <i className="bi bi-check-circle me-2"></i>
-                        Verify List
-                      </Button>
+                      <div className="d-flex gap-2">
+                        <Button 
+                          variant="outline-danger" 
+                          onClick={handleVerify}
+                        >
+                          <i className="bi bi-check-circle me-2"></i>
+                          Verify List
+                        </Button>
+                        <Button 
+                          variant="outline-secondary" 
+                          onClick={() => {
+                            setRawInput('');
+                            setVerifyStatus(null);
+                            setParsedDomains([]);
+                          }}
+                        >
+                          <i className="bi bi-x-circle me-2"></i>
+                          Clear
+                        </Button>
+                      </div>
 
                       {verifyStatus && (
                         <Alert 
@@ -444,25 +456,6 @@ function ToolsModal({ show, handleClose, initialTab = 'burp-populator' }) {
                         />
                       </div>
                     )}
-
-                    <Button 
-                      variant="danger" 
-                      onClick={handlePopulateBurpsuite}
-                      disabled={populating || parsedDomains.length === 0}
-                      size="lg"
-                    >
-                      {populating ? (
-                        <>
-                          <Spinner animation="border" size="sm" className="me-2" />
-                          Populating Burpsuite...
-                        </>
-                      ) : (
-                        <>
-                          <i className="bi bi-arrow-repeat me-2"></i>
-                          Populate Burpsuite
-                        </>
-                      )}
-                    </Button>
                   </Tab.Pane>
                 </Tab.Content>
               </Col>
@@ -471,6 +464,23 @@ function ToolsModal({ show, handleClose, initialTab = 'burp-populator' }) {
         )}
       </Modal.Body>
       <Modal.Footer>
+        <Button 
+          variant="danger" 
+          onClick={handlePopulateBurpsuite}
+          disabled={populating || parsedDomains.length === 0}
+        >
+          {populating ? (
+            <>
+              <Spinner animation="border" size="sm" className="me-2" />
+              Populating Burpsuite...
+            </>
+          ) : (
+            <>
+              <i className="bi bi-arrow-repeat me-2"></i>
+              Populate Burpsuite
+            </>
+          )}
+        </Button>
         <Button variant="secondary" onClick={handleClose}>
           Close
         </Button>
