@@ -15,6 +15,7 @@ export const AmassEnumCompanyResultsModal = ({
   const [error, setError] = useState(null);
   const [rawResultsError, setRawResultsError] = useState(null);
   const [activeTab, setActiveTab] = useState('cloud-domains');
+  const [copySuccess, setCopySuccess] = useState(false);
   
   // Filter states
   const [searchFilters, setSearchFilters] = useState([{ searchTerm: '', isNegative: false }]);
@@ -133,6 +134,19 @@ export const AmassEnumCompanyResultsModal = ({
     return `Cloud Domains (${totalCount})`;
   };
 
+  const copyFilteredCloudDomains = async () => {
+    const filteredDomains = getFilteredCloudDomains();
+    const domains = filteredDomains.map(domain => domain.domain).join('\n');
+
+    try {
+      await navigator.clipboard.writeText(domains);
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 2000);
+    } catch (error) {
+      console.error('Failed to copy to clipboard:', error);
+    }
+  };
+
   const renderCloudDomains = () => {
     if (loading) {
       return (
@@ -173,8 +187,38 @@ export const AmassEnumCompanyResultsModal = ({
 
     const filteredDomains = getFilteredCloudDomains();
 
+    const filteredCount = filteredDomains.length;
+    const totalCount = cloudDomains.length;
+    const hasActiveFilters = searchFilters.some(filter => filter.searchTerm.trim() !== '');
+    const titleText = hasActiveFilters 
+      ? `Cloud Domains (${filteredCount}/${totalCount})`
+      : `Cloud Domains (${totalCount})`;
+
     return (
       <>
+        <div className="mb-3">
+          <div className="d-flex justify-content-between align-items-center mb-2">
+            <h5 className="text-light mb-0">{titleText}</h5>
+            <Button
+              variant={copySuccess ? "success" : "outline-secondary"}
+              size="sm"
+              onClick={copyFilteredCloudDomains}
+            >
+              {copySuccess ? (
+                <>
+                  <i className="bi bi-check-circle me-1"></i>
+                  Copied!
+                </>
+              ) : (
+                <>
+                  <i className="bi bi-clipboard me-1"></i>
+                  Copy Filtered Cloud Domains to Clipboard
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
+
         {/* Filter Controls */}
         <div className="mb-3">
           <div className="d-flex justify-content-between align-items-center mb-2">
@@ -278,6 +322,7 @@ export const AmassEnumCompanyResultsModal = ({
             <thead>
               <tr>
                 <th>Cloud Domain</th>
+                <th>Original Domain</th>
                 <th>Provider</th>
                 <th>Discovered</th>
               </tr>
@@ -285,9 +330,34 @@ export const AmassEnumCompanyResultsModal = ({
             <tbody>
               {filteredDomains.map((domain, index) => (
                 <tr key={index}>
-                  <td className="font-monospace">{domain.domain}</td>
+                  <td className="font-monospace" style={{ fontSize: '0.875rem' }}>
+                    <a 
+                      href={`https://${domain.domain}`} 
+                      target="_blank" 
+                      rel="noopener noreferrer" 
+                      className="text-decoration-none text-warning"
+                      style={{ cursor: 'pointer' }}
+                    >
+                      {domain.domain}
+                    </a>
+                  </td>
+                  <td className="font-monospace" style={{ fontSize: '0.875rem' }}>
+                    {domain.root_domain ? (
+                      <a 
+                        href={`https://${domain.root_domain}`} 
+                        target="_blank" 
+                        rel="noopener noreferrer" 
+                        className="text-decoration-none text-warning"
+                        style={{ cursor: 'pointer' }}
+                      >
+                        {domain.root_domain}
+                      </a>
+                    ) : (
+                      'N/A'
+                    )}
+                  </td>
                   <td>{getCloudProviderBadge(domain.type)}</td>
-                  <td>{new Date(domain.created_at).toLocaleString()}</td>
+                  <td style={{ fontSize: '0.875rem' }}>{new Date(domain.created_at).toLocaleString()}</td>
                 </tr>
               ))}
             </tbody>
@@ -356,28 +426,11 @@ export const AmassEnumCompanyResultsModal = ({
   };
 
   return (
-    <Modal show={show} onHide={handleClose} size="xl" data-bs-theme="dark">
+    <Modal show={show} onHide={handleClose} fullscreen data-bs-theme="dark">
       <Modal.Header closeButton>
         <Modal.Title className="text-danger">Amass Enum Company Results</Modal.Title>
       </Modal.Header>
       <Modal.Body>
-        <div className="mb-3">
-          <strong className="text-white">Target:</strong> <span className="text-white-50">{activeTarget?.scope_target}</span>
-          {mostRecentAmassEnumCompanyScan && (
-            <>
-              <br />
-              <strong className="text-white">Scan ID:</strong> <span className="text-white-50 font-monospace">{mostRecentAmassEnumCompanyScan.scan_id}</span>
-              <br />
-              <strong className="text-white">Status:</strong> 
-              <Badge bg={mostRecentAmassEnumCompanyScan.status === 'success' ? 'success' : 'secondary'} className="ms-2">
-                {mostRecentAmassEnumCompanyScan.status}
-              </Badge>
-              <br />
-              <strong className="text-white">Created:</strong> <span className="text-white-50">{new Date(mostRecentAmassEnumCompanyScan.created_at).toLocaleString()}</span>
-            </>
-          )}
-        </div>
-
         <Tabs
           activeKey={activeTab}
           onSelect={(k) => setActiveTab(k)}
