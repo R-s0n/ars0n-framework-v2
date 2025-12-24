@@ -274,6 +274,9 @@ func main() {
 	// Burpsuite populate route
 	r.HandleFunc("/burpsuite/populate", populateBurpsuite).Methods("POST", "OPTIONS")
 
+	// API Populator route
+	r.HandleFunc("/api-populator/process", processApiEndpoint).Methods("POST", "OPTIONS")
+
 	log.Println("API server started on :8443")
 	http.ListenAndServe(":8443", r)
 }
@@ -2419,6 +2422,54 @@ func populateBurpsuite(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "success",
 		"message": fmt.Sprintf("Successfully populated Burpsuite with %d URLs", len(requestBody.URLs)),
+	})
+}
+
+func processApiEndpoint(w http.ResponseWriter, r *http.Request) {
+	var requestBody struct {
+		Method            string                 `json:"method"`
+		Path              string                 `json:"path"`
+		BaseURL           string                 `json:"baseUrl"`
+		Body              interface{}            `json:"body"`
+		APIKey            string                 `json:"apiKey"`
+		ProxyIP           string                 `json:"proxyIP"`
+		ProxyPort         int                    `json:"proxyPort"`
+		Parameters        []interface{}          `json:"parameters"`
+		ManualInputValues map[string]interface{} `json:"manualInputValues"`
+	}
+
+	err := json.NewDecoder(r.Body).Decode(&requestBody)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if requestBody.Method == "" || requestBody.Path == "" {
+		http.Error(w, "Method and Path are required", http.StatusBadRequest)
+		return
+	}
+
+	err = utils.ProcessApiRequest(
+		requestBody.Method,
+		requestBody.Path,
+		requestBody.BaseURL,
+		requestBody.Body,
+		requestBody.APIKey,
+		requestBody.ProxyIP,
+		requestBody.ProxyPort,
+		requestBody.Parameters,
+		requestBody.ManualInputValues,
+	)
+	if err != nil {
+		log.Printf("[ERROR] Failed to process API endpoint: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to process API endpoint: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "success",
+		"message": fmt.Sprintf("Successfully processed %s %s", requestBody.Method, requestBody.Path),
 	})
 }
 
