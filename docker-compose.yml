@@ -255,6 +255,26 @@ services:
     networks:
       - ars0n-network
 
+  linkfinder:
+    container_name: ars0n-framework-v2-linkfinder-1
+    build: ./docker/linkfinder
+    depends_on:
+      - api
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  waybackurls:
+    container_name: ars0n-framework-v2-waybackurls-1
+    build: ./docker/waybackurls
+    depends_on:
+      - api
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
 volumes:
   postgres_data:
   temp_data:

@@ -277,6 +277,38 @@ func main() {
 	// API Populator route
 	r.HandleFunc("/api-populator/process", processApiEndpoint).Methods("POST", "OPTIONS")
 
+	// URL Workflow scan routes
+	r.HandleFunc("/katana-url/run", utils.RunKatanaURLScan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/katana-url/status/{scan_id}", utils.GetKatanaURLScanStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/scopetarget/{id}/scans/katana-url", utils.GetKatanaURLScansForScopeTarget).Methods("GET", "OPTIONS")
+	
+	r.HandleFunc("/linkfinder-url/run", utils.RunLinkFinderURLScan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/linkfinder-url/status/{scan_id}", utils.GetLinkFinderURLScanStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/scopetarget/{id}/scans/linkfinder-url", utils.GetLinkFinderURLScansForScopeTarget).Methods("GET", "OPTIONS")
+	
+	r.HandleFunc("/waybackurls/run", utils.RunWaybackURLsScan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/waybackurls/status/{scan_id}", utils.GetWaybackURLsScanStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/scopetarget/{id}/scans/waybackurls", utils.GetWaybackURLsScansForScopeTarget).Methods("GET", "OPTIONS")
+	
+	r.HandleFunc("/gau-url/run", utils.RunGAUURLScan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/gau-url/status/{scan_id}", utils.GetGAUURLScanStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/scopetarget/{id}/scans/gau-url", utils.GetGAUURLScansForScopeTarget).Methods("GET", "OPTIONS")
+	
+	r.HandleFunc("/ffuf-url/run", utils.RunFFUFURLScan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/ffuf-url/status/{scan_id}", utils.GetFFUFURLScanStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/scopetarget/{id}/scans/ffuf-url", utils.GetFFUFURLScansForScopeTarget).Methods("GET", "OPTIONS")
+
+	r.HandleFunc("/ffuf-config/{scope_target_id}", utils.SaveFFUFConfig).Methods("POST", "OPTIONS")
+	r.HandleFunc("/ffuf-config/{scope_target_id}", utils.GetFFUFConfig).Methods("GET", "OPTIONS")
+	r.HandleFunc("/ffuf-wordlists/upload", utils.UploadFFUFWordlist).Methods("POST", "OPTIONS")
+	r.HandleFunc("/ffuf-wordlists", utils.GetFFUFWordlists).Methods("GET", "OPTIONS")
+	r.HandleFunc("/ffuf-wordlists/{wordlist_id}", utils.DeleteFFUFWordlist).Methods("DELETE", "OPTIONS")
+
+	r.HandleFunc("/application-questions/{scope_target_id}/answers", utils.GetApplicationQuestionsAnswers).Methods("GET", "OPTIONS")
+	r.HandleFunc("/application-questions/{scope_target_id}/answers", utils.CreateApplicationQuestionAnswer).Methods("POST", "OPTIONS")
+	r.HandleFunc("/application-questions/answers/{answer_id}", utils.UpdateApplicationQuestionAnswer).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/application-questions/answers/{answer_id}", utils.DeleteApplicationQuestionAnswer).Methods("DELETE", "OPTIONS")
+
 	log.Println("API server started on :8443")
 	http.ListenAndServe(":8443", r)
 }

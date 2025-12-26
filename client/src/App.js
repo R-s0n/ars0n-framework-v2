@@ -166,6 +166,25 @@ import monitorCloudEnumScanStatus from './utils/monitorCloudEnumScanStatus';
 // Add Attack Surface Visualization import
 import AttackSurfaceVisualizationModal from './modals/AttackSurfaceVisualizationModal.js';
 
+// Add URL workflow imports
+import initiateKatanaURLScan from './utils/initiateKatanaURLScan';
+import monitorKatanaURLScanStatus from './utils/monitorKatanaURLScanStatus';
+import initiateLinkFinderURLScan from './utils/initiateLinkFinderURLScan';
+import monitorLinkFinderURLScanStatus from './utils/monitorLinkFinderURLScanStatus';
+import initiateWaybackURLsScan from './utils/initiateWaybackURLsScan';
+import monitorWaybackURLsScanStatus from './utils/monitorWaybackURLsScanStatus';
+import initiateGAUURLScan from './utils/initiateGAUURLScan';
+import monitorGAUURLScanStatus from './utils/monitorGAUURLScanStatus';
+import initiateFFUFURLScan from './utils/initiateFFUFURLScan';
+import monitorFFUFURLScanStatus from './utils/monitorFFUFURLScanStatus';
+import { KatanaURLResultsModal } from './modals/KatanaURLResultsModal';
+import { LinkFinderURLResultsModal } from './modals/LinkFinderURLResultsModal';
+import { WaybackURLsResultsModal } from './modals/WaybackURLsResultsModal';
+import { GAUURLResultsModal } from './modals/GAUURLResultsModal';
+import { FFUFURLResultsModal } from './modals/FFUFURLResultsModal';
+import { ApplicationQuestionsModal } from './modals/ApplicationQuestionsModal';
+import { FFUFConfigModal } from './modals/FFUFConfigModal';
+
 // Add helper function
 const getHttpxResultsCount = (scan) => {
   if (!scan?.result?.String) return 0;
@@ -586,6 +605,39 @@ function App() {
   const [showExploreAttackSurfaceModal, setShowExploreAttackSurfaceModal] = useState(false);
   const [showAttackSurfaceVisualizationModal, setShowAttackSurfaceVisualizationModal] = useState(false);
   const [katanaCompanyCloudAssets, setKatanaCompanyCloudAssets] = useState([]);
+  
+  const [katanaURLScans, setKatanaURLScans] = useState([]);
+  const [mostRecentKatanaURLScanStatus, setMostRecentKatanaURLScanStatus] = useState(null);
+  const [mostRecentKatanaURLScan, setMostRecentKatanaURLScan] = useState(null);
+  const [isKatanaURLScanning, setIsKatanaURLScanning] = useState(false);
+  
+  const [linkFinderURLScans, setLinkFinderURLScans] = useState([]);
+  const [mostRecentLinkFinderURLScanStatus, setMostRecentLinkFinderURLScanStatus] = useState(null);
+  const [mostRecentLinkFinderURLScan, setMostRecentLinkFinderURLScan] = useState(null);
+  const [isLinkFinderURLScanning, setIsLinkFinderURLScanning] = useState(false);
+  
+  const [waybackURLsScans, setWaybackURLsScans] = useState([]);
+  const [mostRecentWaybackURLsScanStatus, setMostRecentWaybackURLsScanStatus] = useState(null);
+  const [mostRecentWaybackURLsScan, setMostRecentWaybackURLsScan] = useState(null);
+  const [isWaybackURLsScanning, setIsWaybackURLsScanning] = useState(false);
+  
+  const [gauURLScans, setGAUURLScans] = useState([]);
+  const [mostRecentGAUURLScanStatus, setMostRecentGAUURLScanStatus] = useState(null);
+  const [mostRecentGAUURLScan, setMostRecentGAUURLScan] = useState(null);
+  const [isGAUURLScanning, setIsGAUURLScanning] = useState(false);
+  
+  const [ffufURLScans, setFFUFURLScans] = useState([]);
+  const [mostRecentFFUFURLScanStatus, setMostRecentFFUFURLScanStatus] = useState(null);
+  const [mostRecentFFUFURLScan, setMostRecentFFUFURLScan] = useState(null);
+  const [isFFUFURLScanning, setIsFFUFURLScanning] = useState(false);
+  
+  const [showKatanaURLResultsModal, setShowKatanaURLResultsModal] = useState(false);
+  const [showLinkFinderURLResultsModal, setShowLinkFinderURLResultsModal] = useState(false);
+  const [showWaybackURLsResultsModal, setShowWaybackURLsResultsModal] = useState(false);
+  const [showGAUURLResultsModal, setShowGAUURLResultsModal] = useState(false);
+  const [showFFUFURLResultsModal, setShowFFUFURLResultsModal] = useState(false);
+  const [showApplicationQuestionsModal, setShowApplicationQuestionsModal] = useState(false);
+  const [showFFUFConfigModal, setShowFFUFConfigModal] = useState(false);
   
   const handleCloseSubdomainsModal = () => setShowSubdomainsModal(false);
   const handleCloseCloudDomainsModal = () => setShowCloudDomainsModal(false);
@@ -3677,6 +3729,67 @@ function App() {
     }
   }, [activeTarget]);
 
+  // URL Workflow scans useEffect hooks
+  useEffect(() => {
+    if (activeTarget && activeTarget.type === 'URL') {
+      monitorKatanaURLScanStatus(
+        activeTarget,
+        setKatanaURLScans,
+        setMostRecentKatanaURLScan,
+        setIsKatanaURLScanning,
+        setMostRecentKatanaURLScanStatus
+      );
+    }
+  }, [activeTarget]);
+
+  useEffect(() => {
+    if (activeTarget && activeTarget.type === 'URL') {
+      monitorLinkFinderURLScanStatus(
+        activeTarget,
+        setLinkFinderURLScans,
+        setMostRecentLinkFinderURLScan,
+        setIsLinkFinderURLScanning,
+        setMostRecentLinkFinderURLScanStatus
+      );
+    }
+  }, [activeTarget]);
+
+  useEffect(() => {
+    if (activeTarget && activeTarget.type === 'URL') {
+      monitorWaybackURLsScanStatus(
+        activeTarget,
+        setWaybackURLsScans,
+        setMostRecentWaybackURLsScan,
+        setIsWaybackURLsScanning,
+        setMostRecentWaybackURLsScanStatus
+      );
+    }
+  }, [activeTarget]);
+
+  useEffect(() => {
+    if (activeTarget && activeTarget.type === 'URL') {
+      monitorGAUURLScanStatus(
+        activeTarget,
+        setGAUURLScans,
+        setMostRecentGAUURLScan,
+        setIsGAUURLScanning,
+        setMostRecentGAUURLScanStatus
+      );
+    }
+  }, [activeTarget]);
+
+  useEffect(() => {
+    if (activeTarget && activeTarget.type === 'URL') {
+      monitorFFUFURLScanStatus(
+        activeTarget,
+        setFFUFURLScans,
+        setMostRecentFFUFURLScan,
+        setIsFFUFURLScanning,
+        setMostRecentFFUFURLScanStatus
+      );
+    }
+  }, [activeTarget]);
+
   // Katana Company scans useEffect
   useEffect(() => {
     if (activeTarget) {
@@ -3776,6 +3889,71 @@ function App() {
       setMostRecentGitHubReconScan
     );
   };
+
+  const startKatanaURLScan = () => {
+    initiateKatanaURLScan(
+      activeTarget,
+      setIsKatanaURLScanning,
+      setKatanaURLScans,
+      setMostRecentKatanaURLScan,
+      setMostRecentKatanaURLScanStatus
+    );
+  };
+
+  const startLinkFinderURLScan = () => {
+    initiateLinkFinderURLScan(
+      activeTarget,
+      setIsLinkFinderURLScanning,
+      setLinkFinderURLScans,
+      setMostRecentLinkFinderURLScan,
+      setMostRecentLinkFinderURLScanStatus
+    );
+  };
+
+  const startWaybackURLsScan = () => {
+    initiateWaybackURLsScan(
+      activeTarget,
+      setIsWaybackURLsScanning,
+      setWaybackURLsScans,
+      setMostRecentWaybackURLsScan,
+      setMostRecentWaybackURLsScanStatus
+    );
+  };
+
+  const startGAUURLScan = () => {
+    initiateGAUURLScan(
+      activeTarget,
+      setIsGAUURLScanning,
+      setGAUURLScans,
+      setMostRecentGAUURLScan,
+      setMostRecentGAUURLScanStatus
+    );
+  };
+
+  const startFFUFURLScan = () => {
+    initiateFFUFURLScan(
+      activeTarget,
+      setIsFFUFURLScanning,
+      setFFUFURLScans,
+      setMostRecentFFUFURLScan,
+      setMostRecentFFUFURLScanStatus
+    );
+  };
+
+  const handleOpenKatanaURLResultsModal = () => setShowKatanaURLResultsModal(true);
+  const handleCloseKatanaURLResultsModal = () => setShowKatanaURLResultsModal(false);
+  const handleOpenLinkFinderURLResultsModal = () => setShowLinkFinderURLResultsModal(true);
+  const handleCloseLinkFinderURLResultsModal = () => setShowLinkFinderURLResultsModal(false);
+  const handleOpenWaybackURLsResultsModal = () => setShowWaybackURLsResultsModal(true);
+  const handleCloseWaybackURLsResultsModal = () => setShowWaybackURLsResultsModal(false);
+  const handleOpenGAUURLResultsModal = () => setShowGAUURLResultsModal(true);
+  const handleCloseGAUURLResultsModal = () => setShowGAUURLResultsModal(false);
+  const handleOpenFFUFURLResultsModal = () => setShowFFUFURLResultsModal(true);
+  const handleCloseFFUFURLResultsModal = () => setShowFFUFURLResultsModal(false);
+  const handleOpenApplicationQuestionsModal = () => setShowApplicationQuestionsModal(true);
+  const handleCloseApplicationQuestionsModal = () => setShowApplicationQuestionsModal(false);
+  const handleOpenFFUFConfigModal = () => setShowFFUFConfigModal(true);
+  const handleCloseFFUFConfigModal = () => setShowFFUFConfigModal(false);
 
   useEffect(() => {
     if (activeTarget) {
@@ -6271,21 +6449,202 @@ function App() {
             )}
             {activeTarget.type === 'URL' && (
               <div className="mb-4">
-                <h3 className="text-danger">URL</h3>
-                <Row>
+                <h3 className="text-danger mb-3">URL</h3>
+                <h4 className="text-secondary mb-3 fs-5">Application Questions</h4>
+                <Row className="mb-4">
                   <Col md={12}>
-                    <Card className="mb-3 shadow-sm">
-                      <Card.Body className="text-center">
-                        <Card.Title className="text-danger mb-4">Coming Soon!</Card.Title>
-                        <Card.Text>
-                          The URL workflow is currently under development. rs0n is working hard to create powerful features for analyzing individual target URLs.
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          Application Questions
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Answer a comprehensive list of questions about the target URL as you enumerate and explore it. Track your findings across 8 categories including application identity, technology stack, infrastructure, security, authentication, authorization, and more.
                         </Card.Text>
-                        <Card.Text className="text-muted fst-italic mt-4">
-                          Please note that rs0n maintains this tool while balancing a full-time job and family life. This is a passion project provided free to the community, and your patience and kindness are greatly appreciated! 💝
+                        <div className="mt-auto">
+                          <Button
+                            variant="outline-danger"
+                            className="mt-3"
+                            onClick={handleOpenApplicationQuestionsModal}
+                          >
+                            <i className="bi bi-question-circle me-2" />
+                            Answer Questions
+                          </Button>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
+                <h4 className="text-secondary mb-3 fs-5 mt-4">URL Discovery & Endpoint Enumeration</h4>
+                <Row className="mb-4">
+                  {[
+                    {
+                      name: 'Katana',
+                      link: 'https://github.com/projectdiscovery/katana',
+                      description: 'A next-generation crawling and spidering framework for discovering URLs and endpoints.',
+                      isActive: true,
+                      status: mostRecentKatanaURLScanStatus,
+                      isScanning: isKatanaURLScanning,
+                      onScan: startKatanaURLScan,
+                      onResults: handleOpenKatanaURLResultsModal,
+                      resultCount: mostRecentKatanaURLScan && mostRecentKatanaURLScan.result ? 
+                        mostRecentKatanaURLScan.result.split('\n').filter(line => line.trim()).length : 0,
+                      resultLabel: 'Endpoints:'
+                    },
+                    {
+                      name: 'LinkFinder',
+                      link: 'https://github.com/GerbenJavado/LinkFinder',
+                      description: 'Discover endpoints and their parameters in JavaScript files.',
+                      isActive: true,
+                      status: mostRecentLinkFinderURLScanStatus,
+                      isScanning: isLinkFinderURLScanning,
+                      onScan: startLinkFinderURLScan,
+                      onResults: handleOpenLinkFinderURLResultsModal,
+                      resultCount: mostRecentLinkFinderURLScan && mostRecentLinkFinderURLScan.result ? 
+                        mostRecentLinkFinderURLScan.result.split('\n').filter(line => line.trim()).length : 0,
+                      resultLabel: 'Endpoints:'
+                    },
+                    {
+                      name: 'Waybackurls',
+                      link: 'https://github.com/tomnomnom/waybackurls',
+                      description: 'Fetch all the URLs that the Wayback Machine knows about for a domain.',
+                      isActive: true,
+                      status: mostRecentWaybackURLsScanStatus,
+                      isScanning: isWaybackURLsScanning,
+                      onScan: startWaybackURLsScan,
+                      onResults: handleOpenWaybackURLsResultsModal,
+                      resultCount: mostRecentWaybackURLsScan && mostRecentWaybackURLsScan.result ? 
+                        mostRecentWaybackURLsScan.result.split('\n').filter(line => line.trim()).length : 0,
+                      resultLabel: 'Endpoints:'
+                    },
+                    {
+                      name: 'GAU',
+                      link: 'https://github.com/lc/gau',
+                      description: 'Get All URLs - Fetch known URLs from AlienVault\'s OTX, Wayback Machine, and Common Crawl.',
+                      isActive: true,
+                      status: mostRecentGAUURLScanStatus,
+                      isScanning: isGAUURLScanning,
+                      onScan: startGAUURLScan,
+                      onResults: handleOpenGAUURLResultsModal,
+                      resultCount: mostRecentGAUURLScan && mostRecentGAUURLScan.result ? 
+                        (() => {
+                          try {
+                            const results = mostRecentGAUURLScan.result.split('\n')
+                              .filter(line => line.trim())
+                              .map(line => JSON.parse(line));
+                            return results.length;
+                          } catch (e) {
+                            return mostRecentGAUURLScan.result.split('\n').filter(line => line.trim()).length;
+                          }
+                        })() : 0,
+                      resultLabel: 'Endpoints:'
+                    }
+                  ].map((tool, index) => (
+                    <Col md={3} key={index}>
+                      <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
+                        <Card.Body className="d-flex flex-column">
+                          <Card.Title className="text-danger mb-3">
+                            <a href={tool.link} className="text-danger text-decoration-none" target="_blank" rel="noopener noreferrer">
+                              {tool.name}
+                            </a>
+                          </Card.Title>
+                          <Card.Text className="text-white small fst-italic">
+                            {tool.description}
+                          </Card.Text>
+                          <div className="mt-auto">
+                            <Card.Text className="text-white small mb-3">
+                              {tool.resultLabel}: {tool.resultCount || "0"}
+                            </Card.Text>
+                            <div className="d-flex justify-content-center gap-2">
+                              <Button
+                                variant="outline-danger"
+                                className="flex-fill"
+                                onClick={tool.onScan}
+                                disabled={!tool.isActive || tool.isScanning}
+                              >
+                                <div className="btn-content">
+                                  {tool.isScanning ? (
+                                    <Spinner animation="border" size="sm" />
+                                  ) : (
+                                    'Scan'
+                                  )}
+                                </div>
+                              </Button>
+                              <Button
+                                variant="outline-danger"
+                                className="flex-fill"
+                                onClick={tool.onResults}
+                                disabled={!tool.status || tool.status !== 'success'}
+                              >
+                                Results
+                              </Button>
+                            </div>
+                          </div>
+                        </Card.Body>
+                      </Card>
+                    </Col>
+                  ))}
+                </Row>
+
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Endpoint Brute Forcing</h4>
+                <Row className="mb-4">
+                  <Col md={12}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          <a href="https://github.com/ffuf/ffuf" className="text-danger text-decoration-none" target="_blank" rel="noopener noreferrer">
+                            FFUF
+                          </a>
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Fast web fuzzer written in Go. Brute force endpoints, parameters, directories, and more with custom wordlists and extensive filtering options.
                         </Card.Text>
-                        <Card.Text className="text-danger mt-4">
-                          In the meantime, try out our fully-featured Wildcard workflow - it's packed with powerful reconnaissance capabilities!
-                        </Card.Text>
+                        <div className="mt-auto">
+                          <Card.Text className="text-white small mb-3">
+                            Endpoints: {mostRecentFFUFURLScan?.result ? (() => {
+                              try {
+                                const parsed = typeof mostRecentFFUFURLScan.result === 'string' 
+                                  ? JSON.parse(mostRecentFFUFURLScan.result) 
+                                  : mostRecentFFUFURLScan.result;
+                                return parsed.endpoints?.length || 0;
+                              } catch (e) {
+                                return 0;
+                              }
+                            })() : 0}
+                          </Card.Text>
+                          <div className="d-flex justify-content-center gap-2">
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleOpenFFUFConfigModal}
+                            >
+                              <i className="bi bi-gear me-2" />
+                              Configure
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={startFFUFURLScan}
+                              disabled={!activeTarget || isFFUFURLScanning}
+                            >
+                              <div className="btn-content">
+                                {isFFUFURLScanning ? (
+                                  <Spinner animation="border" size="sm" />
+                                ) : (
+                                  'Scan'
+                                )}
+                              </div>
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleOpenFFUFURLResultsModal}
+                              disabled={!mostRecentFFUFURLScan || mostRecentFFUFURLScanStatus !== 'success'}
+                            >
+                              Results
+                            </Button>
+                          </div>
+                        </div>
                       </Card.Body>
                     </Card>
                   </Col>
@@ -6695,6 +7054,53 @@ function App() {
         show={showKatanaCompanyHistoryModal}
         handleClose={handleCloseKatanaCompanyHistoryModal}
         scans={katanaCompanyScans}
+      />
+
+      <KatanaURLResultsModal
+        show={showKatanaURLResultsModal}
+        handleClose={handleCloseKatanaURLResultsModal}
+        activeTarget={activeTarget}
+        mostRecentKatanaURLScan={mostRecentKatanaURLScan}
+      />
+
+      <LinkFinderURLResultsModal
+        show={showLinkFinderURLResultsModal}
+        handleClose={handleCloseLinkFinderURLResultsModal}
+        activeTarget={activeTarget}
+        mostRecentLinkFinderURLScan={mostRecentLinkFinderURLScan}
+      />
+
+      <WaybackURLsResultsModal
+        show={showWaybackURLsResultsModal}
+        handleClose={handleCloseWaybackURLsResultsModal}
+        activeTarget={activeTarget}
+        mostRecentWaybackURLsScan={mostRecentWaybackURLsScan}
+      />
+
+      <GAUURLResultsModal
+        show={showGAUURLResultsModal}
+        handleClose={handleCloseGAUURLResultsModal}
+        activeTarget={activeTarget}
+        mostRecentGAUURLScan={mostRecentGAUURLScan}
+      />
+
+      <FFUFURLResultsModal
+        show={showFFUFURLResultsModal}
+        handleClose={handleCloseFFUFURLResultsModal}
+        activeTarget={activeTarget}
+        mostRecentFFUFURLScan={mostRecentFFUFURLScan}
+      />
+
+      <ApplicationQuestionsModal
+        show={showApplicationQuestionsModal}
+        handleClose={handleCloseApplicationQuestionsModal}
+        activeTarget={activeTarget}
+      />
+
+      <FFUFConfigModal
+        show={showFFUFConfigModal}
+        handleClose={handleCloseFFUFConfigModal}
+        activeTarget={activeTarget}
       />
 
       <ExploreAttackSurfaceModal
