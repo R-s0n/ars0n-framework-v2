@@ -1,5 +1,5 @@
-import { Modal, Container, Row, Col, Table, Badge, Card, Button } from 'react-bootstrap';
-import { useState } from 'react';
+import { Modal, Container, Row, Col, Table, Badge, Card, Button, OverlayTrigger, Tooltip, Spinner } from 'react-bootstrap';
+import { useState, useEffect, useMemo, memo } from 'react';
 
 const calculateROIScore = (targetURL) => {
   let score = 50;
@@ -66,37 +66,45 @@ const calculateROIScore = (targetURL) => {
   
   if (targetURL.status_code === 200 && katanaCount > 10) {
     try {
-      const headers = typeof targetURL.http_response_headers === 'string' 
-        ? JSON.parse(targetURL.http_response_headers)
-        : targetURL.http_response_headers;
+      let headers = null;
+      if (typeof targetURL.http_response_headers === 'string' && targetURL.http_response_headers.trim()) {
+        headers = JSON.parse(targetURL.http_response_headers);
+      } else if (typeof targetURL.http_response_headers === 'object') {
+        headers = targetURL.http_response_headers;
+      }
       
-      const hasCSP = Object.keys(headers || {}).some(header => 
-        header.toLowerCase() === 'content-security-policy'
-      );
-      
-      if (!hasCSP) {
-        score += 10;
+      if (headers) {
+        const hasCSP = Object.keys(headers).some(header => 
+          header.toLowerCase() === 'content-security-policy'
+        );
+        
+        if (!hasCSP) {
+          score += 10;
+        }
       }
     } catch (error) {
-      console.error('Error checking CSP header:', error);
     }
   }
   
   try {
-    const headers = typeof targetURL.http_response_headers === 'string'
-      ? JSON.parse(targetURL.http_response_headers)
-      : targetURL.http_response_headers;
+    let headers = null;
+    if (typeof targetURL.http_response_headers === 'string' && targetURL.http_response_headers.trim()) {
+      headers = JSON.parse(targetURL.http_response_headers);
+    } else if (typeof targetURL.http_response_headers === 'object') {
+      headers = targetURL.http_response_headers;
+    }
     
-    const hasCachingHeaders = Object.keys(headers || {}).some(header => {
-      const headerLower = header.toLowerCase();
-      return ['cache-control', 'etag', 'expires', 'vary'].includes(headerLower);
-    });
-    
-    if (hasCachingHeaders) {
-      score += 10;
+    if (headers) {
+      const hasCachingHeaders = Object.keys(headers).some(header => {
+        const headerLower = header.toLowerCase();
+        return ['cache-control', 'etag', 'expires', 'vary'].includes(headerLower);
+      });
+      
+      if (hasCachingHeaders) {
+        score += 10;
+      }
     }
   } catch (error) {
-    console.error('Error checking caching headers:', error);
   }
   
   const finalScore = Math.max(0, Math.round(score));
@@ -104,77 +112,85 @@ const calculateROIScore = (targetURL) => {
   return finalScore;
 };
 
-const TargetSection = ({ targetURL, roiScore }) => {
+const TargetSection = memo(({ targetURL, roiScore, onDelete, onAddAsScope, isDeleting, isAdding, isAlreadyScope }) => {
+  const [showLightbox, setShowLightbox] = useState(false);
 
-  // Process HTTP response
-  let httpResponse = '';
-  try {
-    if (targetURL.http_response) {
-      if (typeof targetURL.http_response === 'string') {
-        httpResponse = targetURL.http_response;
-      } else if (targetURL.http_response.String) {
-        httpResponse = targetURL.http_response.String;
+  useEffect(() => {
+    const handleEsc = (e) => {
+      if (e.key === 'Escape' && showLightbox) {
+        setShowLightbox(false);
       }
-    }
-  } catch (error) {
-    console.error('Error processing HTTP response:', error);
-  }
-  const truncatedResponse = httpResponse.split('\n').slice(0, 25).join('\n');
+    };
+    window.addEventListener('keydown', handleEsc);
+    return () => window.removeEventListener('keydown', handleEsc);
+  }, [showLightbox]);
 
-  // Process HTTP headers
-  let httpHeaders = {};
-  try {
-    if (targetURL.http_response_headers) {
-      if (typeof targetURL.http_response_headers === 'string') {
-        httpHeaders = JSON.parse(targetURL.http_response_headers);
-      } else {
-        httpHeaders = targetURL.http_response_headers;
+  const processedData = useMemo(() => {
+    let httpResponse = '';
+    try {
+      if (targetURL.http_response) {
+        if (typeof targetURL.http_response === 'string') {
+          httpResponse = targetURL.http_response;
+        } else if (targetURL.http_response.String) {
+          httpResponse = targetURL.http_response.String;
+        }
       }
+    } catch (error) {
     }
-  } catch (error) {
-    console.error('Error processing HTTP headers:', error);
-  }
+    const truncatedResponse = httpResponse.split('\n').slice(0, 25).join('\n');
 
-  // Process title and web server
-  const title = targetURL.title || '';
-  const webServer = targetURL.web_server || '';
+    let httpHeaders = {};
+    try {
+      if (targetURL.http_response_headers) {
+        if (typeof targetURL.http_response_headers === 'string') {
+          httpHeaders = JSON.parse(targetURL.http_response_headers);
+        } else {
+          httpHeaders = targetURL.http_response_headers;
+        }
+      }
+    } catch (error) {
+    }
 
-  // Process technologies
-  const technologies = Array.isArray(targetURL.technologies) ? targetURL.technologies : [];
+    const title = targetURL.title || '';
+    const webServer = targetURL.web_server || '';
+    const technologies = Array.isArray(targetURL.technologies) ? targetURL.technologies : [];
 
-  // Handle katana results - could be string, array, or JSON string
-  let katanaResults = 0;
-  if (targetURL.katana_results) {
-    if (Array.isArray(targetURL.katana_results)) {
-      katanaResults = targetURL.katana_results.length;
-    } else if (typeof targetURL.katana_results === 'string') {
-      if (targetURL.katana_results.startsWith('[') || targetURL.katana_results.startsWith('{')) {
-        try {
-          const parsed = JSON.parse(targetURL.katana_results);
-          katanaResults = Array.isArray(parsed) ? parsed.length : 1;
-        } catch {
+    let katanaResults = 0;
+    if (targetURL.katana_results) {
+      if (Array.isArray(targetURL.katana_results)) {
+        katanaResults = targetURL.katana_results.length;
+      } else if (typeof targetURL.katana_results === 'string') {
+        if (targetURL.katana_results.startsWith('[') || targetURL.katana_results.startsWith('{')) {
+          try {
+            const parsed = JSON.parse(targetURL.katana_results);
+            katanaResults = Array.isArray(parsed) ? parsed.length : 1;
+          } catch {
+            katanaResults = targetURL.katana_results.split('\n').filter(line => line.trim()).length;
+          }
+        } else {
           katanaResults = targetURL.katana_results.split('\n').filter(line => line.trim()).length;
         }
-      } else {
-        katanaResults = targetURL.katana_results.split('\n').filter(line => line.trim()).length;
       }
     }
-  }
 
-  // Handle ffuf results - could be object, string, or JSON string
-  let ffufResults = 0;
-  if (targetURL.ffuf_results) {
-    if (typeof targetURL.ffuf_results === 'object') {
-      ffufResults = targetURL.ffuf_results.endpoints?.length || Object.keys(targetURL.ffuf_results).length || 0;
-    } else if (typeof targetURL.ffuf_results === 'string') {
-      try {
-        const parsed = JSON.parse(targetURL.ffuf_results);
-        ffufResults = parsed.endpoints?.length || Object.keys(parsed).length || 0;
-      } catch {
-        ffufResults = targetURL.ffuf_results.split('\n').filter(line => line.trim()).length;
+    let ffufResults = 0;
+    if (targetURL.ffuf_results) {
+      if (typeof targetURL.ffuf_results === 'object') {
+        ffufResults = targetURL.ffuf_results.endpoints?.length || Object.keys(targetURL.ffuf_results).length || 0;
+      } else if (typeof targetURL.ffuf_results === 'string') {
+        try {
+          const parsed = JSON.parse(targetURL.ffuf_results);
+          ffufResults = parsed.endpoints?.length || Object.keys(parsed).length || 0;
+        } catch {
+          ffufResults = targetURL.ffuf_results.split('\n').filter(line => line.trim()).length;
+        }
       }
     }
-  }
+
+    return { truncatedResponse, httpHeaders, title, webServer, technologies, katanaResults, ffufResults };
+  }, [targetURL]);
+
+  const { truncatedResponse, httpHeaders, title, webServer, technologies, katanaResults, ffufResults } = processedData;
 
   // Calculate ROI score based on the same logic as the backend
   const calculateLocalROIScore = () => {
@@ -210,37 +226,45 @@ const TargetSection = ({ targetURL, roiScore }) => {
     
     if (targetURL.status_code === 200 && katanaResults > 10) {
       try {
-        const headers = typeof targetURL.http_response_headers === 'string'
-          ? JSON.parse(targetURL.http_response_headers)
-          : targetURL.http_response_headers;
+        let headers = null;
+        if (typeof targetURL.http_response_headers === 'string' && targetURL.http_response_headers.trim()) {
+          headers = JSON.parse(targetURL.http_response_headers);
+        } else if (typeof targetURL.http_response_headers === 'object') {
+          headers = targetURL.http_response_headers;
+        }
         
-        const hasCSP = Object.keys(headers || {}).some(header =>
-          header.toLowerCase() === 'content-security-policy'
-        );
-        
-        if (!hasCSP) {
-          score += 10;
+        if (headers) {
+          const hasCSP = Object.keys(headers).some(header =>
+            header.toLowerCase() === 'content-security-policy'
+          );
+          
+          if (!hasCSP) {
+            score += 10;
+          }
         }
       } catch (error) {
-        console.error('Error checking CSP header:', error);
       }
     }
     
     try {
-      const headers = typeof targetURL.http_response_headers === 'string'
-        ? JSON.parse(targetURL.http_response_headers)
-        : targetURL.http_response_headers;
+      let headers = null;
+      if (typeof targetURL.http_response_headers === 'string' && targetURL.http_response_headers.trim()) {
+        headers = JSON.parse(targetURL.http_response_headers);
+      } else if (typeof targetURL.http_response_headers === 'object') {
+        headers = targetURL.http_response_headers;
+      }
       
-      const hasCachingHeaders = Object.keys(headers || {}).some(header => {
-        const headerLower = header.toLowerCase();
-        return ['cache-control', 'etag', 'expires', 'vary'].includes(headerLower);
-      });
-      
-      if (hasCachingHeaders) {
-        score += 10;
+      if (headers) {
+        const hasCachingHeaders = Object.keys(headers).some(header => {
+          const headerLower = header.toLowerCase();
+          return ['cache-control', 'etag', 'expires', 'vary'].includes(headerLower);
+        });
+        
+        if (hasCachingHeaders) {
+          score += 10;
+        }
       }
     } catch (error) {
-      console.error('Error checking caching headers:', error);
     }
     
     const finalScore = Math.max(0, Math.round(score));
@@ -252,15 +276,71 @@ const TargetSection = ({ targetURL, roiScore }) => {
   const displayScore = targetURL.roi_score || calculateLocalROIScore();
 
   return (
-    <div className="mb-5 pb-4 border-bottom border-danger">
-      <Row className="mb-4">
+    <div className="mb-3 pb-3 border-bottom border-danger">
+      <Row className="mb-3">
         <Col md={8}>
           <Card className="bg-dark border-danger">
-            <Card.Body>
+            <Card.Body className="p-3">
               <div className="d-flex justify-content-between align-items-center mb-4">
-                <div className="d-flex align-items-center">
+                <div className="d-flex align-items-center flex-grow-1">
                   <div className="display-4 text-danger me-3">{displayScore}</div>
-                  <div className="h3 mb-0 text-white"><a href={targetURL.url} target="_blank" rel="noopener noreferrer">{targetURL.url}</a></div>
+                  <div className="h3 mb-0 text-white">
+                    <a href={targetURL.url} target="_blank" rel="noopener noreferrer">{targetURL.url}</a>
+                  </div>
+                </div>
+                <div className="d-flex align-items-center gap-2 ms-3">
+                  {isAlreadyScope ? (
+                    <OverlayTrigger
+                      placement="top"
+                      overlay={<Tooltip>Already added as URL Scope Target</Tooltip>}
+                    >
+                      <Button
+                        variant="outline-secondary"
+                        size="sm"
+                        disabled
+                        style={{ padding: '0.25rem 0.5rem' }}
+                      >
+                        <i className="bi bi-check-circle"></i>
+                      </Button>
+                    </OverlayTrigger>
+                  ) : (
+                    <OverlayTrigger
+                      placement="top"
+                      overlay={<Tooltip>Add as URL Scope Target</Tooltip>}
+                    >
+                      <Button
+                        variant="outline-success"
+                        size="sm"
+                        onClick={() => onAddAsScope(targetURL)}
+                        disabled={isAdding}
+                        style={{ padding: '0.25rem 0.5rem' }}
+                      >
+                        {isAdding ? (
+                          <i className="bi bi-hourglass-split"></i>
+                        ) : (
+                          <i className="bi bi-plus-circle"></i>
+                        )}
+                      </Button>
+                    </OverlayTrigger>
+                  )}
+                  <OverlayTrigger
+                    placement="top"
+                    overlay={<Tooltip>Delete from results</Tooltip>}
+                  >
+                    <Button
+                      variant="outline-danger"
+                      size="sm"
+                      onClick={() => onDelete(targetURL.id)}
+                      disabled={isDeleting}
+                      style={{ padding: '0.25rem 0.5rem' }}
+                    >
+                      {isDeleting ? (
+                        <i className="bi bi-hourglass-split"></i>
+                      ) : (
+                        <i className="bi bi-trash"></i>
+                      )}
+                    </Button>
+                  </OverlayTrigger>
                 </div>
               </div>
               <Table className="table-dark">
@@ -304,29 +384,39 @@ const TargetSection = ({ targetURL, roiScore }) => {
           {targetURL.screenshot && (
             <Card className="bg-dark border-danger h-100">
               <Card.Body className="p-2 d-flex align-items-center justify-content-center">
-                <img 
-                  src={`data:image/png;base64,${targetURL.screenshot}`}
-                  alt="Target Screenshot"
-                  className="img-fluid"
-                  style={{ 
-                    maxHeight: '200px',
-                    maxWidth: '100%',
-                    objectFit: 'contain',
-                    margin: 'auto',
-                    display: 'block'
-                  }}
-                />
+                <OverlayTrigger
+                  placement="top"
+                  overlay={<Tooltip>Click to view full size</Tooltip>}
+                >
+                  <img 
+                    src={`data:image/png;base64,${targetURL.screenshot}`}
+                    alt="Target Screenshot"
+                    className="img-fluid"
+                    onClick={() => setShowLightbox(true)}
+                    style={{ 
+                      maxHeight: '180px',
+                      maxWidth: '100%',
+                      objectFit: 'contain',
+                      margin: 'auto',
+                      display: 'block',
+                      cursor: 'pointer',
+                      transition: 'transform 0.2s',
+                    }}
+                    onMouseOver={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
+                    onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                  />
+                </OverlayTrigger>
               </Card.Body>
             </Card>
           )}
         </Col>
       </Row>
 
-      <Row className="mb-4">
+      <Row className="mb-3">
         <Col>
           <Card className="bg-dark border-danger">
-            <Card.Body>
-              <h4 className="text-danger">SSL/TLS Security Issues</h4>
+            <Card.Body className="p-3">
+              <h5 className="text-danger mb-2">SSL/TLS Security Issues</h5>
               <div className="d-flex flex-wrap gap-2">
                 {Object.entries({
                   'Deprecated TLS': targetURL.has_deprecated_tls,
@@ -351,12 +441,12 @@ const TargetSection = ({ targetURL, roiScore }) => {
         </Col>
       </Row>
 
-      <Row className="mb-4">
+      <Row className="mb-3">
         <Col md={6}>
           <Card className="bg-dark border-danger h-100">
-            <Card.Body>
-              <h4 className="text-danger">DNS Analysis</h4>
-              <div style={{ maxHeight: '350px', overflowY: 'auto' }}>
+            <Card.Body className="p-3">
+              <h5 className="text-danger mb-2">DNS Analysis</h5>
+              <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
                 <Table className="table-dark">
                   <tbody>
                     {[
@@ -382,8 +472,8 @@ const TargetSection = ({ targetURL, roiScore }) => {
         </Col>
         <Col md={6}>
           <Card className="bg-dark border-danger h-100">
-            <Card.Body>
-              <h4 className="text-danger">Attack Surface Analysis</h4>
+            <Card.Body className="p-3">
+              <h5 className="text-danger mb-2">Attack Surface Analysis</h5>
               <Table className="table-dark">
                 <tbody>
                   <tr>
@@ -396,8 +486,8 @@ const TargetSection = ({ targetURL, roiScore }) => {
                   </tr>
                 </tbody>
               </Table>
-              <h4 className="text-danger mt-4">Response Headers</h4>
-              <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+              <h5 className="text-danger mt-3 mb-2">Response Headers</h5>
+              <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
                 <Table className="table-dark">
                   <tbody>
                     {Object.entries(httpHeaders || {}).map(([key, value]) => (
@@ -417,31 +507,231 @@ const TargetSection = ({ targetURL, roiScore }) => {
       <Row>
         <Col>
           <Card className="bg-dark border-danger">
-            <Card.Body>
-              <h4 className="text-danger">Response Preview</h4>
-              <pre className="bg-dark text-white p-3 border border-danger rounded" style={{ maxHeight: '200px', overflowY: 'auto' }}>
+            <Card.Body className="p-3">
+              <h5 className="text-danger mb-2">Response Preview</h5>
+              <pre className="bg-dark text-white p-2 border border-danger rounded" style={{ maxHeight: '150px', overflowY: 'auto', fontSize: '0.85rem' }}>
                 {truncatedResponse}
               </pre>
             </Card.Body>
           </Card>
         </Col>
       </Row>
+
+      {showLightbox && targetURL.screenshot && (
+        <div 
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.95)',
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            animation: 'fadeIn 0.2s ease-in'
+          }}
+          onClick={() => setShowLightbox(false)}
+        >
+          <div 
+            style={{
+              position: 'relative',
+              maxWidth: '95vw',
+              maxHeight: '95vh',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setShowLightbox(false)}
+              style={{
+                position: 'absolute',
+                top: '-40px',
+                right: '-40px',
+                backgroundColor: 'transparent',
+                border: 'none',
+                color: 'white',
+                fontSize: '32px',
+                cursor: 'pointer',
+                width: '40px',
+                height: '40px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'color 0.2s',
+              }}
+              onMouseOver={(e) => e.currentTarget.style.color = '#dc3545'}
+              onMouseOut={(e) => e.currentTarget.style.color = 'white'}
+            >
+              ×
+            </button>
+            <img 
+              src={`data:image/png;base64,${targetURL.screenshot}`}
+              alt="Target Screenshot - Full Size"
+              style={{ 
+                maxWidth: '100%',
+                maxHeight: '95vh',
+                objectFit: 'contain',
+                borderRadius: '8px',
+                boxShadow: '0 0 30px rgba(220, 53, 69, 0.5)',
+                animation: 'zoomIn 0.2s ease-out'
+              }}
+            />
+          </div>
+          <div
+            style={{
+              position: 'absolute',
+              bottom: '20px',
+              left: '50%',
+              transform: 'translateX(-50%)',
+              color: 'rgba(255, 255, 255, 0.7)',
+              fontSize: '14px',
+              textAlign: 'center'
+            }}
+          >
+            Click anywhere or press ESC to close
+          </div>
+        </div>
+      )}
     </div>
   );
-};
+});
 
-const ROIReport = ({ show, onHide, targetURLs = [] }) => {
-  // Ensure targetURLs is always an array
+const ROIReport = ({ show, onHide, targetURLs = [], setTargetURLs, fetchScopeTargets }) => {
   const safeTargetURLs = targetURLs || [];
   
   const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 1;
-  const totalPages = Math.ceil((safeTargetURLs || []).length / itemsPerPage);
+  const [deletingUrls, setDeletingUrls] = useState(new Set());
+  const [addingUrls, setAddingUrls] = useState(new Set());
+  const [existingScopeTargets, setExistingScopeTargets] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
   
-  const sortedTargets = Array.isArray(safeTargetURLs) 
-    ? [...safeTargetURLs].sort((a, b) => b.roi_score - a.roi_score)
-    : [];
+  const itemsPerPage = 1;
 
+  useEffect(() => {
+    if (show) {
+      setIsLoading(true);
+      setSortedTargets([]);
+      fetchExistingScopeTargets();
+    } else {
+      setIsLoading(true);
+      setSortedTargets([]);
+      setCurrentPage(1);
+    }
+  }, [show]);
+
+  const fetchExistingScopeTargets = async () => {
+    try {
+      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/read`);
+      if (response.ok) {
+        const data = await response.json();
+        setExistingScopeTargets(data);
+      }
+    } catch (error) {
+    }
+  };
+
+  const isUrlAlreadyScopeTarget = (url) => {
+    return existingScopeTargets.some(
+      target => target.type === 'URL' && target.scope_target === url
+    );
+  };
+
+  const handleDeleteUrl = async (urlId) => {
+    if (deletingUrls.has(urlId)) return;
+    
+    setDeletingUrls(prev => new Set(prev).add(urlId));
+    
+    try {
+      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/target-urls/${urlId}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to delete URL from database');
+      }
+
+      const updatedUrls = safeTargetURLs.filter(url => url.id !== urlId);
+      if (setTargetURLs) {
+        setTargetURLs(updatedUrls);
+      }
+      
+      if (currentPage > 1 && updatedUrls.length <= (currentPage - 1) * itemsPerPage) {
+        setCurrentPage(currentPage - 1);
+      }
+    } catch (error) {
+      alert(`Failed to delete URL: ${error.message}`);
+    } finally {
+      setDeletingUrls(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(urlId);
+        return newSet;
+      });
+    }
+  };
+
+  const handleAddAsScopeTarget = async (url) => {
+    if (addingUrls.has(url.id)) return;
+    
+    setAddingUrls(prev => new Set(prev).add(url.id));
+    
+    try {
+      const payload = {
+        type: 'URL',
+        mode: 'Passive',
+        scope_target: url.url,
+        active: false,
+      };
+      
+      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/add`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to add URL as scope target: ${response.status} - ${errorText}`);
+      }
+      
+      await fetchExistingScopeTargets();
+      
+      if (fetchScopeTargets) {
+        await fetchScopeTargets();
+      }
+    } catch (error) {
+      alert(`Failed to add ${url.url} as scope target: ${error.message}`);
+    } finally {
+      setAddingUrls(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(url.id);
+        return newSet;
+      });
+    }
+  };
+  
+  const [sortedTargets, setSortedTargets] = useState([]);
+
+  useEffect(() => {
+    if (show && Array.isArray(safeTargetURLs) && safeTargetURLs.length > 0) {
+      const sorted = [...safeTargetURLs]
+        .map(target => ({
+          ...target,
+          _calculatedScore: target.roi_score || calculateROIScore(target)
+        }))
+        .sort((a, b) => b._calculatedScore - a._calculatedScore);
+      setSortedTargets(sorted);
+      setIsLoading(false);
+    }
+  }, [show, safeTargetURLs]);
+
+  const totalPages = Math.ceil(sortedTargets.length / itemsPerPage);
   const currentTarget = sortedTargets[currentPage - 1];
 
   const handlePreviousPage = () => {
@@ -475,21 +765,45 @@ const ROIReport = ({ show, onHide, targetURLs = [] }) => {
   );
 
   return (
-    <Modal show={show} onHide={onHide} size="xl" className="bg-dark text-white">
+    <Modal 
+      show={show} 
+      onHide={onHide} 
+      size="xl" 
+      fullscreen={true}
+      backdrop="static"
+      className="bg-dark text-white"
+      data-bs-theme="dark"
+    >
       <Modal.Header closeButton className="bg-dark border-danger">
         <Modal.Title className="text-danger">Bug Bounty Target ROI Analysis</Modal.Title>
       </Modal.Header>
       <Modal.Body className="bg-dark">
         <Container fluid>
-          <PaginationControls />
-          {currentTarget && (
-            <TargetSection 
-              key={currentTarget.id} 
-              targetURL={currentTarget} 
-              roiScore={currentTarget.roi_score}
-            />
+          {isLoading ? (
+            <div className="d-flex justify-content-center align-items-center" style={{ minHeight: '400px' }}>
+              <div className="text-center">
+                <Spinner animation="border" variant="danger" />
+                <p className="text-white mt-3">Loading ROI Analysis...</p>
+              </div>
+            </div>
+          ) : (
+            <>
+              <PaginationControls />
+              {currentTarget && (
+                <TargetSection 
+                  key={currentTarget.id} 
+                  targetURL={currentTarget} 
+                  roiScore={currentTarget._calculatedScore || currentTarget.roi_score}
+                  onDelete={handleDeleteUrl}
+                  onAddAsScope={handleAddAsScopeTarget}
+                  isDeleting={deletingUrls.has(currentTarget.id)}
+                  isAdding={addingUrls.has(currentTarget.id)}
+                  isAlreadyScope={isUrlAlreadyScopeTarget(currentTarget.url)}
+                />
+              )}
+              <PaginationControls />
+            </>
           )}
-          <PaginationControls />
         </Container>
       </Modal.Body>
     </Modal>

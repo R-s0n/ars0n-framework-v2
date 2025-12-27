@@ -1718,3 +1718,23 @@ func GetCompanyMetaDataResults(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewEncoder(w).Encode(targetURLs)
 }
+
+func DeleteTargetURL(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+	if id == "" {
+		http.Error(w, "ID is required in the path", http.StatusBadRequest)
+		return
+	}
+
+	query := `DELETE FROM target_urls WHERE id = $1`
+	_, err := dbPool.Exec(context.Background(), query, id)
+	if err != nil {
+		log.Printf("Error deleting target URL from database: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Target URL deleted successfully"})
+}

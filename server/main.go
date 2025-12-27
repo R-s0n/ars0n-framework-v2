@@ -160,6 +160,7 @@ func main() {
 	r.HandleFunc("/investigate/{scan_id}", utils.GetInvestigateScanStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/scopetarget/{id}/scans/investigate", utils.GetInvestigateScansForScopeTarget).Methods("GET", "OPTIONS")
 	r.HandleFunc("/api/target-urls/{id}/roi-score", utils.UpdateTargetURLROIScore).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/api/target-urls/{id}", utils.DeleteTargetURL).Methods("DELETE", "OPTIONS")
 	r.HandleFunc("/user/settings", getUserSettings).Methods("GET", "OPTIONS")
 	r.HandleFunc("/user/settings", updateUserSettings).Methods("POST", "OPTIONS")
 	r.HandleFunc("/api/export-data", utils.HandleExportData).Methods("POST", "OPTIONS")
@@ -308,6 +309,21 @@ func main() {
 	r.HandleFunc("/application-questions/{scope_target_id}/answers", utils.CreateApplicationQuestionAnswer).Methods("POST", "OPTIONS")
 	r.HandleFunc("/application-questions/answers/{answer_id}", utils.UpdateApplicationQuestionAnswer).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/application-questions/answers/{answer_id}", utils.DeleteApplicationQuestionAnswer).Methods("DELETE", "OPTIONS")
+
+	r.HandleFunc("/mechanisms/{scope_target_id}/examples", utils.GetMechanismsExamples).Methods("GET", "OPTIONS")
+	r.HandleFunc("/mechanisms/{scope_target_id}/examples", utils.CreateMechanismExample).Methods("POST", "OPTIONS")
+	r.HandleFunc("/mechanisms/examples/{example_id}", utils.UpdateMechanismExample).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/mechanisms/examples/{example_id}", utils.DeleteMechanismExample).Methods("DELETE", "OPTIONS")
+
+	r.HandleFunc("/notable-objects/{scope_target_id}", utils.GetNotableObjects).Methods("GET", "OPTIONS")
+	r.HandleFunc("/notable-objects/{scope_target_id}", utils.CreateNotableObject).Methods("POST", "OPTIONS")
+	r.HandleFunc("/notable-objects/{object_id}", utils.UpdateNotableObject).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/notable-objects/{object_id}", utils.DeleteNotableObject).Methods("DELETE", "OPTIONS")
+
+	r.HandleFunc("/security-controls/{scope_target_id}/notes", utils.GetSecurityControlsNotes).Methods("GET", "OPTIONS")
+	r.HandleFunc("/security-controls/{scope_target_id}/notes", utils.CreateSecurityControlNote).Methods("POST", "OPTIONS")
+	r.HandleFunc("/security-controls/notes/{note_id}", utils.UpdateSecurityControlNote).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/security-controls/notes/{note_id}", utils.DeleteSecurityControlNote).Methods("DELETE", "OPTIONS")
 
 	log.Println("API server started on :8443")
 	http.ListenAndServe(":8443", r)

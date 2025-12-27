@@ -630,6 +630,35 @@ func createTables() {
 			updated_at TIMESTAMP DEFAULT NOW()
 		);`,
 
+		`CREATE TABLE IF NOT EXISTS mechanisms_examples (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			mechanism TEXT NOT NULL,
+			url TEXT NOT NULL,
+			notes TEXT,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS notable_objects (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			object_name TEXT NOT NULL,
+			object_json TEXT,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW(),
+			UNIQUE(scope_target_id, object_name)
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS security_controls_notes (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			control_name TEXT NOT NULL,
+			note TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+
 		`CREATE TABLE IF NOT EXISTS nuclei_scans (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			scan_id UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),

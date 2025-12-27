@@ -183,6 +183,9 @@ import { WaybackURLsResultsModal } from './modals/WaybackURLsResultsModal';
 import { GAUURLResultsModal } from './modals/GAUURLResultsModal';
 import { FFUFURLResultsModal } from './modals/FFUFURLResultsModal';
 import { ApplicationQuestionsModal } from './modals/ApplicationQuestionsModal';
+import { MechanismsModal } from './modals/MechanismsModal';
+import { NotableObjectsModal } from './modals/NotableObjectsModal';
+import { SecurityControlsModal } from './modals/SecurityControlsModal';
 import { FFUFConfigModal } from './modals/FFUFConfigModal';
 
 // Add helper function
@@ -299,37 +302,45 @@ const calculateROIScore = (targetURL) => {
   
   if (targetURL.status_code === 200 && katanaCount > 10) {
     try {
-      const headers = typeof targetURL.http_response_headers === 'string' 
-        ? JSON.parse(targetURL.http_response_headers)
-        : targetURL.http_response_headers;
+      let headers = null;
+      if (typeof targetURL.http_response_headers === 'string' && targetURL.http_response_headers.trim()) {
+        headers = JSON.parse(targetURL.http_response_headers);
+      } else if (typeof targetURL.http_response_headers === 'object') {
+        headers = targetURL.http_response_headers;
+      }
       
-      const hasCSP = Object.keys(headers || {}).some(header => 
-        header.toLowerCase() === 'content-security-policy'
-      );
-      
-      if (!hasCSP) {
-        score += 10;
+      if (headers) {
+        const hasCSP = Object.keys(headers).some(header => 
+          header.toLowerCase() === 'content-security-policy'
+        );
+        
+        if (!hasCSP) {
+          score += 10;
+        }
       }
     } catch (error) {
-      console.error('Error checking CSP header:', error);
     }
   }
   
   try {
-    const headers = typeof targetURL.http_response_headers === 'string'
-      ? JSON.parse(targetURL.http_response_headers)
-      : targetURL.http_response_headers;
+    let headers = null;
+    if (typeof targetURL.http_response_headers === 'string' && targetURL.http_response_headers.trim()) {
+      headers = JSON.parse(targetURL.http_response_headers);
+    } else if (typeof targetURL.http_response_headers === 'object') {
+      headers = targetURL.http_response_headers;
+    }
     
-    const hasCachingHeaders = Object.keys(headers || {}).some(header => {
-      const headerLower = header.toLowerCase();
-      return ['cache-control', 'etag', 'expires', 'vary'].includes(headerLower);
-    });
-    
-    if (hasCachingHeaders) {
-      score += 10;
+    if (headers) {
+      const hasCachingHeaders = Object.keys(headers).some(header => {
+        const headerLower = header.toLowerCase();
+        return ['cache-control', 'etag', 'expires', 'vary'].includes(headerLower);
+      });
+      
+      if (hasCachingHeaders) {
+        score += 10;
+      }
     }
   } catch (error) {
-    console.error('Error checking caching headers:', error);
   }
   
   return Math.max(0, Math.round(score));
@@ -637,6 +648,9 @@ function App() {
   const [showGAUURLResultsModal, setShowGAUURLResultsModal] = useState(false);
   const [showFFUFURLResultsModal, setShowFFUFURLResultsModal] = useState(false);
   const [showApplicationQuestionsModal, setShowApplicationQuestionsModal] = useState(false);
+  const [showMechanismsModal, setShowMechanismsModal] = useState(false);
+  const [showNotableObjectsModal, setShowNotableObjectsModal] = useState(false);
+  const [showSecurityControlsModal, setShowSecurityControlsModal] = useState(false);
   const [showFFUFConfigModal, setShowFFUFConfigModal] = useState(false);
   
   const handleCloseSubdomainsModal = () => setShowSubdomainsModal(false);
@@ -2939,6 +2953,8 @@ function App() {
   }, [activeTarget]);
 
   const handleOpenMetaDataModal = async () => {
+    setShowMetaDataModal(true);
+    
     try {
       const response = await fetch(
         `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${activeTarget.id}/target-urls`
@@ -2949,15 +2965,15 @@ function App() {
       const data = await response.json();
       const safeData = data || [];
       setTargetURLs(safeData);
-      setShowMetaDataModal(true);
     } catch (error) {
       console.error('Error fetching target URLs:', error);
     }
   };
 
   const handleOpenROIReport = async () => {
+    setShowROIReport(true);
+    
     try {
-      // First, get the latest target URLs
       const response = await fetch(
         `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${activeTarget.id}/target-urls`
       );
@@ -2966,41 +2982,9 @@ function App() {
       }
       const data = await response.json();
       const safeData = data || [];
-
-      // Calculate and update ROI scores for each target
-      const updatePromises = safeData.map(async (target) => {
-        const score = calculateROIScore(target);
-        const updateResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/target-urls/${target.id}/roi-score`,
-          {
-            method: 'PUT',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ roi_score: score }),
-          }
-        );
-        if (!updateResponse.ok) {
-          console.error(`Failed to update ROI score for target ${target.id}`);
-        }
-      });
-
-      // Wait for all updates to complete
-      await Promise.all(updatePromises);
-
-      // Fetch the updated target URLs
-      const updatedResponse = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${activeTarget.id}/target-urls`
-      );
-      if (!updatedResponse.ok) {
-        throw new Error('Failed to fetch updated target URLs');
-      }
-      const updatedData = await updatedResponse.json();
-      const safeUpdatedData = updatedData || [];
-      setTargetURLs(safeUpdatedData);
-      setShowROIReport(true);
+      setTargetURLs(safeData);
     } catch (error) {
-      console.error('Error preparing ROI report:', error);
+      console.error('Error loading ROI report:', error);
     }
   };
 
@@ -3952,6 +3936,12 @@ function App() {
   const handleCloseFFUFURLResultsModal = () => setShowFFUFURLResultsModal(false);
   const handleOpenApplicationQuestionsModal = () => setShowApplicationQuestionsModal(true);
   const handleCloseApplicationQuestionsModal = () => setShowApplicationQuestionsModal(false);
+  const handleOpenMechanismsModal = () => setShowMechanismsModal(true);
+  const handleCloseMechanismsModal = () => setShowMechanismsModal(false);
+  const handleOpenNotableObjectsModal = () => setShowNotableObjectsModal(true);
+  const handleCloseNotableObjectsModal = () => setShowNotableObjectsModal(false);
+  const handleOpenSecurityControlsModal = () => setShowSecurityControlsModal(true);
+  const handleCloseSecurityControlsModal = () => setShowSecurityControlsModal(false);
   const handleOpenFFUFConfigModal = () => setShowFFUFConfigModal(true);
   const handleCloseFFUFConfigModal = () => setShowFFUFConfigModal(false);
 
@@ -6450,26 +6440,56 @@ function App() {
             {activeTarget.type === 'URL' && (
               <div className="mb-4">
                 <h3 className="text-danger mb-3">URL</h3>
-                <h4 className="text-secondary mb-3 fs-5">Application Questions</h4>
+                <h4 className="text-secondary mb-3 fs-5">Manual Recon</h4>
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
                       <Card.Body className="d-flex flex-column">
                         <Card.Title className="text-danger mb-3">
-                          Application Questions
+                          Manual Recon
                         </Card.Title>
                         <Card.Text className="text-white small fst-italic">
-                          Answer a comprehensive list of questions about the target URL as you enumerate and explore it. Track your findings across 8 categories including application identity, technology stack, infrastructure, security, authentication, authorization, and more.
+                          Document your manual reconnaissance findings as you enumerate and explore the target. Track high-level application details, security mechanisms, notable objects, and security controls you discover.
                         </Card.Text>
                         <div className="mt-auto">
-                          <Button
-                            variant="outline-danger"
-                            className="mt-3"
-                            onClick={handleOpenApplicationQuestionsModal}
-                          >
-                            <i className="bi bi-question-circle me-2" />
-                            Answer Questions
-                          </Button>
+                          <Row className="g-2">
+                            <Col xs={6} md={3}>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenApplicationQuestionsModal}
+                              >
+                                High-Level Questions
+                              </Button>
+                            </Col>
+                            <Col xs={6} md={3}>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenMechanismsModal}
+                              >
+                                Mechanisms
+                              </Button>
+                            </Col>
+                            <Col xs={6} md={3}>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenNotableObjectsModal}
+                              >
+                                Notable Objects
+                              </Button>
+                            </Col>
+                            <Col xs={6} md={3}>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenSecurityControlsModal}
+                              >
+                                Security Controls
+                              </Button>
+                            </Col>
+                          </Row>
                         </div>
                       </Card.Body>
                     </Card>
@@ -6660,11 +6680,14 @@ function App() {
         metaDataResults={mostRecentMetaDataScan}
         targetURLs={targetURLs}
         setTargetURLs={setTargetURLs}
+        fetchScopeTargets={fetchScopeTargets}
       />
       <ROIReport
         show={showROIReport}
         onHide={handleCloseROIReport}
         targetURLs={targetURLs}
+        setTargetURLs={setTargetURLs}
+        fetchScopeTargets={fetchScopeTargets}
       />
       <Modal data-bs-theme="dark" show={showAutoScanHistoryModal} onHide={handleCloseAutoScanHistoryModal} size="xl" dialogClassName="modal-90w">
         <Modal.Header closeButton>
@@ -7094,6 +7117,24 @@ function App() {
       <ApplicationQuestionsModal
         show={showApplicationQuestionsModal}
         handleClose={handleCloseApplicationQuestionsModal}
+        activeTarget={activeTarget}
+      />
+
+      <MechanismsModal
+        show={showMechanismsModal}
+        handleClose={handleCloseMechanismsModal}
+        activeTarget={activeTarget}
+      />
+
+      <NotableObjectsModal
+        show={showNotableObjectsModal}
+        handleClose={handleCloseNotableObjectsModal}
+        activeTarget={activeTarget}
+      />
+
+      <SecurityControlsModal
+        show={showSecurityControlsModal}
+        handleClose={handleCloseSecurityControlsModal}
         activeTarget={activeTarget}
       />
 
