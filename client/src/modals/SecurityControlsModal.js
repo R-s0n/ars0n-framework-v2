@@ -196,6 +196,103 @@ const SECURITY_CONTROLS = [
       'Data Minimization',
       'Cross-Border Data Transfer Controls'
     ]
+  },
+  {
+    category: 'Cloud Security',
+    controls: [
+      'Cloud Storage Bucket Access Controls',
+      'S3 Bucket Public Access Block',
+      'Cloud IAM Least Privilege',
+      'Cloud Resource Tagging',
+      'Cloud Security Groups/Firewalls',
+      'VPC/Network Segmentation',
+      'Cloud Audit Logging',
+      'Cloud Secrets Manager Integration',
+      'Serverless Function Permissions',
+      'Cloud Storage Encryption',
+      'Cloud Database Security',
+      'Cloud API Gateway Security'
+    ]
+  },
+  {
+    category: 'Container & Orchestration Security',
+    controls: [
+      'Container Image Scanning',
+      'Container Runtime Security',
+      'Pod Security Policies',
+      'Network Policies (Kubernetes)',
+      'Service Mesh Security',
+      'Container Registry Access Control',
+      'Secrets Management for Containers',
+      'Container Resource Limits'
+    ]
+  },
+  {
+    category: 'Secrets & Credential Management',
+    controls: [
+      'Secrets Rotation',
+      'No Hardcoded Credentials',
+      'Environment Variable Protection',
+      'Secrets Vault Integration',
+      'API Key Rotation',
+      'Certificate Management',
+      'Service Account Key Management',
+      'Database Credential Rotation'
+    ]
+  },
+  {
+    category: 'OSINT & Information Disclosure Prevention',
+    controls: [
+      'GitHub/GitLab Secret Scanning',
+      'Source Code Access Control',
+      'Build Artifact Protection',
+      'Debug Endpoint Protection',
+      'Error Message Sanitization',
+      'Internal Path Disclosure Prevention',
+      'Server Header Suppression',
+      'Version Information Hiding',
+      'Backup File Protection',
+      'Configuration File Protection',
+      'Source Map Protection'
+    ]
+  },
+  {
+    category: 'GraphQL Security',
+    controls: [
+      'GraphQL Query Depth Limiting',
+      'GraphQL Query Complexity Analysis',
+      'GraphQL Introspection Disabling (Production)',
+      'GraphQL Rate Limiting',
+      'GraphQL Authorization per Field',
+      'GraphQL Batching Limits',
+      'GraphQL Persisted Queries'
+    ]
+  },
+  {
+    category: 'CI/CD Security',
+    controls: [
+      'Pipeline Secret Management',
+      'Code Signing',
+      'Build Environment Isolation',
+      'Artifact Integrity Verification',
+      'Dependency Scanning in Pipeline',
+      'Branch Protection Rules',
+      'Merge Approval Requirements',
+      'Automated Security Testing in Pipeline'
+    ]
+  },
+  {
+    category: 'Monitoring & Incident Response',
+    controls: [
+      'Security Information and Event Management (SIEM)',
+      'Intrusion Detection System (IDS)',
+      'Intrusion Prevention System (IPS)',
+      'Anomaly Detection',
+      'Threat Intelligence Integration',
+      'Automated Incident Response',
+      'Security Playbooks',
+      'Forensic Logging'
+    ]
   }
 ];
 
@@ -214,6 +311,9 @@ export const SecurityControlsModal = ({
   const [error, setError] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState(null);
+  const [showAddControl, setShowAddControl] = useState(false);
+  const [newControlName, setNewControlName] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => {
     if (show && activeTarget) {
@@ -405,6 +505,13 @@ export const SecurityControlsModal = ({
     setEditNoteText('');
   };
 
+  const handleAddCustomControl = () => {
+    if (!newControlName.trim()) return;
+    setSelectedControl(newControlName.trim());
+    setShowAddControl(false);
+    setNewControlName('');
+  };
+
   const getControlCategory = (control) => {
     for (const category of SECURITY_CONTROLS) {
       if (category.controls.includes(control)) {
@@ -440,16 +547,38 @@ export const SecurityControlsModal = ({
               backgroundColor: '#1a1a1a' 
             }}
           >
-            <div className="p-3 bg-dark border-bottom border-danger">
+            <div className="p-3 bg-dark border-bottom border-danger d-flex justify-content-between align-items-center">
               <h6 className="text-danger mb-0">Controls by Category</h6>
+              <Button 
+                variant="outline-danger" 
+                size="sm"
+                onClick={() => setShowAddControl(true)}
+              >
+                Add Custom
+              </Button>
             </div>
-            {SECURITY_CONTROLS.map((category, catIndex) => (
+            <div className="p-3 border-bottom border-secondary">
+              <Form.Control
+                type="text"
+                placeholder="Search controls..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                data-bs-theme="dark"
+                size="sm"
+              />
+            </div>
+            {SECURITY_CONTROLS.map((category, catIndex) => {
+              const filteredControls = category.controls.filter(c => 
+                c.toLowerCase().includes(searchTerm.toLowerCase())
+              );
+              if (filteredControls.length === 0) return null;
+              return (
               <div key={catIndex} className="border-bottom border-secondary">
                 <div className="p-2 bg-dark">
                   <strong className="text-danger small">{category.category}</strong>
                 </div>
                 <ListGroup variant="flush">
-                  {category.controls.map((control, cIndex) => {
+                  {filteredControls.map((control, cIndex) => {
                     const hasNotes = notes[control] && notes[control].length > 0;
                     const isSelected = selectedControl === control;
                     return (
@@ -479,7 +608,55 @@ export const SecurityControlsModal = ({
                   })}
                 </ListGroup>
               </div>
-            ))}
+              );
+            })}
+            {(() => {
+              const allControlNames = SECURITY_CONTROLS.flatMap(cat => cat.controls);
+              const customControls = Object.keys(notes).filter(c => !allControlNames.includes(c)).sort();
+              const filteredCustomControls = customControls.filter(c => 
+                c.toLowerCase().includes(searchTerm.toLowerCase())
+              );
+              if (filteredCustomControls.length > 0) {
+                return (
+                  <div className="border-bottom border-secondary">
+                    <div className="p-2 bg-dark">
+                      <strong className="text-danger small">Custom Controls</strong>
+                    </div>
+                    <ListGroup variant="flush">
+                      {filteredCustomControls.map((control, cIndex) => {
+                        const hasNotes = notes[control] && notes[control].length > 0;
+                        const isSelected = selectedControl === control;
+                        return (
+                          <ListGroup.Item
+                            key={cIndex}
+                            action
+                            active={isSelected}
+                            onClick={() => setSelectedControl(control)}
+                            className={`bg-dark text-white ${isSelected ? 'border-start border-3 border-danger' : ''}`}
+                            style={{ 
+                              cursor: 'pointer',
+                              backgroundColor: isSelected ? '#2a1a1a !important' : undefined,
+                              border: 'none',
+                              borderBottom: '1px solid #333'
+                            }}
+                          >
+                            <div className="d-flex justify-content-between align-items-start" style={{ gap: '8px' }}>
+                              <span className="small" style={{ flex: '1 1 auto', minWidth: 0, wordWrap: 'break-word' }}>{control}</span>
+                              {hasNotes && (
+                                <Badge bg="success" className="flex-shrink-0" style={{ minWidth: '24px', textAlign: 'center' }}>
+                                  {notes[control].length}
+                                </Badge>
+                              )}
+                            </div>
+                          </ListGroup.Item>
+                        );
+                      })}
+                    </ListGroup>
+                  </div>
+                );
+              }
+              return null;
+            })()}
           </div>
 
           <div className="flex-fill p-4" style={{ overflowY: 'auto' }}>
@@ -604,46 +781,47 @@ export const SecurityControlsModal = ({
               <div className="py-4 px-4">
                 <Card className="bg-dark border-danger">
                   <Card.Body>
-                    <h4 className="text-danger mb-4">Welcome to Security Controls</h4>
+                    <h4 className="text-danger mb-4">Security Controls</h4>
                     
                     <div className="text-white mb-4">
-                      <h5 className="text-danger mb-3">What is this?</h5>
+                      <h5 className="text-danger mb-3">Defensive Posture Assessment</h5>
                       <p>
-                        Security Controls documents the security mechanisms, protections, and defenses implemented 
-                        in the target application. By tracking which controls are present, how they're configured, 
-                        and their effectiveness, you build a complete picture of the application's security posture.
+                        Security Controls represent the defensive layer that mitigates STRIDE threats. Documenting what controls 
+                        exist, how they're configured, and their weaknesses is essential for accurate threat modeling. Missing or 
+                        misconfigured controls directly translate to exploitable threats, while strong controls reduce threat impact 
+                        and likelihood.
                       </p>
                     </div>
 
                     <div className="text-white mb-4">
-                      <h5 className="text-danger mb-3">Why document security controls?</h5>
+                      <h5 className="text-danger mb-3">Controls as Threat Mitigations</h5>
                       <ul className="mb-2">
-                        <li>Identifies which security layers are present vs. missing</li>
-                        <li>Reveals misconfigurations that weaken otherwise strong controls</li>
-                        <li>Documents bypass techniques you've discovered</li>
-                        <li>Helps prioritize testing based on security gaps</li>
-                        <li>Shows security patterns and implementation consistency</li>
-                        <li>Provides evidence for reports about security posture</li>
+                        <li><strong>Spoofing</strong> - Authentication controls (MFA, session management) prevent identity theft</li>
+                        <li><strong>Tampering</strong> - Integrity controls (checksums, signatures, validation) detect/prevent data modification</li>
+                        <li><strong>Repudiation</strong> - Audit logging and monitoring ensure accountability and non-repudiation</li>
+                        <li><strong>Information Disclosure</strong> - Encryption, access controls, and data masking protect sensitive data</li>
+                        <li><strong>Denial of Service</strong> - Rate limiting, resource quotas, and DDoS protection maintain availability</li>
+                        <li><strong>Elevation of Privilege</strong> - Authorization controls and privilege separation limit unauthorized access</li>
                       </ul>
                     </div>
 
                     <div className="text-white mb-3">
-                      <h5 className="text-danger mb-3">How to use this</h5>
+                      <h5 className="text-danger mb-3">Threat Modeling Workflow</h5>
                       <ol className="mb-2">
                         <li className="mb-2">
-                          <strong>Test for control presence</strong> - Check if each security control exists
+                          <strong>Enumerate controls</strong> - Identify which security controls are present or absent
                         </li>
                         <li className="mb-2">
-                          <strong>Document configuration</strong> - Record how it's implemented and configured
+                          <strong>Assess implementation</strong> - Document configuration, strength, and any weaknesses
                         </li>
                         <li className="mb-2">
-                          <strong>Note effectiveness</strong> - Is it working properly? Any weaknesses?
+                          <strong>Identify gaps</strong> - Missing controls indicate unmitigated threats in your model
                         </li>
                         <li className="mb-2">
-                          <strong>Record bypasses</strong> - Document any techniques to circumvent the control
+                          <strong>Test bypasses</strong> - Weak or bypassable controls remain exploitable threats
                         </li>
                         <li className="mb-2">
-                          <strong>Track multiple findings</strong> - Add multiple notes as you discover more
+                          <strong>Map to threats</strong> - Reference controls when assessing threat likelihood and impact
                         </li>
                       </ol>
                     </div>
@@ -691,6 +869,50 @@ export const SecurityControlsModal = ({
           ) : (
             'Delete'
           )}
+        </Button>
+      </Modal.Footer>
+    </Modal>
+
+    <Modal 
+      show={showAddControl} 
+      onHide={() => setShowAddControl(false)}
+      centered
+      data-bs-theme="dark"
+    >
+      <Modal.Header closeButton className="bg-dark border-danger">
+        <Modal.Title className="text-danger">Add Custom Security Control</Modal.Title>
+      </Modal.Header>
+      <Modal.Body className="bg-dark">
+        <Form.Group>
+          <Form.Label className="text-white">Control Name</Form.Label>
+          <Form.Control
+            type="text"
+            value={newControlName}
+            onChange={(e) => setNewControlName(e.target.value)}
+            placeholder="e.g., Custom Validation Rule, Special Protection"
+            data-bs-theme="dark"
+            onKeyPress={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleAddCustomControl();
+              }
+            }}
+          />
+          <Form.Text className="text-white-50">
+            Enter a descriptive name for this custom security control
+          </Form.Text>
+        </Form.Group>
+      </Modal.Body>
+      <Modal.Footer className="bg-dark border-danger">
+        <Button variant="outline-secondary" onClick={() => setShowAddControl(false)}>
+          Cancel
+        </Button>
+        <Button 
+          variant="danger" 
+          onClick={handleAddCustomControl} 
+          disabled={!newControlName.trim()}
+        >
+          Add Control
         </Button>
       </Modal.Footer>
     </Modal>

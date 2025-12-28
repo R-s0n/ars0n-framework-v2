@@ -26,7 +26,33 @@ const DEFAULT_OBJECTS = [
   'Post/Content Object',
   'Analytics Event Object',
   'Webhook Payload',
-  'Configuration Object'
+  'Configuration Object',
+  'Cloud Metadata Object',
+  'S3 Bucket Policy',
+  'IAM Role/Policy',
+  'Cloud Function Config',
+  'Container/Pod Spec',
+  'Secret/Credential Object',
+  'Environment Variables',
+  'GraphQL Schema',
+  'GraphQL Query Response',
+  'GraphQL Error Object',
+  'Build/Deployment Config',
+  'CI/CD Pipeline Object',
+  'Debug/Trace Object',
+  'Metrics/Monitoring Data',
+  'Log Entry Object',
+  'Health Check Response',
+  'Feature Flag Object',
+  'A/B Test Configuration',
+  'Rate Limit Object',
+  'Queue Message',
+  'Event/Stream Object',
+  'Webhook Delivery Object',
+  'OAuth Token Response',
+  'SAML Assertion',
+  'Certificate Object',
+  'DNS Record Object'
 ];
 
 export const NotableObjectsModal = ({ 
@@ -45,6 +71,7 @@ export const NotableObjectsModal = ({
   const [objectToDelete, setObjectToDelete] = useState(null);
   const [showAddObject, setShowAddObject] = useState(false);
   const [newObjectName, setNewObjectName] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => {
     if (show && activeTarget) {
@@ -251,6 +278,9 @@ export const NotableObjectsModal = ({
   };
 
   const allObjectNames = [...new Set([...DEFAULT_OBJECTS, ...Object.keys(objects)])].sort();
+  const filteredObjectNames = allObjectNames.filter(name => 
+    name.toLowerCase().includes(searchTerm.toLowerCase())
+  );
 
   const formatJson = (jsonString) => {
     try {
@@ -298,8 +328,18 @@ export const NotableObjectsModal = ({
                 Add New
               </Button>
             </div>
+            <div className="p-3 border-bottom border-secondary">
+              <Form.Control
+                type="text"
+                placeholder="Search objects..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                data-bs-theme="dark"
+                size="sm"
+              />
+            </div>
             <ListGroup variant="flush">
-              {allObjectNames.map((objectName, index) => {
+              {filteredObjectNames.map((objectName, index) => {
                 const hasData = objects[objectName] && objects[objectName].object_json;
                 const isSelected = selectedObject === objectName;
                 return (
@@ -465,46 +505,47 @@ export const NotableObjectsModal = ({
               <div className="py-4 px-4">
                 <Card className="bg-dark border-danger">
                   <Card.Body>
-                    <h4 className="text-danger mb-4">Welcome to Notable Objects</h4>
+                    <h4 className="text-danger mb-4">Notable Objects</h4>
                     
                     <div className="text-white mb-4">
-                      <h5 className="text-danger mb-3">What is this?</h5>
+                      <h5 className="text-danger mb-3">Threat Target Identification</h5>
                       <p>
-                        Notable Objects documents the data structures used throughout the application. By capturing 
-                        example JSON objects with their actual fields and data types, you create a reference guide 
-                        that helps you understand how the application stores and transmits data.
+                        Notable Objects define what attackers can target in your threat model. Each documented object represents 
+                        a potential asset that can be spoofed, tampered with, disclosed, or manipulated. By capturing actual data 
+                        structures with their fields and data types, you identify exactly what needs protection and what an attacker 
+                        might seek to compromise.
                       </p>
                     </div>
 
                     <div className="text-white mb-4">
-                      <h5 className="text-danger mb-3">Why document objects?</h5>
+                      <h5 className="text-danger mb-3">Objects as STRIDE Threat Targets</h5>
                       <ul className="mb-2">
-                        <li>Understanding object structures reveals what data the application handles</li>
-                        <li>Field names and types help identify parameter tampering opportunities</li>
-                        <li>Hidden or undocumented fields may expose sensitive information</li>
-                        <li>Comparing different object versions can reveal API changes or inconsistencies</li>
-                        <li>Object references help test for IDOR and authorization bypasses</li>
-                        <li>Data type information guides injection attack payload crafting</li>
+                        <li><strong>Spoofing</strong> - Identity objects (User, Session, Token) can be forged or stolen</li>
+                        <li><strong>Tampering</strong> - Any object field can be modified; privileged fields (role, permissions) are critical targets</li>
+                        <li><strong>Repudiation</strong> - Objects lacking audit fields (created_by, modified_at) enable denial of actions</li>
+                        <li><strong>Information Disclosure</strong> - Sensitive object fields (PII, credentials, secrets) can be exposed</li>
+                        <li><strong>Denial of Service</strong> - Large objects or expensive operations can exhaust resources</li>
+                        <li><strong>Elevation of Privilege</strong> - Authorization objects (Role, Permission) control access levels</li>
                       </ul>
                     </div>
 
                     <div className="text-white mb-3">
-                      <h5 className="text-danger mb-3">How to use this</h5>
+                      <h5 className="text-danger mb-3">Threat Modeling Workflow</h5>
                       <ol className="mb-2">
                         <li className="mb-2">
-                          <strong>Select or create an object type</strong> - Choose from common objects or add your own custom types
+                          <strong>Capture object structures</strong> - Document real JSON from API responses, storage, or network traffic
                         </li>
                         <li className="mb-2">
-                          <strong>Capture real examples</strong> - Copy actual JSON from API responses, browser storage, or network traffic
+                          <strong>Identify sensitive fields</strong> - Mark fields containing PII, credentials, or business-critical data
                         </li>
                         <li className="mb-2">
-                          <strong>Document all fields</strong> - Include every field you discover, even ones that seem unimportant
+                          <strong>Map to threats</strong> - Each object becomes a target in your threat model entries
                         </li>
                         <li className="mb-2">
-                          <strong>Update as you learn</strong> - Add newly discovered fields or correct your understanding
+                          <strong>Analyze relationships</strong> - ID fields reveal how objects link together in attack chains
                         </li>
                         <li className="mb-2">
-                          <strong>Reference during testing</strong> - Use your documented objects to craft targeted attacks
+                          <strong>Track changes</strong> - Update objects as you discover new fields or behaviors
                         </li>
                       </ol>
                     </div>

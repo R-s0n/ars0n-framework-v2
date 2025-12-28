@@ -121,6 +121,51 @@ const QUESTIONS = [
       'Is CORS implemented?',
       'Is source code or documentation publicly available?'
     ]
+  },
+  {
+    category: 'Cloud Infrastructure & Services',
+    questions: [
+      'Are cloud storage buckets accessible (S3, Azure Blob, GCS)?',
+      'Are bucket/container names discoverable or predictable?',
+      'Are cloud metadata endpoints accessible?',
+      'Are serverless functions identifiable?',
+      'Are cloud service URLs exposed in client-side code?',
+      'Is the cloud region/zone disclosed?',
+      'Are CDN or object storage URLs structured predictably?',
+      'Are cloud resource naming patterns consistent?',
+      'Are AWS ARNs, Azure Resource IDs, or GCP project IDs leaked?',
+      'Are infrastructure-as-code templates publicly accessible?'
+    ]
+  },
+  {
+    category: 'API Architecture & GraphQL',
+    questions: [
+      'Does the application use GraphQL?',
+      'Is GraphQL introspection enabled?',
+      'Are API endpoints versioned?',
+      'Are deprecated API versions still accessible?',
+      'Is the API documentation publicly available?',
+      'Are websockets or SSE used for real-time features?',
+      'Are REST API endpoints discoverable through OPTIONS requests?',
+      'Is there an API gateway or BFF (Backend for Frontend)?',
+      'Are internal/debugging endpoints exposed?',
+      'Are API responses verbose with metadata?'
+    ]
+  },
+  {
+    category: 'Public Information & OSINT',
+    questions: [
+      'Are employee emails or usernames predictable?',
+      'Is company GitHub/GitLab organization public?',
+      'Are public repositories related to this application?',
+      'Are commits containing secrets, keys, or credentials visible?',
+      'Are subdomains enumerable through certificate transparency?',
+      'Are job postings revealing tech stack details?',
+      'Are error messages leaking internal paths or usernames?',
+      'Are backup files, config files, or archives publicly accessible?',
+      'Is sensitive information in JavaScript source maps?',
+      'Are API docs, changelogs, or internal wikis indexed by search engines?'
+    ]
   }
 ];
 
@@ -762,6 +807,7 @@ export const ApplicationQuestionsModal = ({
   const [error, setError] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [answerToDelete, setAnswerToDelete] = useState(null);
+  const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => {
     if (show && activeTarget) {
@@ -993,13 +1039,28 @@ export const ApplicationQuestionsModal = ({
             <div className="p-3 bg-dark border-bottom border-danger">
               <h6 className="text-danger mb-0">Questions by Category</h6>
             </div>
-            {QUESTIONS.map((category, catIndex) => (
+            <div className="p-3 border-bottom border-secondary">
+              <Form.Control
+                type="text"
+                placeholder="Search questions..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                data-bs-theme="dark"
+                size="sm"
+              />
+            </div>
+            {QUESTIONS.map((category, catIndex) => {
+              const filteredQuestions = category.questions.filter(q => 
+                q.toLowerCase().includes(searchTerm.toLowerCase())
+              );
+              if (filteredQuestions.length === 0) return null;
+              return (
               <div key={catIndex} className="border-bottom border-secondary">
                 <div className="p-2 bg-dark">
                   <strong className="text-danger small">{category.category}</strong>
                 </div>
                 <ListGroup variant="flush">
-                  {category.questions.map((question, qIndex) => {
+                  {filteredQuestions.map((question, qIndex) => {
                     const hasAnswers = answers[question] && answers[question].length > 0;
                     const isSelected = selectedQuestion === question;
                     return (
@@ -1029,7 +1090,8 @@ export const ApplicationQuestionsModal = ({
                   })}
                 </ListGroup>
               </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="flex-fill p-4" style={{ overflowY: 'auto' }}>
@@ -1192,30 +1254,29 @@ export const ApplicationQuestionsModal = ({
               <div className="py-4 px-4">
                 <Card className="bg-dark border-danger">
                   <Card.Body>
-                    <h4 className="text-danger mb-4">Welcome to Manual Recon</h4>
+                    <h4 className="text-danger mb-4">High-Level Questions</h4>
                     
                     <div className="text-white mb-4">
-                      <h5 className="text-danger mb-3">What is this?</h5>
+                      <h5 className="text-danger mb-3">Foundation for Threat Modeling</h5>
                       <p>
-                        Manual Recon is a systematic reconnaissance framework designed to help you deeply understand 
-                        your target application. By answering high-level questions as you enumerate and explore the target, you'll 
-                        build a comprehensive knowledge base that informs every subsequent testing decision.
+                        High-level questions help you deeply understand the target application's architecture, authentication, 
+                        authorization, data handling, and business logic. This foundational knowledge is essential for effective 
+                        STRIDE threat modeling, as you cannot identify threats without first understanding how the system works.
                       </p>
                     </div>
 
                     <div className="text-white mb-4">
-                      <h5 className="text-danger mb-3">Why is this important?</h5>
+                      <h5 className="text-danger mb-3">How This Supports Threat Modeling</h5>
                       <p className="mb-2">
-                        In bug bounty hunting and application security testing, the difference between finding trivial issues 
-                        and discovering critical vulnerabilities often comes down to how well you understand the application. 
-                        This framework ensures you:
+                        By systematically answering these questions, you'll identify:
                       </p>
                       <ul className="mb-2">
-                        <li>Don't miss important attack surfaces by rushing into testing</li>
-                        <li>Understand the security context and business logic</li>
-                        <li>Identify trust boundaries, privilege levels, and data flows</li>
-                        <li>Recognize patterns that indicate specific vulnerability classes</li>
-                        <li>Build institutional knowledge you can reference throughout testing</li>
+                        <li><strong>Spoofing opportunities</strong> - Authentication mechanisms and identity verification points</li>
+                        <li><strong>Tampering targets</strong> - Data flows, storage locations, and integrity controls</li>
+                        <li><strong>Repudiation risks</strong> - Logging mechanisms, audit trails, and accountability systems</li>
+                        <li><strong>Information disclosure vectors</strong> - Sensitive data locations, access controls, and data exposure points</li>
+                        <li><strong>Denial of service weaknesses</strong> - Resource-intensive operations, rate limiting, and availability controls</li>
+                        <li><strong>Elevation of privilege paths</strong> - Authorization boundaries, privilege levels, and trust boundaries</li>
                       </ul>
                     </div>
 

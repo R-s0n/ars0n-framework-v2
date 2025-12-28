@@ -186,6 +186,7 @@ import { ApplicationQuestionsModal } from './modals/ApplicationQuestionsModal';
 import { MechanismsModal } from './modals/MechanismsModal';
 import { NotableObjectsModal } from './modals/NotableObjectsModal';
 import { SecurityControlsModal } from './modals/SecurityControlsModal';
+import { ThreatModelModal } from './modals/ThreatModelModal';
 import { FFUFConfigModal } from './modals/FFUFConfigModal';
 
 // Add helper function
@@ -651,7 +652,10 @@ function App() {
   const [showMechanismsModal, setShowMechanismsModal] = useState(false);
   const [showNotableObjectsModal, setShowNotableObjectsModal] = useState(false);
   const [showSecurityControlsModal, setShowSecurityControlsModal] = useState(false);
+  const [showThreatModelModal, setShowThreatModelModal] = useState(false);
   const [showFFUFConfigModal, setShowFFUFConfigModal] = useState(false);
+  const [mechanismsForThreatModel, setMechanismsForThreatModel] = useState([]);
+  const [notableObjectsForThreatModel, setNotableObjectsForThreatModel] = useState([]);
   
   const handleCloseSubdomainsModal = () => setShowSubdomainsModal(false);
   const handleCloseCloudDomainsModal = () => setShowCloudDomainsModal(false);
@@ -3942,6 +3946,37 @@ function App() {
   const handleCloseNotableObjectsModal = () => setShowNotableObjectsModal(false);
   const handleOpenSecurityControlsModal = () => setShowSecurityControlsModal(true);
   const handleCloseSecurityControlsModal = () => setShowSecurityControlsModal(false);
+  const handleOpenThreatModelModal = async () => {
+    setShowThreatModelModal(true);
+    if (activeTarget) {
+      try {
+        const mechanismsResponse = await fetch(
+          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/mechanisms/${activeTarget.id}/examples`
+        );
+        if (mechanismsResponse.ok) {
+          const mechanismsData = await mechanismsResponse.json();
+          const uniqueMechanisms = [...new Set(mechanismsData.map(m => m.mechanism))];
+          setMechanismsForThreatModel(uniqueMechanisms);
+        }
+      } catch (error) {
+        console.error('Error fetching mechanisms:', error);
+      }
+      
+      try {
+        const objectsResponse = await fetch(
+          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/notable-objects/${activeTarget.id}`
+        );
+        if (objectsResponse.ok) {
+          const objectsData = await objectsResponse.json();
+          const objectNames = objectsData.map(o => o.object_name);
+          setNotableObjectsForThreatModel(objectNames);
+        }
+      } catch (error) {
+        console.error('Error fetching notable objects:', error);
+      }
+    }
+  };
+  const handleCloseThreatModelModal = () => setShowThreatModelModal(false);
   const handleOpenFFUFConfigModal = () => setShowFFUFConfigModal(true);
   const handleCloseFFUFConfigModal = () => setShowFFUFConfigModal(false);
 
@@ -6440,20 +6475,34 @@ function App() {
             {activeTarget.type === 'URL' && (
               <div className="mb-4">
                 <h3 className="text-danger mb-3">URL</h3>
-                <h4 className="text-secondary mb-3 fs-5">Manual Recon</h4>
+                <h4 className="text-secondary mb-3 fs-5">Threat Modeling</h4>
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
                       <Card.Body className="d-flex flex-column">
                         <Card.Title className="text-danger mb-3">
-                          Manual Recon
+                          STRIDE Threat Model
                         </Card.Title>
                         <Card.Text className="text-white small fst-italic">
-                          Document your manual reconnaissance findings as you enumerate and explore the target. Track high-level application details, security mechanisms, notable objects, and security controls you discover.
+                          Perform comprehensive threat modeling using the STRIDE methodology to identify security threats across six categories:
+                          <br /><br />
+                          <strong>(S)poofing</strong> - Impersonation of users, systems, or data
+                          <br />
+                          <strong>(T)ampering</strong> - Malicious modification of data or code
+                          <br />
+                          <strong>(R)epudiation</strong> - Denial of actions without proper logging
+                          <br />
+                          <strong>(I)nformation Disclosure</strong> - Exposure of sensitive information
+                          <br />
+                          <strong>(D)enial of Service</strong> - Preventing legitimate access
+                          <br />
+                          <strong>(E)levation of Privilege</strong> - Gaining unauthorized elevated permissions
+                          <br /><br />
+                          Build your threat model by documenting reconnaissance findings, identifying mechanisms and objects, assessing security controls, and systematically analyzing potential attack vectors and their business impact.
                         </Card.Text>
                         <div className="mt-auto">
                           <Row className="g-2">
-                            <Col xs={6} md={3}>
+                            <Col>
                               <Button
                                 variant="outline-danger"
                                 className="w-100"
@@ -6462,7 +6511,7 @@ function App() {
                                 High-Level Questions
                               </Button>
                             </Col>
-                            <Col xs={6} md={3}>
+                            <Col>
                               <Button
                                 variant="outline-danger"
                                 className="w-100"
@@ -6471,7 +6520,7 @@ function App() {
                                 Mechanisms
                               </Button>
                             </Col>
-                            <Col xs={6} md={3}>
+                            <Col>
                               <Button
                                 variant="outline-danger"
                                 className="w-100"
@@ -6480,13 +6529,22 @@ function App() {
                                 Notable Objects
                               </Button>
                             </Col>
-                            <Col xs={6} md={3}>
+                            <Col>
                               <Button
                                 variant="outline-danger"
                                 className="w-100"
                                 onClick={handleOpenSecurityControlsModal}
                               >
                                 Security Controls
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenThreatModelModal}
+                              >
+                                Threat Model
                               </Button>
                             </Col>
                           </Row>
@@ -7136,6 +7194,14 @@ function App() {
         show={showSecurityControlsModal}
         handleClose={handleCloseSecurityControlsModal}
         activeTarget={activeTarget}
+      />
+
+      <ThreatModelModal
+        show={showThreatModelModal}
+        handleClose={handleCloseThreatModelModal}
+        activeTarget={activeTarget}
+        mechanisms={mechanismsForThreatModel}
+        notableObjects={notableObjectsForThreatModel}
       />
 
       <FFUFConfigModal

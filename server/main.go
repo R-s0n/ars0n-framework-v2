@@ -325,6 +325,11 @@ func main() {
 	r.HandleFunc("/security-controls/notes/{note_id}", utils.UpdateSecurityControlNote).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/security-controls/notes/{note_id}", utils.DeleteSecurityControlNote).Methods("DELETE", "OPTIONS")
 
+	r.HandleFunc("/threat-model/{scope_target_id}", utils.GetThreatModel).Methods("GET", "OPTIONS")
+	r.HandleFunc("/threat-model/{scope_target_id}", utils.CreateThreatModel).Methods("POST", "OPTIONS")
+	r.HandleFunc("/threat-model/{threat_id}", utils.UpdateThreatModel).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/threat-model/{threat_id}", utils.DeleteThreatModel).Methods("DELETE", "OPTIONS")
+
 	log.Println("API server started on :8443")
 	http.ListenAndServe(":8443", r)
 }
