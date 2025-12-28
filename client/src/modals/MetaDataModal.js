@@ -1,7 +1,7 @@
 import { Modal, Badge, Accordion, Form, Row, Col, Button, OverlayTrigger, Tooltip, Pagination, Spinner } from 'react-bootstrap';
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, memo } from 'react';
 
-const MetaDataModal = ({
+const MetaDataModal = memo(({
   showMetaDataModal,
   handleCloseMetaDataModal,
   targetURLs = [],
@@ -1201,6 +1201,6 @@ const MetaDataModal = ({
       )}
     </Modal>
   );
-};
+});
 
 export default MetaDataModal; 

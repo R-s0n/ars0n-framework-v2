@@ -39,7 +39,8 @@ export const ThreatModelModal = ({
   handleClose, 
   activeTarget,
   mechanisms,
-  notableObjects
+  notableObjects,
+  securityControls
 }) => {
   const [activeTab, setActiveTab] = useState('spoofing');
   const [threats, setThreats] = useState({});
@@ -54,6 +55,7 @@ export const ThreatModelModal = ({
     mechanism: '',
     target_object: '',
     steps: [''],
+    security_controls: [{control: '', explanation: ''}],
     impact_customer_data: '',
     impact_attacker_scope: '',
     impact_company_reputation: ''
@@ -79,6 +81,7 @@ export const ThreatModelModal = ({
           mechanism: threat.mechanism || '',
           target_object: threat.target_object || '',
           steps: threat.steps ? JSON.parse(threat.steps) : [''],
+          security_controls: threat.security_controls ? JSON.parse(threat.security_controls) : [{control: '', explanation: ''}],
           impact_customer_data: threat.impact_customer_data || '',
           impact_attacker_scope: threat.impact_attacker_scope || '',
           impact_company_reputation: threat.impact_company_reputation || ''
@@ -138,6 +141,7 @@ export const ThreatModelModal = ({
 
     try {
       const stepsFiltered = editedThreat.steps.filter(s => s.trim());
+      const securityControlsFiltered = editedThreat.security_controls.filter(sc => sc.control.trim() || sc.explanation.trim());
       
       const payload = {
         category: activeTab,
@@ -145,6 +149,7 @@ export const ThreatModelModal = ({
         mechanism: editedThreat.mechanism.trim(),
         target_object: editedThreat.target_object.trim(),
         steps: JSON.stringify(stepsFiltered),
+        security_controls: JSON.stringify(securityControlsFiltered),
         impact_customer_data: editedThreat.impact_customer_data.trim(),
         impact_attacker_scope: editedThreat.impact_attacker_scope.trim(),
         impact_company_reputation: editedThreat.impact_company_reputation.trim()
@@ -250,6 +255,7 @@ export const ThreatModelModal = ({
           mechanism: threat.mechanism || '',
           target_object: threat.target_object || '',
           steps: threat.steps ? JSON.parse(threat.steps) : [''],
+          security_controls: threat.security_controls ? JSON.parse(threat.security_controls) : [{control: '', explanation: ''}],
           impact_customer_data: threat.impact_customer_data || '',
           impact_attacker_scope: threat.impact_attacker_scope || '',
           impact_company_reputation: threat.impact_company_reputation || ''
@@ -265,6 +271,7 @@ export const ThreatModelModal = ({
       mechanism: '',
       target_object: '',
       steps: [''],
+      security_controls: [{control: '', explanation: ''}],
       impact_customer_data: '',
       impact_attacker_scope: '',
       impact_company_reputation: ''
@@ -293,9 +300,33 @@ export const ThreatModelModal = ({
     }));
   };
 
+  const handleAddSecurityControl = () => {
+    setEditedThreat(prev => ({
+      ...prev,
+      security_controls: [...prev.security_controls, {control: '', explanation: ''}]
+    }));
+  };
+
+  const handleRemoveSecurityControl = (index) => {
+    setEditedThreat(prev => ({
+      ...prev,
+      security_controls: prev.security_controls.filter((_, i) => i !== index)
+    }));
+  };
+
+  const handleSecurityControlChange = (index, field, value) => {
+    setEditedThreat(prev => ({
+      ...prev,
+      security_controls: prev.security_controls.map((sc, i) => 
+        i === index ? { ...sc, [field]: value } : sc
+      )
+    }));
+  };
+
   const currentThreats = threats[activeTab] || [];
   const mechanismsList = mechanisms && Array.isArray(mechanisms) ? mechanisms : [];
   const objectsList = notableObjects && Array.isArray(notableObjects) ? notableObjects : [];
+  const securityControlsList = securityControls && Array.isArray(securityControls) ? securityControls : [];
 
   return (
     <>
@@ -509,6 +540,58 @@ export const ThreatModelModal = ({
                       </Form.Group>
 
                       <Form.Group className="mb-3">
+                        <Form.Label className="text-white">Affected Security Controls</Form.Label>
+                        {editedThreat.security_controls.map((sc, index) => (
+                          <div key={index} className="mb-3 p-3 border border-secondary rounded">
+                            <div className="d-flex gap-2 mb-2 align-items-center">
+                              <Form.Select
+                                value={sc.control}
+                                onChange={(e) => handleSecurityControlChange(index, 'control', e.target.value)}
+                                data-bs-theme="dark"
+                                size="sm"
+                              >
+                                <option value="">Select a security control...</option>
+                                {securityControlsList.map((ctrl, idx) => (
+                                  <option key={idx} value={ctrl}>
+                                    {ctrl}
+                                  </option>
+                                ))}
+                              </Form.Select>
+                              <Button
+                                variant="outline-danger"
+                                size="sm"
+                                onClick={() => handleRemoveSecurityControl(index)}
+                                disabled={editedThreat.security_controls.length === 1}
+                                style={{ minWidth: '40px' }}
+                              >
+                                -
+                              </Button>
+                            </div>
+                            <Form.Control
+                              as="textarea"
+                              rows={2}
+                              value={sc.explanation}
+                              onChange={(e) => handleSecurityControlChange(index, 'explanation', e.target.value)}
+                              placeholder="How does this control affect the attack? Does it prevent, mitigate, or detect it?"
+                              data-bs-theme="dark"
+                              size="sm"
+                            />
+                          </div>
+                        ))}
+                        <Button
+                          variant="outline-success"
+                          size="sm"
+                          onClick={handleAddSecurityControl}
+                          className="mt-2"
+                        >
+                          + Add Security Control
+                        </Button>
+                        <Form.Text className="text-white-50 d-block mt-2">
+                          Document security controls that affect this threat and how they impact the attack
+                        </Form.Text>
+                      </Form.Group>
+
+                      <Form.Group className="mb-3">
                         <Form.Label className="text-white">Impact on Customer Data</Form.Label>
                         <Form.Control
                           as="textarea"
@@ -631,6 +714,27 @@ export const ThreatModelModal = ({
                                 step && <li key={index}>{step}</li>
                               ))}
                             </ol>
+                          </Card.Body>
+                        </Card>
+                      )}
+
+                      {editedThreat.security_controls && editedThreat.security_controls.length > 0 && 
+                       editedThreat.security_controls.some(sc => sc.control || sc.explanation) && (
+                        <Card className="bg-dark border-secondary mb-3">
+                          <Card.Body>
+                            <h6 className="text-danger">Affected Security Controls</h6>
+                            {editedThreat.security_controls.map((sc, index) => (
+                              (sc.control || sc.explanation) && (
+                                <div key={index} className="mb-3 pb-3 border-bottom border-secondary last:border-0">
+                                  {sc.control && (
+                                    <div className="fw-bold text-warning mb-1">{sc.control}</div>
+                                  )}
+                                  {sc.explanation && (
+                                    <div className="text-white small">{sc.explanation}</div>
+                                  )}
+                                </div>
+                              )
+                            ))}
                           </Card.Body>
                         </Card>
                       )}

@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from 'react';
+﻿import { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
 import AddScopeTargetModal from './modals/addScopeTargetModal.js';
 import SelectActiveScopeTargetModal from './modals/selectActiveScopeTargetModal.js';
 import { DNSRecordsModal, SubdomainsModal, CloudDomainsModal, InfrastructureMapModal } from './modals/amassModals.js';
@@ -12,10 +12,6 @@ import { ShuffleDNSResultsModal } from './modals/shuffleDNSModals.js';
 import ScreenshotResultsModal from './modals/ScreenshotResultsModal.js';
 import SettingsModal from './modals/SettingsModal.js';
 import ToolsModal from './modals/ToolsModal.js';
-import ExportModal from './modals/ExportModal.js';
-import ImportModal from './modals/ImportModal.js';
-import WelcomeModal from './modals/WelcomeModal.js';
-import GoogleDorkingModal from './modals/GoogleDorkingModal.js';
 import Ars0nFrameworkHeader from './components/ars0nFrameworkHeader.js';
 import ManageScopeTargets from './components/manageScopeTargets.js';
 import fetchAmassScans from './utils/fetchAmassScans.js';
@@ -90,10 +86,7 @@ import initiateNucleiScreenshotScan from './utils/initiateNucleiScreenshotScan';
 import monitorNucleiScreenshotScanStatus from './utils/monitorNucleiScreenshotScanStatus';
 import initiateMetaDataScan, { initiateCompanyMetaDataScan } from './utils/initiateMetaDataScan';
 import monitorMetaDataScanStatus, { monitorCompanyMetaDataScanStatus } from './utils/monitorMetaDataScanStatus';
-import MetaDataModal from './modals/MetaDataModal.js';
 import fetchHttpxScans from './utils/fetchHttpxScans';
-import ROIReport from './components/ROIReport';
-import HelpMeLearn from './components/HelpMeLearn';
 import {
   AUTO_SCAN_STEPS,
   resumeAutoScan as resumeAutoScanUtil,
@@ -188,6 +181,20 @@ import { NotableObjectsModal } from './modals/NotableObjectsModal';
 import { SecurityControlsModal } from './modals/SecurityControlsModal';
 import { ThreatModelModal } from './modals/ThreatModelModal';
 import { FFUFConfigModal } from './modals/FFUFConfigModal';
+
+const ExportModal = lazy(() => import('./modals/ExportModal.js'));
+const ImportModal = lazy(() => import('./modals/ImportModal.js'));
+const WelcomeModal = lazy(() => import('./modals/WelcomeModal.js'));
+const GoogleDorkingModal = lazy(() => import('./modals/GoogleDorkingModal.js'));
+const MetaDataModal = lazy(() => import('./modals/MetaDataModal.js'));
+const ROIReport = lazy(() => import('./components/ROIReport'));
+const HelpMeLearnLazy = lazy(() => import('./components/HelpMeLearn'));
+
+const HelpMeLearn = ({ section }) => (
+  <Suspense fallback={<div style={{ height: '24px' }} />}>
+    <HelpMeLearnLazy section={section} />
+  </Suspense>
+);
 
 // Add helper function
 const getHttpxResultsCount = (scan) => {
@@ -656,6 +663,7 @@ function App() {
   const [showFFUFConfigModal, setShowFFUFConfigModal] = useState(false);
   const [mechanismsForThreatModel, setMechanismsForThreatModel] = useState([]);
   const [notableObjectsForThreatModel, setNotableObjectsForThreatModel] = useState([]);
+  const [securityControlsForThreatModel, setSecurityControlsForThreatModel] = useState([]);
   
   const handleCloseSubdomainsModal = () => setShowSubdomainsModal(false);
   const handleCloseCloudDomainsModal = () => setShowCloudDomainsModal(false);
@@ -3974,6 +3982,19 @@ function App() {
       } catch (error) {
         console.error('Error fetching notable objects:', error);
       }
+
+      try {
+        const controlsResponse = await fetch(
+          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/security-controls/${activeTarget.id}/notes`
+        );
+        if (controlsResponse.ok) {
+          const controlsData = await controlsResponse.json();
+          const uniqueControls = [...new Set(controlsData.map(c => c.control_name))];
+          setSecurityControlsForThreatModel(uniqueControls);
+        }
+      } catch (error) {
+        console.error('Error fetching security controls:', error);
+      }
     }
   };
   const handleCloseThreatModelModal = () => setShowThreatModelModal(false);
@@ -4650,25 +4671,31 @@ function App() {
         handleClose={handleCloseToolsModal}
       />
 
-      <ExportModal
-        show={showExportModal}
-        handleClose={handleCloseExportModal}
-      />
+      <Suspense fallback={<div />}>
+        <ExportModal
+          show={showExportModal}
+          handleClose={handleCloseExportModal}
+        />
+      </Suspense>
 
-      <ImportModal
-        show={showImportModal}
-        handleClose={handleCloseImportModal}
-        onSuccess={handleImportSuccess}
-        showBackButton={scopeTargets.length === 0}
-        onBackClick={handleBackToWelcome}
-      />
+      <Suspense fallback={<div />}>
+        <ImportModal
+          show={showImportModal}
+          handleClose={handleCloseImportModal}
+          onSuccess={handleImportSuccess}
+          showBackButton={scopeTargets.length === 0}
+          onBackClick={handleBackToWelcome}
+        />
+      </Suspense>
 
-      <WelcomeModal
-        show={showWelcomeModal}
-        handleClose={handleCloseWelcomeModal}
-        onAddScopeTarget={handleWelcomeAddScopeTarget}
-        onImportData={handleWelcomeImportData}
-      />
+      <Suspense fallback={<div />}>
+        <WelcomeModal
+          show={showWelcomeModal}
+          handleClose={handleCloseWelcomeModal}
+          onAddScopeTarget={handleWelcomeAddScopeTarget}
+          onImportData={handleWelcomeImportData}
+        />
+      </Suspense>
 
       <Modal data-bs-theme="dark" show={showScanHistoryModal} onHide={handleCloseScanHistoryModal} size="xl">
         <Modal.Header closeButton>
@@ -6476,6 +6503,7 @@ function App() {
               <div className="mb-4">
                 <h3 className="text-danger mb-3">URL</h3>
                 <h4 className="text-secondary mb-3 fs-5">Threat Modeling</h4>
+                <HelpMeLearn section="threatModeling" />
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
@@ -6732,21 +6760,25 @@ function App() {
           </div>
         </Fade>
       )}
-      <MetaDataModal
-        showMetaDataModal={showMetaDataModal}
-        handleCloseMetaDataModal={handleCloseMetaDataModal}
-        metaDataResults={mostRecentMetaDataScan}
-        targetURLs={targetURLs}
-        setTargetURLs={setTargetURLs}
-        fetchScopeTargets={fetchScopeTargets}
-      />
-      <ROIReport
-        show={showROIReport}
-        onHide={handleCloseROIReport}
-        targetURLs={targetURLs}
-        setTargetURLs={setTargetURLs}
-        fetchScopeTargets={fetchScopeTargets}
-      />
+      <Suspense fallback={<div />}>
+        <MetaDataModal
+          showMetaDataModal={showMetaDataModal}
+          handleCloseMetaDataModal={handleCloseMetaDataModal}
+          metaDataResults={mostRecentMetaDataScan}
+          targetURLs={targetURLs}
+          setTargetURLs={setTargetURLs}
+          fetchScopeTargets={fetchScopeTargets}
+        />
+      </Suspense>
+      <Suspense fallback={<div />}>
+        <ROIReport
+          show={showROIReport}
+          onHide={handleCloseROIReport}
+          targetURLs={targetURLs}
+          setTargetURLs={setTargetURLs}
+          fetchScopeTargets={fetchScopeTargets}
+        />
+      </Suspense>
       <Modal data-bs-theme="dark" show={showAutoScanHistoryModal} onHide={handleCloseAutoScanHistoryModal} size="xl" dialogClassName="modal-90w">
         <Modal.Header closeButton>
           <Modal.Title className='text-danger'>Auto Scan History</Modal.Title>
@@ -6968,14 +7000,16 @@ function App() {
         </Modal.Body>
       </Modal>
 
-      <GoogleDorkingModal
-        show={showGoogleDorkingManualModal}
-        handleClose={handleCloseGoogleDorkingManualModal}
+      <Suspense fallback={<div />}>
+        <GoogleDorkingModal
+          show={showGoogleDorkingManualModal}
+          handleClose={handleCloseGoogleDorkingManualModal}
         companyName={activeTarget?.scope_target || ''}
         onDomainAdd={handleGoogleDorkingDomainAdd}
         error={googleDorkingError}
         onClearError={() => setGoogleDorkingError('')}
-      />
+        />
+      </Suspense>
 
       <ReverseWhoisModal
         show={showReverseWhoisManualModal}
@@ -7202,6 +7236,7 @@ function App() {
         activeTarget={activeTarget}
         mechanisms={mechanismsForThreatModel}
         notableObjects={notableObjectsForThreatModel}
+        securityControls={securityControlsForThreatModel}
       />
 
       <FFUFConfigModal

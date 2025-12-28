@@ -1,9 +1,9 @@
 import { Row, Col, Button, Card, Alert, Spinner, ProgressBar } from 'react-bootstrap';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, memo, useMemo } from 'react';
 import AutoScanConfigModal from '../modals/autoScanConfigModal';
 import { getHttpxResultsCount } from '../utils/miscUtils';
 
-function ManageScopeTargets({ 
+const ManageScopeTargets = memo(function ManageScopeTargets({ 
   handleOpen, 
   handleActiveModalOpen, 
   activeTarget, 
@@ -355,7 +355,7 @@ function ManageScopeTargets({
       .replace('Nuclei-screenshot', 'Nuclei Screenshot');
   };
 
-  const calculateProgress = () => {
+  const currentProgress = useMemo(() => {
     // If the display status is idle, always return 0
     if (displayStatus === 'idle' || !autoScanConfig || !autoScanCurrentStep || autoScanCurrentStep === 'idle') return 0;
     
@@ -448,7 +448,7 @@ function ManageScopeTargets({
     
     // Cap at 95% until completed
     return Math.min(progress, 95);
-  };
+  }, [displayStatus, autoScanConfig, autoScanCurrentStep]);
 
   // Add CSS for flashing text
   const flashingTextStyle = `
@@ -592,11 +592,11 @@ function ManageScopeTargets({
                           <div className="d-flex justify-content-between mb-1">
                             <span className="text-white-50 small">Progress</span>
                             <span className="text-white small">
-                              {displayStatus === 'idle' ? '0' : calculateProgress()}%
+                              {displayStatus === 'idle' ? '0' : currentProgress}%
                             </span>
                           </div>
                           <ProgressBar 
-                            now={calculateProgress()} 
+                            now={currentProgress} 
                             variant="danger" 
                             className="bg-dark" 
                             style={{ height: '8px' }}
@@ -698,6 +698,6 @@ function ManageScopeTargets({
       />
     </>
   );
-}
+});
 
 export default ManageScopeTargets;

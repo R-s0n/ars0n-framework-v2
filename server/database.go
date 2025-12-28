@@ -667,6 +667,7 @@ func createTables() {
 			mechanism TEXT,
 			target_object TEXT,
 			steps TEXT,
+			security_controls TEXT,
 			impact_customer_data TEXT,
 			impact_attacker_scope TEXT,
 			impact_company_reputation TEXT,

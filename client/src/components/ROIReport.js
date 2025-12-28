@@ -601,7 +601,7 @@ const TargetSection = memo(({ targetURL, roiScore, onDelete, onAddAsScope, isDel
   );
 });
 
-const ROIReport = ({ show, onHide, targetURLs = [], setTargetURLs, fetchScopeTargets }) => {
+const ROIReport = memo(({ show, onHide, targetURLs = [], setTargetURLs, fetchScopeTargets }) => {
   const safeTargetURLs = targetURLs || [];
   
   const [currentPage, setCurrentPage] = useState(1);
@@ -615,11 +615,9 @@ const ROIReport = ({ show, onHide, targetURLs = [], setTargetURLs, fetchScopeTar
   useEffect(() => {
     if (show) {
       setIsLoading(true);
-      setSortedTargets([]);
       fetchExistingScopeTargets();
     } else {
       setIsLoading(true);
-      setSortedTargets([]);
       setCurrentPage(1);
     }
   }, [show]);
@@ -716,17 +714,20 @@ const ROIReport = ({ show, onHide, targetURLs = [], setTargetURLs, fetchScopeTar
     }
   };
   
-  const [sortedTargets, setSortedTargets] = useState([]);
-
-  useEffect(() => {
+  const sortedTargets = useMemo(() => {
     if (show && Array.isArray(safeTargetURLs) && safeTargetURLs.length > 0) {
-      const sorted = [...safeTargetURLs]
+      return [...safeTargetURLs]
         .map(target => ({
           ...target,
           _calculatedScore: target.roi_score || calculateROIScore(target)
         }))
         .sort((a, b) => b._calculatedScore - a._calculatedScore);
-      setSortedTargets(sorted);
+    }
+    return [];
+  }, [show, safeTargetURLs]);
+
+  useEffect(() => {
+    if (show && Array.isArray(safeTargetURLs) && safeTargetURLs.length > 0) {
       setIsLoading(false);
     }
   }, [show, safeTargetURLs]);
@@ -808,6 +809,6 @@ const ROIReport = ({ show, onHide, targetURLs = [], setTargetURLs, fetchScopeTar
       </Modal.Body>
     </Modal>
   );
-};
+});
 
 export default ROIReport; 

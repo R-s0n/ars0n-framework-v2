@@ -15,7 +15,7 @@ func GetThreatModel(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	scopeTargetID := vars["scope_target_id"]
 
-	query := `SELECT id, category, url, mechanism, target_object, steps, 
+	query := `SELECT id, category, url, mechanism, target_object, steps, security_controls, 
 	          impact_customer_data, impact_attacker_scope, impact_company_reputation, 
 	          created_at, updated_at 
 	          FROM threat_model 
@@ -39,6 +39,7 @@ func GetThreatModel(w http.ResponseWriter, r *http.Request) {
 			Mechanism                 string    `json:"mechanism"`
 			TargetObject              string    `json:"target_object"`
 			Steps                     string    `json:"steps"`
+			SecurityControls          string    `json:"security_controls"`
 			ImpactCustomerData        string    `json:"impact_customer_data"`
 			ImpactAttackerScope       string    `json:"impact_attacker_scope"`
 			ImpactCompanyReputation   string    `json:"impact_company_reputation"`
@@ -47,7 +48,7 @@ func GetThreatModel(w http.ResponseWriter, r *http.Request) {
 		}
 
 		err := rows.Scan(&threat.ID, &threat.Category, &threat.URL, &threat.Mechanism, 
-			&threat.TargetObject, &threat.Steps, &threat.ImpactCustomerData, 
+			&threat.TargetObject, &threat.Steps, &threat.SecurityControls, &threat.ImpactCustomerData, 
 			&threat.ImpactAttackerScope, &threat.ImpactCompanyReputation, 
 			&threat.CreatedAt, &threat.UpdatedAt)
 		if err != nil {
@@ -62,6 +63,7 @@ func GetThreatModel(w http.ResponseWriter, r *http.Request) {
 			"mechanism":                   threat.Mechanism,
 			"target_object":               threat.TargetObject,
 			"steps":                       threat.Steps,
+			"security_controls":           threat.SecurityControls,
 			"impact_customer_data":        threat.ImpactCustomerData,
 			"impact_attacker_scope":       threat.ImpactAttackerScope,
 			"impact_company_reputation":   threat.ImpactCompanyReputation,
@@ -84,6 +86,7 @@ func CreateThreatModel(w http.ResponseWriter, r *http.Request) {
 		Mechanism                 string `json:"mechanism"`
 		TargetObject              string `json:"target_object"`
 		Steps                     string `json:"steps"`
+		SecurityControls          string `json:"security_controls"`
 		ImpactCustomerData        string `json:"impact_customer_data"`
 		ImpactAttackerScope       string `json:"impact_attacker_scope"`
 		ImpactCompanyReputation   string `json:"impact_company_reputation"`
@@ -101,10 +104,10 @@ func CreateThreatModel(w http.ResponseWriter, r *http.Request) {
 
 	threatID := uuid.New().String()
 	query := `INSERT INTO threat_model (id, scope_target_id, category, url, mechanism, 
-	          target_object, steps, impact_customer_data, impact_attacker_scope, 
+	          target_object, steps, security_controls, impact_customer_data, impact_attacker_scope, 
 	          impact_company_reputation) 
-	          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) 
-	          RETURNING id, category, url, mechanism, target_object, steps, 
+	          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
+	          RETURNING id, category, url, mechanism, target_object, steps, security_controls, 
 	          impact_customer_data, impact_attacker_scope, impact_company_reputation, 
 	          created_at, updated_at`
 
@@ -115,6 +118,7 @@ func CreateThreatModel(w http.ResponseWriter, r *http.Request) {
 		Mechanism                 string    `json:"mechanism"`
 		TargetObject              string    `json:"target_object"`
 		Steps                     string    `json:"steps"`
+		SecurityControls          string    `json:"security_controls"`
 		ImpactCustomerData        string    `json:"impact_customer_data"`
 		ImpactAttackerScope       string    `json:"impact_attacker_scope"`
 		ImpactCompanyReputation   string    `json:"impact_company_reputation"`
@@ -124,10 +128,10 @@ func CreateThreatModel(w http.ResponseWriter, r *http.Request) {
 
 	err := dbPool.QueryRow(context.Background(), query, threatID, scopeTargetID, 
 		payload.Category, payload.URL, payload.Mechanism, payload.TargetObject, 
-		payload.Steps, payload.ImpactCustomerData, payload.ImpactAttackerScope, 
+		payload.Steps, payload.SecurityControls, payload.ImpactCustomerData, payload.ImpactAttackerScope, 
 		payload.ImpactCompanyReputation).Scan(
 		&threat.ID, &threat.Category, &threat.URL, &threat.Mechanism, 
-		&threat.TargetObject, &threat.Steps, &threat.ImpactCustomerData, 
+		&threat.TargetObject, &threat.Steps, &threat.SecurityControls, &threat.ImpactCustomerData, 
 		&threat.ImpactAttackerScope, &threat.ImpactCompanyReputation, 
 		&threat.CreatedAt, &threat.UpdatedAt,
 	)
@@ -153,6 +157,7 @@ func UpdateThreatModel(w http.ResponseWriter, r *http.Request) {
 		Mechanism                 string `json:"mechanism"`
 		TargetObject              string `json:"target_object"`
 		Steps                     string `json:"steps"`
+		SecurityControls          string `json:"security_controls"`
 		ImpactCustomerData        string `json:"impact_customer_data"`
 		ImpactAttackerScope       string `json:"impact_attacker_scope"`
 		ImpactCompanyReputation   string `json:"impact_company_reputation"`
@@ -170,10 +175,10 @@ func UpdateThreatModel(w http.ResponseWriter, r *http.Request) {
 
 	query := `UPDATE threat_model 
 	          SET category = $1, url = $2, mechanism = $3, target_object = $4, 
-	          steps = $5, impact_customer_data = $6, impact_attacker_scope = $7, 
-	          impact_company_reputation = $8, updated_at = NOW() 
-	          WHERE id = $9 
-	          RETURNING id, category, url, mechanism, target_object, steps, 
+	          steps = $5, security_controls = $6, impact_customer_data = $7, impact_attacker_scope = $8, 
+	          impact_company_reputation = $9, updated_at = NOW() 
+	          WHERE id = $10 
+	          RETURNING id, category, url, mechanism, target_object, steps, security_controls, 
 	          impact_customer_data, impact_attacker_scope, impact_company_reputation, 
 	          created_at, updated_at`
 
@@ -184,6 +189,7 @@ func UpdateThreatModel(w http.ResponseWriter, r *http.Request) {
 		Mechanism                 string    `json:"mechanism"`
 		TargetObject              string    `json:"target_object"`
 		Steps                     string    `json:"steps"`
+		SecurityControls          string    `json:"security_controls"`
 		ImpactCustomerData        string    `json:"impact_customer_data"`
 		ImpactAttackerScope       string    `json:"impact_attacker_scope"`
 		ImpactCompanyReputation   string    `json:"impact_company_reputation"`
@@ -192,10 +198,10 @@ func UpdateThreatModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := dbPool.QueryRow(context.Background(), query, payload.Category, payload.URL, 
-		payload.Mechanism, payload.TargetObject, payload.Steps, payload.ImpactCustomerData, 
+		payload.Mechanism, payload.TargetObject, payload.Steps, payload.SecurityControls, payload.ImpactCustomerData, 
 		payload.ImpactAttackerScope, payload.ImpactCompanyReputation, threatID).Scan(
 		&threat.ID, &threat.Category, &threat.URL, &threat.Mechanism, 
-		&threat.TargetObject, &threat.Steps, &threat.ImpactCustomerData, 
+		&threat.TargetObject, &threat.Steps, &threat.SecurityControls, &threat.ImpactCustomerData, 
 		&threat.ImpactAttackerScope, &threat.ImpactCompanyReputation, 
 		&threat.CreatedAt, &threat.UpdatedAt,
 	)

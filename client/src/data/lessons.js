@@ -4317,5 +4317,683 @@ export const lessons = {
         description: "SANS guide to strategic planning and decision-making frameworks for comprehensive security assessments"
       }
     ]
+  },
+
+  strideMethodologyOverview: {
+    title: "STRIDE Threat Modeling: A Systematic Approach to Security Analysis",
+    overview: "STRIDE is a comprehensive threat modeling framework that categorizes security threats into six distinct types, providing bug bounty hunters with a systematic methodology for identifying vulnerabilities that automated tools often miss.",
+    sections: [
+      {
+        title: "Understanding the STRIDE Framework",
+        icon: "fa-shield-alt",
+        content: [
+          "STRIDE was developed by Microsoft security researchers Praerit Garg and Loren Kohnfelder in 1999 as a mnemonic for six threat categories: Spoofing identity, Tampering with data, Repudiation, Information disclosure, Denial of service, and Elevation of privilege.",
+          "Each STRIDE category represents a different class of security violations that correspond to fundamental security properties. Spoofing threatens authentication, Tampering threatens integrity, Repudiation threatens non-repudiation, Information Disclosure threatens confidentiality, Denial of Service threatens availability, and Elevation of Privilege threatens authorization.",
+          "For bug bounty hunters, STRIDE provides a structured thinking framework that ensures comprehensive coverage of attack vectors. By systematically considering each category against application components, you avoid cognitive blind spots and discover vulnerabilities that others might overlook.",
+          "The framework is particularly effective when combined with detailed application understanding. By mapping STRIDE categories to specific mechanisms, objects, and security controls, you create a threat matrix that reveals security gaps and attack opportunities."
+        ],
+        keyPoints: [
+          "STRIDE provides six distinct threat categories that cover all major security properties",
+          "Each category corresponds to a security principle: authentication, integrity, non-repudiation, confidentiality, availability, and authorization",
+          "Systematic application of STRIDE ensures comprehensive attack surface coverage",
+          "The framework excels at identifying business logic flaws and architectural vulnerabilities"
+        ]
+      },
+      {
+        title: "STRIDE vs. Traditional Vulnerability Hunting",
+        icon: "fa-crosshairs",
+        content: [
+          "Traditional bug bounty hunting often focuses on known vulnerability patterns: SQL injection, XSS, SSRF, and other common web vulnerabilities. While effective, this approach can miss sophisticated threats that don't fit standard patterns.",
+          "STRIDE threat modeling takes a threat-centric approach by asking 'What can an attacker do?' rather than 'What vulnerabilities exist?' This mindset shift often reveals complex attack chains and business logic flaws that automated scanners and standard testing approaches miss.",
+          "The framework encourages deep application understanding by requiring you to document mechanisms, objects, and security controls before identifying threats. This preparation phase often reveals security assumptions and design flaws that lead to high-impact findings.",
+          "STRIDE is particularly valuable for complex applications with intricate business logic, multi-tenant architectures, or sophisticated authentication and authorization systems where traditional vulnerability scanning provides limited value."
+        ],
+        keyPoints: [
+          "STRIDE focuses on threats and attacker capabilities rather than just vulnerability types",
+          "The methodology uncovers business logic flaws and architectural weaknesses",
+          "Deep application understanding is required, leading to higher quality findings",
+          "Most effective for complex applications with sophisticated security models"
+        ]
+      },
+      {
+        title: "Integrating STRIDE into Bug Bounty Workflow",
+        icon: "fa-project-diagram",
+        content: [
+          "STRIDE threat modeling fits naturally after reconnaissance and before active testing. Once you've discovered targets and gathered application intelligence through questions, mechanisms, objects, and controls, you have the foundation needed for effective threat modeling.",
+          "The threat model becomes your testing roadmap. Each documented threat represents a specific attack hypothesis with clear exploitation steps, expected impact, and affected security controls. This structured approach maximizes testing efficiency and finding quality.",
+          "As you test and discover vulnerabilities, update your threat model with actual findings. This creates a living document that captures application security understanding and can be expanded as you discover new mechanisms, objects, or attack vectors.",
+          "The threat model also serves as compelling evidence in bug reports. Demonstrating systematic security analysis, understanding of affected controls, and clear impact assessment significantly strengthens your submissions and can lead to higher bounties."
+        ],
+        keyPoints: [
+          "Apply STRIDE after reconnaissance provides sufficient application understanding",
+          "Use threat model as structured testing roadmap with clear attack hypotheses",
+          "Maintain living threat model that evolves with testing discoveries",
+          "Leverage threat model documentation to strengthen bug bounty submissions"
+        ]
+      }
+    ],
+    practicalTips: [
+      "Start with a single STRIDE category and one application mechanism to build familiarity before expanding to comprehensive threat modeling",
+      "Focus on high-value mechanisms first: authentication flows, authorization checks, and data handling operations typically yield the most significant findings",
+      "Document even threats that are successfully mitigated - they demonstrate security understanding and may reveal partial bypasses or edge cases",
+      "Cross-reference threats across STRIDE categories: a spoofing vulnerability might enable information disclosure, creating a powerful attack chain",
+      "Use the threat model to identify testing priorities based on potential impact and likelihood of exploitation",
+      "Review threat models periodically as application changes and new features introduce new mechanisms and attack surfaces"
+    ],
+    furtherReading: [
+      {
+        title: "Microsoft Threat Modeling Tool Documentation",
+        url: "https://docs.microsoft.com/en-us/azure/security/develop/threat-modeling-tool",
+        description: "Official Microsoft documentation on threat modeling concepts and the STRIDE framework"
+      },
+      {
+        title: "OWASP Application Threat Modeling",
+        url: "https://owasp.org/www-community/Application_Threat_Modeling",
+        description: "OWASP guide to threat modeling methodologies and best practices"
+      },
+      {
+        title: "Threat Modeling: Designing for Security",
+        url: "https://www.amazon.com/Threat-Modeling-Designing-Adam-Shostack/dp/1118809998",
+        description: "Adam Shostack's comprehensive book on threat modeling, including detailed STRIDE coverage"
+      }
+    ]
+  },
+
+  stridePreparationSteps: {
+    title: "Preparing for STRIDE: Documenting Application Intelligence",
+    overview: "Effective STRIDE threat modeling requires comprehensive application understanding. By systematically documenting questions, mechanisms, objects, and security controls, you create the foundation needed to identify meaningful threats and exploitation paths.",
+    sections: [
+      {
+        title: "Application Questions: Understanding Business Context",
+        icon: "fa-question-circle",
+        content: [
+          "Application questions establish foundational understanding of the target's business purpose, user base, data sensitivity, and architectural patterns. Start by identifying what the application does, who uses it, what data it processes, and why it matters to the organization.",
+          "Critical questions to answer include: What is the primary business function? Who are the different user roles and what privileges do they have? What sensitive data does the application handle? What are the authentication and authorization models? What external systems or APIs does it integrate with?",
+          "For bug bounty purposes, focus particularly on questions that reveal high-impact attack surfaces: financial transactions, personal identifiable information (PII), administrative functions, inter-system communications, and privileged operations.",
+          "Cloud infrastructure and OSINT considerations should be integrated into your questions: What cloud services are used? What information is publicly available about the infrastructure? What credentials or keys might be exposed? What employee information is available that might enable social engineering?"
+        ],
+        keyPoints: [
+          "Application questions establish business context and identify high-value targets",
+          "Focus on data sensitivity, user privileges, and critical business functions",
+          "Include cloud services, third-party integrations, and OSINT considerations",
+          "Questions guide where to focus detailed mechanism and object documentation"
+        ]
+      },
+      {
+        title: "Mechanisms: Identifying Application Behaviors",
+        icon: "fa-cogs",
+        content: [
+          "Mechanisms are specific application behaviors or operations that process data, enforce security policies, or perform business functions. Examples include user login flows, password reset processes, API request handling, data validation routines, and session management.",
+          "Each mechanism represents a potential attack surface. Document the mechanism's purpose, what inputs it accepts, what outputs it produces, what data it accesses, and what security decisions it makes. This detail enables precise threat identification.",
+          "Prioritize mechanisms that cross security boundaries: authentication and authorization checks, data serialization and deserialization, inter-service communication, privilege changes, and external data processing. These boundary-crossing mechanisms often contain the most significant vulnerabilities.",
+          "For modern applications, include cloud-specific mechanisms: serverless function invocations, container orchestration operations, S3 bucket access patterns, IAM credential handling, API gateway routing, and managed service interactions. Cloud mechanisms have unique threat characteristics."
+        ],
+        keyPoints: [
+          "Mechanisms are specific application behaviors that represent attack surfaces",
+          "Document inputs, outputs, data access, and security decisions for each mechanism",
+          "Prioritize mechanisms that cross security boundaries or handle sensitive operations",
+          "Include cloud-specific mechanisms with their unique threat characteristics"
+        ],
+        examples: [
+          {
+            code: "Authentication Mechanism: OAuth2 token validation",
+            description: "Validates JWT tokens, checks expiration, verifies signature, extracts user claims"
+          },
+          {
+            code: "Data Access Mechanism: Multi-tenant query filtering",
+            description: "Adds tenant_id filter to database queries to enforce data isolation"
+          },
+          {
+            code: "Cloud Mechanism: S3 pre-signed URL generation",
+            description: "Generates temporary URLs with limited permissions for direct S3 access"
+          }
+        ]
+      },
+      {
+        title: "Notable Objects: Cataloging Attack Targets",
+        icon: "fa-cube",
+        content: [
+          "Notable objects are data structures, resources, or entities that attackers might want to access, modify, or control. Examples include user accounts, API tokens, session identifiers, database records, configuration files, and cloud resources.",
+          "For each object, document its structure, what sensitive information it contains, who should have access to it, and what operations can be performed on it. Understanding object details helps you craft precise threat scenarios about what attackers might target.",
+          "Objects become the 'target' in threat modeling scenarios. When documenting a threat, you'll often identify which object is being compromised. This specificity helps evaluate impact and prioritize findings based on object sensitivity.",
+          "Cloud environments introduce important object types: IAM roles and policies, security groups, encryption keys, container images, secrets in secret managers, CloudFormation templates, and API gateway configurations. These objects control access and security posture."
+        ],
+        keyPoints: [
+          "Notable objects are the targets that attackers want to access or manipulate",
+          "Document structure, sensitive data, access controls, and available operations",
+          "Objects link threat scenarios to specific impact (what gets compromised)",
+          "Cloud objects like IAM roles and security groups are critical attack targets"
+        ],
+        examples: [
+          {
+            code: "User Object: { id, email, role, permissions[], password_hash }",
+            description: "Primary user entity with authentication credentials and authorization data"
+          },
+          {
+            code: "API Token Object: { token_id, user_id, scopes[], expiration }",
+            description: "Bearer token for API authentication with defined permission scopes"
+          },
+          {
+            code: "IAM Role Object: { role_name, trust_policy, permission_policies[] }",
+            description: "AWS IAM role defining service permissions and trust relationships"
+          }
+        ]
+      },
+      {
+        title: "Security Controls: Mapping Defensive Measures",
+        icon: "fa-shield-virus",
+        content: [
+          "Security controls are the defensive mechanisms that protect against threats: authentication systems, authorization checks, input validation, encryption, rate limiting, logging, monitoring, and security headers. Cataloging controls reveals what protections exist and where gaps might occur.",
+          "For each control, document what it protects against, how it's implemented, what assumptions it makes, and what its limitations are. Understanding control boundaries and assumptions often reveals bypass opportunities.",
+          "When documenting threats, you'll map which security controls affect each threat and how. This mapping identifies whether threats are fully mitigated, partially protected, or completely unprotected, enabling risk-based prioritization.",
+          "Cloud security controls include both application-level protections and platform-provided security: WAF rules, CloudTrail logging, VPC security groups, encryption at rest, IAM permission boundaries, and resource policies. Understanding the shared responsibility model is critical."
+        ],
+        keyPoints: [
+          "Security controls are defensive measures that mitigate threats",
+          "Document what each control protects, its implementation, and limitations",
+          "Map controls to threats to identify gaps and bypass opportunities",
+          "Include both application controls and cloud platform security features"
+        ],
+        examples: [
+          {
+            code: "Control: JWT signature validation",
+            description: "Protects against token tampering by cryptographically verifying token integrity"
+          },
+          {
+            code: "Control: Row-level security policies",
+            description: "Database-level enforcement of multi-tenant data isolation"
+          },
+          {
+            code: "Control: S3 bucket policies",
+            description: "Resource-based access control defining who can access bucket contents"
+          }
+        ]
+      }
+    ],
+    practicalTips: [
+      "Use the application questions modal to systematically work through business context before diving into technical details",
+      "Start with critical user journeys (login, checkout, admin actions) and document all mechanisms in those flows",
+      "For each mechanism you identify, immediately document related objects and security controls to build connected understanding",
+      "Create custom mechanisms and objects for application-specific behaviors - the default lists are starting points, not complete inventories",
+      "Use JSON structures for notable objects to capture actual data formats you observe in API responses and requests",
+      "Document not just what security controls exist, but specifically HOW they work and what assumptions they make - this reveals bypass opportunities",
+      "Include OSINT findings as 'Information Disclosure' issues that affect multiple mechanisms (exposed credentials enable authentication bypass)",
+      "For cloud applications, map which services are used and document cloud-specific objects like IAM roles, security groups, and managed service configurations"
+    ],
+    furtherReading: [
+      {
+        title: "OWASP Testing Guide - Information Gathering",
+        url: "https://owasp.org/www-project-web-security-testing-guide/stable/4-Web_Application_Security_Testing/01-Information_Gathering/",
+        description: "Comprehensive techniques for gathering application intelligence"
+      },
+      {
+        title: "Data Flow Diagrams for Security",
+        url: "https://docs.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats",
+        description: "Microsoft guidance on creating data flow diagrams to understand application architecture"
+      }
+    ]
+  },
+
+  strideCategories: {
+    title: "STRIDE Categories: Systematic Threat Identification",
+    overview: "Each STRIDE category represents a distinct class of security threats targeting different security properties. Understanding how to apply each category systematically reveals vulnerabilities across the complete attack surface.",
+    sections: [
+      {
+        title: "Spoofing: Attacking Authentication and Identity",
+        icon: "fa-user-secret",
+        content: [
+          "Spoofing threats target authentication mechanisms by attempting to impersonate legitimate users, services, or systems. Attackers aim to present false credentials or identity claims to gain unauthorized access to systems or data.",
+          "When analyzing spoofing threats, examine all authentication mechanisms: user login flows, API authentication, service-to-service authentication, SSO integrations, and cryptographic verification. Ask: Can an attacker create or obtain credentials for another identity?",
+          "Common spoofing vulnerabilities include: weak password policies enabling credential guessing, session token prediction or brute-forcing, JWT token manipulation, cookie theft through XSS, credential stuffing against accounts without MFA, and authentication bypass through logic flaws.",
+          "Cloud-specific spoofing threats: stolen IAM access keys, compromised service account credentials, metadata service abuse (SSRF to obtain cloud credentials), assumed role exploitation, and federated authentication vulnerabilities."
+        ],
+        keyPoints: [
+          "Spoofing targets authentication and identity verification mechanisms",
+          "Examine all credential types: passwords, tokens, cookies, API keys, certificates",
+          "Look for weak authentication, predictable identifiers, and credential theft opportunities",
+          "Cloud spoofing often involves IAM credentials and service account compromise"
+        ],
+        examples: [
+          {
+            code: "Mechanism: JWT token validation, Object: User session",
+            description: "Threat: Attacker modifies JWT claims to escalate privileges without signature verification failing"
+          },
+          {
+            code: "Mechanism: API key authentication, Object: Service account",
+            description: "Threat: API keys exposed in GitHub repositories enable attacker to impersonate legitimate services"
+          }
+        ]
+      },
+      {
+        title: "Tampering: Attacking Data Integrity",
+        icon: "fa-edit",
+        content: [
+          "Tampering threats target data integrity by attempting to modify data in unauthorized ways. Attackers aim to change data in transit, data at rest, application state, or system configurations to achieve their objectives.",
+          "When analyzing tampering threats, examine all data processing mechanisms: input validation, API parameter handling, database operations, file modifications, and configuration management. Ask: Can an attacker modify data they shouldn't be able to change?",
+          "Common tampering vulnerabilities include: insufficient input validation allowing injection attacks, client-side controls that can be bypassed, API parameter tampering to modify other users' data, insecure deserialization, and IDOR vulnerabilities enabling unauthorized data modification.",
+          "Cloud-specific tampering threats: S3 bucket policy modification, IAM policy tampering, CloudFormation template injection, Lambda function code modification, security group rule changes, and container image tampering."
+        ],
+        keyPoints: [
+          "Tampering targets data integrity in transit, at rest, and in processing",
+          "Examine input validation, parameter handling, and data modification operations",
+          "Look for client-side controls, injection points, and insecure deserialization",
+          "Cloud tampering often involves policy modifications and configuration changes"
+        ],
+        examples: [
+          {
+            code: "Mechanism: API parameter processing, Object: Order total",
+            description: "Threat: Attacker modifies price parameter in checkout API to reduce payment amount"
+          },
+          {
+            code: "Mechanism: S3 bucket access, Object: Static website content",
+            description: "Threat: Misconfigured bucket policy allows attacker to overwrite legitimate files with malicious content"
+          }
+        ]
+      },
+      {
+        title: "Repudiation: Attacking Accountability and Non-Repudiation",
+        icon: "fa-history",
+        content: [
+          "Repudiation threats target logging and accountability mechanisms. Attackers aim to perform actions without leaving evidence or to deny their involvement in malicious activities by manipulating or avoiding audit systems.",
+          "When analyzing repudiation threats, examine all logging and audit mechanisms: authentication logs, transaction records, audit trails, access logs, and cryptographic signatures. Ask: Can an attacker perform actions without being logged or manipulate logs after the fact?",
+          "Common repudiation vulnerabilities include: missing audit logs for critical operations, insufficient log detail preventing incident investigation, log injection vulnerabilities allowing attackers to forge entries, lack of log integrity protection, and missing timestamps or user attribution.",
+          "Cloud-specific repudiation threats: disabled CloudTrail logging, CloudWatch log deletion, lack of log aggregation allowing evidence destruction, missing S3 access logging, and insufficient IAM activity auditing."
+        ],
+        keyPoints: [
+          "Repudiation targets logging, audit trails, and accountability mechanisms",
+          "Examine what gets logged, log integrity protections, and evidence preservation",
+          "Look for missing logs on critical operations and log manipulation opportunities",
+          "Cloud repudiation often involves disabling platform logging services"
+        ],
+        examples: [
+          {
+            code: "Mechanism: Admin action logging, Object: Audit trail",
+            description: "Threat: Administrative interface lacks logging for privilege changes, enabling untraceable privilege escalation"
+          },
+          {
+            code: "Mechanism: CloudTrail configuration, Object: AWS activity logs",
+            description: "Threat: Attacker disables CloudTrail logging before performing malicious actions, preventing incident detection"
+          }
+        ]
+      },
+      {
+        title: "Information Disclosure: Attacking Confidentiality",
+        icon: "fa-eye",
+        content: [
+          "Information Disclosure threats target data confidentiality by attempting to access information without authorization. This category is particularly valuable for bug bounty hunting as it includes both technical vulnerabilities and OSINT findings.",
+          "When analyzing information disclosure, examine all data access mechanisms: API responses, error messages, directory structures, public repositories, verbose responses, and OSINT sources. Ask: Can an attacker access information they shouldn't have access to?",
+          "Common information disclosure vulnerabilities include: excessive API data exposure, verbose error messages revealing system details, directory traversal, IDOR allowing access to other users' data, missing access controls, exposed admin interfaces, leaked credentials in GitHub, and sensitive data in public S3 buckets.",
+          "Cloud-specific information disclosure: publicly accessible S3 buckets, overly permissive IAM policies, exposed AWS credentials, metadata service information leakage, CloudFormation outputs revealing infrastructure details, and unsecured snapshots or backups."
+        ],
+        keyPoints: [
+          "Information disclosure targets data confidentiality and unauthorized access",
+          "Examine API responses, error messages, file access, and OSINT sources",
+          "Look for excessive data exposure, missing access controls, and public leaks",
+          "Cloud information disclosure often involves misconfigured storage and permissions"
+        ],
+        examples: [
+          {
+            code: "Mechanism: User profile API, Object: User personal data",
+            description: "Threat: API returns all user data without filtering based on requester permissions, exposing other users' PII"
+          },
+          {
+            code: "Mechanism: GitHub repository scanning, Object: AWS credentials",
+            description: "Threat: Development credentials committed to public repository enable full AWS account access"
+          }
+        ]
+      },
+      {
+        title: "Denial of Service: Attacking Availability",
+        icon: "fa-ban",
+        content: [
+          "Denial of Service threats target system availability by attempting to make resources unavailable to legitimate users. While traditional DoS is often out of scope, application-level DoS and resource exhaustion are valid bug bounty findings.",
+          "When analyzing DoS threats, examine resource management mechanisms: rate limiting, resource quotas, algorithmic complexity, connection limits, and processing efficiency. Ask: Can an attacker consume resources to deny service to others?",
+          "Common DoS vulnerabilities include: missing rate limiting on expensive operations, algorithmic complexity attacks (ReDoS, billion laughs), resource exhaustion through large uploads, connection exhaustion, cache poisoning, and account lockout abuse.",
+          "Cloud-specific DoS threats: Lambda function timeout abuse, API Gateway throttle limit bypass, cost amplification attacks (forcing expensive cloud operations), serverless cold start exploitation, and storage quota exhaustion."
+        ],
+        keyPoints: [
+          "DoS targets availability through resource exhaustion or system disruption",
+          "Examine rate limiting, resource quotas, and algorithmic efficiency",
+          "Look for expensive operations without limits and complexity attacks",
+          "Cloud DoS can involve cost amplification and serverless abuse"
+        ],
+        examples: [
+          {
+            code: "Mechanism: Search functionality, Object: Database resources",
+            description: "Threat: Regex-based search without timeout allows ReDoS attack causing database CPU exhaustion"
+          },
+          {
+            code: "Mechanism: Image processing Lambda, Object: AWS bill",
+            description: "Threat: Attacker triggers processing of huge images repeatedly, causing massive Lambda costs"
+          }
+        ]
+      },
+      {
+        title: "Elevation of Privilege: Attacking Authorization",
+        icon: "fa-level-up-alt",
+        content: [
+          "Elevation of Privilege threats target authorization mechanisms by attempting to gain access or permissions beyond what's intended. This category often yields the highest-impact bug bounty findings as it enables attackers to access administrative functions or sensitive operations.",
+          "When analyzing privilege escalation, examine all authorization checks: role-based access control, permission validation, API authorization, administrative interface access, and trust boundaries. Ask: Can an attacker perform operations intended only for higher-privileged users?",
+          "Common privilege escalation vulnerabilities include: missing authorization checks on admin endpoints, IDOR allowing access to other users' resources, horizontal and vertical privilege escalation, insecure direct object references, mass assignment vulnerabilities, and authorization bypass through parameter manipulation.",
+          "Cloud-specific privilege escalation: IAM role assumption vulnerabilities, privilege escalation through service-linked roles, Lambda function permission abuse, overly permissive resource policies, and container escape to host access."
+        ],
+        keyPoints: [
+          "Elevation of privilege targets authorization and access control mechanisms",
+          "Examine role checks, permission validation, and administrative access",
+          "Look for missing authorization checks and parameter-based privilege escalation",
+          "Cloud privilege escalation often involves IAM roles and resource policies"
+        ],
+        examples: [
+          {
+            code: "Mechanism: Admin API endpoints, Object: Admin functions",
+            description: "Threat: Admin endpoints verify authentication but not authorization, allowing regular users to perform admin actions"
+          },
+          {
+            code: "Mechanism: IAM role assumption, Object: Privileged AWS role",
+            description: "Threat: Lambda function can assume any role in account, enabling privilege escalation to admin access"
+          }
+        ]
+      }
+    ],
+    practicalTips: [
+      "Work through one STRIDE category at a time against each critical mechanism to ensure systematic coverage",
+      "Start with Information Disclosure and Elevation of Privilege as these often yield the highest-impact findings",
+      "Combine categories in attack chains: spoofing credentials might enable information disclosure which reveals data for tampering attacks",
+      "Document even mitigated threats to demonstrate understanding and identify partial protections that might be bypassable",
+      "For each threat, be specific about the mechanism being exploited and the object being targeted",
+      "Pay special attention to authorization checks (EoP) and data access controls (Information Disclosure) as these are commonly flawed",
+      "Use OSINT findings to feed multiple STRIDE categories: exposed credentials enable spoofing, infrastructure details aid DoS, leaked data shows information disclosure",
+      "For cloud applications, each STRIDE category has cloud-specific manifestations - don't forget IAM, storage, and managed service threats"
+    ],
+    furtherReading: [
+      {
+        title: "STRIDE Threat Examples",
+        url: "https://docs.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats",
+        description: "Microsoft's comprehensive list of example threats for each STRIDE category"
+      },
+      {
+        title: "OWASP Top 10",
+        url: "https://owasp.org/www-project-top-ten/",
+        description: "Map STRIDE categories to OWASP Top 10 vulnerabilities for practical testing guidance"
+      }
+    ]
+  },
+
+  threatScenarioCreation: {
+    title: "Creating Effective Threat Scenarios for Bug Bounty Hunting",
+    overview: "Well-documented threat scenarios transform abstract security analysis into actionable testing plans and compelling bug reports. Each scenario should clearly define the attack, steps to reproduce, impact assessment, and affected security controls.",
+    sections: [
+      {
+        title: "Threat Scenario Components",
+        icon: "fa-list-ol",
+        content: [
+          "Every threat scenario should identify a specific URL or endpoint where the vulnerability exists. This grounds your threat model in concrete testable targets discovered during reconnaissance, enabling immediate validation and testing.",
+          "Select the mechanism being exploited from your documented mechanisms. This could be an authentication flow, API operation, data validation process, or any application behavior. The mechanism defines the attack surface being exploited.",
+          "Optionally identify the target object from your notable objects list. This defines what is being compromised: a user account, API token, sensitive data structure, or cloud resource. The object helps assess impact and demonstrates clear understanding of what's at risk.",
+          "Document the STRIDE category the threat belongs to. This categorization helps organize threats, ensures comprehensive coverage across all security properties, and provides context for the type of security violation occurring."
+        ],
+        keyPoints: [
+          "Identify specific URL/endpoint for concrete testability",
+          "Select the mechanism being exploited to define attack surface",
+          "Optionally specify target object to clarify what's compromised",
+          "Categorize by STRIDE type for organization and coverage"
+        ]
+      },
+      {
+        title: "Step-by-Step Exploitation Instructions",
+        icon: "fa-shoe-prints",
+        content: [
+          "Exploitation steps should be detailed enough that another security researcher could reproduce the attack without prior knowledge. Include specific API requests with example payloads, parameter values, headers, and expected responses.",
+          "Break complex attacks into discrete steps. Each step should represent a single action: sending a request, observing a response, modifying a value, or performing a specific operation. This granularity makes the attack clear and reproducible.",
+          "Include technical details that demonstrate feasibility: actual API endpoints, parameter names, example values, timing requirements, and observable outcomes. These details prove you've thought through the attack mechanics.",
+          "For complex attacks involving multiple systems or sequences, number your steps and show the progression clearly. Include what you expect to see at each step to help validators understand success criteria."
+        ],
+        keyPoints: [
+          "Provide reproduction steps detailed enough for independent verification",
+          "Break attacks into discrete, numbered steps with specific actions",
+          "Include technical details: endpoints, parameters, payloads, expected responses",
+          "Show attack progression clearly with observable outcomes at each step"
+        ],
+        examples: [
+          {
+            code: "1. Authenticate as low-privilege user and capture JWT token",
+            description: "Step 1 establishes baseline access level"
+          },
+          {
+            code: "2. Modify JWT 'role' claim from 'user' to 'admin' without resigning",
+            description: "Step 2 performs the tampering action"
+          },
+          {
+            code: "3. Send request to /api/admin/users with modified token",
+            description: "Step 3 attempts to access admin functionality"
+          },
+          {
+            code: "4. Observe successful response with admin data, bypassing authorization",
+            description: "Step 4 demonstrates successful privilege escalation"
+          }
+        ]
+      },
+      {
+        title: "Impact Assessment Across Three Dimensions",
+        icon: "fa-exclamation-triangle",
+        content: [
+          "Customer Data impact describes risks to user privacy and data confidentiality. Explain what customer information could be accessed, modified, or deleted. Quantify the scope: can the attacker access one user's data, all users' data, or specific subsets? Mention regulatory implications like GDPR, PII exposure, or financial data compromise.",
+          "Attacker Scope describes how the vulnerability enables further attacks or lateral movement. Can the attacker escalate privileges? Access additional systems? Modify security controls? Persist access? Understanding scope expansion helps prioritize threats that could lead to deeper compromise.",
+          "Company Reputation impact considers business and brand consequences. Would this vulnerability damage customer trust if disclosed? Are there regulatory fines at risk? Could it affect stock price? Would it generate negative press? Does it expose critical business operations? High-profile organizations particularly value reputation impact assessment.",
+          "Be specific and realistic in impact assessment. Avoid generic statements like 'high impact' - instead explain the precise consequences. Use concrete examples: '10,000 customer credit cards exposed' rather than 'customer data at risk'."
+        ],
+        keyPoints: [
+          "Customer Data: Privacy, PII, regulatory violations, data breach scope",
+          "Attacker Scope: Privilege escalation, lateral movement, persistence, control expansion",
+          "Company Reputation: Trust damage, regulatory fines, press coverage, business impact",
+          "Be specific with real consequences rather than generic severity ratings"
+        ],
+        examples: [
+          {
+            code: "Customer Data: Attacker accesses complete user profiles including names, emails, addresses, and order history for all 50,000 registered users. GDPR violation with potential €20M fine.",
+            description: "Specific data types, scope quantification, regulatory implications"
+          },
+          {
+            code: "Attacker Scope: Initial API key exposure enables authentication. From there, attacker escalates to admin role, modifies security policies, and creates persistent backdoor admin account.",
+            description: "Shows attack progression and scope expansion"
+          },
+          {
+            code: "Company Reputation: Public disclosure of this vulnerability would reveal that customer payment data was inadequately protected, likely causing significant customer churn and negative press coverage in financial media.",
+            description: "Concrete business consequences beyond technical impact"
+          }
+        ]
+      },
+      {
+        title: "Mapping Affected Security Controls",
+        icon: "fa-shield-virus",
+        content: [
+          "For each threat, identify which security controls from your catalog are relevant and explain their relationship to the threat. This demonstrates deep security understanding and shows you've considered the defensive posture.",
+          "Explain how each control affects the threat: Does it completely prevent the attack? Partially mitigate it? Fail to protect against it? Is there a bypass? Understanding control effectiveness reveals security gaps and helps prioritize remediation.",
+          "When controls fail to prevent threats, explain why. Is the control missing? Incorrectly implemented? Based on flawed assumptions? Bypassable through another mechanism? This analysis is valuable for defenders and strengthens your submission.",
+          "Multiple controls might affect a single threat. Document all relevant controls to show comprehensive understanding of the security architecture. A threat might bypass authentication controls but be logged by audit controls, affecting detectability."
+        ],
+        keyPoints: [
+          "Identify all security controls relevant to each threat",
+          "Explain how each control affects the threat: prevents, mitigates, or fails",
+          "Analyze why controls fail: missing, flawed, bypassable, misimplemented",
+          "Multiple controls can affect one threat - document all relationships"
+        ],
+        examples: [
+          {
+            code: "Control: JWT signature validation | Effect: This control should prevent token tampering, but the implementation only checks signature presence, not validity, allowing modified claims to pass.",
+            description: "Control exists but is incorrectly implemented"
+          },
+          {
+            code: "Control: API rate limiting | Effect: Rate limiting would make brute-force impractical, but this endpoint has no rate limit configured, enabling unlimited authentication attempts.",
+            description: "Control is missing where it should exist"
+          },
+          {
+            code: "Control: CloudTrail logging | Effect: While the attack is successful, CloudTrail logs all API calls, making the attack detectable during security review if logs are monitored.",
+            description: "Control doesn't prevent but enables detection"
+          }
+        ]
+      }
+    ],
+    practicalTips: [
+      "Start with high-confidence threats you believe are exploitable, then expand to theoretical vulnerabilities for comprehensive coverage",
+      "Use your threat scenarios as actual test cases - if the exploitation steps are clear, you can directly test them",
+      "When you discover an actual vulnerability, update the threat scenario with real data: actual requests, real responses, confirmed impact",
+      "Save your threat model even for unsuccessful attacks - they represent security understanding and might be valuable for future testing",
+      "For complex attack chains, create multiple linked threats showing progression: initial access → information disclosure → privilege escalation",
+      "Include proof-of-concept payloads and request/response examples when documenting real findings",
+      "Reference your threat model documentation in bug reports to demonstrate systematic analysis and security expertise",
+      "As you learn about new mechanisms or objects during testing, update your threat model to include new attack scenarios"
+    ],
+    furtherReading: [
+      {
+        title: "Writing High-Quality Bug Reports",
+        url: "https://blog.bugcrowd.com/how-to-write-a-great-bug-bounty-report",
+        description: "Bugcrowd guide to effective vulnerability reporting"
+      },
+      {
+        title: "CVSS Impact Assessment",
+        url: "https://www.first.org/cvss/specification-document",
+        description: "Understanding how to assess and communicate security impact"
+      }
+    ]
+  },
+
+  cloudOsintThreatModeling: {
+    title: "Cloud Infrastructure and OSINT in STRIDE Threat Modeling",
+    overview: "Modern applications leverage cloud services and expose information through public sources. Integrating cloud-specific threats and OSINT findings into STRIDE threat modeling reveals vulnerabilities that traditional web application testing misses.",
+    sections: [
+      {
+        title: "Cloud-Specific STRIDE Threats",
+        icon: "fa-cloud",
+        content: [
+          "Cloud services fundamentally change the threat landscape. Traditional on-premises threats manifest differently in cloud environments, and entirely new threat categories emerge from cloud-specific services, shared responsibility models, and elastic infrastructure.",
+          "Spoofing in cloud environments often involves IAM credentials: stolen access keys, compromised service account tokens, metadata service abuse (SSRF to obtain credentials), or IAM role assumption vulnerabilities. Cloud authentication is often API-key-based rather than password-based, changing attack dynamics.",
+          "Tampering threats expand to include infrastructure-as-code manipulation, cloud policy modifications, security group changes, and managed service configuration tampering. Attackers might not tamper with application data directly but instead modify cloud policies controlling access.",
+          "Information Disclosure is perhaps the most common cloud vulnerability: publicly accessible S3 buckets, overly permissive IAM policies, exposed snapshots, leaked credentials in repositories, CloudFormation outputs revealing infrastructure, and metadata service information leakage.",
+          "Elevation of Privilege in cloud contexts involves IAM permission escalation, service-linked role abuse, resource policy exploitation, and cross-account access vulnerabilities. Cloud authorization models are often more complex than application authorization, creating bypass opportunities."
+        ],
+        keyPoints: [
+          "Cloud threats span all STRIDE categories with cloud-specific manifestations",
+          "IAM credentials and cloud policies become primary attack targets",
+          "Shared responsibility model creates gaps where neither party provides adequate security",
+          "Cloud misconfigurations often enable information disclosure and privilege escalation"
+        ]
+      },
+      {
+        title: "Cloud Service Categories and Their Threats",
+        icon: "fa-server",
+        content: [
+          "Compute services (EC2, Lambda, Container services): Instance metadata service abuse, excessive IAM role permissions on compute resources, container escape to host access, serverless cold start exploitation, and shared tenancy information leakage.",
+          "Storage services (S3, EBS, EFS): Public bucket access, bucket policy manipulation, signed URL abuse, snapshot sharing vulnerabilities, encryption key exposure, and inadequate object-level permissions.",
+          "Networking (VPC, API Gateway, CloudFront): Security group misconfigurations, API Gateway authorization bypass, WAF rule gaps, DNS manipulation, and CDN cache poisoning.",
+          "Identity and Access Management: Overly permissive policies, privilege escalation paths, AssumeRole vulnerabilities, cross-account trust exploitation, and resource-based policy confusion.",
+          "Managed Databases and Data Services: Publicly accessible databases, weak authentication, snapshot exposure, insufficient encryption, backup security gaps, and data exfiltration through logging.",
+          "DevOps and Management (CloudFormation, Systems Manager, Secrets Manager): Infrastructure-as-code secret exposure, template injection, parameter tampering, secrets with excessive permissions, and insufficient rotation."
+        ],
+        keyPoints: [
+          "Each cloud service category has distinct security boundaries and threat vectors",
+          "Document cloud services in use as mechanisms with service-specific threats",
+          "Cloud objects include IAM roles, policies, security groups, and resource configurations",
+          "Cloud security controls span both application-level and platform-provided protections"
+        ],
+        examples: [
+          {
+            code: "Service: S3 Bucket | Threat: Information Disclosure",
+            description: "Bucket configured with public read access exposes sensitive customer documents"
+          },
+          {
+            code: "Service: Lambda Function | Threat: Elevation of Privilege",
+            description: "Lambda role can assume any role in account due to overly permissive trust policy"
+          },
+          {
+            code: "Service: RDS Database | Threat: Information Disclosure",
+            description: "Database snapshot shared publicly reveals production customer data"
+          }
+        ]
+      },
+      {
+        title: "OSINT as Information Disclosure Threats",
+        icon: "fa-search",
+        content: [
+          "Open Source Intelligence (OSINT) findings should be documented as Information Disclosure threats in your STRIDE model. Publicly available information often enables other attack categories by revealing credentials, infrastructure details, or security weaknesses.",
+          "GitHub and code repository scanning frequently reveals: hardcoded credentials (API keys, database passwords), configuration files with internal infrastructure details, commented-out code with security implications, and development/staging URLs not intended for public access.",
+          "Employee information from LinkedIn and social media reveals: organizational structure for social engineering, technology stack details from job descriptions, project information from employee posts, and email format for credential stuffing or phishing.",
+          "Public cloud resources include: exposed S3 buckets containing backups or logs, publicly accessible CloudFront distributions, subdomain information from certificate transparency logs, and IP ranges from BGP routing data.",
+          "Web archive and cached content can reveal: historical vulnerabilities that might still exist in forgotten instances, previous configurations showing security evolution, exposed documentation or admin panels, and leaked data that was later removed."
+        ],
+        keyPoints: [
+          "OSINT findings are Information Disclosure threats showing data leakage",
+          "Leaked credentials enable Spoofing and Elevation of Privilege attacks",
+          "Infrastructure details revealed through OSINT aid in attack planning",
+          "Document OSINT sources: GitHub, job postings, social media, web archives, DNS records"
+        ],
+        examples: [
+          {
+            code: "Source: GitHub Repository | Finding: AWS credentials in .env file",
+            description: "Information Disclosure enabling Spoofing - credentials allow impersonation of legitimate service"
+          },
+          {
+            code: "Source: LinkedIn Job Posting | Finding: Technology stack (GraphQL, React, PostgreSQL)",
+            description: "Information Disclosure providing attack surface intelligence for targeted vulnerability research"
+          },
+          {
+            code: "Source: Certificate Transparency | Finding: dev.internal.company.com subdomain",
+            description: "Information Disclosure revealing non-public development environment for targeted testing"
+          }
+        ]
+      },
+      {
+        title: "Integrating Cloud and OSINT into Threat Modeling Workflow",
+        icon: "fa-project-diagram",
+        content: [
+          "When documenting Application Questions, include cloud architecture questions: Which cloud provider(s)? What services are used? How is authentication to cloud services handled? What is the deployment architecture? Are there separate accounts for dev/staging/production?",
+          "In your Mechanisms documentation, include cloud-specific mechanisms: S3 bucket access patterns, Lambda invocation flows, API Gateway routing, IAM role assumption, Secrets Manager retrieval, and CloudFormation deployments. Each represents an attack surface.",
+          "Notable Objects should include cloud resources: IAM roles and policies, S3 bucket policies, security group configurations, encryption keys, container images, and cloud resource identifiers. These are targets in cloud-focused threats.",
+          "Security Controls must encompass both application and cloud platform protections: IAM permission boundaries, resource policies, VPC security groups, CloudTrail logging, encryption at rest/transit, WAF rules, and service-specific security features.",
+          "Regularly perform OSINT reconnaissance and document findings as Information Disclosure threats. Map how OSINT discoveries connect to other STRIDE categories: credentials enable spoofing, infrastructure details aid DoS planning, leaked data shows confidentiality failures."
+        ],
+        keyPoints: [
+          "Integrate cloud services into all four preparation areas: questions, mechanisms, objects, controls",
+          "Document cloud services as mechanisms with cloud-specific threat applications",
+          "Include cloud resources as notable objects that become threat targets",
+          "OSINT findings feed multiple STRIDE categories through threat chains",
+          "Update threat model continuously as OSINT research reveals new information"
+        ]
+      }
+    ],
+    practicalTips: [
+      "Use cloud service documentation to understand security boundaries and identify potential misconfigurations in your targets",
+      "For each cloud service discovered in reconnaissance, document the service as a mechanism and research STRIDE threats specific to that service",
+      "Maintain an OSINT findings log and regularly update your threat model with new information disclosure threats as you discover them",
+      "Cloud privilege escalation paths can be complex - use tools like AWS IAM Policy Simulator to understand permission relationships",
+      "Document cloud security as defense-in-depth with multiple control layers: application controls, IAM policies, resource policies, network security",
+      "GitHub dorking for organization-related repositories is one of the highest-value OSINT activities for finding credentials and infrastructure details",
+      "Certificate transparency logs (crt.sh) reveal non-public subdomains that are often development or internal environments with weaker security",
+      "When you find cloud credentials through OSINT, document as both Information Disclosure (the leak) and Spoofing (the enabled impersonation)",
+      "Use OSINT to identify employee roles and responsibilities, then map to application areas they likely work on for targeted testing focus",
+      "Cloud security misconfigurations often cross STRIDE categories: a misconfigured S3 bucket policy is Information Disclosure but also enables Tampering if write access is granted"
+    ],
+    furtherReading: [
+      {
+        title: "AWS Security Best Practices",
+        url: "https://docs.aws.amazon.com/security/",
+        description: "AWS security documentation covering IAM, encryption, logging, and service-specific security"
+      },
+      {
+        title: "OWASP Cloud Security Project",
+        url: "https://owasp.org/www-project-cloud-security/",
+        description: "OWASP guidance on cloud-specific security vulnerabilities and testing"
+      },
+      {
+        title: "OSINT Framework",
+        url: "https://osintframework.com/",
+        description: "Comprehensive collection of OSINT tools and techniques"
+      },
+      {
+        title: "Cloud Security Alliance - Cloud Controls Matrix",
+        url: "https://cloudsecurityalliance.org/research/cloud-controls-matrix/",
+        description: "Framework for cloud security controls across multiple providers"
+      }
+    ]
   }
 }; 
