@@ -6582,6 +6582,10 @@ function App() {
                   </Col>
                 </Row>
                 <h4 className="text-secondary mb-3 fs-5 mt-4">URL Discovery & Endpoint Enumeration</h4>
+                <div className="alert alert-warning mb-3" role="alert">
+                  <i className="bi bi-exclamation-triangle-fill me-2"></i>
+                  This section is still under development
+                </div>
                 <Row className="mb-4">
                   {[
                     {
@@ -6595,7 +6599,7 @@ function App() {
                       onResults: handleOpenKatanaURLResultsModal,
                       resultCount: mostRecentKatanaURLScan && mostRecentKatanaURLScan.result ? 
                         mostRecentKatanaURLScan.result.split('\n').filter(line => line.trim()).length : 0,
-                      resultLabel: 'Endpoints:'
+                      resultLabel: 'Endpoints'
                     },
                     {
                       name: 'LinkFinder',
@@ -6608,7 +6612,7 @@ function App() {
                       onResults: handleOpenLinkFinderURLResultsModal,
                       resultCount: mostRecentLinkFinderURLScan && mostRecentLinkFinderURLScan.result ? 
                         mostRecentLinkFinderURLScan.result.split('\n').filter(line => line.trim()).length : 0,
-                      resultLabel: 'Endpoints:'
+                      resultLabel: 'Endpoints'
                     },
                     {
                       name: 'Waybackurls',
@@ -6621,7 +6625,7 @@ function App() {
                       onResults: handleOpenWaybackURLsResultsModal,
                       resultCount: mostRecentWaybackURLsScan && mostRecentWaybackURLsScan.result ? 
                         mostRecentWaybackURLsScan.result.split('\n').filter(line => line.trim()).length : 0,
-                      resultLabel: 'Endpoints:'
+                      resultLabel: 'Endpoints'
                     },
                     {
                       name: 'GAU',
@@ -6643,7 +6647,7 @@ function App() {
                             return mostRecentGAUURLScan.result.split('\n').filter(line => line.trim()).length;
                           }
                         })() : 0,
-                      resultLabel: 'Endpoints:'
+                      resultLabel: 'Endpoints'
                     }
                   ].map((tool, index) => (
                     <Col md={3} key={index}>
@@ -6693,6 +6697,10 @@ function App() {
                 </Row>
 
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Endpoint Brute Forcing</h4>
+                <div className="alert alert-warning mb-3" role="alert">
+                  <i className="bi bi-exclamation-triangle-fill me-2"></i>
+                  This section is still under development
+                </div>
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>

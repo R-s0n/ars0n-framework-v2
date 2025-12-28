@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { Modal, Button, Tab, Tabs, Table, Badge, Spinner, Alert, Accordion } from 'react-bootstrap';
+import { useState, useEffect, useMemo } from 'react';
+import { Modal, Button, Tab, Tabs, Table, Badge, Spinner, Alert, Accordion, Form, Row, Col, Pagination, OverlayTrigger, Tooltip } from 'react-bootstrap';
 import { MdCopyAll } from 'react-icons/md';
 
 const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNetworkRanges, mostRecentIPPortScan }) => {
@@ -12,6 +12,20 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
   const [metadataResults, setMetadataResults] = useState([]);
   const [metadataScans, setMetadataScans] = useState([]);
   const [metadataLoading, setMetadataLoading] = useState(false);
+  const [sortColumn, setSortColumn] = useState('');
+  const [sortDirection, setSortDirection] = useState('asc');
+  const [filters, setFilters] = useState({
+    url: '',
+    hostname: '',
+    statusCode: '',
+    port: '',
+    protocol: '',
+    technologies: ''
+  });
+  const [addingUrls, setAddingUrls] = useState(new Set());
+  const [existingScopeTargets, setExistingScopeTargets] = useState([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage] = useState(25);
 
   const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8443';
 
@@ -19,8 +33,13 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
     if (show && mostRecentIPPortScan && mostRecentIPPortScan.scan_id) {
       fetchIPPortScanData();
       fetchMetadataData();
+      fetchExistingScopeTargets();
     }
   }, [show, mostRecentIPPortScan]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filters, sortColumn, sortDirection]);
 
   const fetchIPPortScanData = async () => {
     if (!mostRecentIPPortScan || !mostRecentIPPortScan.scan_id) return;
@@ -82,6 +101,98 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
     } finally {
       setMetadataLoading(false);
     }
+  };
+
+  const fetchExistingScopeTargets = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/scopetarget/read`);
+      if (response.ok) {
+        const data = await response.json();
+        setExistingScopeTargets(data);
+      }
+    } catch (error) {
+      console.error('LiveWebServersResultsModal: Error fetching scope targets:', error);
+    }
+  };
+
+  const isUrlAlreadyScopeTarget = (url) => {
+    return existingScopeTargets.some(
+      target => target.type === 'URL' && target.scope_target === url
+    );
+  };
+
+  const handleAddAsScopeTarget = async (server) => {
+    if (addingUrls.has(server.url)) return;
+    
+    setAddingUrls(prev => new Set(prev).add(server.url));
+    
+    try {
+      const payload = {
+        type: 'URL',
+        mode: 'Passive',
+        scope_target: server.url,
+        active: false,
+      };
+      
+      const response = await fetch(`${API_BASE_URL}/scopetarget/add`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to add URL as scope target: ${response.status} - ${errorText}`);
+      }
+      
+      await fetchExistingScopeTargets();
+    } catch (error) {
+      alert(`Failed to add ${server.url} as scope target: ${error.message}`);
+    } finally {
+      setAddingUrls(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(server.url);
+        return newSet;
+      });
+    }
+  };
+
+  const handleFilterChange = (filterKey, value) => {
+    setFilters(prev => ({
+      ...prev,
+      [filterKey]: value
+    }));
+  };
+
+  const clearFilters = () => {
+    setFilters({
+      url: '',
+      hostname: '',
+      statusCode: '',
+      port: '',
+      protocol: '',
+      technologies: ''
+    });
+  };
+
+  const handleSort = (column) => {
+    if (sortColumn === column) {
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortColumn(column);
+      setSortDirection('asc');
+    }
+  };
+
+  const renderSortIcon = (column) => {
+    if (sortColumn !== column) {
+      return <i className="bi bi-arrow-down-up text-muted ms-1"></i>;
+    }
+    return sortDirection === 'asc' ? 
+      <i className="bi bi-arrow-up text-primary ms-1"></i> : 
+      <i className="bi bi-arrow-down text-primary ms-1"></i>;
   };
 
   const handleCopyText = async (text) => {
@@ -154,6 +265,145 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(1024));
     return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];
+  };
+
+  const filteredAndSortedServers = useMemo(() => {
+    let filtered = liveWebServers.filter(server => {
+      if (filters.url && !server.url?.toLowerCase().includes(filters.url.toLowerCase())) {
+        return false;
+      }
+      
+      if (filters.hostname && !server.hostname?.toLowerCase().includes(filters.hostname.toLowerCase())) {
+        return false;
+      }
+      
+      if (filters.statusCode) {
+        const statusCode = server.status_code;
+        if (filters.statusCode === '2xx' && (statusCode < 200 || statusCode >= 300)) return false;
+        if (filters.statusCode === '3xx' && (statusCode < 300 || statusCode >= 400)) return false;
+        if (filters.statusCode === '4xx' && (statusCode < 400 || statusCode >= 500)) return false;
+        if (filters.statusCode === '5xx' && (statusCode < 500 || statusCode >= 600)) return false;
+        if (filters.statusCode === 'no_response' && statusCode) return false;
+      }
+      
+      if (filters.port && server.port && !server.port.toString().includes(filters.port)) {
+        return false;
+      }
+      
+      if (filters.protocol && !server.protocol?.toLowerCase().includes(filters.protocol.toLowerCase())) {
+        return false;
+      }
+      
+      if (filters.technologies) {
+        const techString = server.technologies ? server.technologies.join(' ') : '';
+        if (!techString.toLowerCase().includes(filters.technologies.toLowerCase())) {
+          return false;
+        }
+      }
+      
+      return true;
+    });
+
+    if (!sortColumn) return filtered;
+
+    return filtered.sort((a, b) => {
+      let valueA, valueB;
+
+      switch (sortColumn) {
+        case 'url':
+          valueA = a.url || '';
+          valueB = b.url || '';
+          break;
+        case 'hostname':
+          valueA = a.hostname || '';
+          valueB = b.hostname || '';
+          break;
+        case 'statusCode':
+          valueA = a.status_code || 0;
+          valueB = b.status_code || 0;
+          break;
+        case 'port':
+          valueA = a.port || 0;
+          valueB = b.port || 0;
+          break;
+        case 'protocol':
+          valueA = a.protocol || '';
+          valueB = b.protocol || '';
+          break;
+        case 'title':
+          valueA = a.title || '';
+          valueB = b.title || '';
+          break;
+        case 'server':
+          valueA = a.server_header || '';
+          valueB = b.server_header || '';
+          break;
+        default:
+          return 0;
+      }
+
+      if (valueA < valueB) return sortDirection === 'asc' ? -1 : 1;
+      if (valueA > valueB) return sortDirection === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [liveWebServers, filters, sortColumn, sortDirection]);
+
+  const totalPages = Math.ceil(filteredAndSortedServers.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const paginatedServers = filteredAndSortedServers.slice(startIndex, endIndex);
+
+  const handlePageChange = (pageNumber) => {
+    setCurrentPage(pageNumber);
+  };
+
+  const renderPagination = () => {
+    if (totalPages <= 1) return null;
+
+    const items = [];
+    const maxPagesToShow = 5;
+    let startPage = Math.max(1, currentPage - Math.floor(maxPagesToShow / 2));
+    let endPage = Math.min(totalPages, startPage + maxPagesToShow - 1);
+
+    if (endPage - startPage + 1 < maxPagesToShow) {
+      startPage = Math.max(1, endPage - maxPagesToShow + 1);
+    }
+
+    items.push(
+      <Pagination.First key="first" onClick={() => handlePageChange(1)} disabled={currentPage === 1} />
+    );
+    items.push(
+      <Pagination.Prev key="prev" onClick={() => handlePageChange(currentPage - 1)} disabled={currentPage === 1} />
+    );
+
+    if (startPage > 1) {
+      items.push(<Pagination.Ellipsis key="ellipsis-start" disabled />);
+    }
+
+    for (let page = startPage; page <= endPage; page++) {
+      items.push(
+        <Pagination.Item
+          key={page}
+          active={page === currentPage}
+          onClick={() => handlePageChange(page)}
+        >
+          {page}
+        </Pagination.Item>
+      );
+    }
+
+    if (endPage < totalPages) {
+      items.push(<Pagination.Ellipsis key="ellipsis-end" disabled />);
+    }
+
+    items.push(
+      <Pagination.Next key="next" onClick={() => handlePageChange(currentPage + 1)} disabled={currentPage === totalPages} />
+    );
+    items.push(
+      <Pagination.Last key="last" onClick={() => handlePageChange(totalPages)} disabled={currentPage === totalPages} />
+    );
+
+    return <Pagination>{items}</Pagination>;
   };
 
   return (
@@ -338,82 +588,268 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
                 <p className="mt-2">Loading live web servers...</p>
               </div>
             ) : (
-              <div className="table-responsive">
-                                  <Table striped bordered hover variant="dark" size="sm">
-                    <thead>
-                      <tr>
-                        <th>URL</th>
-                        <th>IP Address</th>
-                        <th>Hostname</th>
-                        <th>Port</th>
-                        <th>Protocol</th>
-                        <th>Status</th>
-                        <th>Title</th>
-                        <th>Server</th>
-                        <th>Technologies</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {liveWebServers.map((server, index) => (
-                        <tr key={index}>
-                          <td>
-                            <a 
-                              href={server.url} 
-                              target="_blank" 
-                              rel="noopener noreferrer"
-                              className="text-info text-decoration-none"
-                              style={{ fontSize: '0.85em' }}
-                            >
-                              {server.url}
-                            </a>
-                          </td>
-                          <td><code className="text-info">{server.ip_address}</code></td>
-                          <td className="text-truncate" style={{ maxWidth: '200px' }} title={server.hostname}>
-                            {server.hostname ? (
-                              <code className="text-warning">{server.hostname}</code>
-                            ) : (
-                              <span className="text-muted">N/A</span>
-                            )}
-                          </td>
-                          <td>{server.port}</td>
-                          <td>{server.protocol}</td>
-                          <td>
-                            <Badge bg={getStatusColor(server.status_code)}>
-                              {server.status_code || 'N/A'}
-                            </Badge>
-                          </td>
-                          <td className="text-truncate" style={{ maxWidth: '200px' }} title={server.title}>
-                            {server.title || 'N/A'}
-                          </td>
-                          <td className="text-truncate" style={{ maxWidth: '150px' }} title={server.server_header}>
-                            {server.server_header || 'N/A'}
-                          </td>
-                          <td>
-                            {server.technologies && server.technologies.length > 0 ? (
-                              <div>
-                                {server.technologies.slice(0, 2).map((tech, i) => (
-                                  <Badge key={i} bg="secondary" className="me-1 mb-1">
-                                    {tech}
-                                  </Badge>
-                                ))}
-                                {server.technologies.length > 2 && (
-                                  <Badge bg="outline-secondary">+{server.technologies.length - 2}</Badge>
-                                )}
-                              </div>
-                            ) : (
-                              'N/A'
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </Table>
-                {liveWebServers.length === 0 && (
-                  <div className="text-center py-4 text-white-50">
-                    {mostRecentIPPortScan ? 'No live web servers found.' : 'Run an IP/Port scan to see live web servers here.'}
+              <>
+                {filteredAndSortedServers.length > 0 && (
+                  <div className="mb-4">
+                    <Row className="mb-3">
+                      <Col md={4}>
+                        <Form.Label>Filter by URL</Form.Label>
+                        <Form.Control
+                          type="text"
+                          placeholder="Search URL..."
+                          value={filters.url}
+                          onChange={(e) => handleFilterChange('url', e.target.value)}
+                        />
+                      </Col>
+                      <Col md={4}>
+                        <Form.Label>Filter by Hostname</Form.Label>
+                        <Form.Control
+                          type="text"
+                          placeholder="Search hostname..."
+                          value={filters.hostname}
+                          onChange={(e) => handleFilterChange('hostname', e.target.value)}
+                        />
+                      </Col>
+                      <Col md={2}>
+                        <Form.Label>Status Code</Form.Label>
+                        <Form.Select
+                          value={filters.statusCode}
+                          onChange={(e) => handleFilterChange('statusCode', e.target.value)}
+                        >
+                          <option value="">All</option>
+                          <option value="2xx">2xx (Success)</option>
+                          <option value="3xx">3xx (Redirect)</option>
+                          <option value="4xx">4xx (Client Error)</option>
+                          <option value="5xx">5xx (Server Error)</option>
+                          <option value="no_response">No Response</option>
+                        </Form.Select>
+                      </Col>
+                      <Col md={2}>
+                        <Form.Label>Port</Form.Label>
+                        <Form.Control
+                          type="text"
+                          placeholder="Port..."
+                          value={filters.port}
+                          onChange={(e) => handleFilterChange('port', e.target.value)}
+                        />
+                      </Col>
+                    </Row>
+                    <Row className="mb-3">
+                      <Col md={4}>
+                        <Form.Label>Protocol</Form.Label>
+                        <Form.Control
+                          type="text"
+                          placeholder="Search protocol..."
+                          value={filters.protocol}
+                          onChange={(e) => handleFilterChange('protocol', e.target.value)}
+                        />
+                      </Col>
+                      <Col md={4}>
+                        <Form.Label>Technologies</Form.Label>
+                        <Form.Control
+                          type="text"
+                          placeholder="Search technologies..."
+                          value={filters.technologies}
+                          onChange={(e) => handleFilterChange('technologies', e.target.value)}
+                        />
+                      </Col>
+                      <Col md={4} className="d-flex align-items-end">
+                        <Button variant="outline-secondary" onClick={clearFilters} className="w-100">
+                          Clear Filters
+                        </Button>
+                      </Col>
+                    </Row>
+                    <div className="mb-3">
+                      <div className="d-flex align-items-center gap-3 flex-wrap">
+                        <span className="text-muted">Sort by:</span>
+                        <Button
+                          variant="link"
+                          className="p-0 text-white text-decoration-none"
+                          onClick={() => handleSort('url')}
+                        >
+                          URL {renderSortIcon('url')}
+                        </Button>
+                        <Button
+                          variant="link"
+                          className="p-0 text-white text-decoration-none"
+                          onClick={() => handleSort('hostname')}
+                        >
+                          Hostname {renderSortIcon('hostname')}
+                        </Button>
+                        <Button
+                          variant="link"
+                          className="p-0 text-white text-decoration-none"
+                          onClick={() => handleSort('statusCode')}
+                        >
+                          Status Code {renderSortIcon('statusCode')}
+                        </Button>
+                        <Button
+                          variant="link"
+                          className="p-0 text-white text-decoration-none"
+                          onClick={() => handleSort('port')}
+                        >
+                          Port {renderSortIcon('port')}
+                        </Button>
+                        <Button
+                          variant="link"
+                          className="p-0 text-white text-decoration-none"
+                          onClick={() => handleSort('protocol')}
+                        >
+                          Protocol {renderSortIcon('protocol')}
+                        </Button>
+                        <Button
+                          variant="link"
+                          className="p-0 text-white text-decoration-none"
+                          onClick={() => handleSort('title')}
+                        >
+                          Title {renderSortIcon('title')}
+                        </Button>
+                        <Button
+                          variant="link"
+                          className="p-0 text-white text-decoration-none"
+                          onClick={() => handleSort('server')}
+                        >
+                          Server {renderSortIcon('server')}
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="mb-2 d-flex justify-content-between align-items-center">
+                      <small className="text-muted">
+                        Showing {startIndex + 1}-{Math.min(endIndex, filteredAndSortedServers.length)} of {filteredAndSortedServers.length} filtered results
+                        {filteredAndSortedServers.length !== liveWebServers.length && 
+                          ` (${liveWebServers.length} total)`
+                        }
+                      </small>
+                      {totalPages > 1 && (
+                        <small className="text-muted">
+                          Page {currentPage} of {totalPages}
+                        </small>
+                      )}
+                    </div>
                   </div>
                 )}
-              </div>
+                <div className="table-responsive">
+                  {filteredAndSortedServers.length === 0 ? (
+                    <div className="text-center py-4 text-white-50">
+                      {liveWebServers.length > 0 
+                        ? 'No results match the current filters' 
+                        : mostRecentIPPortScan 
+                          ? 'No live web servers found.' 
+                          : 'Run an IP/Port scan to see live web servers here.'}
+                    </div>
+                  ) : (
+                    <Table striped bordered hover variant="dark" size="sm">
+                      <thead>
+                        <tr>
+                          <th>URL</th>
+                          <th>IP Address</th>
+                          <th>Hostname</th>
+                          <th>Port</th>
+                          <th>Protocol</th>
+                          <th>Status</th>
+                          <th>Title</th>
+                          <th>Server</th>
+                          <th>Technologies</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {paginatedServers.map((server, index) => (
+                          <tr key={index}>
+                            <td>
+                              <a 
+                                href={server.url} 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                                className="text-info text-decoration-none"
+                                style={{ fontSize: '0.85em' }}
+                              >
+                                {server.url}
+                              </a>
+                            </td>
+                            <td><code className="text-info">{server.ip_address}</code></td>
+                            <td className="text-truncate" style={{ maxWidth: '200px' }} title={server.hostname}>
+                              {server.hostname ? (
+                                <code className="text-warning">{server.hostname}</code>
+                              ) : (
+                                <span className="text-muted">N/A</span>
+                              )}
+                            </td>
+                            <td>{server.port}</td>
+                            <td>{server.protocol}</td>
+                            <td>
+                              <Badge bg={getStatusColor(server.status_code)}>
+                                {server.status_code || 'N/A'}
+                              </Badge>
+                            </td>
+                            <td className="text-truncate" style={{ maxWidth: '200px' }} title={server.title}>
+                              {server.title || 'N/A'}
+                            </td>
+                            <td className="text-truncate" style={{ maxWidth: '150px' }} title={server.server_header}>
+                              {server.server_header || 'N/A'}
+                            </td>
+                            <td>
+                              {server.technologies && server.technologies.length > 0 ? (
+                                <div>
+                                  {server.technologies.slice(0, 2).map((tech, i) => (
+                                    <Badge key={i} bg="secondary" className="me-1 mb-1">
+                                      {tech}
+                                    </Badge>
+                                  ))}
+                                  {server.technologies.length > 2 && (
+                                    <Badge bg="outline-secondary">+{server.technologies.length - 2}</Badge>
+                                  )}
+                                </div>
+                              ) : (
+                                'N/A'
+                              )}
+                            </td>
+                            <td>
+                              {isUrlAlreadyScopeTarget(server.url) ? (
+                                <OverlayTrigger
+                                  placement="top"
+                                  overlay={<Tooltip>Already added as URL Scope Target</Tooltip>}
+                                >
+                                  <Button
+                                    variant="outline-secondary"
+                                    size="sm"
+                                    disabled
+                                  >
+                                    <i className="bi bi-check-circle"></i>
+                                  </Button>
+                                </OverlayTrigger>
+                              ) : (
+                                <OverlayTrigger
+                                  placement="top"
+                                  overlay={<Tooltip>Add as URL Scope Target</Tooltip>}
+                                >
+                                  <Button
+                                    variant="outline-success"
+                                    size="sm"
+                                    onClick={() => handleAddAsScopeTarget(server)}
+                                    disabled={addingUrls.has(server.url)}
+                                  >
+                                    {addingUrls.has(server.url) ? (
+                                      <i className="bi bi-hourglass-split"></i>
+                                    ) : (
+                                      <i className="bi bi-plus-circle"></i>
+                                    )}
+                                  </Button>
+                                </OverlayTrigger>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </Table>
+                  )}
+                </div>
+                {filteredAndSortedServers.length > 0 && (
+                  <div className="d-flex justify-content-center mt-4">
+                    {renderPagination()}
+                  </div>
+                )}
+              </>
             )}
           </Tab>
 
