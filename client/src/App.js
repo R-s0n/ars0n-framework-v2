@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from 'react';
+﻿import { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
 import AddScopeTargetModal from './modals/addScopeTargetModal.js';
 import SelectActiveScopeTargetModal from './modals/selectActiveScopeTargetModal.js';
 import { DNSRecordsModal, SubdomainsModal, CloudDomainsModal, InfrastructureMapModal } from './modals/amassModals.js';
@@ -12,10 +12,6 @@ import { ShuffleDNSResultsModal } from './modals/shuffleDNSModals.js';
 import ScreenshotResultsModal from './modals/ScreenshotResultsModal.js';
 import SettingsModal from './modals/SettingsModal.js';
 import ToolsModal from './modals/ToolsModal.js';
-import ExportModal from './modals/ExportModal.js';
-import ImportModal from './modals/ImportModal.js';
-import WelcomeModal from './modals/WelcomeModal.js';
-import GoogleDorkingModal from './modals/GoogleDorkingModal.js';
 import Ars0nFrameworkHeader from './components/ars0nFrameworkHeader.js';
 import ManageScopeTargets from './components/manageScopeTargets.js';
 import fetchAmassScans from './utils/fetchAmassScans.js';
@@ -90,10 +86,7 @@ import initiateNucleiScreenshotScan from './utils/initiateNucleiScreenshotScan';
 import monitorNucleiScreenshotScanStatus from './utils/monitorNucleiScreenshotScanStatus';
 import initiateMetaDataScan, { initiateCompanyMetaDataScan } from './utils/initiateMetaDataScan';
 import monitorMetaDataScanStatus, { monitorCompanyMetaDataScanStatus } from './utils/monitorMetaDataScanStatus';
-import MetaDataModal from './modals/MetaDataModal.js';
 import fetchHttpxScans from './utils/fetchHttpxScans';
-import ROIReport from './components/ROIReport';
-import HelpMeLearn from './components/HelpMeLearn';
 import {
   AUTO_SCAN_STEPS,
   resumeAutoScan as resumeAutoScanUtil,
@@ -186,7 +179,24 @@ import { ApplicationQuestionsModal } from './modals/ApplicationQuestionsModal';
 import { MechanismsModal } from './modals/MechanismsModal';
 import { NotableObjectsModal } from './modals/NotableObjectsModal';
 import { SecurityControlsModal } from './modals/SecurityControlsModal';
+import { ThreatModelModal } from './modals/ThreatModelModal';
 import { FFUFConfigModal } from './modals/FFUFConfigModal';
+
+const ExportModal = lazy(() => import('./modals/ExportModal.js'));
+const ImportModal = lazy(() => import('./modals/ImportModal.js'));
+const WelcomeModal = lazy(() => import('./modals/WelcomeModal.js'));
+const ConfigUploadModal = lazy(() => import('./modals/ConfigUploadModal.js'));
+const APIIntegrationModal = lazy(() => import('./modals/APIIntegrationModal.js'));
+const GoogleDorkingModal = lazy(() => import('./modals/GoogleDorkingModal.js'));
+const MetaDataModal = lazy(() => import('./modals/MetaDataModal.js'));
+const ROIReport = lazy(() => import('./components/ROIReport'));
+const HelpMeLearnLazy = lazy(() => import('./components/HelpMeLearn'));
+
+const HelpMeLearn = ({ section }) => (
+  <Suspense fallback={<div style={{ height: '24px' }} />}>
+    <HelpMeLearnLazy section={section} />
+  </Suspense>
+);
 
 // Add helper function
 const getHttpxResultsCount = (scan) => {
@@ -358,6 +368,8 @@ function App() {
   const [showExportModal, setShowExportModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showWelcomeModal, setShowWelcomeModal] = useState(false);
+  const [showConfigUploadModal, setShowConfigUploadModal] = useState(false);
+  const [showAPIIntegrationModal, setShowAPIIntegrationModal] = useState(false);
   const [selections, setSelections] = useState({
     type: '',
     inputText: '',
@@ -651,7 +663,11 @@ function App() {
   const [showMechanismsModal, setShowMechanismsModal] = useState(false);
   const [showNotableObjectsModal, setShowNotableObjectsModal] = useState(false);
   const [showSecurityControlsModal, setShowSecurityControlsModal] = useState(false);
+  const [showThreatModelModal, setShowThreatModelModal] = useState(false);
   const [showFFUFConfigModal, setShowFFUFConfigModal] = useState(false);
+  const [mechanismsForThreatModel, setMechanismsForThreatModel] = useState([]);
+  const [notableObjectsForThreatModel, setNotableObjectsForThreatModel] = useState([]);
+  const [securityControlsForThreatModel, setSecurityControlsForThreatModel] = useState([]);
   
   const handleCloseSubdomainsModal = () => setShowSubdomainsModal(false);
   const handleCloseCloudDomainsModal = () => setShowCloudDomainsModal(false);
@@ -1672,11 +1688,12 @@ function App() {
     }
   };
 
-  const handleDelete = async () => {
-    if (!activeTarget) return;
+  const handleDelete = async (targetId = null) => {
+    const idToDelete = targetId || activeTarget?.id;
+    if (!idToDelete) return;
 
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/delete/${activeTarget.id}`, {
+      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/delete/${idToDelete}`, {
         method: 'DELETE',
       });
 
@@ -1685,13 +1702,17 @@ function App() {
       }
 
       setScopeTargets((prev) => {
-        const updatedTargets = prev.filter((target) => target.id !== activeTarget.id);
-        const newActiveTarget = updatedTargets.length > 0 ? updatedTargets[0] : null;
-        setActiveTarget(newActiveTarget);
-        if (!newActiveTarget && showActiveModal) {
-          setShowActiveModal(false);
-          setShowModal(true);
+        const updatedTargets = prev.filter((target) => target.id !== idToDelete);
+        
+        if (activeTarget?.id === idToDelete) {
+          const newActiveTarget = updatedTargets.length > 0 ? updatedTargets[0] : null;
+          setActiveTarget(newActiveTarget);
+          if (!newActiveTarget && showActiveModal) {
+            setShowActiveModal(false);
+            setShowModal(true);
+          }
         }
+        
         return updatedTargets;
       });
     } catch (error) {
@@ -3016,6 +3037,14 @@ function App() {
     setShowWelcomeModal(false);
   };
 
+  const handleCloseConfigUploadModal = () => {
+    setShowConfigUploadModal(false);
+  };
+
+  const handleCloseAPIIntegrationModal = () => {
+    setShowAPIIntegrationModal(false);
+  };
+
   const handleWelcomeAddScopeTarget = () => {
     setShowWelcomeModal(false);
     setShowModal(true);
@@ -3026,13 +3055,33 @@ function App() {
     setShowImportModal(true);
   };
 
+  const handleWelcomeUploadConfig = () => {
+    setShowWelcomeModal(false);
+    setShowConfigUploadModal(true);
+  };
+
+  const handleWelcomeUseAPI = () => {
+    setShowWelcomeModal(false);
+    setShowAPIIntegrationModal(true);
+  };
+
   const handleImportSuccess = async (result) => {
+    await fetchScopeTargets();
+  };
+
+  const handleConfigUploadSuccess = async (result) => {
+    await fetchScopeTargets();
+  };
+
+  const handleAPIIntegrationSuccess = async (result) => {
     await fetchScopeTargets();
   };
 
   const handleBackToWelcome = () => {
     setShowModal(false);
     setShowImportModal(false);
+    setShowConfigUploadModal(false);
+    setShowAPIIntegrationModal(false);
     setShowWelcomeModal(true);
   };
 
@@ -3942,6 +3991,50 @@ function App() {
   const handleCloseNotableObjectsModal = () => setShowNotableObjectsModal(false);
   const handleOpenSecurityControlsModal = () => setShowSecurityControlsModal(true);
   const handleCloseSecurityControlsModal = () => setShowSecurityControlsModal(false);
+  const handleOpenThreatModelModal = async () => {
+    setShowThreatModelModal(true);
+    if (activeTarget) {
+      try {
+        const mechanismsResponse = await fetch(
+          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/mechanisms/${activeTarget.id}/examples`
+        );
+        if (mechanismsResponse.ok) {
+          const mechanismsData = await mechanismsResponse.json();
+          const uniqueMechanisms = [...new Set(mechanismsData.map(m => m.mechanism))];
+          setMechanismsForThreatModel(uniqueMechanisms);
+        }
+      } catch (error) {
+        console.error('Error fetching mechanisms:', error);
+      }
+      
+      try {
+        const objectsResponse = await fetch(
+          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/notable-objects/${activeTarget.id}`
+        );
+        if (objectsResponse.ok) {
+          const objectsData = await objectsResponse.json();
+          const objectNames = objectsData.map(o => o.object_name);
+          setNotableObjectsForThreatModel(objectNames);
+        }
+      } catch (error) {
+        console.error('Error fetching notable objects:', error);
+      }
+
+      try {
+        const controlsResponse = await fetch(
+          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/security-controls/${activeTarget.id}/notes`
+        );
+        if (controlsResponse.ok) {
+          const controlsData = await controlsResponse.json();
+          const uniqueControls = [...new Set(controlsData.map(c => c.control_name))];
+          setSecurityControlsForThreatModel(uniqueControls);
+        }
+      } catch (error) {
+        console.error('Error fetching security controls:', error);
+      }
+    }
+  };
+  const handleCloseThreatModelModal = () => setShowThreatModelModal(false);
   const handleOpenFFUFConfigModal = () => setShowFFUFConfigModal(true);
   const handleCloseFFUFConfigModal = () => setShowFFUFConfigModal(false);
 
@@ -4590,7 +4683,7 @@ function App() {
         handleSelect={handleSelect}
         handleFormSubmit={handleSubmit}
         errorMessage={errorMessage}
-        showBackButton={scopeTargets.length === 0}
+        showBackButton={true}
         onBackClick={handleBackToWelcome}
       />
 
@@ -4615,25 +4708,53 @@ function App() {
         handleClose={handleCloseToolsModal}
       />
 
-      <ExportModal
-        show={showExportModal}
-        handleClose={handleCloseExportModal}
-      />
+      <Suspense fallback={<div />}>
+        <ExportModal
+          show={showExportModal}
+          handleClose={handleCloseExportModal}
+        />
+      </Suspense>
 
-      <ImportModal
-        show={showImportModal}
-        handleClose={handleCloseImportModal}
-        onSuccess={handleImportSuccess}
-        showBackButton={scopeTargets.length === 0}
-        onBackClick={handleBackToWelcome}
-      />
+      <Suspense fallback={<div />}>
+        <ImportModal
+          show={showImportModal}
+          handleClose={handleCloseImportModal}
+          onSuccess={handleImportSuccess}
+          showBackButton={scopeTargets.length === 0}
+          onBackClick={handleBackToWelcome}
+        />
+      </Suspense>
 
-      <WelcomeModal
-        show={showWelcomeModal}
-        handleClose={handleCloseWelcomeModal}
-        onAddScopeTarget={handleWelcomeAddScopeTarget}
-        onImportData={handleWelcomeImportData}
-      />
+      <Suspense fallback={<div />}>
+        <WelcomeModal
+          show={showWelcomeModal}
+          handleClose={handleCloseWelcomeModal}
+          onAddScopeTarget={handleWelcomeAddScopeTarget}
+          onImportData={handleWelcomeImportData}
+          onUploadConfig={handleWelcomeUploadConfig}
+          onUseAPI={handleWelcomeUseAPI}
+        />
+      </Suspense>
+
+      <Suspense fallback={<div />}>
+        <ConfigUploadModal
+          show={showConfigUploadModal}
+          handleClose={handleCloseConfigUploadModal}
+          onSuccess={handleConfigUploadSuccess}
+          showBackButton={scopeTargets.length === 0}
+          onBackClick={handleBackToWelcome}
+        />
+      </Suspense>
+
+      <Suspense fallback={<div />}>
+        <APIIntegrationModal
+          show={showAPIIntegrationModal}
+          handleClose={handleCloseAPIIntegrationModal}
+          onSuccess={handleAPIIntegrationSuccess}
+          showBackButton={scopeTargets.length === 0}
+          onBackClick={handleBackToWelcome}
+        />
+      </Suspense>
 
       <Modal data-bs-theme="dark" show={showScanHistoryModal} onHide={handleCloseScanHistoryModal} size="xl">
         <Modal.Header closeButton>
@@ -6440,20 +6561,42 @@ function App() {
             {activeTarget.type === 'URL' && (
               <div className="mb-4">
                 <h3 className="text-danger mb-3">URL</h3>
-                <h4 className="text-secondary mb-3 fs-5">Manual Recon</h4>
+                <h4 className="text-secondary mb-3 fs-5">Threat Modeling</h4>
+                <HelpMeLearn section="threatModeling" />
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
                       <Card.Body className="d-flex flex-column">
                         <Card.Title className="text-danger mb-3">
-                          Manual Recon
+                          STRIDE Threat Model
                         </Card.Title>
                         <Card.Text className="text-white small fst-italic">
-                          Document your manual reconnaissance findings as you enumerate and explore the target. Track high-level application details, security mechanisms, notable objects, and security controls you discover.
+                          Perform comprehensive threat modeling using the STRIDE methodology to identify security threats across six categories:
+                          <div style={{ columnCount: 2, columnGap: '20px', marginTop: '15px', marginBottom: '15px', textAlign: 'center' }}>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(S)poofing</strong> - Impersonation of users, systems, or data
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(T)ampering</strong> - Malicious modification of data or code
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(R)epudiation</strong> - Denial of actions without proper logging
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(I)nformation Disclosure</strong> - Exposure of sensitive information
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(D)enial of Service</strong> - Preventing legitimate access
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(E)levation of Privilege</strong> - Gaining unauthorized elevated permissions
+                            </div>
+                          </div>
+                          Build your threat model by documenting reconnaissance findings, identifying mechanisms and objects, assessing security controls, and systematically analyzing potential attack vectors and their business impact.
                         </Card.Text>
                         <div className="mt-auto">
                           <Row className="g-2">
-                            <Col xs={6} md={3}>
+                            <Col>
                               <Button
                                 variant="outline-danger"
                                 className="w-100"
@@ -6462,7 +6605,7 @@ function App() {
                                 High-Level Questions
                               </Button>
                             </Col>
-                            <Col xs={6} md={3}>
+                            <Col>
                               <Button
                                 variant="outline-danger"
                                 className="w-100"
@@ -6471,7 +6614,7 @@ function App() {
                                 Mechanisms
                               </Button>
                             </Col>
-                            <Col xs={6} md={3}>
+                            <Col>
                               <Button
                                 variant="outline-danger"
                                 className="w-100"
@@ -6480,13 +6623,22 @@ function App() {
                                 Notable Objects
                               </Button>
                             </Col>
-                            <Col xs={6} md={3}>
+                            <Col>
                               <Button
                                 variant="outline-danger"
                                 className="w-100"
                                 onClick={handleOpenSecurityControlsModal}
                               >
                                 Security Controls
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenThreatModelModal}
+                              >
+                                Threat Model
                               </Button>
                             </Col>
                           </Row>
@@ -6496,6 +6648,10 @@ function App() {
                   </Col>
                 </Row>
                 <h4 className="text-secondary mb-3 fs-5 mt-4">URL Discovery & Endpoint Enumeration</h4>
+                <div className="alert alert-warning mb-3" role="alert">
+                  <i className="bi bi-exclamation-triangle-fill me-2"></i>
+                  This section is still under development
+                </div>
                 <Row className="mb-4">
                   {[
                     {
@@ -6509,7 +6665,7 @@ function App() {
                       onResults: handleOpenKatanaURLResultsModal,
                       resultCount: mostRecentKatanaURLScan && mostRecentKatanaURLScan.result ? 
                         mostRecentKatanaURLScan.result.split('\n').filter(line => line.trim()).length : 0,
-                      resultLabel: 'Endpoints:'
+                      resultLabel: 'Endpoints'
                     },
                     {
                       name: 'LinkFinder',
@@ -6522,7 +6678,7 @@ function App() {
                       onResults: handleOpenLinkFinderURLResultsModal,
                       resultCount: mostRecentLinkFinderURLScan && mostRecentLinkFinderURLScan.result ? 
                         mostRecentLinkFinderURLScan.result.split('\n').filter(line => line.trim()).length : 0,
-                      resultLabel: 'Endpoints:'
+                      resultLabel: 'Endpoints'
                     },
                     {
                       name: 'Waybackurls',
@@ -6535,7 +6691,7 @@ function App() {
                       onResults: handleOpenWaybackURLsResultsModal,
                       resultCount: mostRecentWaybackURLsScan && mostRecentWaybackURLsScan.result ? 
                         mostRecentWaybackURLsScan.result.split('\n').filter(line => line.trim()).length : 0,
-                      resultLabel: 'Endpoints:'
+                      resultLabel: 'Endpoints'
                     },
                     {
                       name: 'GAU',
@@ -6557,7 +6713,7 @@ function App() {
                             return mostRecentGAUURLScan.result.split('\n').filter(line => line.trim()).length;
                           }
                         })() : 0,
-                      resultLabel: 'Endpoints:'
+                      resultLabel: 'Endpoints'
                     }
                   ].map((tool, index) => (
                     <Col md={3} key={index}>
@@ -6607,6 +6763,10 @@ function App() {
                 </Row>
 
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Endpoint Brute Forcing</h4>
+                <div className="alert alert-warning mb-3" role="alert">
+                  <i className="bi bi-exclamation-triangle-fill me-2"></i>
+                  This section is still under development
+                </div>
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
@@ -6674,21 +6834,25 @@ function App() {
           </div>
         </Fade>
       )}
-      <MetaDataModal
-        showMetaDataModal={showMetaDataModal}
-        handleCloseMetaDataModal={handleCloseMetaDataModal}
-        metaDataResults={mostRecentMetaDataScan}
-        targetURLs={targetURLs}
-        setTargetURLs={setTargetURLs}
-        fetchScopeTargets={fetchScopeTargets}
-      />
-      <ROIReport
-        show={showROIReport}
-        onHide={handleCloseROIReport}
-        targetURLs={targetURLs}
-        setTargetURLs={setTargetURLs}
-        fetchScopeTargets={fetchScopeTargets}
-      />
+      <Suspense fallback={<div />}>
+        <MetaDataModal
+          showMetaDataModal={showMetaDataModal}
+          handleCloseMetaDataModal={handleCloseMetaDataModal}
+          metaDataResults={mostRecentMetaDataScan}
+          targetURLs={targetURLs}
+          setTargetURLs={setTargetURLs}
+          fetchScopeTargets={fetchScopeTargets}
+        />
+      </Suspense>
+      <Suspense fallback={<div />}>
+        <ROIReport
+          show={showROIReport}
+          onHide={handleCloseROIReport}
+          targetURLs={targetURLs}
+          setTargetURLs={setTargetURLs}
+          fetchScopeTargets={fetchScopeTargets}
+        />
+      </Suspense>
       <Modal data-bs-theme="dark" show={showAutoScanHistoryModal} onHide={handleCloseAutoScanHistoryModal} size="xl" dialogClassName="modal-90w">
         <Modal.Header closeButton>
           <Modal.Title className='text-danger'>Auto Scan History</Modal.Title>
@@ -6910,14 +7074,16 @@ function App() {
         </Modal.Body>
       </Modal>
 
-      <GoogleDorkingModal
-        show={showGoogleDorkingManualModal}
-        handleClose={handleCloseGoogleDorkingManualModal}
+      <Suspense fallback={<div />}>
+        <GoogleDorkingModal
+          show={showGoogleDorkingManualModal}
+          handleClose={handleCloseGoogleDorkingManualModal}
         companyName={activeTarget?.scope_target || ''}
         onDomainAdd={handleGoogleDorkingDomainAdd}
         error={googleDorkingError}
         onClearError={() => setGoogleDorkingError('')}
-      />
+        />
+      </Suspense>
 
       <ReverseWhoisModal
         show={showReverseWhoisManualModal}
@@ -7136,6 +7302,15 @@ function App() {
         show={showSecurityControlsModal}
         handleClose={handleCloseSecurityControlsModal}
         activeTarget={activeTarget}
+      />
+
+      <ThreatModelModal
+        show={showThreatModelModal}
+        handleClose={handleCloseThreatModelModal}
+        activeTarget={activeTarget}
+        mechanisms={mechanismsForThreatModel}
+        notableObjects={notableObjectsForThreatModel}
+        securityControls={securityControlsForThreatModel}
       />
 
       <FFUFConfigModal

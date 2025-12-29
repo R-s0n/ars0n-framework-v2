@@ -659,6 +659,22 @@ func createTables() {
 			updated_at TIMESTAMP DEFAULT NOW()
 		);`,
 
+		`CREATE TABLE IF NOT EXISTS threat_model (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			category TEXT NOT NULL,
+			url TEXT NOT NULL,
+			mechanism TEXT,
+			target_object TEXT,
+			steps TEXT,
+			security_controls TEXT,
+			impact_customer_data TEXT,
+			impact_attacker_scope TEXT,
+			impact_company_reputation TEXT,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+
 		`CREATE TABLE IF NOT EXISTS nuclei_scans (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			scan_id UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),

@@ -272,6 +272,68 @@ const MECHANISMS = [
       'Download Security Logs',
       'Report Security Issue'
     ]
+  },
+  {
+    category: 'Cloud & Storage Operations',
+    mechanisms: [
+      'S3/Blob Storage Upload',
+      'S3/Blob Storage Download',
+      'Generate Pre-signed URL',
+      'Bucket/Container Listing',
+      'Cloud Function Invocation',
+      'Lambda/Function Trigger',
+      'Queue Message Publishing',
+      'Event Bus Publishing',
+      'CDN Cache Purge',
+      'Object Versioning',
+      'Bucket Policy Update',
+      'CORS Configuration Update'
+    ]
+  },
+  {
+    category: 'GraphQL Operations',
+    mechanisms: [
+      'GraphQL Query',
+      'GraphQL Mutation',
+      'GraphQL Subscription',
+      'Introspection Query',
+      'Batch Query Execution',
+      'Field Aliasing',
+      'Fragment Usage',
+      'Variable Binding',
+      'Directive Application',
+      'Schema Stitching Request'
+    ]
+  },
+  {
+    category: 'CI/CD & Development',
+    mechanisms: [
+      'Trigger Build/Deployment',
+      'View Build Logs',
+      'Rollback Deployment',
+      'Environment Variable Update',
+      'Secret Management',
+      'Feature Flag Management',
+      'A/B Test Configuration',
+      'Debug Mode Toggle',
+      'Performance Profiling',
+      'Error Tracking Configuration'
+    ]
+  },
+  {
+    category: 'Infrastructure & Monitoring',
+    mechanisms: [
+      'Health Check Endpoint',
+      'Metrics Export',
+      'Log Aggregation Query',
+      'Trace Viewing',
+      'Alert Configuration',
+      'Dashboard Creation',
+      'Resource Scaling',
+      'Configuration Reload',
+      'Service Discovery Query',
+      'Status Page Update'
+    ]
   }
 ];
 
@@ -292,6 +354,9 @@ export const MechanismsModal = ({
   const [error, setError] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [exampleToDelete, setExampleToDelete] = useState(null);
+  const [showAddMechanism, setShowAddMechanism] = useState(false);
+  const [newMechanismName, setNewMechanismName] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => {
     if (show && activeTarget) {
@@ -490,6 +555,13 @@ export const MechanismsModal = ({
     setEditExampleNotes('');
   };
 
+  const handleAddCustomMechanism = () => {
+    if (!newMechanismName.trim()) return;
+    setSelectedMechanism(newMechanismName.trim());
+    setShowAddMechanism(false);
+    setNewMechanismName('');
+  };
+
   const getMechanismCategory = (mechanism) => {
     for (const category of MECHANISMS) {
       if (category.mechanisms.includes(mechanism)) {
@@ -525,16 +597,38 @@ export const MechanismsModal = ({
               backgroundColor: '#1a1a1a' 
             }}
           >
-            <div className="p-3 bg-dark border-bottom border-danger">
+            <div className="p-3 bg-dark border-bottom border-danger d-flex justify-content-between align-items-center">
               <h6 className="text-danger mb-0">Mechanisms by Category</h6>
+              <Button 
+                variant="outline-danger" 
+                size="sm"
+                onClick={() => setShowAddMechanism(true)}
+              >
+                Add Custom
+              </Button>
             </div>
-            {MECHANISMS.map((category, catIndex) => (
+            <div className="p-3 border-bottom border-secondary">
+              <Form.Control
+                type="text"
+                placeholder="Search mechanisms..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                data-bs-theme="dark"
+                size="sm"
+              />
+            </div>
+            {MECHANISMS.map((category, catIndex) => {
+              const filteredMechanisms = category.mechanisms.filter(m => 
+                m.toLowerCase().includes(searchTerm.toLowerCase())
+              );
+              if (filteredMechanisms.length === 0) return null;
+              return (
               <div key={catIndex} className="border-bottom border-secondary">
                 <div className="p-2 bg-dark">
                   <strong className="text-danger small">{category.category}</strong>
                 </div>
                 <ListGroup variant="flush">
-                  {category.mechanisms.map((mechanism, mIndex) => {
+                  {filteredMechanisms.map((mechanism, mIndex) => {
                     const hasExamples = examples[mechanism] && examples[mechanism].length > 0;
                     const isSelected = selectedMechanism === mechanism;
                     return (
@@ -564,7 +658,55 @@ export const MechanismsModal = ({
                   })}
                 </ListGroup>
               </div>
-            ))}
+              );
+            })}
+            {(() => {
+              const allMechanismNames = MECHANISMS.flatMap(cat => cat.mechanisms);
+              const customMechanisms = Object.keys(examples).filter(m => !allMechanismNames.includes(m)).sort();
+              const filteredCustomMechanisms = customMechanisms.filter(m => 
+                m.toLowerCase().includes(searchTerm.toLowerCase())
+              );
+              if (filteredCustomMechanisms.length > 0) {
+                return (
+                  <div className="border-bottom border-secondary">
+                    <div className="p-2 bg-dark">
+                      <strong className="text-danger small">Custom Mechanisms</strong>
+                    </div>
+                    <ListGroup variant="flush">
+                      {filteredCustomMechanisms.map((mechanism, mIndex) => {
+                        const hasExamples = examples[mechanism] && examples[mechanism].length > 0;
+                        const isSelected = selectedMechanism === mechanism;
+                        return (
+                          <ListGroup.Item
+                            key={mIndex}
+                            action
+                            active={isSelected}
+                            onClick={() => setSelectedMechanism(mechanism)}
+                            className={`bg-dark text-white ${isSelected ? 'border-start border-3 border-danger' : ''}`}
+                            style={{ 
+                              cursor: 'pointer',
+                              backgroundColor: isSelected ? '#2a1a1a !important' : undefined,
+                              border: 'none',
+                              borderBottom: '1px solid #333'
+                            }}
+                          >
+                            <div className="d-flex justify-content-between align-items-start" style={{ gap: '8px' }}>
+                              <span className="small" style={{ flex: '1 1 auto', minWidth: 0, wordWrap: 'break-word' }}>{mechanism}</span>
+                              {hasExamples && (
+                                <Badge bg="success" className="flex-shrink-0" style={{ minWidth: '24px', textAlign: 'center' }}>
+                                  {examples[mechanism].length}
+                                </Badge>
+                              )}
+                            </div>
+                          </ListGroup.Item>
+                        );
+                      })}
+                    </ListGroup>
+                  </div>
+                );
+              }
+              return null;
+            })()}
           </div>
 
           <div className="flex-fill p-4" style={{ overflowY: 'auto' }}>
@@ -730,36 +872,38 @@ export const MechanismsModal = ({
               <div className="py-4 px-4">
                 <Card className="bg-dark border-danger">
                   <Card.Body>
-                    <h4 className="text-danger mb-4">Welcome to Mechanisms</h4>
+                    <h4 className="text-danger mb-4">Mechanisms</h4>
                     
                     <div className="text-white mb-4">
-                      <h5 className="text-danger mb-3">What is this?</h5>
+                      <h5 className="text-danger mb-3">Attack Surface Mapping</h5>
                       <p>
-                        Mechanisms are the specific actions and operations that users can perform in the application. 
-                        By documenting each mechanism with URLs and notes, you build a comprehensive map of the 
-                        application's functionality that guides your security testing.
+                        Mechanisms are specific actions and operations users can perform in the application. Each documented 
+                        mechanism becomes a potential attack vector in your STRIDE threat model. By cataloging these mechanisms 
+                        with URLs and implementation details, you create a comprehensive attack surface map that feeds directly 
+                        into threat identification.
                       </p>
                     </div>
 
                     <div className="text-white mb-4">
-                      <h5 className="text-danger mb-3">Why document mechanisms?</h5>
+                      <h5 className="text-danger mb-3">Application to STRIDE Threat Modeling</h5>
                       <ul className="mb-2">
-                        <li>Each mechanism is a potential vulnerability testing target</li>
-                        <li>Understanding how features work helps identify business logic flaws</li>
-                        <li>URLs and parameters reveal the application's API structure</li>
-                        <li>Documentation helps you test systematically rather than randomly</li>
-                        <li>You can identify which mechanisms lack proper authorization checks</li>
+                        <li><strong>Spoofing</strong> - Authentication mechanisms reveal impersonation opportunities (login, SSO, session management)</li>
+                        <li><strong>Tampering</strong> - Data operation mechanisms show what can be modified (updates, file uploads, API calls)</li>
+                        <li><strong>Repudiation</strong> - Action mechanisms without logging create deniability risks (delete, modify, admin actions)</li>
+                        <li><strong>Information Disclosure</strong> - Read/view mechanisms expose data leakage vectors (search, export, API responses)</li>
+                        <li><strong>Denial of Service</strong> - Resource-intensive mechanisms can be abused (bulk operations, imports, processing)</li>
+                        <li><strong>Elevation of Privilege</strong> - Authorization mechanisms reveal privilege boundaries (role changes, access grants)</li>
                       </ul>
                     </div>
 
                     <div className="text-white mb-3">
-                      <h5 className="text-danger mb-3">How to use this</h5>
+                      <h5 className="text-danger mb-3">Threat Modeling Workflow</h5>
                       <ol className="mb-2">
-                        <li className="mb-2">Select a mechanism from the left sidebar</li>
-                        <li className="mb-2">Add the URL where you found this mechanism (endpoint, page, etc.)</li>
-                        <li className="mb-2">Document any important details: parameters, behaviors, edge cases</li>
-                        <li className="mb-2">Add multiple examples if the mechanism appears in different contexts</li>
-                        <li className="mb-2">Use your documented mechanisms to plan targeted vulnerability testing</li>
+                        <li className="mb-2">Document mechanisms as you discover them during reconnaissance</li>
+                        <li className="mb-2">Note URLs, parameters, and observed behaviors for each mechanism</li>
+                        <li className="mb-2">Group related mechanisms to identify complex attack chains</li>
+                        <li className="mb-2">Reference mechanisms when creating threats in the Threat Model tab</li>
+                        <li className="mb-2">Each mechanism should map to one or more STRIDE threat categories</li>
                       </ol>
                     </div>
 
@@ -806,6 +950,50 @@ export const MechanismsModal = ({
           ) : (
             'Delete'
           )}
+        </Button>
+      </Modal.Footer>
+    </Modal>
+
+    <Modal 
+      show={showAddMechanism} 
+      onHide={() => setShowAddMechanism(false)}
+      centered
+      data-bs-theme="dark"
+    >
+      <Modal.Header closeButton className="bg-dark border-danger">
+        <Modal.Title className="text-danger">Add Custom Mechanism</Modal.Title>
+      </Modal.Header>
+      <Modal.Body className="bg-dark">
+        <Form.Group>
+          <Form.Label className="text-white">Mechanism Name</Form.Label>
+          <Form.Control
+            type="text"
+            value={newMechanismName}
+            onChange={(e) => setNewMechanismName(e.target.value)}
+            placeholder="e.g., Custom API Operation, Special Feature"
+            data-bs-theme="dark"
+            onKeyPress={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleAddCustomMechanism();
+              }
+            }}
+          />
+          <Form.Text className="text-white-50">
+            Enter a descriptive name for this custom mechanism
+          </Form.Text>
+        </Form.Group>
+      </Modal.Body>
+      <Modal.Footer className="bg-dark border-danger">
+        <Button variant="outline-secondary" onClick={() => setShowAddMechanism(false)}>
+          Cancel
+        </Button>
+        <Button 
+          variant="danger" 
+          onClick={handleAddCustomMechanism} 
+          disabled={!newMechanismName.trim()}
+        >
+          Add Mechanism
         </Button>
       </Modal.Footer>
     </Modal>

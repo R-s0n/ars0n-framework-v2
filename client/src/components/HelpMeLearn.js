@@ -594,6 +594,65 @@ const HelpMeLearn = ({ section }) => {
           ]
         }
       ]
+    },
+    threatModeling: {
+      title: "Help Me Learn!",
+      items: [
+        {
+          question: "What is STRIDE threat modeling and how does it enhance bug bounty hunting?",
+          lessonKey: "strideMethodologyOverview",
+          answers: [
+            "STRIDE is a systematic threat modeling framework developed by Microsoft that categorizes security threats into six types: Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, and Elevation of Privilege.",
+            "For bug bounty hunters, STRIDE provides a structured approach to identifying security vulnerabilities by thinking like an attacker and systematically considering each threat category against application mechanisms, objects, and security controls.",
+            "By documenting threats using the STRIDE framework, you create a comprehensive attack surface map that connects discovered mechanisms, notable objects, and security controls with specific exploitation scenarios, ensuring no vulnerability class is overlooked.",
+            "This methodology transforms reactive vulnerability hunting into proactive security analysis, helping you discover complex attack chains, business logic flaws, and security gaps that automated scanners typically miss."
+          ]
+        },
+        {
+          question: "How do I systematically document application questions, mechanisms, objects, and controls for effective threat modeling?",
+          lessonKey: "stridePreparationSteps",
+          answers: [
+            "Start with Application Questions to understand the business context, data flows, authentication architecture, and technology stack. This foundational knowledge reveals where sensitive operations occur and which components handle critical data.",
+            "Document Mechanisms by identifying specific application behaviors like authentication flows, data validation, API operations, and state transitions. Each mechanism represents a potential attack surface where STRIDE threats can be applied.",
+            "Catalog Notable Objects including user accounts, API tokens, sensitive data structures, session identifiers, and business entities. These objects become the targets in your threat scenarios, helping you identify what attackers might want to compromise.",
+            "Define Security Controls such as authentication systems, authorization checks, input validation, encryption, rate limiting, and monitoring. Understanding existing controls helps you identify gaps and determine how threats might bypass protections."
+          ]
+        },
+        {
+          question: "How do I apply each STRIDE category to discover vulnerabilities?",
+          lessonKey: "strideCategories",
+          answers: [
+            "Spoofing threats target authentication and identity verification. Ask: Can attackers impersonate users, services, or systems? Look for weak authentication, missing multi-factor authentication, predictable session tokens, or credential stuffing opportunities.",
+            "Tampering threats focus on data integrity. Ask: Can attackers modify data in transit or at rest? Examine input validation, API parameter tampering, client-side controls, database manipulation, and file integrity protections.",
+            "Repudiation threats concern logging and accountability. Ask: Can attackers deny their actions? Evaluate audit logging, transaction records, cryptographic signatures, and evidence preservation for critical operations.",
+            "Information Disclosure threats involve data confidentiality. Ask: Can attackers access unauthorized information? Investigate API data leakage, directory traversal, verbose error messages, OSINT exposure, and insecure data storage.",
+            "Denial of Service threats target availability. Ask: Can attackers make systems unavailable? Test rate limiting, resource exhaustion, algorithmic complexity attacks, and infrastructure resilience.",
+            "Elevation of Privilege threats involve authorization bypass. Ask: Can attackers gain unauthorized access? Analyze authorization checks, privilege escalation paths, role-based access control flaws, and trust boundary violations."
+          ]
+        },
+        {
+          question: "How do I create effective threat scenarios that lead to bug bounty findings?",
+          lessonKey: "threatScenarioCreation",
+          answers: [
+            "Each threat should identify a specific URL or endpoint where the vulnerability exists, connecting your threat model to concrete testable targets discovered during reconnaissance.",
+            "Select the mechanism being exploited (authentication flow, API operation, data validation) and optionally the target object (user account, API token, data structure) to clearly define the attack surface and what's being compromised.",
+            "Document step-by-step exploitation instructions that another security researcher could follow to reproduce the attack. Include specific API requests, parameter manipulations, timing requirements, and observable outcomes.",
+            "Assess impact across three dimensions: customer data compromise (privacy violations, data theft), attacker scope expansion (lateral movement, privilege escalation), and company reputation damage (regulatory fines, public disclosure impact).",
+            "Map affected security controls to each threat, explaining how existing protections fail or are bypassed. This demonstrates security gap awareness and helps prioritize remediation efforts based on control effectiveness."
+          ]
+        },
+        {
+          question: "How do cloud infrastructure and OSINT fit into STRIDE threat modeling?",
+          lessonKey: "cloudOsintThreatModeling",
+          answers: [
+            "Cloud services introduce unique threats across all STRIDE categories: spoofed IAM credentials, tampered S3 bucket policies, missing CloudTrail logs (repudiation), exposed storage buckets (information disclosure), API throttling bypasses (DoS), and privilege escalation through misconfigured IAM roles.",
+            "Document cloud-specific mechanisms like serverless functions, container orchestration, cloud storage operations, and managed service interactions. Each cloud service type has distinct security boundaries and threat vectors.",
+            "OSINT (Open Source Intelligence) primarily feeds Information Disclosure threats: exposed credentials in GitHub, leaked API keys in public documents, employee information on LinkedIn, and infrastructure details in job postings. These findings can enable other STRIDE threat categories.",
+            "Consider the cloud shared responsibility model in your threat analysis: identify which security controls are managed by the cloud provider versus the application, revealing gaps where neither party has implemented sufficient protection.",
+            "Catalog cloud-specific notable objects like IAM roles, security groups, API gateway configurations, and encryption keys. These objects become targets for threats and help you map cloud attack paths that span multiple services."
+          ]
+        }
+      ]
     }
   };
 
