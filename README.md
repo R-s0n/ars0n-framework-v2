@@ -91,7 +91,7 @@ My hope is that this modular framework will act as a canvas to help share what I
 
 This framework consists of 20+ Docker containers along w/ a Docker Compose Manifest to automate the process of deploying these containers.
 
-1. Download the Zip File for the <a href="https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.1/ars0n-framework-v2-beta-0.0.1.zip">latest release</a>
+1. Download the Zip File for the <a href="https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.2/ars0n-framework-v2-beta-0.0.2.zip">latest release</a>
 2. Unzip the files
 3. Navigate to the directory with the `docker-compose.yml` file
 4. Run `docker-compose up --build`
@@ -102,12 +102,12 @@ This framework consists of 20+ Docker containers along w/ a Docker Compose Manif
 
 **Step 1:** Download the framework
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.1/ars0n-framework-v2-beta-0.0.1.zip" -OutFile "ars0n-framework-v2-beta-0.0.1.zip"
+Invoke-WebRequest -Uri "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.2/ars0n-framework-v2-beta-0.0.2.zip" -OutFile "ars0n-framework-v2-beta-0.0.2.zip"
 ```
 
 **Step 2:** Extract the zip file
 ```powershell
-Expand-Archive -Path "ars0n-framework-v2-beta-0.0.1.zip" -DestinationPath "."
+Expand-Archive -Path "ars0n-framework-v2-beta-0.0.2.zip" -DestinationPath "."
 ```
 
 **Step 3:** Navigate to the framework directory
@@ -124,12 +124,12 @@ docker-compose up --build
 
 **Step 1:** Download the framework
 ```bash
-curl -L -o ars0n-framework-v2-beta-0.0.1.zip "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.1/ars0n-framework-v2-beta-0.0.1.zip"
+curl -L -o ars0n-framework-v2-beta-0.0.2.zip "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.2/ars0n-framework-v2-beta-0.0.2.zip"
 ```
 
 **Step 2:** Extract the zip file
 ```bash
-unzip ars0n-framework-v2-beta-0.0.1.zip
+unzip ars0n-framework-v2-beta-0.0.2.zip
 ```
 
 **Step 3:** Navigate to the framework directory
@@ -146,12 +146,12 @@ docker-compose up --build
 
 **Step 1:** Download the framework
 ```bash
-wget "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.1/ars0n-framework-v2-beta-0.0.1.zip"
+wget "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.2/ars0n-framework-v2-beta-0.0.2.zip"
 ```
 
 **Step 2:** Extract the zip file
 ```bash
-unzip ars0n-framework-v2-beta-0.0.1.zip
+unzip ars0n-framework-v2-beta-0.0.2.zip
 ```
 
 **Step 3:** Navigate to the framework directory
