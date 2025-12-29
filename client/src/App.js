@@ -185,6 +185,8 @@ import { FFUFConfigModal } from './modals/FFUFConfigModal';
 const ExportModal = lazy(() => import('./modals/ExportModal.js'));
 const ImportModal = lazy(() => import('./modals/ImportModal.js'));
 const WelcomeModal = lazy(() => import('./modals/WelcomeModal.js'));
+const ConfigUploadModal = lazy(() => import('./modals/ConfigUploadModal.js'));
+const APIIntegrationModal = lazy(() => import('./modals/APIIntegrationModal.js'));
 const GoogleDorkingModal = lazy(() => import('./modals/GoogleDorkingModal.js'));
 const MetaDataModal = lazy(() => import('./modals/MetaDataModal.js'));
 const ROIReport = lazy(() => import('./components/ROIReport'));
@@ -366,6 +368,8 @@ function App() {
   const [showExportModal, setShowExportModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showWelcomeModal, setShowWelcomeModal] = useState(false);
+  const [showConfigUploadModal, setShowConfigUploadModal] = useState(false);
+  const [showAPIIntegrationModal, setShowAPIIntegrationModal] = useState(false);
   const [selections, setSelections] = useState({
     type: '',
     inputText: '',
@@ -1684,11 +1688,12 @@ function App() {
     }
   };
 
-  const handleDelete = async () => {
-    if (!activeTarget) return;
+  const handleDelete = async (targetId = null) => {
+    const idToDelete = targetId || activeTarget?.id;
+    if (!idToDelete) return;
 
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/delete/${activeTarget.id}`, {
+      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/delete/${idToDelete}`, {
         method: 'DELETE',
       });
 
@@ -1697,13 +1702,17 @@ function App() {
       }
 
       setScopeTargets((prev) => {
-        const updatedTargets = prev.filter((target) => target.id !== activeTarget.id);
-        const newActiveTarget = updatedTargets.length > 0 ? updatedTargets[0] : null;
-        setActiveTarget(newActiveTarget);
-        if (!newActiveTarget && showActiveModal) {
-          setShowActiveModal(false);
-          setShowModal(true);
+        const updatedTargets = prev.filter((target) => target.id !== idToDelete);
+        
+        if (activeTarget?.id === idToDelete) {
+          const newActiveTarget = updatedTargets.length > 0 ? updatedTargets[0] : null;
+          setActiveTarget(newActiveTarget);
+          if (!newActiveTarget && showActiveModal) {
+            setShowActiveModal(false);
+            setShowModal(true);
+          }
         }
+        
         return updatedTargets;
       });
     } catch (error) {
@@ -3028,6 +3037,14 @@ function App() {
     setShowWelcomeModal(false);
   };
 
+  const handleCloseConfigUploadModal = () => {
+    setShowConfigUploadModal(false);
+  };
+
+  const handleCloseAPIIntegrationModal = () => {
+    setShowAPIIntegrationModal(false);
+  };
+
   const handleWelcomeAddScopeTarget = () => {
     setShowWelcomeModal(false);
     setShowModal(true);
@@ -3038,13 +3055,33 @@ function App() {
     setShowImportModal(true);
   };
 
+  const handleWelcomeUploadConfig = () => {
+    setShowWelcomeModal(false);
+    setShowConfigUploadModal(true);
+  };
+
+  const handleWelcomeUseAPI = () => {
+    setShowWelcomeModal(false);
+    setShowAPIIntegrationModal(true);
+  };
+
   const handleImportSuccess = async (result) => {
+    await fetchScopeTargets();
+  };
+
+  const handleConfigUploadSuccess = async (result) => {
+    await fetchScopeTargets();
+  };
+
+  const handleAPIIntegrationSuccess = async (result) => {
     await fetchScopeTargets();
   };
 
   const handleBackToWelcome = () => {
     setShowModal(false);
     setShowImportModal(false);
+    setShowConfigUploadModal(false);
+    setShowAPIIntegrationModal(false);
     setShowWelcomeModal(true);
   };
 
@@ -4646,7 +4683,7 @@ function App() {
         handleSelect={handleSelect}
         handleFormSubmit={handleSubmit}
         errorMessage={errorMessage}
-        showBackButton={scopeTargets.length === 0}
+        showBackButton={true}
         onBackClick={handleBackToWelcome}
       />
 
@@ -4694,6 +4731,28 @@ function App() {
           handleClose={handleCloseWelcomeModal}
           onAddScopeTarget={handleWelcomeAddScopeTarget}
           onImportData={handleWelcomeImportData}
+          onUploadConfig={handleWelcomeUploadConfig}
+          onUseAPI={handleWelcomeUseAPI}
+        />
+      </Suspense>
+
+      <Suspense fallback={<div />}>
+        <ConfigUploadModal
+          show={showConfigUploadModal}
+          handleClose={handleCloseConfigUploadModal}
+          onSuccess={handleConfigUploadSuccess}
+          showBackButton={scopeTargets.length === 0}
+          onBackClick={handleBackToWelcome}
+        />
+      </Suspense>
+
+      <Suspense fallback={<div />}>
+        <APIIntegrationModal
+          show={showAPIIntegrationModal}
+          handleClose={handleCloseAPIIntegrationModal}
+          onSuccess={handleAPIIntegrationSuccess}
+          showBackButton={scopeTargets.length === 0}
+          onBackClick={handleBackToWelcome}
         />
       </Suspense>
 
@@ -6513,19 +6572,26 @@ function App() {
                         </Card.Title>
                         <Card.Text className="text-white small fst-italic">
                           Perform comprehensive threat modeling using the STRIDE methodology to identify security threats across six categories:
-                          <br /><br />
-                          <strong>(S)poofing</strong> - Impersonation of users, systems, or data
-                          <br />
-                          <strong>(T)ampering</strong> - Malicious modification of data or code
-                          <br />
-                          <strong>(R)epudiation</strong> - Denial of actions without proper logging
-                          <br />
-                          <strong>(I)nformation Disclosure</strong> - Exposure of sensitive information
-                          <br />
-                          <strong>(D)enial of Service</strong> - Preventing legitimate access
-                          <br />
-                          <strong>(E)levation of Privilege</strong> - Gaining unauthorized elevated permissions
-                          <br /><br />
+                          <div style={{ columnCount: 2, columnGap: '20px', marginTop: '15px', marginBottom: '15px', textAlign: 'center' }}>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(S)poofing</strong> - Impersonation of users, systems, or data
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(T)ampering</strong> - Malicious modification of data or code
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(R)epudiation</strong> - Denial of actions without proper logging
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(I)nformation Disclosure</strong> - Exposure of sensitive information
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(D)enial of Service</strong> - Preventing legitimate access
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(E)levation of Privilege</strong> - Gaining unauthorized elevated permissions
+                            </div>
+                          </div>
                           Build your threat model by documenting reconnaissance findings, identifying mechanisms and objects, assessing security controls, and systematically analyzing potential attack vectors and their business impact.
                         </Card.Text>
                         <div className="mt-auto">

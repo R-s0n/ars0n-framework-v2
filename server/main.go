@@ -188,6 +188,9 @@ func main() {
 	r.HandleFunc("/api/api-keys", createAPIKey).Methods("POST", "OPTIONS")
 	r.HandleFunc("/api/api-keys/{id}", updateAPIKey).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/api/api-keys/{id}", deleteAPIKey).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/api/hackerone/test-key", utils.TestHackerOneAPIKey).Methods("POST", "OPTIONS")
+	r.HandleFunc("/api/hackerone/program", utils.GetHackerOneProgram).Methods("GET", "OPTIONS")
+	r.HandleFunc("/api/hackerone/programs", utils.ListHackerOnePrograms).Methods("GET", "OPTIONS")
 
 	// AI API Keys routes
 	r.HandleFunc("/api/ai-api-keys", getAiAPIKeys).Methods("GET", "OPTIONS")
@@ -338,7 +341,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, X-HackerOne-API-Key")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
