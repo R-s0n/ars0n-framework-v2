@@ -18,7 +18,7 @@ const styles = {
   },
 };
 
-function ToolsModal({ show, handleClose, initialTab = 'url-populator' }) {
+function ToolsModal({ show, handleClose, initialTab = 'url-populator', initialUrls = '' }) {
   const [activeTab, setActiveTab] = useState(initialTab);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -59,6 +59,13 @@ function ToolsModal({ show, handleClose, initialTab = 'url-populator' }) {
   useEffect(() => {
     setActiveTab(initialTab);
   }, [initialTab]);
+
+  useEffect(() => {
+    if (show && initialUrls) {
+      setRawInput(initialUrls);
+      setActiveTab('url-populator');
+    }
+  }, [show, initialUrls]);
 
   const fetchSettings = async () => {
     setLoading(true);

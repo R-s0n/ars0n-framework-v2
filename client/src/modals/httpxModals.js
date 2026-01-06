@@ -1,7 +1,7 @@
 import { Modal, Table, Form, Row, Col, Button, Pagination, OverlayTrigger, Tooltip } from 'react-bootstrap';
 import { useState, useEffect, useMemo } from 'react';
 
-export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResultsModal, httpxResults }) => {
+export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResultsModal, httpxResults, onPopulateBurp }) => {
   const [sortColumn, setSortColumn] = useState('');
   const [sortDirection, setSortDirection] = useState('asc');
   const [filters, setFilters] = useState({
@@ -16,6 +16,7 @@ export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResul
   const [existingScopeTargets, setExistingScopeTargets] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(25);
+  const [copySuccess, setCopySuccess] = useState(false);
 
   const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8443';
 
@@ -358,6 +359,26 @@ export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResul
     return <Pagination>{items}</Pagination>;
   };
 
+  const handleCopyAllUrls = () => {
+    const urls = filteredAndSortedResults.map(result => result.url).filter(url => url).join('\n');
+    if (urls) {
+      navigator.clipboard.writeText(urls).then(() => {
+        setCopySuccess(true);
+        setTimeout(() => setCopySuccess(false), 2000);
+      }).catch(err => {
+        console.error('Failed to copy URLs:', err);
+      });
+    }
+  };
+
+  const handlePopulateBurp = () => {
+    const urls = filteredAndSortedResults.map(result => result.url).filter(url => url).join('\n');
+    if (urls && onPopulateBurp) {
+      onPopulateBurp(urls);
+      handleCloseHttpxResultsModal();
+    }
+  };
+
   return (
     <Modal data-bs-theme="dark" show={showHttpxResultsModal} onHide={handleCloseHttpxResultsModal} fullscreen>
       <Modal.Header closeButton>
@@ -365,7 +386,25 @@ export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResul
       </Modal.Header>
       <Modal.Body>
         {filteredAndSortedResults.length > 0 && (
-          <div className="mb-4">
+          <>
+            <div className="d-flex gap-2 mb-3">
+              <Button 
+                variant="outline-info" 
+                size="sm" 
+                onClick={handleCopyAllUrls}
+              >
+                {copySuccess ? 'Copied!' : 'Copy All URLs'}
+              </Button>
+              <Button 
+                variant="outline-danger" 
+                size="sm" 
+                onClick={handlePopulateBurp}
+                disabled={!onPopulateBurp}
+              >
+                Populate Burp with All URLs
+              </Button>
+            </div>
+            <div className="mb-4">
             <Row className="mb-3">
               <Col md={4}>
                 <Form.Label>Filter by URL</Form.Label>
@@ -491,6 +530,7 @@ export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResul
               )}
             </div>
           </div>
+          </>
         )}
         {filteredAndSortedResults.length === 0 ? (
           <div className="text-center py-4 text-white-50">

@@ -485,6 +485,8 @@ function App() {
   const [shuffleDNSCustomScans, setShuffleDNSCustomScans] = useState([]);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showToolsModal, setShowToolsModal] = useState(false);
+  const [toolsModalInitialUrls, setToolsModalInitialUrls] = useState('');
+  const [toolsModalInitialTab, setToolsModalInitialTab] = useState('url-populator');
   const [isAutoScanning, setIsAutoScanning] = useState(false);
   const [autoScanCurrentStep, setAutoScanCurrentStep] = useState(AUTO_SCAN_STEPS.IDLE);
   const [autoScanTargetId, setAutoScanTargetId] = useState(null);
@@ -675,6 +677,8 @@ function App() {
   const handleCloseMetaDataModal = () => setShowMetaDataModal(false);
   const handleCloseToolsModal = () => {
     setShowToolsModal(false);
+    setToolsModalInitialUrls('');
+    setToolsModalInitialTab('url-populator');
   };
 
   const handleCloseSettingsModal = () => {
@@ -3021,6 +3025,12 @@ function App() {
     setShowToolsModal(true);
   };
 
+  const handleOpenToolsModalWithUrls = (urls) => {
+    setToolsModalInitialUrls(urls);
+    setToolsModalInitialTab('url-populator');
+    setShowToolsModal(true);
+  };
+
   const handleOpenExportModal = () => {
     setShowExportModal(true);
   };
@@ -4706,6 +4716,8 @@ function App() {
       <ToolsModal
         show={showToolsModal}
         handleClose={handleCloseToolsModal}
+        initialTab={toolsModalInitialTab}
+        initialUrls={toolsModalInitialUrls}
       />
 
       <Suspense fallback={<div />}>
@@ -4840,6 +4852,7 @@ function App() {
         showHttpxResultsModal={showHttpxResultsModal}
         handleCloseHttpxResultsModal={handleCloseHttpxResultsModal}
         httpxResults={mostRecentHttpxScan}
+        onPopulateBurp={handleOpenToolsModalWithUrls}
       />
 
       <GauResultsModal
@@ -4974,6 +4987,7 @@ function App() {
         showScreenshotResultsModal={showScreenshotResultsModal}
         handleCloseScreenshotResultsModal={handleCloseScreenshotResultsModal}
         activeTarget={activeTarget}
+        onPopulateBurp={handleOpenToolsModalWithUrls}
       />
 
       <Fade in={fadeIn}>
@@ -6842,6 +6856,7 @@ function App() {
           targetURLs={targetURLs}
           setTargetURLs={setTargetURLs}
           fetchScopeTargets={fetchScopeTargets}
+          onPopulateBurp={handleOpenToolsModalWithUrls}
         />
       </Suspense>
       <Suspense fallback={<div />}>
@@ -7186,6 +7201,7 @@ function App() {
         activeTarget={activeTarget}
         consolidatedNetworkRanges={consolidatedNetworkRanges}
         mostRecentIPPortScan={mostRecentIPPortScan}
+        onPopulateBurp={handleOpenToolsModalWithUrls}
       />
       <AmassEnumConfigModal
         show={showAmassEnumConfigModal}

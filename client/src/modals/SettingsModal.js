@@ -145,13 +145,16 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
         handleClose();
       } else {
         // For other settings, show the success toast
-        const response = await fetch('/api/settings', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(settings),
-        });
+        const response = await fetch(
+          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/user/settings`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(settings),
+          }
+        );
 
         if (!response.ok) {
           throw new Error('Failed to save settings');

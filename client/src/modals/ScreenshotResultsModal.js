@@ -11,10 +11,12 @@ const getNullStringValue = (field) => {
 const ScreenshotResultsModal = ({
   showScreenshotResultsModal,
   handleCloseScreenshotResultsModal,
-  activeTarget
+  activeTarget,
+  onPopulateBurp
 }) => {
   const [targetURLs, setTargetURLs] = useState([]);
   const [expandedIndex, setExpandedIndex] = useState(null);
+  const [copySuccess, setCopySuccess] = useState(false);
 
   useEffect(() => {
     const fetchTargetURLs = async () => {
@@ -60,12 +62,51 @@ const ScreenshotResultsModal = ({
     return { bg: 'secondary', text: 'white' };
   };
 
+  const handleCopyAllUrls = () => {
+    const urls = targetURLs.map(item => item.url).filter(url => url).join('\n');
+    if (urls) {
+      navigator.clipboard.writeText(urls).then(() => {
+        setCopySuccess(true);
+        setTimeout(() => setCopySuccess(false), 2000);
+      }).catch(err => {
+        console.error('Failed to copy URLs:', err);
+      });
+    }
+  };
+
+  const handlePopulateBurp = () => {
+    const urls = targetURLs.map(item => item.url).filter(url => url).join('\n');
+    if (urls && onPopulateBurp) {
+      onPopulateBurp(urls);
+      handleCloseScreenshotResultsModal();
+    }
+  };
+
   return (
     <Modal data-bs-theme="dark" show={showScreenshotResultsModal} onHide={handleCloseScreenshotResultsModal} size="xl">
       <Modal.Header closeButton>
         <Modal.Title className="text-danger">Screenshot Results</Modal.Title>
       </Modal.Header>
       <Modal.Body>
+        {targetURLs.length > 0 && (
+          <div className="d-flex gap-2 mb-3">
+            <Button 
+              variant="outline-info" 
+              size="sm" 
+              onClick={handleCopyAllUrls}
+            >
+              {copySuccess ? 'Copied!' : 'Copy All URLs'}
+            </Button>
+            <Button 
+              variant="outline-danger" 
+              size="sm" 
+              onClick={handlePopulateBurp}
+              disabled={!onPopulateBurp}
+            >
+              Populate Burp with All URLs
+            </Button>
+          </div>
+        )}
         <div className="screenshot-list">
           {targetURLs.map((targetURL, index) => (
             <div key={index} className="screenshot-item mb-4">

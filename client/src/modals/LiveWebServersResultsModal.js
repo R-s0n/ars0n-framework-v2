@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { Modal, Button, Tab, Tabs, Table, Badge, Spinner, Alert, Accordion, Form, Row, Col, Pagination, OverlayTrigger, Tooltip } from 'react-bootstrap';
 import { MdCopyAll } from 'react-icons/md';
 
-const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNetworkRanges, mostRecentIPPortScan }) => {
+const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNetworkRanges, mostRecentIPPortScan, onPopulateBurp }) => {
   const [activeTab, setActiveTab] = useState('network-ranges');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -26,6 +26,7 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
   const [existingScopeTargets, setExistingScopeTargets] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(25);
+  const [copySuccess, setCopySuccess] = useState(false);
 
   const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8443';
 
@@ -406,12 +407,51 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
     return <Pagination>{items}</Pagination>;
   };
 
+  const handleCopyAllUrls = () => {
+    const urls = liveWebServers.map(server => server.url).filter(url => url).join('\n');
+    if (urls) {
+      navigator.clipboard.writeText(urls).then(() => {
+        setCopySuccess(true);
+        setTimeout(() => setCopySuccess(false), 2000);
+      }).catch(err => {
+        console.error('Failed to copy URLs:', err);
+      });
+    }
+  };
+
+  const handlePopulateBurp = () => {
+    const urls = liveWebServers.map(server => server.url).filter(url => url).join('\n');
+    if (urls && onPopulateBurp) {
+      onPopulateBurp(urls);
+      onHide();
+    }
+  };
+
   return (
     <Modal show={show} onHide={onHide} size="xl" className="modal-90w">
       <Modal.Header closeButton className="bg-dark text-white">
         <Modal.Title>Live Web Servers Results</Modal.Title>
       </Modal.Header>
       <Modal.Body className="bg-dark text-white">
+        {activeTab === 'live-web-servers' && liveWebServers.length > 0 && (
+          <div className="d-flex gap-2 mb-3">
+            <Button 
+              variant="outline-info" 
+              size="sm" 
+              onClick={handleCopyAllUrls}
+            >
+              {copySuccess ? 'Copied!' : 'Copy All URLs'}
+            </Button>
+            <Button 
+              variant="outline-danger" 
+              size="sm" 
+              onClick={handlePopulateBurp}
+              disabled={!onPopulateBurp}
+            >
+              Populate Burp with All URLs
+            </Button>
+          </div>
+        )}
         <Tabs
           activeKey={activeTab}
           onSelect={(k) => setActiveTab(k)}

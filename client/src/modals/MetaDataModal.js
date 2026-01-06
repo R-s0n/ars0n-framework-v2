@@ -6,7 +6,8 @@ const MetaDataModal = memo(({
   handleCloseMetaDataModal,
   targetURLs = [],
   setTargetURLs,
-  fetchScopeTargets
+  fetchScopeTargets,
+  onPopulateBurp
 }) => {
   const [sortColumn, setSortColumn] = useState('');
   const [sortDirection, setSortDirection] = useState('asc');
@@ -25,6 +26,7 @@ const MetaDataModal = memo(({
   const [itemsPerPage] = useState(25);
   const [isLoading, setIsLoading] = useState(true);
   const [lightboxImage, setLightboxImage] = useState(null);
+  const [copySuccess, setCopySuccess] = useState(false);
 
   useEffect(() => {
     const handleMetadataScanComplete = (event) => {
@@ -424,6 +426,26 @@ const MetaDataModal = memo(({
     return <Pagination>{items}</Pagination>;
   };
 
+  const handleCopyAllUrls = () => {
+    const urls = targetURLs.map(item => item.url).filter(url => url).join('\n');
+    if (urls) {
+      navigator.clipboard.writeText(urls).then(() => {
+        setCopySuccess(true);
+        setTimeout(() => setCopySuccess(false), 2000);
+      }).catch(err => {
+        console.error('Failed to copy URLs:', err);
+      });
+    }
+  };
+
+  const handlePopulateBurp = () => {
+    const urls = targetURLs.map(item => item.url).filter(url => url).join('\n');
+    if (urls && onPopulateBurp) {
+      onPopulateBurp(urls);
+      handleCloseMetaDataModal();
+    }
+  };
+
   return (
     <Modal
       data-bs-theme="dark"
@@ -446,6 +468,25 @@ const MetaDataModal = memo(({
           </div>
         ) : (
           <>
+        {targetURLs.length > 0 && (
+          <div className="d-flex gap-2 mb-3">
+            <Button 
+              variant="outline-info" 
+              size="sm" 
+              onClick={handleCopyAllUrls}
+            >
+              {copySuccess ? 'Copied!' : 'Copy All URLs'}
+            </Button>
+            <Button 
+              variant="outline-danger" 
+              size="sm" 
+              onClick={handlePopulateBurp}
+              disabled={!onPopulateBurp}
+            >
+              Populate Burp with All URLs
+            </Button>
+          </div>
+        )}
         {filteredAndSortedUrls.length > 0 && (
           <div className="mb-4">
             <Row className="mb-3">
