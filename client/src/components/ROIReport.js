@@ -286,14 +286,6 @@ const TargetSection = memo(({ targetURL, roiScore, onDelete, onAddAsScope, isDel
                   <div className="display-4 text-danger me-3">{displayScore}</div>
                   <div className="h3 mb-0 text-white">
                     <a href={targetURL.url} target="_blank" rel="noopener noreferrer">{targetURL.url}</a>
-                    {targetURL.screenshot && targetURL.screenshot.trim() !== '' && (
-                      <OverlayTrigger
-                        placement="top"
-                        overlay={<Tooltip>Screenshot captured</Tooltip>}
-                      >
-                        <i className="bi bi-camera-fill text-success ms-2" style={{ fontSize: '0.7em' }}></i>
-                      </OverlayTrigger>
-                    )}
                   </div>
                 </div>
                 <div className="d-flex align-items-center gap-2 ms-3">
@@ -727,14 +719,9 @@ const ROIReport = memo(({ show, onHide, targetURLs = [], setTargetURLs, fetchSco
       return [...safeTargetURLs]
         .map(target => ({
           ...target,
-          _calculatedScore: target.roi_score || calculateROIScore(target),
-          _hasScreenshot: target.screenshot && target.screenshot.trim() !== ''
+          _calculatedScore: target.roi_score || calculateROIScore(target)
         }))
-        .sort((a, b) => {
-          if (a._hasScreenshot && !b._hasScreenshot) return -1;
-          if (!a._hasScreenshot && b._hasScreenshot) return 1;
-          return b._calculatedScore - a._calculatedScore;
-        });
+        .sort((a, b) => b._calculatedScore - a._calculatedScore);
     }
     return [];
   }, [show, safeTargetURLs]);

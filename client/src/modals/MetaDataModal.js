@@ -320,15 +320,9 @@ const MetaDataModal = memo(({
       return true;
     });
 
-    return filtered.sort((a, b) => {
-      const aHasScreenshot = a.screenshot && a.screenshot.trim() !== '';
-      const bHasScreenshot = b.screenshot && b.screenshot.trim() !== '';
-      
-      if (aHasScreenshot && !bHasScreenshot) return -1;
-      if (!aHasScreenshot && bHasScreenshot) return 1;
-      
-      if (!sortColumn) return 0;
+    if (!sortColumn) return filtered;
 
+    return filtered.sort((a, b) => {
       let valueA, valueB;
 
       switch (sortColumn) {
@@ -718,14 +712,6 @@ const MetaDataModal = memo(({
                             />
                           )}
                           <span>{url.url}</span>
-                          {url.screenshot && url.screenshot.trim() !== '' && (
-                            <OverlayTrigger
-                              placement="top"
-                              overlay={<Tooltip>Screenshot captured</Tooltip>}
-                            >
-                              <i className="bi bi-camera-fill text-success ms-2" style={{ fontSize: '0.9em' }}></i>
-                            </OverlayTrigger>
-                          )}
                         </div>
                         <div className="d-flex align-items-center gap-2">
                           <Badge 

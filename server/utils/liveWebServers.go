@@ -238,12 +238,19 @@ func ExecuteAndParseHttpxScan(scanID, domain string) {
 	}
 	log.Printf("[DEBUG] Wrote %d domains to file: %s", len(domainsToScan), domainsFile)
 
-	// Build the docker command with base parameters
+	ports := []int{80, 443, 7547, 8089, 8085, 8443, 8080, 4567, 7170, 8008, 2083, 8000, 2082, 8081, 2087, 2086, 8888, 8880, 60000, 40000, 9080, 5985, 9100, 2096, 3000, 1024, 30005, 81, 21, 5000, 2095}
+	portStrings := make([]string, len(ports))
+	for i, port := range ports {
+		portStrings[i] = fmt.Sprintf("%d", port)
+	}
+	portsFlag := strings.Join(portStrings, ",")
+
 	dockerCmd := []string{
 		"docker", "exec",
 		"ars0n-framework-v2-httpx-1",
 		"httpx",
 		"-l", filepath.Join("/tmp", fmt.Sprintf("httpx-%s", scanID), "domains.txt"),
+		"-ports", portsFlag,
 		"-json",
 		"-status-code",
 		"-title",

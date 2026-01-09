@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -348,7 +349,54 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 		if err != nil {
 			log.Printf("[WARN] Screenshot command failed for scan ID %s: %v (continuing with other steps)", scanID, err)
 		} else {
-			log.Printf("[INFO] Screenshots captured successfully for scan ID: %s", scanID)
+			log.Printf("[INFO] Screenshots captured successfully for scan ID: %s, processing files...", scanID)
+			
+			// Process screenshot files
+			screenshotFiles, err := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "ls", "/app/screenshots/").Output()
+			if err != nil {
+				log.Printf("[WARN] Failed to list screenshot files for scan ID %s: %v (continuing with other steps)", scanID, err)
+			} else {
+				fileList := strings.Split(string(screenshotFiles), "\n")
+				log.Printf("[INFO] Found %d screenshot files to process", len(fileList))
+				
+				processedCount := 0
+				for _, file := range fileList {
+					if file == "" || !strings.HasSuffix(file, ".png") {
+						continue
+					}
+					
+					// Read the screenshot file
+					imgData, err := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "cat", "/app/screenshots/"+file).Output()
+					if err != nil {
+						log.Printf("[WARN] Failed to read screenshot file %s: %v", file, err)
+						continue
+					}
+					
+					// Convert the URL-safe filename back to a real URL
+					url := strings.TrimSuffix(file, ".png")
+					url = strings.ReplaceAll(url, "__", "://")
+					url = strings.ReplaceAll(url, "_", ".")
+					url = NormalizeURL(url)
+					
+					// Skip URLs with encoded characters that are nuclei test paths
+					if strings.Contains(url, "%") {
+						continue
+					}
+					
+					// Update target URL with screenshot
+					screenshot := base64.StdEncoding.EncodeToString(imgData)
+					if err := UpdateTargetURLFromScreenshot(url, screenshot); err != nil {
+						log.Printf("[WARN] Failed to update target URL screenshot for %s: %v", url, err)
+					} else {
+						processedCount++
+					}
+				}
+				
+				log.Printf("[INFO] Successfully processed %d screenshots for scan ID: %s", processedCount, scanID)
+				
+				// Clean up screenshots in the container
+				exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "rm", "-rf", "/app/screenshots/*").Run()
+			}
 		}
 	} else {
 		log.Printf("[INFO] Screenshot capture skipped (disabled in config)")
