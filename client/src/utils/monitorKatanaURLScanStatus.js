@@ -11,7 +11,7 @@ const monitorKatanaURLScanStatus = async (
     console.log('[KATANA-URL] Monitoring scan status for target:', activeTarget.id);
     
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/katana-url`
+      `/api/scopetarget/${activeTarget.id}/scans/katana-url`
     );
 
     if (!response.ok) {
@@ -64,7 +64,7 @@ export const monitorActiveScan = async (
   const poll = async () => {
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/katana-url/status/${scanId}`
+        `/api/katana-url/status/${scanId}`
       );
       
       if (!response.ok) {
@@ -95,7 +95,7 @@ export const monitorActiveScan = async (
         if (activeTarget && setKatanaURLScans) {
           try {
             const refreshResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/katana-url`
+              `/api/scopetarget/${activeTarget.id}/scans/katana-url`
             );
             if (refreshResponse.ok) {
               const refreshedScans = await refreshResponse.json();

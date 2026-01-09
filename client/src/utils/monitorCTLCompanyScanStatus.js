@@ -11,7 +11,7 @@ const monitorCTLCompanyScanStatus = async (
     console.log('[CTL-COMPANY] Monitoring scan status for target:', activeTarget.id);
     
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/ctl-company`
+      `/api/scopetarget/${activeTarget.id}/scans/ctl-company`
     );
 
     if (!response.ok) {

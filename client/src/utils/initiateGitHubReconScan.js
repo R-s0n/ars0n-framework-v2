@@ -18,7 +18,7 @@ const initiateGitHubReconScan = async (
     if (autoScanSessionId) body.auto_scan_session_id = autoScanSessionId;
     
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/github-recon/run`,
+      `/api/github-recon/run`,
       {
         method: 'POST',
         headers: {

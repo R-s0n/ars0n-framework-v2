@@ -1,7 +1,7 @@
 export const fetchDNSxRawResults = async (scanId) => {
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/dnsx-company/${scanId}/raw-results`
+      `/api/dnsx-company/${scanId}/raw-results`
     );
 
     if (!response.ok) {

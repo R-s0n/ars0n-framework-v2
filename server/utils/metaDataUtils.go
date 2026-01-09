@@ -38,6 +38,22 @@ type MetaDataStatus struct {
 	CreatedAt         time.Time      `json:"created_at"`
 	ScopeTargetID     string         `json:"scope_target_id"`
 	AutoScanSessionID sql.NullString `json:"auto_scan_session_id"`
+	Config            []byte         `json:"config,omitempty"`
+}
+
+type NucleiLogWriter struct {
+	prefix string
+}
+
+func (nlw *NucleiLogWriter) Write(p []byte) (n int, err error) {
+	output := string(p)
+	lines := strings.Split(strings.TrimRight(output, "\n\r"), "\n")
+	for _, line := range lines {
+		if line != "" {
+			log.Printf("%s %s", nlw.prefix, line)
+		}
+	}
+	return len(p), nil
 }
 
 type DNSResults struct {
@@ -116,6 +132,10 @@ func RunMetaDataScan(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		ScopeTargetID     string  `json:"scope_target_id" binding:"required"`
 		AutoScanSessionID *string `json:"auto_scan_session_id,omitempty"`
+		Config            *struct {
+			URLIds []string          `json:"url_ids,omitempty"`
+			Steps  map[string]bool   `json:"steps,omitempty"`
+		} `json:"config,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.ScopeTargetID == "" {
 		http.Error(w, "Invalid request body. `scope_target_id` is required.", http.StatusBadRequest)
@@ -135,12 +155,28 @@ func RunMetaDataScan(w http.ResponseWriter, r *http.Request) {
 	scanID := uuid.New().String()
 	var insertQuery string
 	var args []interface{}
+	
+	var configJSON []byte
+	if payload.Config != nil {
+		configJSON, _ = json.Marshal(payload.Config)
+	}
+	
 	if payload.AutoScanSessionID != nil && *payload.AutoScanSessionID != "" {
-		insertQuery = `INSERT INTO metadata_scans (scan_id, domain, status, scope_target_id, auto_scan_session_id) VALUES ($1, $2, $3, $4, $5)`
-		args = []interface{}{scanID, domain, "pending", payload.ScopeTargetID, *payload.AutoScanSessionID}
+		if configJSON != nil {
+			insertQuery = `INSERT INTO metadata_scans (scan_id, domain, status, scope_target_id, auto_scan_session_id, config) VALUES ($1, $2, $3, $4, $5, $6)`
+			args = []interface{}{scanID, domain, "pending", payload.ScopeTargetID, *payload.AutoScanSessionID, configJSON}
+		} else {
+			insertQuery = `INSERT INTO metadata_scans (scan_id, domain, status, scope_target_id, auto_scan_session_id) VALUES ($1, $2, $3, $4, $5)`
+			args = []interface{}{scanID, domain, "pending", payload.ScopeTargetID, *payload.AutoScanSessionID}
+		}
 	} else {
-		insertQuery = `INSERT INTO metadata_scans (scan_id, domain, status, scope_target_id) VALUES ($1, $2, $3, $4)`
-		args = []interface{}{scanID, domain, "pending", payload.ScopeTargetID}
+		if configJSON != nil {
+			insertQuery = `INSERT INTO metadata_scans (scan_id, domain, status, scope_target_id, config) VALUES ($1, $2, $3, $4, $5)`
+			args = []interface{}{scanID, domain, "pending", payload.ScopeTargetID, configJSON}
+		} else {
+			insertQuery = `INSERT INTO metadata_scans (scan_id, domain, status, scope_target_id) VALUES ($1, $2, $3, $4)`
+			args = []interface{}{scanID, domain, "pending", payload.ScopeTargetID}
+		}
 	}
 	_, err = dbPool.Exec(context.Background(), insertQuery, args...)
 	if err != nil {
@@ -156,34 +192,94 @@ func RunMetaDataScan(w http.ResponseWriter, r *http.Request) {
 }
 
 func ExecuteAndParseMetaDataScan(scanID, domain string) {
-	log.Printf("[INFO] Starting Nuclei SSL scan for domain %s (scan ID: %s)", domain, scanID)
+	log.Printf("[INFO] Starting metadata scan for domain %s (scan ID: %s)", domain, scanID)
 	startTime := time.Now()
 
-	// Get scope target ID and latest httpx results
+	// Get scope target ID and config
 	var scopeTargetID string
+	var configJSON []byte
 	err := dbPool.QueryRow(context.Background(),
-		`SELECT scope_target_id FROM metadata_scans WHERE scan_id = $1`,
-		scanID).Scan(&scopeTargetID)
+		`SELECT scope_target_id, config FROM metadata_scans WHERE scan_id = $1`,
+		scanID).Scan(&scopeTargetID, &configJSON)
 	if err != nil {
 		log.Printf("[ERROR] Failed to get scope target ID: %v", err)
 		UpdateMetaDataScanStatus(scanID, "error", "", fmt.Sprintf("Failed to get scope target ID: %v", err), "", time.Since(startTime).String())
 		return
 	}
 
-	// Get latest httpx results
-	var httpxResults string
-	err = dbPool.QueryRow(context.Background(), `
-		SELECT result 
-		FROM httpx_scans 
-		WHERE scope_target_id = $1 
-		AND status = 'success' 
-		ORDER BY created_at DESC 
-		LIMIT 1`, scopeTargetID).Scan(&httpxResults)
-	if err != nil {
-		log.Printf("[ERROR] Failed to get httpx results: %v", err)
-		UpdateMetaDataScanStatus(scanID, "error", "", fmt.Sprintf("Failed to get httpx results: %v", err), "", time.Since(startTime).String())
+	// Parse config if exists
+	type ScanConfig struct {
+		URLIds []string        `json:"url_ids"`
+		Steps  map[string]bool `json:"steps"`
+	}
+	var config *ScanConfig
+	if len(configJSON) > 0 {
+		config = &ScanConfig{}
+		if err := json.Unmarshal(configJSON, config); err != nil {
+			log.Printf("[WARN] Failed to parse config, using defaults: %v", err)
+			config = nil
+		}
+	}
+
+	// Get target URLs - either from config or from httpx results
+	var urls []string
+	if config != nil && len(config.URLIds) > 0 {
+		log.Printf("[INFO] Using %d configured URL IDs", len(config.URLIds))
+		for _, urlID := range config.URLIds {
+			var url string
+			err := dbPool.QueryRow(context.Background(),
+				`SELECT url FROM target_urls WHERE id = $1`, urlID).Scan(&url)
+			if err != nil {
+				log.Printf("[WARN] Failed to get URL for ID %s: %v", urlID, err)
+				continue
+			}
+			if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+				urls = append(urls, url)
+				log.Printf("[DEBUG] Added URL from config: %s", url)
+			} else {
+				log.Printf("[WARN] Skipping invalid URL (no http/https prefix): %s", url)
+			}
+		}
+	} else {
+		log.Printf("[INFO] No URL IDs in config, using all URLs from httpx results")
+		var httpxResults string
+		err = dbPool.QueryRow(context.Background(), `
+			SELECT result 
+			FROM httpx_scans 
+			WHERE scope_target_id = $1 
+			AND status = 'success' 
+			ORDER BY created_at DESC 
+			LIMIT 1`, scopeTargetID).Scan(&httpxResults)
+		if err != nil {
+			log.Printf("[ERROR] Failed to get httpx results: %v", err)
+			UpdateMetaDataScanStatus(scanID, "error", "", fmt.Sprintf("Failed to get httpx results: %v", err), "", time.Since(startTime).String())
+			return
+		}
+
+		for _, line := range strings.Split(httpxResults, "\n") {
+			if line == "" {
+				continue
+			}
+			var result struct {
+				URL string `json:"url"`
+			}
+			if err := json.Unmarshal([]byte(line), &result); err != nil {
+				log.Printf("[WARN] Failed to parse httpx result line for scan ID %s: %v", scanID, err)
+				continue
+			}
+			if result.URL != "" && (strings.HasPrefix(result.URL, "http://") || strings.HasPrefix(result.URL, "https://")) {
+				urls = append(urls, result.URL)
+			}
+		}
+	}
+
+	if len(urls) == 0 {
+		log.Printf("[ERROR] No valid URLs found for scan ID: %s", scanID)
+		UpdateMetaDataScanStatus(scanID, "error", "", "No valid HTTP/HTTPS URLs found", "", time.Since(startTime).String())
 		return
 	}
+
+	log.Printf("[INFO] Processing %d URLs for scan ID: %s", len(urls), scanID)
 
 	// Create a temporary file for URLs
 	tempFile, err := os.CreateTemp("", "urls-*.txt")
@@ -195,30 +291,6 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 	defer os.Remove(tempFile.Name())
 	log.Printf("[INFO] Created temporary file for URLs: %s", tempFile.Name())
 
-	// Process httpx results and write URLs to temp file
-	var urls []string
-	for _, line := range strings.Split(httpxResults, "\n") {
-		if line == "" {
-			continue
-		}
-		var result struct {
-			URL string `json:"url"`
-		}
-		if err := json.Unmarshal([]byte(line), &result); err != nil {
-			log.Printf("[WARN] Failed to parse httpx result line for scan ID %s: %v", scanID, err)
-			continue
-		}
-		if result.URL != "" && strings.HasPrefix(result.URL, "https://") {
-			urls = append(urls, result.URL)
-		}
-	}
-
-	if len(urls) == 0 {
-		log.Printf("[ERROR] No valid HTTPS URLs found in httpx results for scan ID: %s", scanID)
-		UpdateMetaDataScanStatus(scanID, "error", "", "No valid HTTPS URLs found in httpx results", "", time.Since(startTime).String())
-		return
-	}
-
 	// Write URLs to temp file
 	if err := os.WriteFile(tempFile.Name(), []byte(strings.Join(urls, "\n")), 0644); err != nil {
 		log.Printf("[ERROR] Failed to write URLs to temp file for scan ID %s: %v", scanID, err)
@@ -227,13 +299,69 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 	}
 	log.Printf("[INFO] Successfully wrote %d URLs to temp file for scan ID: %s", len(urls), scanID)
 
-	// Run Katana scan first
-	log.Printf("[INFO] Starting Katana scan for scan ID: %s - Total URLs to scan: %d", scanID, len(urls))
+	// Check which steps to run
+	runScreenshots := config == nil || config.Steps == nil || config.Steps["screenshots"]
+	runKatana := config == nil || config.Steps == nil || config.Steps["katana"]
+	runFfuf := config == nil || config.Steps == nil || config.Steps["ffuf"]
+	runTech := config == nil || config.Steps == nil || config.Steps["technology"]
+	runSSL := config == nil || config.Steps == nil || config.Steps["ssl"]
+
+	log.Printf("[INFO] Scan steps enabled - Screenshots: %v, Katana: %v, FFuf: %v, Technology: %v, SSL: %v", runScreenshots, runKatana, runFfuf, runTech, runSSL)
+
+	// Run screenshots if enabled
+	if runScreenshots {
+		log.Printf("[INFO] Starting screenshot capture for scan ID: %s - Total URLs to scan: %d", scanID, len(urls))
+		
+		// Get custom HTTP settings
+		customUserAgent, customHeader := GetCustomHTTPSettings()
+		
+		// Build nuclei command for screenshots
+		screenshotCmd := exec.Command(
+			"docker", "exec", "ars0n-framework-v2-nuclei-1",
+			"bash", "-c",
+			fmt.Sprintf("echo '%s' > /urls.txt && nuclei -t /root/nuclei-templates/headless/screenshot.yaml -list /urls.txt -headless -c 25 -rl 150 -timeout 10 -retries 1 -bs 25%s%s",
+				strings.Join(urls, "\n"),
+				func() string {
+					if customHeader != "" {
+						return fmt.Sprintf(" -H '%s'", customHeader)
+					}
+					return ""
+				}(),
+				func() string {
+					if customUserAgent != "" {
+						return fmt.Sprintf(" -H 'User-Agent: %s'", customUserAgent)
+					}
+					return ""
+				}(),
+			),
+		)
+		
+		var screenshotStdout, screenshotStderr bytes.Buffer
+		screenshotStdoutWriter := &ScreenshotLogWriter{prefix: "[NUCLEI-SCREENSHOT]"}
+		screenshotStderrWriter := &ScreenshotLogWriter{prefix: "[NUCLEI-SCREENSHOT-ERR]"}
+		
+		screenshotCmd.Stdout = io.MultiWriter(&screenshotStdout, screenshotStdoutWriter)
+		screenshotCmd.Stderr = io.MultiWriter(&screenshotStderr, screenshotStderrWriter)
+		
+		log.Printf("[INFO] Executing screenshot command for scan ID: %s", scanID)
+		err = screenshotCmd.Run()
+		if err != nil {
+			log.Printf("[WARN] Screenshot command failed for scan ID %s: %v (continuing with other steps)", scanID, err)
+		} else {
+			log.Printf("[INFO] Screenshots captured successfully for scan ID: %s", scanID)
+		}
+	} else {
+		log.Printf("[INFO] Screenshot capture skipped (disabled in config)")
+	}
+
+	// Run Katana scan if enabled
 	katanaResults := make(map[string][]string)
-	completedKatana := 0
-	for _, url := range urls {
-		completedKatana++
-		log.Printf("[INFO] Running Katana scan for URL: %s (%d/%d)", url, completedKatana, len(urls))
+	if runKatana {
+		log.Printf("[INFO] Starting Katana scan for scan ID: %s - Total URLs to scan: %d", scanID, len(urls))
+		completedKatana := 0
+		for _, url := range urls {
+			completedKatana++
+			log.Printf("[INFO] Running Katana scan for URL: %s (%d/%d)", url, completedKatana, len(urls))
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
@@ -352,96 +480,107 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 				log.Printf("[DEBUG]   ... and %d more URLs", len(crawledURLs)-5)
 			}
 		}
-		katanaResults[url] = crawledURLs
-	}
-
-	log.Printf("[INFO] Katana scan completed for all URLs. Total results: %d URLs across %d targets",
-		func() int {
-			total := 0
-			for _, urls := range katanaResults {
-				total += len(urls)
-			}
-			return total
-		}(),
-		len(katanaResults))
-
-	// Update the target_urls table to include Katana results
-	for baseURL, crawledURLs := range katanaResults {
-		// First check if the target_url exists
-		var exists bool
-		err = dbPool.QueryRow(context.Background(),
-			`SELECT EXISTS(SELECT 1 FROM target_urls WHERE url = $1 AND scope_target_id = $2)`,
-			baseURL, scopeTargetID).Scan(&exists)
-		if err != nil {
-			log.Printf("[ERROR] Failed to check if target URL exists %s: %v", baseURL, err)
-			continue
+			katanaResults[url] = crawledURLs
 		}
 
-		// If it doesn't exist, insert it
-		if !exists {
-			_, err = dbPool.Exec(context.Background(),
-				`INSERT INTO target_urls (url, scope_target_id, roi_score) VALUES ($1, $2, 50)`,
-				baseURL, scopeTargetID)
+		log.Printf("[INFO] Katana scan completed for all URLs. Total results: %d URLs across %d targets",
+			func() int {
+				total := 0
+				for _, urls := range katanaResults {
+					total += len(urls)
+				}
+				return total
+			}(),
+			len(katanaResults))
+
+		// Update the target_urls table to include Katana results
+		for baseURL, crawledURLs := range katanaResults {
+			// First check if the target_url exists
+			var exists bool
+			err = dbPool.QueryRow(context.Background(),
+				`SELECT EXISTS(SELECT 1 FROM target_urls WHERE url = $1 AND scope_target_id = $2)`,
+				baseURL, scopeTargetID).Scan(&exists)
 			if err != nil {
-				log.Printf("[ERROR] Failed to insert target URL %s: %v", baseURL, err)
+				log.Printf("[ERROR] Failed to check if target URL exists %s: %v", baseURL, err)
 				continue
 			}
-			log.Printf("[DEBUG] Inserted new target URL: %s", baseURL)
-		} else {
-			log.Printf("[DEBUG] Target URL already exists: %s", baseURL)
-		}
 
-		// Then update with Katana results
-		katanaResultsJSON, err := json.Marshal(crawledURLs)
-		if err != nil {
-			log.Printf("[ERROR] Failed to marshal Katana results for URL %s: %v", baseURL, err)
-			continue
-		}
+			// If it doesn't exist, insert it
+			if !exists {
+				_, err = dbPool.Exec(context.Background(),
+					`INSERT INTO target_urls (url, scope_target_id, roi_score) VALUES ($1, $2, 50)`,
+					baseURL, scopeTargetID)
+				if err != nil {
+					log.Printf("[ERROR] Failed to insert target URL %s: %v", baseURL, err)
+					continue
+				}
+				log.Printf("[DEBUG] Inserted new target URL: %s", baseURL)
+			} else {
+				log.Printf("[DEBUG] Target URL already exists: %s", baseURL)
+			}
 
-		_, err = dbPool.Exec(context.Background(),
-			`UPDATE target_urls 
-			 SET katana_results = $1::jsonb 
-			 WHERE url = $2 AND scope_target_id = $3`,
-			string(katanaResultsJSON), baseURL, scopeTargetID)
-		if err != nil {
-			log.Printf("[ERROR] Failed to update Katana results for URL %s: %v", baseURL, err)
-		} else {
-			log.Printf("[INFO] Successfully stored %d Katana results for URL %s", len(crawledURLs), baseURL)
+			// Then update with Katana results
+			katanaResultsJSON, err := json.Marshal(crawledURLs)
+			if err != nil {
+				log.Printf("[ERROR] Failed to marshal Katana results for URL %s: %v", baseURL, err)
+				continue
+			}
+
+			_, err = dbPool.Exec(context.Background(),
+				`UPDATE target_urls 
+				 SET katana_results = $1::jsonb 
+				 WHERE url = $2 AND scope_target_id = $3`,
+				string(katanaResultsJSON), baseURL, scopeTargetID)
+			if err != nil {
+				log.Printf("[ERROR] Failed to update Katana results for URL %s: %v", baseURL, err)
+			} else {
+				log.Printf("[INFO] Successfully stored %d Katana results for URL %s", len(crawledURLs), baseURL)
+			}
 		}
+	} else {
+		log.Printf("[INFO] Katana scan skipped (disabled in config)")
 	}
 
-	// Copy the URLs file into the container for SSL scan
-	copyCmd := exec.Command(
-		"docker", "cp",
-		tempFile.Name(),
-		"ars0n-framework-v2-nuclei-1:/urls.txt",
-	)
-	if err := copyCmd.Run(); err != nil {
-		log.Printf("[ERROR] Failed to copy URLs file to container: %v", err)
-		UpdateMetaDataScanStatus(scanID, "error", "", fmt.Sprintf("Failed to copy URLs file: %v", err), "", time.Since(startTime).String())
-		return
-	}
+	// Run SSL scan if enabled
+	if runSSL {
+		// Copy the URLs file into the container for SSL scan
+		copyCmd := exec.Command(
+			"docker", "cp",
+			tempFile.Name(),
+			"ars0n-framework-v2-nuclei-1:/urls.txt",
+		)
+		if err := copyCmd.Run(); err != nil {
+			log.Printf("[ERROR] Failed to copy URLs file to container: %v", err)
+			UpdateMetaDataScanStatus(scanID, "error", "", fmt.Sprintf("Failed to copy URLs file: %v", err), "", time.Since(startTime).String())
+			return
+		}
 
-	// Run all templates in one scan with JSON output
-	cmd := exec.Command(
-		"docker", "exec", "ars0n-framework-v2-nuclei-1",
-		"nuclei",
-		"-t", "/root/nuclei-templates/ssl/",
-		"-list", "/urls.txt",
-		"-j",
-		"-o", "/output.json",
-	)
-	log.Printf("[INFO] Executing command: %s", cmd.String())
+		// Run all templates in one scan with JSON output
+		cmd := exec.Command(
+			"docker", "exec", "ars0n-framework-v2-nuclei-1",
+			"nuclei",
+			"-t", "/root/nuclei-templates/ssl/",
+			"-list", "/urls.txt",
+			"-j",
+			"-o", "/output.json",
+		)
+		log.Printf("[INFO] Executing command: %s", cmd.String())
 
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stdoutWriter := &NucleiLogWriter{prefix: "[NUCLEI-SSL]"}
+	stderrWriter := &NucleiLogWriter{prefix: "[NUCLEI-SSL-ERR]"}
+	
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = io.MultiWriter(&stderr, stderrWriter)
 
+	log.Printf("[INFO] Nuclei SSL scan started, streaming output...")
 	err = cmd.Run()
 	if err != nil {
 		log.Printf("[ERROR] Nuclei scan failed: %v", err)
 		UpdateMetaDataScanStatus(scanID, "error", "", stderr.String(), cmd.String(), time.Since(startTime).String())
 		return
 	}
+	log.Printf("[INFO] Nuclei SSL scan completed")
 
 	// Read the JSON output file
 	outputCmd := exec.Command(
@@ -516,48 +655,62 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 		}
 	}
 
-	// Update scan status to indicate SSL scan is complete but tech scan is pending
-	UpdateMetaDataScanStatus(
-		scanID,
-		"running",
-		string(output),
-		stderr.String(),
-		cmd.String(),
-		time.Since(startTime).String(),
-	)
+		// Update scan status to indicate SSL scan is complete but tech scan is pending
+		UpdateMetaDataScanStatus(
+			scanID,
+			"running",
+			string(output),
+			stderr.String(),
+			cmd.String(),
+			time.Since(startTime).String(),
+		)
 
-	// Clean up the output file
-	exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "rm", "/output.json").Run()
+		// Clean up the output file
+		exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "rm", "/output.json").Run()
 
-	log.Printf("[INFO] SSL scan completed for scan ID: %s, starting tech scan", scanID)
-
-	// Run the HTTP/technologies scan
-	if err := ExecuteAndParseNucleiTechScan(urls, scopeTargetID); err != nil {
-		log.Printf("[ERROR] Failed to run HTTP/technologies scan: %v", err)
-		UpdateMetaDataScanStatus(scanID, "error", string(output), fmt.Sprintf("Tech scan failed: %v", err), cmd.String(), time.Since(startTime).String())
-		return
+		log.Printf("[INFO] SSL scan completed for scan ID: %s", scanID)
+	} else {
+		log.Printf("[INFO] SSL scan skipped (disabled in config)")
 	}
 
-	// Run ffuf scan for each URL
-	log.Printf("[INFO] Starting ffuf scans for all URLs")
-	for baseURL := range katanaResults {
-		if err := ExecuteFfufScan(baseURL, scopeTargetID); err != nil {
-			log.Printf("[ERROR] Failed to run ffuf scan for URL %s: %v", baseURL, err)
-			continue
+	// Run the HTTP/technologies scan if enabled
+	if runTech {
+		log.Printf("[INFO] Starting technology detection scan")
+		if err := ExecuteAndParseNucleiTechScan(urls, scopeTargetID); err != nil {
+			log.Printf("[ERROR] Failed to run HTTP/technologies scan: %v", err)
+			UpdateMetaDataScanStatus(scanID, "error", "", fmt.Sprintf("Tech scan failed: %v", err), "", time.Since(startTime).String())
+			return
 		}
+		log.Printf("[INFO] Technology detection scan completed")
+	} else {
+		log.Printf("[INFO] Technology detection scan skipped (disabled in config)")
+	}
+
+	// Run ffuf scan for each URL if enabled
+	if runFfuf {
+		log.Printf("[INFO] Starting ffuf scans for all URLs")
+		for _, url := range urls {
+			if err := ExecuteFfufScan(url, scopeTargetID); err != nil {
+				log.Printf("[ERROR] Failed to run ffuf scan for URL %s: %v", url, err)
+				continue
+			}
+		}
+		log.Printf("[INFO] FFuf scans completed")
+	} else {
+		log.Printf("[INFO] FFuf scans skipped (disabled in config)")
 	}
 
 	// Update final scan status after all scans complete successfully
 	UpdateMetaDataScanStatus(
 		scanID,
 		"success",
-		string(output),
-		stderr.String(),
-		cmd.String(),
+		"",
+		"",
+		"",
 		time.Since(startTime).String(),
 	)
 
-	log.Printf("[INFO] All scans completed successfully for scan ID: %s", scanID)
+	log.Printf("[INFO] All enabled scans completed successfully for scan ID: %s", scanID)
 }
 
 func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
@@ -691,12 +844,18 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 	log.Printf("[INFO] Executing command: %s", cmd.String())
 
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stdoutWriter := &NucleiLogWriter{prefix: "[NUCLEI-TECH]"}
+	stderrWriter := &NucleiLogWriter{prefix: "[NUCLEI-TECH-ERR]"}
+	
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = io.MultiWriter(&stderr, stderrWriter)
 
+	log.Printf("[INFO] Nuclei tech scan started, streaming output...")
 	err = cmd.Run()
 	if err != nil {
 		return fmt.Errorf("nuclei tech scan failed: %v\nstderr: %s", err, stderr.String())
 	}
+	log.Printf("[INFO] Nuclei tech scan completed")
 
 	// Read the JSON output file
 	outputCmd := exec.Command(
@@ -1003,6 +1162,7 @@ func GetMetaDataScanStatus(w http.ResponseWriter, r *http.Request) {
 		&scan.CreatedAt,
 		&scan.ScopeTargetID,
 		&scan.AutoScanSessionID,
+		&scan.Config,
 	)
 
 	if err != nil {
@@ -1065,6 +1225,7 @@ func GetMetaDataScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			&scan.CreatedAt,
 			&scan.ScopeTargetID,
 			&scan.AutoScanSessionID,
+			&scan.Config,
 		)
 		if err != nil {
 			log.Printf("[ERROR] Failed to scan row: %v", err)

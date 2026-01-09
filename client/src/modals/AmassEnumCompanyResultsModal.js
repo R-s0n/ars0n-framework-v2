@@ -40,7 +40,7 @@ export const AmassEnumCompanyResultsModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/${mostRecentAmassEnumCompanyScan.scan_id}/cloud-domains`
+        `/api/amass-enum-company/${mostRecentAmassEnumCompanyScan.scan_id}/cloud-domains`
       );
 
       if (!response.ok) {

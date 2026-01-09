@@ -1,7 +1,7 @@
 const fetchIPPortScans = async (activeTarget, setIPPortScans, setMostRecentIPPortScan, setMostRecentIPPortScanStatus) => {
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_API_BASE_URL || 'http://localhost:8443'}/scopetarget/${activeTarget.id}/scans/ip-port`
+      `/api/scopetarget/${activeTarget.id}/scans/ip-port`
     );
     if (!response.ok) throw new Error('Failed to fetch IP/Port scans');
 
@@ -19,7 +19,7 @@ const fetchIPPortScans = async (activeTarget, setIPPortScans, setMostRecentIPPor
     }, scans[0]);
 
     const scanDetailsResponse = await fetch(
-      `${process.env.REACT_APP_API_BASE_URL || 'http://localhost:8443'}/ip-port-scan/status/${mostRecentScan.scan_id}`
+      `/api/ip-port-scan/status/${mostRecentScan.scan_id}`
     );
     if (!scanDetailsResponse.ok) throw new Error('Failed to fetch IP/Port scan details');
 

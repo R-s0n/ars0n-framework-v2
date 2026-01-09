@@ -1,9 +1,19 @@
 services:
+  nginx:
+    container_name: ars0n-framework-v2-nginx-1
+    build: ./nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+      - client
+    restart: unless-stopped
+    networks:
+      - ars0n-network
+
   api:
     container_name: ars0n-framework-v2-api-1
     build: ./server
-    ports:
-      - "8443:8443"
     depends_on:
       db:
         condition: service_healthy
@@ -64,8 +74,6 @@ services:
   client:
     container_name: ars0n-framework-v2-client-1
     build: ./client
-    ports:
-      - "3000:3000"
     depends_on:
       - api
     restart: unless-stopped

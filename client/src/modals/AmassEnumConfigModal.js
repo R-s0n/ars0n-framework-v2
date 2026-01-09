@@ -82,7 +82,7 @@ const AmassEnumConfigModal = ({
     setLoadingDomains(true);
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/consolidated-company-domains/${activeTarget.id}`
+        `/api/consolidated-company-domains/${activeTarget.id}`
       );
       
       if (response.ok) {
@@ -104,7 +104,7 @@ const AmassEnumConfigModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-config/${activeTarget.id}`
+        `/api/amass-enum-config/${activeTarget.id}`
       );
       
       if (response.ok) {
@@ -135,7 +135,7 @@ const AmassEnumConfigModal = ({
     try {
       // Get all scope targets to find which root domains have been added as wildcard targets
       const scopeTargetsResponse = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/read`
+        `/api/scopetarget/read`
       );
       
       if (!scopeTargetsResponse.ok) {
@@ -179,7 +179,7 @@ const AmassEnumConfigModal = ({
         console.log(`Fetching live web servers for wildcard target: ${wildcardTarget.scope_target} (ID: ${wildcardTarget.id})`);
         try {
           const liveWebServersResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${wildcardTarget.id}/target-urls`
+            `/api/api/scope-targets/${wildcardTarget.id}/target-urls`
           );
 
           console.log(`Live web servers response status for ${wildcardTarget.scope_target}:`, liveWebServersResponse.status);
@@ -248,7 +248,7 @@ const AmassEnumConfigModal = ({
     setLoadingScanStatus(true);
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/amass-enum-company`
+        `/api/scopetarget/${activeTarget.id}/scans/amass-enum-company`
       );
       
       if (response.ok) {
@@ -289,7 +289,7 @@ const AmassEnumConfigModal = ({
       };
 
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-config/${activeTarget.id}`,
+        `/api/amass-enum-config/${activeTarget.id}`,
         {
           method: 'POST',
           headers: {

@@ -118,7 +118,7 @@ const getAutoScanSteps = (
         
         // Explicitly fetch the latest results to update UI
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/amass`
+          `/api/scopetarget/${activeTarget.id}/scans/amass`
         );
         
         if (response.ok) {
@@ -156,7 +156,7 @@ const getAutoScanSteps = (
       try {
         const domain = activeTarget.scope_target.replace('*.', '');
         const scanResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/sublist3r/run`,
+          `/api/sublist3r/run`,
           {
             method: 'POST',
             headers: {
@@ -193,7 +193,7 @@ const getAutoScanSteps = (
           
           
           const statusResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/sublist3r`
+            `/api/scopetarget/${activeTarget.id}/scans/sublist3r`
           );
           
           if (!statusResponse.ok) {
@@ -253,7 +253,7 @@ const getAutoScanSteps = (
         // 1. Start the scan
         const domain = activeTarget.scope_target.replace('*.', '');
         const scanResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/assetfinder/run`,
+          `/api/assetfinder/run`,
           {
             method: 'POST',
             headers: {
@@ -290,7 +290,7 @@ const getAutoScanSteps = (
           await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
                     
           const statusResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/assetfinder`
+            `/api/scopetarget/${activeTarget.id}/scans/assetfinder`
           );
           
           if (!statusResponse.ok) {
@@ -366,7 +366,7 @@ const getAutoScanSteps = (
         
         // Explicitly fetch the latest results to update UI
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/gau`
+          `/api/scopetarget/${activeTarget.id}/scans/gau`
         );
         
         if (response.ok) {
@@ -424,7 +424,7 @@ const getAutoScanSteps = (
         
         // Explicitly fetch the latest results to update UI
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/ctl`
+          `/api/scopetarget/${activeTarget.id}/scans/ctl`
         );
         
         if (response.ok) {
@@ -482,7 +482,7 @@ const getAutoScanSteps = (
         
         // Explicitly fetch the latest results to update UI
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/subfinder`
+          `/api/scopetarget/${activeTarget.id}/scans/subfinder`
         );
         
         if (response.ok) {
@@ -532,7 +532,7 @@ const getAutoScanSteps = (
         try {
           // Fetch updated subdomain data to refresh UI
           const subdomainsResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/consolidated-subdomains/${activeTarget.id}`,
+            `/api/consolidated-subdomains/${activeTarget.id}`,
             {
                 method: 'GET',
                 headers: {
@@ -556,7 +556,7 @@ const getAutoScanSteps = (
               
               // Pause the scan by updating the server state
               await fetch(
-                `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`,
+                `/api/api/auto-scan-state/${activeTarget.id}`,
                 {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -572,7 +572,7 @@ const getAutoScanSteps = (
           
           // Fetch updated scan data
           const scansResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans`
+            `/api/scopetarget/${activeTarget.id}/scans`
           );
           
           if (scansResponse.ok) {
@@ -656,7 +656,7 @@ const getAutoScanSteps = (
           try {
             console.log("[AutoScan] DEBUG: Sending pause request to server");
             const pauseResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`,
+              `/api/api/auto-scan-state/${activeTarget.id}`,
               {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -721,7 +721,7 @@ const getAutoScanSteps = (
         
         // Explicitly fetch the latest results to update UI
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/shuffledns`
+          `/api/scopetarget/${activeTarget.id}/scans/shuffledns`
         );
         
         if (response.ok) {
@@ -781,7 +781,7 @@ const getAutoScanSteps = (
         
         // Explicitly fetch the latest CeWL results to update UI
         const cewlResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/cewl`
+          `/api/scopetarget/${activeTarget.id}/scans/cewl`
         );
         
         if (cewlResponse.ok) {
@@ -803,7 +803,7 @@ const getAutoScanSteps = (
         
         // Fetch ShuffleDNS custom scans
         const shuffleDNSCustomResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${activeTarget.id}/shufflednscustom-scans`
+          `/api/api/scope-targets/${activeTarget.id}/shufflednscustom-scans`
         );
         
         if (shuffleDNSCustomResponse.ok) {
@@ -855,7 +855,7 @@ const getAutoScanSteps = (
         try {
           // Fetch updated subdomain data to refresh UI
           const subdomainsResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/consolidated-subdomains/${activeTarget.id}`
+            `/api/consolidated-subdomains/${activeTarget.id}`
           );
           
           if (subdomainsResponse.ok) {
@@ -873,7 +873,7 @@ const getAutoScanSteps = (
               
               // Pause the scan by updating the server state
               await fetch(
-                `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`,
+                `/api/api/auto-scan-state/${activeTarget.id}`,
                 {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -889,7 +889,7 @@ const getAutoScanSteps = (
           
           // Fetch updated scan data
           const scansResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans`
+            `/api/scopetarget/${activeTarget.id}/scans`
           );
           
           if (scansResponse.ok) {
@@ -965,7 +965,7 @@ const getAutoScanSteps = (
           
           // Pause the scan by updating the server state
           await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`,
+            `/api/api/auto-scan-state/${activeTarget.id}`,
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -1020,7 +1020,7 @@ const getAutoScanSteps = (
         
         // Explicitly fetch the latest results to update UI
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/gospider`
+          `/api/scopetarget/${activeTarget.id}/scans/gospider`
         );
         
         if (response.ok) {
@@ -1078,7 +1078,7 @@ const getAutoScanSteps = (
         
         // Explicitly fetch the latest results to update UI
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/subdomainizer`
+          `/api/scopetarget/${activeTarget.id}/scans/subdomainizer`
         );
         
         if (response.ok) {
@@ -1128,7 +1128,7 @@ const getAutoScanSteps = (
         try {
           // Fetch updated subdomain data to refresh UI
           const subdomainsResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/consolidated-subdomains/${activeTarget.id}`
+            `/api/consolidated-subdomains/${activeTarget.id}`
           );
           
           if (subdomainsResponse.ok) {
@@ -1146,7 +1146,7 @@ const getAutoScanSteps = (
               
               // Pause the scan by updating the server state
               await fetch(
-                `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`,
+                `/api/api/auto-scan-state/${activeTarget.id}`,
                 {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -1162,7 +1162,7 @@ const getAutoScanSteps = (
           
           // Fetch updated scan data
           const scansResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans`
+            `/api/scopetarget/${activeTarget.id}/scans`
           );
           
           if (scansResponse.ok) {
@@ -1238,7 +1238,7 @@ const getAutoScanSteps = (
           
           // Pause the scan by updating the server state
           await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`,
+            `/api/api/auto-scan-state/${activeTarget.id}`,
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -1293,7 +1293,7 @@ const getAutoScanSteps = (
         
         // Explicitly fetch the latest results to update UI
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/nuclei-screenshot`
+          `/api/scopetarget/${activeTarget.id}/scans/nuclei-screenshot`
         );
         
         if (response.ok) {
@@ -1351,7 +1351,7 @@ const getAutoScanSteps = (
         
         // Explicitly fetch the latest results to update UI
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/metadata`
+          `/api/scopetarget/${activeTarget.id}/scans/metadata`
         );
         
         if (response.ok) {
@@ -1373,7 +1373,7 @@ const getAutoScanSteps = (
             if (mostRecentScan.id) {
               try {
                 const metadataResponse = await fetch(
-                  `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/metadata`
+                  `/api/scopetarget/${activeTarget.id}/metadata`
                 );
                 
                 if (metadataResponse.ok) {

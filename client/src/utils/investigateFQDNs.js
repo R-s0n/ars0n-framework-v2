@@ -6,7 +6,7 @@ const investigateFQDNs = async (activeTarget) => {
 
     try {
         const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/investigate-fqdns/${activeTarget.id}`,
+            `/api/investigate-fqdns/${activeTarget.id}`,
             {
                 method: 'POST',
                 headers: {

@@ -42,7 +42,7 @@ export const DNSxCompanyResultsModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/dnsx-company/${mostRecentDNSxCompanyScan.scan_id}/dns-records`
+        `/api/dnsx-company/${mostRecentDNSxCompanyScan.scan_id}/dns-records`
       );
 
       if (!response.ok) {

@@ -5,7 +5,7 @@ const fetchAttackSurfaceAssets = async (activeTarget) => {
 
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/attack-surface-assets/${activeTarget.id}`,
+      `/api/attack-surface-assets/${activeTarget.id}`,
       {
         method: 'GET',
         headers: {

@@ -62,7 +62,7 @@ const updateAutoScanState = async (targetId, currentStep, isPaused = false, isCa
     }
 
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${targetId}`,
+      `/api/api/auto-scan-state/${targetId}`,
       {
         method: 'POST',
         headers: {
@@ -98,7 +98,7 @@ const waitForScanCompletion = async (scanType, targetId, setIsScanning, setMostR
       attempts++;
       debugTrace(`Checking ${scanType} scan status - attempt #${attempts}`);
       try {
-        const url = `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${targetId}/scans/${scanType}`;
+        const url = `/api/scopetarget/${targetId}/scans/${scanType}`;
         debugTrace(`Fetching scan status from: ${url}`);
         const response = await fetch(url);
         if (!response.ok) {
@@ -171,7 +171,7 @@ const waitForCeWLAndShuffleDNSCustom = async (
       attempts++;
       debugTrace(`Checking ShuffleDNS custom scan status - attempt #${attempts}`);
       try {
-        const url = `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${activeTarget.id}/shufflednscustom-scans`;
+        const url = `/api/api/scope-targets/${activeTarget.id}/shufflednscustom-scans`;
         debugTrace(`Fetching ShuffleDNS custom scan status from: ${url}`);
         const response = await fetch(url);
         if (!response.ok) {
@@ -228,7 +228,7 @@ const resumeAutoScan = async (
     
     // Get the config for this auto scan
     const configResponse = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-config`
+      `/api/api/auto-scan-config`
     );
     
     if (!configResponse.ok) {
@@ -245,7 +245,7 @@ const resumeAutoScan = async (
     try {
       // Fetch current consolidated subdomains
       const subdomainsResponse = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/consolidated-subdomains/${activeTarget.id}`
+        `/api/consolidated-subdomains/${activeTarget.id}`
       );
       if (subdomainsResponse.ok) {
         const data = await subdomainsResponse.json();
@@ -254,7 +254,7 @@ const resumeAutoScan = async (
       
       // Fetch current HTTPX scan
       const httpxResponse = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/httpx`
+        `/api/scopetarget/${activeTarget.id}/scans/httpx`
       );
       if (httpxResponse.ok) {
         const scans = await httpxResponse.json();
@@ -291,7 +291,7 @@ const resumeAutoScan = async (
       try {
         // Check if cancelled before starting the step
         const stateResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`
+          `/api/api/auto-scan-state/${activeTarget.id}`
         );
         if (stateResponse.ok) {
           const state = await stateResponse.json();
@@ -339,7 +339,7 @@ const resumeAutoScan = async (
         
         // Check if paused or cancelled after step completes
         const pauseResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`
+          `/api/api/auto-scan-state/${activeTarget.id}`
         );
         if (pauseResponse.ok) {
           const state = await pauseResponse.json();
@@ -361,7 +361,7 @@ const resumeAutoScan = async (
             while (isPaused) {
               await new Promise(resolve => setTimeout(resolve, 2000));
               const checkResponse = await fetch(
-                `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`
+                `/api/api/auto-scan-state/${activeTarget.id}`
               );
               if (checkResponse.ok) {
                 const checkState = await checkResponse.json();
@@ -423,7 +423,7 @@ const startAutoScan = async (
   try {
     // Get the config for this auto scan
     const configResponse = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-config`
+      `/api/api/auto-scan-config`
     );
     
     if (!configResponse.ok) {
@@ -476,7 +476,7 @@ const startAutoScan = async (
         
         // Check if cancelled before starting the step
         const stateResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`
+          `/api/api/auto-scan-state/${activeTarget.id}`
         );
         if (stateResponse.ok) {
           const state = await stateResponse.json();
@@ -493,7 +493,7 @@ const startAutoScan = async (
         
         // Check if paused or cancelled after step completes
         const pauseResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`
+          `/api/api/auto-scan-state/${activeTarget.id}`
         );
         if (pauseResponse.ok) {
           const state = await pauseResponse.json();
@@ -513,7 +513,7 @@ const startAutoScan = async (
             while (isPaused) {
               await new Promise(resolve => setTimeout(resolve, 2000));
               const checkResponse = await fetch(
-                `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`
+                `/api/api/auto-scan-state/${activeTarget.id}`
               );
               if (checkResponse.ok) {
                 const checkState = await checkResponse.json();
@@ -559,7 +559,7 @@ const startAutoScan = async (
         try {
           // Always fetch the latest consolidated subdomains data
           const subdomainsResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/consolidated-subdomains/${activeTarget.id}`
+            `/api/consolidated-subdomains/${activeTarget.id}`
           );
           if (subdomainsResponse.ok) {
             const data = await subdomainsResponse.json();
@@ -577,7 +577,7 @@ const startAutoScan = async (
           // Always fetch the latest HTTPX results to ensure accuracy
           debugTrace(`Fetching latest HTTPX scan results for target ${activeTarget.id}...`);
           const httpxResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/httpx`
+            `/api/scopetarget/${activeTarget.id}/scans/httpx`
           );
           if (httpxResponse.ok) {
             const data = await httpxResponse.json();
@@ -635,7 +635,7 @@ const startAutoScan = async (
                 debugTrace(`No result in scan object, trying to fetch from direct HTTPX results endpoint`);
                 try {
                   const directHttpxResponse = await fetch(
-                    `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/httpx-results`
+                    `/api/scopetarget/${activeTarget.id}/httpx-results`
                   );
                   
                   if (directHttpxResponse.ok) {
@@ -665,7 +665,7 @@ const startAutoScan = async (
         }
         
         // Update the session with final stats and set status to completed
-        const finalStatsUrl = `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan/session/${autoScanSessionId}/final-stats`;
+        const finalStatsUrl = `/api/api/auto-scan/session/${autoScanSessionId}/final-stats`;
         debugTrace(`Sending final stats to API: ${finalStatsUrl}`);
         debugTrace(`Stats payload: subdomains=${finalConsolidatedSubdomains}, webServers=${finalLiveWebServers}`);
         
@@ -688,7 +688,7 @@ const startAutoScan = async (
           
           // Double-check the session status to confirm it was updated
           const verifyResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan/session/${autoScanSessionId}`
+            `/api/api/auto-scan/session/${autoScanSessionId}`
           );
           
           if (verifyResponse.ok) {
@@ -699,7 +699,7 @@ const startAutoScan = async (
           debugTrace(`Failed to update session ${autoScanSessionId} to COMPLETED. Trying alternative approach...`);
           
           // Try alternative approach - use the cancel endpoint with completed=true
-          const cancelUrl = `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan/session/${autoScanSessionId}/cancel?completed=true`;
+          const cancelUrl = `/api/api/auto-scan/session/${autoScanSessionId}/cancel?completed=true`;
           debugTrace(`Using alternative endpoint: ${cancelUrl}`);
           
           const cancelResponse = await fetch(cancelUrl, {
@@ -718,7 +718,7 @@ const startAutoScan = async (
         
         // Last resort - try one more simple approach to mark the session as completed
         try {
-          const cancelUrl = `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan/session/${autoScanSessionId}/cancel?completed=true`;
+          const cancelUrl = `/api/api/auto-scan/session/${autoScanSessionId}/cancel?completed=true`;
           debugTrace(`Final attempt to mark session as completed: ${cancelUrl}`);
           
           await fetch(cancelUrl, {

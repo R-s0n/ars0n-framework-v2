@@ -9,7 +9,7 @@ const monitorLinkFinderURLScanStatus = async (
 
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/linkfinder-url`
+      `/api/scopetarget/${activeTarget.id}/scans/linkfinder-url`
     );
 
     if (!response.ok) {
@@ -59,7 +59,7 @@ export const monitorActiveScan = async (
   const poll = async () => {
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/linkfinder-url/status/${scanId}`
+        `/api/linkfinder-url/status/${scanId}`
       );
       
       if (!response.ok) {

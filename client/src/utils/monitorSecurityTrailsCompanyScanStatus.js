@@ -11,7 +11,7 @@ const monitorSecurityTrailsCompanyScanStatus = async (
     console.log('[SECURITYTRAILS-COMPANY] Monitoring scan status for target:', activeTarget.id);
     
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/securitytrails-company`
+      `/api/scopetarget/${activeTarget.id}/scans/securitytrails-company`
     );
 
     if (!response.ok) {

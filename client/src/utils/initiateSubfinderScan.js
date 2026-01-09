@@ -22,7 +22,7 @@ const initiateSubfinderScan = async (
     const body = { fqdn: domain };
     if (autoScanSessionId) body.auto_scan_session_id = autoScanSessionId;
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/subfinder/run`,
+      `/api/subfinder/run`,
       {
         method: 'POST',
         headers: {

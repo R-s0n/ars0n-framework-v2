@@ -8,7 +8,7 @@ export const initiateAmassScan = async (activeTarget, monitorScanStatus, setIsSc
     try {
       const body = { fqdn };
       if (autoScanSessionId) body.auto_scan_session_id = autoScanSessionId;
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/run`, {
+      const response = await fetch(`/api/amass/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),

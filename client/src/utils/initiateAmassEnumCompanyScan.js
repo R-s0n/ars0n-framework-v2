@@ -7,7 +7,7 @@ export const initiateAmassEnumCompanyScan = async (activeTarget, domains, setIsS
   }
 
   try {
-    const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/run/${activeTarget.id}`, {
+    const response = await fetch(`/api/amass-enum-company/run/${activeTarget.id}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ domains }),

@@ -67,7 +67,7 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
     setError(null);
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/user/settings`
+        `/api/user/settings`
       );
       
       if (!response.ok) {
@@ -146,7 +146,7 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
       } else {
         // For other settings, show the success toast
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/user/settings`,
+          `/api/user/settings`,
           {
             method: 'POST',
             headers: {
@@ -180,7 +180,7 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
     setApiKeyLoading(true);
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/api-keys`
+        `/api/api/api-keys`
       );
       
       if (!response.ok) {
@@ -201,7 +201,7 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
     setAiApiKeyLoading(true);
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/ai-api-keys`
+        `/api/api/ai-api-keys`
       );
       
       if (!response.ok) {
@@ -305,7 +305,7 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
       }
 
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/api-keys`,
+        `/api/api/api-keys`,
         {
           method: 'POST',
           headers: {
@@ -393,7 +393,7 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
       if (newAiApiKey.endpoint) keyValues.endpoint = newAiApiKey.endpoint;
 
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/ai-api-keys`,
+        `/api/api/ai-api-keys`,
         {
           method: 'POST',
           headers: {
@@ -475,7 +475,7 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
       const selectedKeyName = keyToDelete ? localStorage.getItem(`selectedApiKey_${keyToDelete.tool_name}`) : null;
       
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/api-keys/${id}`,
+        `/api/api/api-keys/${id}`,
         {
           method: 'DELETE',
         }
@@ -506,7 +506,7 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
   const handleDeleteAiApiKey = async (id) => {
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/ai-api-keys/${id}`,
+        `/api/api/ai-api-keys/${id}`,
         {
           method: 'DELETE',
         }

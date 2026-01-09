@@ -85,12 +85,12 @@ function ImportModal({ show, handleClose, onSuccess, showBackButton, onBackClick
         const formData = new FormData();
         formData.append('file', selectedFile);
 
-        response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/database-import`, {
+        response = await fetch(`/api/api/database-import`, {
           method: 'POST',
           body: formData
         });
       } else {
-        response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/database-import-url`, {
+        response = await fetch(`/api/api/database-import-url`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

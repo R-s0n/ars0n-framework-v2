@@ -21,7 +21,7 @@ const monitorScanStatus = async (
 
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/amass`
+      `/api/scopetarget/${activeTarget.id}/scans/amass`
     );
 
     if (!response.ok) {
@@ -60,9 +60,9 @@ const monitorScanStatus = async (
         if (mostRecentScan.status === 'success') {
           try {
             const [dnsResponse, subdomainsResponse, cloudResponse] = await Promise.all([
-              fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${mostRecentScan.scan_id}/dns`),
-              fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${mostRecentScan.scan_id}/subdomain`),
-              fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${mostRecentScan.scan_id}/cloud`)
+              fetch(`/api/amass/${mostRecentScan.scan_id}/dns`),
+              fetch(`/api/amass/${mostRecentScan.scan_id}/subdomain`),
+              fetch(`/api/amass/${mostRecentScan.scan_id}/cloud`)
             ]);
 
             if (!dnsResponse.ok || !subdomainsResponse.ok || !cloudResponse.ok) {

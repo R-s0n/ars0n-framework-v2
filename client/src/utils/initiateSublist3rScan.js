@@ -23,7 +23,7 @@ const initiateSublist3rScan = async (
     const body = { fqdn: domain };
     if (autoScanSessionId) body.auto_scan_session_id = autoScanSessionId;
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/sublist3r/run`,
+      `/api/sublist3r/run`,
       {
         method: 'POST',
         headers: {

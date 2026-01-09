@@ -829,7 +829,7 @@ export const ApplicationQuestionsModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/application-questions/${activeTarget.id}/answers`
+        `/api/application-questions/${activeTarget.id}/answers`
       );
 
       if (!response.ok) {
@@ -865,7 +865,7 @@ export const ApplicationQuestionsModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/application-questions/${activeTarget.id}/answers`,
+        `/api/application-questions/${activeTarget.id}/answers`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -908,7 +908,7 @@ export const ApplicationQuestionsModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/application-questions/answers/${answerId}`,
+        `/api/application-questions/answers/${answerId}`,
         {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
@@ -958,7 +958,7 @@ export const ApplicationQuestionsModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/application-questions/answers/${answerToDelete}`,
+        `/api/application-questions/answers/${answerToDelete}`,
         {
           method: 'DELETE'
         }

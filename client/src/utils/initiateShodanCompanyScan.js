@@ -18,7 +18,7 @@ const initiateShodanCompanyScan = async (
     if (autoScanSessionId) body.auto_scan_session_id = autoScanSessionId;
     
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/shodan-company/run`,
+      `/api/shodan-company/run`,
       {
         method: 'POST',
         headers: {

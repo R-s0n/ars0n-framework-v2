@@ -11,7 +11,7 @@ const monitorCloudEnumScanStatus = async (
     console.log('[CLOUD-ENUM] Monitoring scan status for target:', activeTarget.id);
     
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/cloud-enum`
+      `/api/scopetarget/${activeTarget.id}/scans/cloud-enum`
     );
 
     if (!response.ok) {

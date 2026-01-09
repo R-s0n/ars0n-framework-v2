@@ -94,7 +94,7 @@ export const NotableObjectsModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/notable-objects/${activeTarget.id}`
+        `/api/notable-objects/${activeTarget.id}`
       );
 
       if (!response.ok) {
@@ -139,8 +139,8 @@ export const NotableObjectsModal = ({
     try {
       const method = objects[selectedObject] ? 'PUT' : 'POST';
       const url = objects[selectedObject]
-        ? `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/notable-objects/${objects[selectedObject].id}`
-        : `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/notable-objects/${activeTarget.id}`;
+        ? `/api/notable-objects/${objects[selectedObject].id}`
+        : `/api/notable-objects/${activeTarget.id}`;
 
       const response = await fetch(url, {
         method: method,
@@ -186,7 +186,7 @@ export const NotableObjectsModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/notable-objects/${activeTarget.id}`,
+        `/api/notable-objects/${activeTarget.id}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -234,7 +234,7 @@ export const NotableObjectsModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/notable-objects/${objects[objectToDelete].id}`,
+        `/api/notable-objects/${objects[objectToDelete].id}`,
         {
           method: 'DELETE'
         }

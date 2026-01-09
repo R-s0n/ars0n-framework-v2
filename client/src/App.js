@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
 import AddScopeTargetModal from './modals/addScopeTargetModal.js';
 import SelectActiveScopeTargetModal from './modals/selectActiveScopeTargetModal.js';
 import { DNSRecordsModal, SubdomainsModal, CloudDomainsModal, InfrastructureMapModal } from './modals/amassModals.js';
@@ -189,6 +189,7 @@ const ConfigUploadModal = lazy(() => import('./modals/ConfigUploadModal.js'));
 const APIIntegrationModal = lazy(() => import('./modals/APIIntegrationModal.js'));
 const GoogleDorkingModal = lazy(() => import('./modals/GoogleDorkingModal.js'));
 const MetaDataModal = lazy(() => import('./modals/MetaDataModal.js'));
+const ConfigureMetaDataModal = lazy(() => import('./modals/ConfigureMetaDataModal.js'));
 const ROIReport = lazy(() => import('./components/ROIReport'));
 const HelpMeLearnLazy = lazy(() => import('./components/HelpMeLearn'));
 
@@ -583,6 +584,8 @@ function App() {
   const [mostRecentMetaDataScan, setMostRecentMetaDataScan] = useState(null);
   const [isMetaDataScanning, setIsMetaDataScanning] = useState(false);
   const [showMetaDataModal, setShowMetaDataModal] = useState(false);
+  const [showConfigureMetaDataModal, setShowConfigureMetaDataModal] = useState(false);
+  const [metaDataScanConfigs, setMetaDataScanConfigs] = useState({});
   const [companyMetaDataScans, setCompanyMetaDataScans] = useState([]);
   const [mostRecentCompanyMetaDataScanStatus, setMostRecentCompanyMetaDataScanStatus] = useState(null);
   const [mostRecentCompanyMetaDataScan, setMostRecentCompanyMetaDataScan] = useState(null);
@@ -675,6 +678,35 @@ function App() {
   const handleCloseCloudDomainsModal = () => setShowCloudDomainsModal(false);
   const handleCloseUniqueSubdomainsModal = () => setShowUniqueSubdomainsModal(false);
   const handleCloseMetaDataModal = () => setShowMetaDataModal(false);
+  
+  const handleOpenConfigureMetaDataModal = async () => {
+    setShowConfigureMetaDataModal(true);
+    
+    try {
+      const response = await fetch(
+        `/api/api/scope-targets/${activeTarget.id}/target-urls`
+      );
+      if (!response.ok) {
+        throw new Error('Failed to fetch target URLs');
+      }
+      const data = await response.json();
+      const safeData = data || [];
+      setTargetURLs(safeData);
+    } catch (error) {
+      console.error('Error fetching target URLs:', error);
+    }
+  };
+  
+  const handleCloseConfigureMetaDataModal = () => setShowConfigureMetaDataModal(false);
+  
+  const handleSaveMetaDataConfig = (config) => {
+    if (!activeTarget) return;
+    setMetaDataScanConfigs(prev => ({
+      ...prev,
+      [activeTarget.id]: config
+    }));
+  };
+  
   const handleCloseToolsModal = () => {
     setShowToolsModal(false);
     setToolsModalInitialUrls('');
@@ -686,7 +718,7 @@ function App() {
     const checkApiKeys = async () => {
       try {
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/api-keys`
+          `/api/api/api-keys`
         );
         if (!response.ok) {
           throw new Error('Failed to fetch API keys');
@@ -803,7 +835,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-config/${activeTarget.id}`
+        `/api/amass-enum-config/${activeTarget.id}`
       );
       
       if (response.ok) {
@@ -819,7 +851,7 @@ function App() {
           try {
             // Fetch all scope targets to find wildcard targets
             const scopeTargetsResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/read`
+              `/api/scopetarget/read`
             );
             
             if (scopeTargetsResponse.ok) {
@@ -844,7 +876,7 @@ function App() {
                 for (const wildcardTarget of wildcardTargets) {
                   try {
                     const liveWebServersResponse = await fetch(
-                      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${wildcardTarget.id}/target-urls`
+                      `/api/api/scope-targets/${wildcardTarget.id}/target-urls`
                     );
                     
                     if (liveWebServersResponse.ok) {
@@ -906,7 +938,7 @@ function App() {
         try {
           // Fetch raw results count
           const rawResultsResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/${mostRecentAmassEnumCompanyScan.scan_id}/raw-results`
+            `/api/amass-enum-company/${mostRecentAmassEnumCompanyScan.scan_id}/raw-results`
           );
           if (rawResultsResponse.ok) {
             const rawResults = await rawResultsResponse.json();
@@ -917,7 +949,7 @@ function App() {
 
           // Fetch cloud domains count
           const cloudDomainsResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/${mostRecentAmassEnumCompanyScan.scan_id}/cloud-domains`
+            `/api/amass-enum-company/${mostRecentAmassEnumCompanyScan.scan_id}/cloud-domains`
           );
           if (cloudDomainsResponse.ok) {
             const cloudDomains = await cloudDomainsResponse.json();
@@ -947,7 +979,7 @@ function App() {
 
           // Fetch DNS records count
           const dnsRecordsResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/dnsx-company/${mostRecentDNSxCompanyScan.scan_id}/dns-records`
+            `/api/dnsx-company/${mostRecentDNSxCompanyScan.scan_id}/dns-records`
           );
           if (dnsRecordsResponse.ok) {
             const dnsRecords = await dnsRecordsResponse.json();
@@ -976,7 +1008,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-intel-config/${activeTarget.id}`
+        `/api/amass-intel-config/${activeTarget.id}`
       );
       
       if (response.ok) {
@@ -1104,7 +1136,7 @@ function App() {
 
   const handleAddWildcardTarget = async (domain) => {
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/add`, {
+      const response = await fetch(`/api/scopetarget/add`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1325,7 +1357,7 @@ function App() {
       const fetchCustomShuffleDNSScans = async () => {
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${activeTarget.id}/shufflednscustom-scans`
+            `/api/api/scope-targets/${activeTarget.id}/shufflednscustom-scans`
           );
           if (!response.ok) {
             throw new Error('Failed to fetch custom ShuffleDNS scans');
@@ -1393,7 +1425,7 @@ function App() {
         try {
           // First check if there's an active session for this target
           const sessionResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan/sessions?target_id=${activeTarget.id}`
+            `/api/api/auto-scan/sessions?target_id=${activeTarget.id}`
           );
           
           if (sessionResponse.ok) {
@@ -1410,7 +1442,7 @@ function App() {
           
           // Then check the current step
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`
+            `/api/api/auto-scan-state/${activeTarget.id}`
           );
           
           if (response.ok) {
@@ -1543,7 +1575,7 @@ function App() {
 
       try {
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${mostRecentScan.scan_id}/subdomain`
+          `/api/amass/${mostRecentScan.scan_id}/subdomain`
         );
         if (!response.ok) {
           throw new Error('Failed to fetch subdomains');
@@ -1570,7 +1602,7 @@ function App() {
 
       try {
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${mostRecentScan.scan_id}/cloud`
+          `/api/amass/${mostRecentScan.scan_id}/cloud`
         );
         if (!response.ok) {
           throw new Error('Failed to fetch cloud domains');
@@ -1611,7 +1643,7 @@ function App() {
 
       try {
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${mostRecentScan.scan_id}/dns`
+          `/api/amass/${mostRecentScan.scan_id}/dns`
         );
         if (!response.ok) {
           throw new Error('Failed to fetch DNS records');
@@ -1660,7 +1692,7 @@ function App() {
       }
 
       try {
-        const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/add`, {
+        const response = await fetch(`/api/scopetarget/add`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1697,7 +1729,7 @@ function App() {
     if (!idToDelete) return;
 
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/delete/${idToDelete}`, {
+      const response = await fetch(`/api/scopetarget/delete/${idToDelete}`, {
         method: 'DELETE',
       });
 
@@ -1727,7 +1759,7 @@ function App() {
   const fetchScopeTargets = async () => {
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/read`
+        `/api/scopetarget/read`
       );
       if (!response.ok) {
         throw new Error('Failed to fetch scope targets');
@@ -1749,7 +1781,7 @@ function App() {
           // Call the API to set the first target as active
           try {
             await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${data[0].id}/activate`,
+              `/api/scopetarget/${data[0].id}/activate`,
               {
                 method: 'POST',
               }
@@ -1837,7 +1869,7 @@ function App() {
     // Update the backend to set this target as active
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${target.id}/activate`,
+        `/api/scopetarget/${target.id}/activate`,
         {
           method: 'POST',
         }
@@ -1855,7 +1887,7 @@ function App() {
       if (target.id) {
         // Fetch screenshot scans
         const screenshotResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${target.id}/scans/nuclei-screenshot`
+          `/api/scopetarget/${target.id}/scans/nuclei-screenshot`
         );
         if (screenshotResponse.ok) {
           const screenshotData = await screenshotResponse.json();
@@ -1868,7 +1900,7 @@ function App() {
 
         // Fetch metadata scans
         const metadataResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${target.id}/scans/metadata`
+          `/api/scopetarget/${target.id}/scans/metadata`
         );
         if (metadataResponse.ok) {
           const metadataData = await metadataResponse.json();
@@ -1881,7 +1913,7 @@ function App() {
 
         // Fetch CEWL scans
         const cewlResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${target.id}/scans/cewl`
+          `/api/scopetarget/${target.id}/scans/cewl`
         );
         if (cewlResponse.ok) {
           const cewlData = await cewlResponse.json();
@@ -1894,7 +1926,7 @@ function App() {
 
         // Fetch ShuffleDNS scans
         const shufflednsResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${target.id}/scans/shuffledns`
+          `/api/scopetarget/${target.id}/scans/shuffledns`
         );
         if (shufflednsResponse.ok) {
           const shufflednsData = await shufflednsResponse.json();
@@ -1907,7 +1939,7 @@ function App() {
 
         // Fetch ShuffleDNS Custom scans
         const shufflednsCustomResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${target.id}/shufflednscustom-scans`
+          `/api/api/scope-targets/${target.id}/shufflednscustom-scans`
         );
         if (shufflednsCustomResponse.ok) {
           const shufflednsCustomData = await shufflednsCustomResponse.json();
@@ -1920,7 +1952,7 @@ function App() {
 
         // Fetch SecurityTrails Company scans
         const securitytrailsResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${target.id}/scans/securitytrails-company`
+          `/api/scopetarget/${target.id}/scans/securitytrails-company`
         );
         if (securitytrailsResponse.ok) {
           const securitytrailsData = await securitytrailsResponse.json();
@@ -1939,7 +1971,7 @@ function App() {
 
         // Fetch Censys Company scans
         const censysResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${target.id}/scans/censys-company`
+          `/api/scopetarget/${target.id}/scans/censys-company`
         );
         if (censysResponse.ok) {
           const censysData = await censysResponse.json();
@@ -1958,7 +1990,7 @@ function App() {
 
         // Fetch Shodan Company scans
         const shodanResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${target.id}/scans/shodan-company`
+          `/api/scopetarget/${target.id}/scans/shodan-company`
         );
         if (shodanResponse.ok) {
           const shodanData = await shodanResponse.json();
@@ -1977,7 +2009,7 @@ function App() {
 
         // Fetch GitHub Recon scans
         const githubResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${target.id}/scans/github-recon`
+          `/api/scopetarget/${target.id}/scans/github-recon`
         );
         if (githubResponse.ok) {
           const githubData = await githubResponse.json();
@@ -2056,7 +2088,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-config`
+        `/api/api/auto-scan-config`
       );
       if (!response.ok) {
         throw new Error('Failed to fetch auto scan config');
@@ -2065,7 +2097,7 @@ function App() {
       console.log('[AutoScan] Config received from backend:', config);
       // Create session
       const sessionResp = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan/session/start`,
+        `/api/api/auto-scan/session/start`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2387,7 +2419,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/nuclei-config/${activeTarget.id}`
+        `/api/nuclei-config/${activeTarget.id}`
       );
       
       if (response.ok) {
@@ -2526,7 +2558,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/katana-company-config/${activeTarget.id}`
+        `/api/katana-company-config/${activeTarget.id}`
       );
       
       if (!response.ok) {
@@ -2610,7 +2642,7 @@ function App() {
     }
 
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/google-dorking-domains`, {
+      const response = await fetch(`/api/api/google-dorking-domains`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -2644,7 +2676,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/google-dorking-domains/${activeTarget.id}`
+        `/api/api/google-dorking-domains/${activeTarget.id}`
       );
       if (response.ok) {
         const domains = await response.json();
@@ -2661,7 +2693,7 @@ function App() {
     try {
       console.log('[fetchNucleiScans] Fetching nuclei scans for target:', activeTarget.id);
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/nuclei`
+        `/api/scopetarget/${activeTarget.id}/scans/nuclei`
       );
 
       if (response.ok) {
@@ -2699,7 +2731,7 @@ function App() {
   const deleteGoogleDorkingDomain = async (domainId) => {
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/google-dorking-domains/${domainId}`,
+        `/api/api/google-dorking-domains/${domainId}`,
         { method: 'DELETE' }
       );
 
@@ -2773,7 +2805,7 @@ function App() {
         // Fetch updated counts after consolidation
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/attack-surface-asset-counts/${activeTarget.id}`,
+            `/api/attack-surface-asset-counts/${activeTarget.id}`,
             {
               method: 'GET',
               headers: {
@@ -2814,7 +2846,7 @@ function App() {
         // Fetch updated counts after investigation
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/attack-surface-asset-counts/${activeTarget.id}`,
+            `/api/attack-surface-asset-counts/${activeTarget.id}`,
             {
               method: 'GET',
               headers: {
@@ -2943,13 +2975,16 @@ function App() {
   }, [activeTarget]);
 
   const startMetaDataScan = () => {
+    const config = activeTarget ? metaDataScanConfigs[activeTarget.id] : null;
     initiateMetaDataScan(
       activeTarget,
       monitorMetaDataScanStatus,
       setIsMetaDataScanning,
       setMetaDataScans,
       setMostRecentMetaDataScanStatus,
-      setMostRecentMetaDataScan
+      setMostRecentMetaDataScan,
+      null,
+      config
     );
   };
 
@@ -2982,7 +3017,7 @@ function App() {
     
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${activeTarget.id}/target-urls`
+        `/api/api/scope-targets/${activeTarget.id}/target-urls`
       );
       if (!response.ok) {
         throw new Error('Failed to fetch target URLs');
@@ -3000,7 +3035,7 @@ function App() {
     
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${activeTarget.id}/target-urls`
+        `/api/api/scope-targets/${activeTarget.id}/target-urls`
       );
       if (!response.ok) {
         throw new Error('Failed to fetch target URLs');
@@ -3130,7 +3165,7 @@ function App() {
     
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${targetId}`
+        `/api/api/auto-scan-state/${targetId}`
       );
       
       if (response.ok) {
@@ -3154,7 +3189,7 @@ function App() {
     if (!activeTarget || !activeTarget.id) return;
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan/sessions?target_id=${activeTarget.id}`
+        `/api/api/auto-scan/sessions?target_id=${activeTarget.id}`
       );
       if (response.ok) {
         const rawData = await response.json();
@@ -3249,7 +3284,7 @@ function App() {
       const interval = setInterval(async () => {
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`
+            `/api/api/auto-scan-state/${activeTarget.id}`
           );
           
           if (response.ok) {
@@ -3317,7 +3352,7 @@ function App() {
     }
 
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/reverse-whois-domains`, {
+      const response = await fetch(`/api/api/reverse-whois-domains`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -3351,7 +3386,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/reverse-whois-domains/${activeTarget.id}`
+        `/api/api/reverse-whois-domains/${activeTarget.id}`
       );
       if (response.ok) {
         const domains = await response.json();
@@ -3365,7 +3400,7 @@ function App() {
   const deleteReverseWhoisDomain = async (domainId) => {
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/reverse-whois-domains/${domainId}`,
+        `/api/api/reverse-whois-domains/${domainId}`,
         { method: 'DELETE' }
       );
 
@@ -3401,7 +3436,7 @@ function App() {
       const fetchSecurityTrailsCompanyScans = async () => {
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/securitytrails-company`
+            `/api/scopetarget/${activeTarget.id}/scans/securitytrails-company`
           );
           if (!response.ok) {
             throw new Error('Failed to fetch SecurityTrails Company scans');
@@ -3430,7 +3465,7 @@ function App() {
     const checkAllApiKeys = async () => {
       try {
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/api-keys`
+          `/api/api/api-keys`
         );
         if (!response.ok) {
           throw new Error('Failed to fetch API keys');
@@ -3508,7 +3543,7 @@ function App() {
     // Re-check all API keys when one is deleted
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/api-keys`
+        `/api/api/api-keys`
       );
       if (!response.ok) {
         throw new Error('Failed to fetch API keys');
@@ -3593,7 +3628,7 @@ function App() {
       const fetchCensysCompanyScans = async () => {
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/censys-company`
+            `/api/scopetarget/${activeTarget.id}/scans/censys-company`
           );
           if (!response.ok) {
             throw new Error('Failed to fetch Censys Company scans');
@@ -3623,7 +3658,7 @@ function App() {
       const fetchShodanCompanyScans = async () => {
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/shodan-company`
+            `/api/scopetarget/${activeTarget.id}/scans/shodan-company`
           );
           if (!response.ok) {
             throw new Error('Failed to fetch Shodan Company scans');
@@ -3660,7 +3695,7 @@ function App() {
       const fetchAmassEnumCompanyScans = async () => {
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/amass-enum-company`
+            `/api/scopetarget/${activeTarget.id}/scans/amass-enum-company`
           );
           if (!response.ok) {
             throw new Error('Failed to fetch Amass Enum Company scans');
@@ -3679,7 +3714,7 @@ function App() {
               // Fetch raw results to get actual scanned domains count
               if (mostRecentScan.scan_id) {
                 const rawResultsResponse = await fetch(
-                  `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/${mostRecentScan.scan_id}/raw-results`
+                  `/api/amass-enum-company/${mostRecentScan.scan_id}/raw-results`
                 );
                 if (rawResultsResponse.ok) {
                   const rawResults = await rawResultsResponse.json();
@@ -3692,7 +3727,7 @@ function App() {
 
                 // Fetch cloud domains for the main card display
                 const cloudDomainsResponse = await fetch(
-                  `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/${mostRecentScan.scan_id}/cloud-domains`
+                  `/api/amass-enum-company/${mostRecentScan.scan_id}/cloud-domains`
                 );
                 if (cloudDomainsResponse.ok) {
                   const cloudDomains = await cloudDomainsResponse.json();
@@ -3725,7 +3760,7 @@ function App() {
       const fetchDNSxCompanyScans = async () => {
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/dnsx-company`
+            `/api/scopetarget/${activeTarget.id}/scans/dnsx-company`
           );
           if (!response.ok) {
             throw new Error('Failed to fetch DNSx Company scans');
@@ -3751,7 +3786,7 @@ function App() {
 
                 // Fetch DNS records for the main card display
                 const dnsRecordsResponse = await fetch(
-                  `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/dnsx-company/${mostRecentScan.scan_id}/dns-records`
+                  `/api/dnsx-company/${mostRecentScan.scan_id}/dns-records`
                 );
                 if (dnsRecordsResponse.ok) {
                   const dnsRecords = await dnsRecordsResponse.json();
@@ -3839,7 +3874,7 @@ function App() {
       const fetchKatanaCompanyScans = async () => {
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/katana-company`
+            `/api/scopetarget/${activeTarget.id}/scans/katana-company`
           );
           if (!response.ok) {
             throw new Error('Failed to fetch Katana Company scans');
@@ -3855,7 +3890,7 @@ function App() {
               // Fetch accumulated cloud assets from the backend API
               try {
                 const assetsResponse = await fetch(
-                  `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/katana-company/${mostRecentScan.scan_id}/cloud-assets`
+                  `/api/katana-company/${mostRecentScan.scan_id}/cloud-assets`
                 );
                 if (assetsResponse.ok) {
                   const assets = await assetsResponse.json();
@@ -4006,7 +4041,7 @@ function App() {
     if (activeTarget) {
       try {
         const mechanismsResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/mechanisms/${activeTarget.id}/examples`
+          `/api/mechanisms/${activeTarget.id}/examples`
         );
         if (mechanismsResponse.ok) {
           const mechanismsData = await mechanismsResponse.json();
@@ -4019,7 +4054,7 @@ function App() {
       
       try {
         const objectsResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/notable-objects/${activeTarget.id}`
+          `/api/notable-objects/${activeTarget.id}`
         );
         if (objectsResponse.ok) {
           const objectsData = await objectsResponse.json();
@@ -4032,7 +4067,7 @@ function App() {
 
       try {
         const controlsResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/security-controls/${activeTarget.id}/notes`
+          `/api/security-controls/${activeTarget.id}/notes`
         );
         if (controlsResponse.ok) {
           const controlsData = await controlsResponse.json();
@@ -4145,7 +4180,7 @@ function App() {
         const fetchDNSxCompanyScansRefresh = async () => {
           try {
             const response = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/dnsx-company`
+              `/api/scopetarget/${activeTarget.id}/scans/dnsx-company`
             );
             if (!response.ok) {
               throw new Error('Failed to fetch DNSx Company scans');
@@ -4169,7 +4204,7 @@ function App() {
         const fetchKatanaCompanyScansRefresh = async () => {
           try {
             const response = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/katana-company`
+              `/api/scopetarget/${activeTarget.id}/scans/katana-company`
             );
             if (!response.ok) {
               throw new Error('Failed to fetch Katana Company scans');
@@ -4185,7 +4220,7 @@ function App() {
                 // Fetch accumulated cloud assets for the card count
                 try {
                   const assetsResponse = await fetch(
-                    `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/katana-company/target/${activeTarget.id}/cloud-assets`
+                    `/api/katana-company/target/${activeTarget.id}/cloud-assets`
                   );
                   if (assetsResponse.ok) {
                     const assets = await assetsResponse.json();
@@ -4229,7 +4264,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/dnsx-config/${activeTarget.id}`
+        `/api/dnsx-config/${activeTarget.id}`
       );
       
       if (response.ok) {
@@ -4245,7 +4280,7 @@ function App() {
           try {
             // Fetch all scope targets to find wildcard targets
             const scopeTargetsResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/read`
+              `/api/scopetarget/read`
             );
             
             if (scopeTargetsResponse.ok) {
@@ -4270,7 +4305,7 @@ function App() {
                 for (const wildcardTarget of wildcardTargets) {
                   try {
                     const liveWebServersResponse = await fetch(
-                      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${wildcardTarget.id}/target-urls`
+                      `/api/api/scope-targets/${wildcardTarget.id}/target-urls`
                     );
                     
                     if (liveWebServersResponse.ok) {
@@ -4340,7 +4375,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/dnsx-config/${activeTarget.id}`
+        `/api/dnsx-config/${activeTarget.id}`
       );
       
       if (!response.ok) {
@@ -4393,7 +4428,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-config/${activeTarget.id}`
+        `/api/amass-enum-config/${activeTarget.id}`
       );
       
       if (!response.ok) {
@@ -4446,7 +4481,7 @@ function App() {
       const fetchAmassEnumCompanyScans = async () => {
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/amass-enum-company`
+            `/api/scopetarget/${activeTarget.id}/scans/amass-enum-company`
           );
           if (!response.ok) {
             throw new Error('Failed to fetch Amass Enum Company scans');
@@ -4465,7 +4500,7 @@ function App() {
               // Fetch raw results to get actual scanned domains count
               if (mostRecentScan.scan_id) {
                 const rawResultsResponse = await fetch(
-                  `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/${mostRecentScan.scan_id}/raw-results`
+                  `/api/amass-enum-company/${mostRecentScan.scan_id}/raw-results`
                 );
                 if (rawResultsResponse.ok) {
                   const rawResults = await rawResultsResponse.json();
@@ -4478,7 +4513,7 @@ function App() {
 
                 // Fetch cloud domains for the main card display
                 const cloudDomainsResponse = await fetch(
-                  `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/${mostRecentScan.scan_id}/cloud-domains`
+                  `/api/amass-enum-company/${mostRecentScan.scan_id}/cloud-domains`
                 );
                 if (cloudDomainsResponse.ok) {
                   const cloudDomains = await cloudDomainsResponse.json();
@@ -4511,7 +4546,7 @@ function App() {
       const fetchAmassEnumCompanyScans = async () => {
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/amass-enum-company`
+            `/api/scopetarget/${activeTarget.id}/scans/amass-enum-company`
           );
           if (!response.ok) {
             throw new Error('Failed to fetch Amass Enum Company scans');
@@ -4530,7 +4565,7 @@ function App() {
               // Fetch raw results to get actual scanned domains count
               if (mostRecentScan.scan_id) {
                 const rawResultsResponse = await fetch(
-                  `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/${mostRecentScan.scan_id}/raw-results`
+                  `/api/amass-enum-company/${mostRecentScan.scan_id}/raw-results`
                 );
                 if (rawResultsResponse.ok) {
                   const rawResults = await rawResultsResponse.json();
@@ -4543,7 +4578,7 @@ function App() {
 
                 // Fetch cloud domains for the main card display
                 const cloudDomainsResponse = await fetch(
-                  `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/${mostRecentScan.scan_id}/cloud-domains`
+                  `/api/amass-enum-company/${mostRecentScan.scan_id}/cloud-domains`
                 );
                 if (cloudDomainsResponse.ok) {
                   const cloudDomains = await cloudDomainsResponse.json();
@@ -4576,7 +4611,7 @@ function App() {
       const fetchAmassEnumCompanyScans = async () => {
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/amass-enum-company`
+            `/api/scopetarget/${activeTarget.id}/scans/amass-enum-company`
           );
           if (!response.ok) {
             throw new Error('Failed to fetch Amass Enum Company scans');
@@ -4595,7 +4630,7 @@ function App() {
               // Fetch raw results to get actual scanned domains count
               if (mostRecentScan.scan_id) {
                 const rawResultsResponse = await fetch(
-                  `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/${mostRecentScan.scan_id}/raw-results`
+                  `/api/amass-enum-company/${mostRecentScan.scan_id}/raw-results`
                 );
                 if (rawResultsResponse.ok) {
                   const rawResults = await rawResultsResponse.json();
@@ -4608,7 +4643,7 @@ function App() {
 
                 // Fetch cloud domains for the main card display
                 const cloudDomainsResponse = await fetch(
-                  `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/${mostRecentScan.scan_id}/cloud-domains`
+                  `/api/amass-enum-company/${mostRecentScan.scan_id}/cloud-domains`
                 );
                 if (cloudDomainsResponse.ok) {
                   const cloudDomains = await cloudDomainsResponse.json();
@@ -6471,23 +6506,9 @@ function App() {
                         <div>
                           <Card.Title className="text-danger fs-3 mb-3">Add URL Scope Target</Card.Title>
                           <Card.Text className="text-white small fst-italic">
-                            We now have a list of unique subdomains pointing to live web servers. The next step is to take screenshots of each web application and gather data to identify the target that will give us the greatest ROI as a bug bounty hunter. Focus on signs that the target may have vulnerabilities, may not be maintained, or offers a large attack surface.
+                            We now have a list of unique subdomains pointing to live web servers. The next step is to gather comprehensive data about each web application to identify targets that will give us the greatest ROI as a bug bounty hunter. Configure your scan to select which URLs to analyze and which reconnaissance steps to perform. Focus on signs that the target may have vulnerabilities, may not be maintained, or offers a large attack surface.
                           </Card.Text>
-                          <div className="d-flex justify-content-around mt-4 mb-4">
-                            <div className="text-center px-4">
-                              <div className="digital-clock text-danger fw-bold" style={{
-                                fontFamily: "'Digital-7', monospace",
-                                fontSize: "2.5rem",
-                                textShadow: "0 0 10px rgba(255, 0, 0, 0.5)",
-                                letterSpacing: "2px"
-                              }}>
-                                {mostRecentNucleiScreenshotScan ? 
-                                  Math.floor((new Date() - new Date(mostRecentNucleiScreenshotScan.created_at)) / (1000 * 60 * 60 * 24)) : 
-                                  '∞'}
-                              </div>
-                              <div className="text-white small mt-2">day{mostRecentNucleiScreenshotScan && 
-                                Math.floor((new Date() - new Date(mostRecentNucleiScreenshotScan.created_at)) / (1000 * 60 * 60 * 24)) !== 1 ? 's' : ''} since last Screenshots</div>
-                            </div>
+                          <div className="d-flex justify-content-center mt-4 mb-4">
                             <div className="text-center px-4">
                               <div className="digital-clock text-danger fw-bold" style={{
                                 fontFamily: "'Digital-7', monospace",
@@ -6497,10 +6518,10 @@ function App() {
                               }}>
                                 {mostRecentMetaDataScan ? 
                                   Math.floor((new Date() - new Date(mostRecentMetaDataScan.created_at)) / (1000 * 60 * 60 * 24)) : 
-                                  '∞'}
+                                  '8'}
                               </div>
                               <div className="text-white small mt-2">day{mostRecentMetaDataScan && 
-                                Math.floor((new Date() - new Date(mostRecentMetaDataScan.created_at)) / (1000 * 60 * 60 * 24)) !== 1 ? 's' : ''} since last MetaData</div>
+                                Math.floor((new Date() - new Date(mostRecentMetaDataScan.created_at)) / (1000 * 60 * 60 * 24)) !== 1 ? 's' : ''} since last MetaData Scan</div>
                             </div>
                           </div>
                         </div>
@@ -6510,30 +6531,18 @@ function App() {
                             <Button 
                               variant="outline-danger" 
                               className="flex-fill"
-                              onClick={startNucleiScreenshotScan}
+                              onClick={handleOpenConfigureMetaDataModal}
                               disabled={!mostRecentHttpxScan || 
                                       mostRecentHttpxScan.status !== "success" || 
                                       !httpxScans || 
                                       httpxScans.length === 0}
                             >
-                              <div className="btn-content">
-                                {isNucleiScreenshotScanning || mostRecentNucleiScreenshotScanStatus === "pending" ? (
-                                  <div className="spinner"></div>
-                                ) : 'Take Screenshots'}
-                              </div>
+                              Configure
                             </Button>
                             <Button 
                               variant="outline-danger" 
                               className="flex-fill"
-                              onClick={handleOpenScreenshotResultsModal}
-                              disabled={!mostRecentNucleiScreenshotScan || mostRecentNucleiScreenshotScan.status !== "success"}
-                            >
-                              View Screenshots
-                            </Button>
-                            <Button 
-                              variant="outline-danger" 
-                              className="flex-fill"
-                              onClick={startMetaDataScan}
+                              onClick={() => startMetaDataScan()}
                               disabled={!mostRecentHttpxScan || 
                                       mostRecentHttpxScan.status !== "success" || 
                                       !httpxScans || 
@@ -6557,9 +6566,7 @@ function App() {
                               variant="outline-danger" 
                               className="flex-fill"
                               onClick={handleOpenROIReport}
-                              disabled={!mostRecentNucleiScreenshotScan || 
-                                      mostRecentNucleiScreenshotScan.status !== "success" || 
-                                      !mostRecentMetaDataScan || 
+                              disabled={!mostRecentMetaDataScan || 
                                       mostRecentMetaDataScan.status !== "success"}
                             >
                               ROI Report
@@ -6860,6 +6867,15 @@ function App() {
         />
       </Suspense>
       <Suspense fallback={<div />}>
+        <ConfigureMetaDataModal
+          show={showConfigureMetaDataModal}
+          handleClose={handleCloseConfigureMetaDataModal}
+          targetURLs={targetURLs}
+          onSaveConfig={handleSaveMetaDataConfig}
+          currentConfig={activeTarget ? metaDataScanConfigs[activeTarget.id] : null}
+        />
+      </Suspense>
+      <Suspense fallback={<div />}>
         <ROIReport
           show={showROIReport}
           onHide={handleCloseROIReport}
@@ -6919,29 +6935,29 @@ function App() {
                 autoScanSessions.map((session) => (
                   <tr key={session.session_id}>
                     <td>{session.start_time}</td>
-                    <td>{session.duration || '—'}</td>
+                    <td>{session.duration || '�'}</td>
                     <td>
                       <span className={`text-${session.status === 'completed' ? 'success' : session.status === 'cancelled' ? 'warning' : 'primary'}`}>
                         {session.status.charAt(0).toUpperCase() + session.status.slice(1)}
                       </span>
                     </td>
-                    <td className="text-center"><strong>{session.final_consolidated_subdomains || '—'}</strong></td>
-                    <td className="text-center"><strong>{session.final_live_web_servers || '—'}</strong></td>
-                    <td className="text-center">{session.config?.amass ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.sublist3r ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.assetfinder ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.gau ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.ctl ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.subfinder ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.httpx_round1 ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.shuffledns ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.cewl ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.httpx_round2 ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.gospider ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.subdomainizer ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.httpx_round3 ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.nuclei_screenshot ? <span className="text-danger fw-bold">✓</span> : ''}</td>
-                    <td className="text-center">{session.config?.metadata ? <span className="text-danger fw-bold">✓</span> : ''}</td>
+                    <td className="text-center"><strong>{session.final_consolidated_subdomains || '�'}</strong></td>
+                    <td className="text-center"><strong>{session.final_live_web_servers || '�'}</strong></td>
+                    <td className="text-center">{session.config?.amass ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.sublist3r ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.assetfinder ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.gau ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.ctl ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.subfinder ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.httpx_round1 ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.shuffledns ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.cewl ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.httpx_round2 ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.gospider ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.subdomainizer ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.httpx_round3 ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.nuclei_screenshot ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center">{session.config?.metadata ? <span className="text-danger fw-bold">?</span> : ''}</td>
                   </tr>
                 ))
               )}

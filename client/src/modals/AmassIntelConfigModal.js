@@ -46,7 +46,7 @@ const AmassIntelConfigModal = ({
     setLoadingNetworkRanges(true);
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/consolidated-network-ranges/${activeTarget.id}`
+        `/api/consolidated-network-ranges/${activeTarget.id}`
       );
       
       if (response.ok) {
@@ -68,7 +68,7 @@ const AmassIntelConfigModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-intel-config/${activeTarget.id}`
+        `/api/amass-intel-config/${activeTarget.id}`
       );
       
       if (response.ok) {
@@ -98,7 +98,7 @@ const AmassIntelConfigModal = ({
       };
 
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-intel-config/${activeTarget.id}`,
+        `/api/amass-intel-config/${activeTarget.id}`,
         {
           method: 'POST',
           headers: {

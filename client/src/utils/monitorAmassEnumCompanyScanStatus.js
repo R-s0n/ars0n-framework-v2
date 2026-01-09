@@ -13,7 +13,7 @@ const monitorAmassEnumCompanyScanStatus = async (
   const poll = async () => {
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/status/${scanId}`
+        `/api/amass-enum-company/status/${scanId}`
       );
       
       if (!response.ok) {
@@ -47,7 +47,7 @@ const monitorAmassEnumCompanyScanStatus = async (
         if (setAmassEnumCompanyCloudDomains) {
           try {
             const cloudDomainsResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-enum-company/${scanId}/cloud-domains`
+              `/api/amass-enum-company/${scanId}/cloud-domains`
             );
             
             if (cloudDomainsResponse.ok) {
@@ -63,7 +63,7 @@ const monitorAmassEnumCompanyScanStatus = async (
         if (activeTarget && setAmassEnumCompanyScans) {
           try {
             const refreshResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/amass-enum-company`
+              `/api/scopetarget/${activeTarget.id}/scans/amass-enum-company`
             );
             if (refreshResponse.ok) {
               const refreshedScans = await refreshResponse.json();

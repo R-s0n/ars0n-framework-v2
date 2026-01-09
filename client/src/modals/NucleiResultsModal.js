@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { Modal, Button, Badge, ListGroup, Row, Col, Card, Alert, Table } from 'react-bootstrap';
+import { Modal, Button, Badge, ListGroup, Row, Col, Card, Alert, Pagination, Table } from 'react-bootstrap';
 import { copyToClipboard } from '../utils/miscUtils';
 
 export const NucleiResultsModal = ({ 
@@ -19,7 +19,10 @@ export const NucleiResultsModal = ({
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [templateFilter, setTemplateFilter] = useState('all');
   const [showScanSelector, setShowScanSelector] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
   const findingsListRef = useRef(null);
+  
+  const FINDINGS_PER_PAGE = 50;
 
   const formatResults = (results) => {
     console.log('[NucleiResultsModal] Formatting results:', results);
@@ -58,14 +61,19 @@ export const NucleiResultsModal = ({
     if (scan) {
       const formattedResults = formatResults(scan);
       setFindings(formattedResults);
+      setCurrentPage(1);
       if (formattedResults.length > 0) {
         setSelectedFinding(formattedResults[0]);
+        setSelectedIndex(0);
       } else {
         setSelectedFinding(null);
+        setSelectedIndex(0);
       }
     } else {
       setFindings([]);
       setSelectedFinding(null);
+      setSelectedIndex(0);
+      setCurrentPage(1);
     }
   }, [scan]);
 
@@ -190,7 +198,6 @@ export const NucleiResultsModal = ({
     return Array.from(templates).sort();
   }, [findings]);
 
-  // Helper function to get scan details
   const getScanDetails = (scan) => {
     if (!scan) return null;
     
@@ -222,7 +229,6 @@ export const NucleiResultsModal = ({
     };
   };
 
-  // Handle scan selection
   const handleScanSelect = (selectedScan) => {
     setActiveNucleiScan(selectedScan);
     setShowScanSelector(false);
@@ -300,6 +306,24 @@ export const NucleiResultsModal = ({
     return findings;
   }, [filteredGroupedFindings]);
 
+  const totalPages = Math.ceil(allFindings.length / FINDINGS_PER_PAGE);
+  
+  const paginatedFindings = useMemo(() => {
+    const startIndex = (currentPage - 1) * FINDINGS_PER_PAGE;
+    const endIndex = startIndex + FINDINGS_PER_PAGE;
+    return allFindings.slice(startIndex, endIndex);
+  }, [allFindings, currentPage]);
+
+  const paginatedGroupedFindings = useMemo(() => {
+    return groupBySeverity(paginatedFindings);
+  }, [paginatedFindings]);
+
+  useEffect(() => {
+    if (currentPage > totalPages && totalPages > 0) {
+      setCurrentPage(totalPages);
+    }
+  }, [totalPages, currentPage]);
+
   useEffect(() => {
     if (show && allFindings.length > 0 && !selectedFinding) {
       setSelectedFinding(allFindings[0]);
@@ -313,7 +337,6 @@ export const NucleiResultsModal = ({
     }
   }, [selectedFinding]);
 
-  // Close scan selector when clicking outside
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (showScanSelector && !event.target.closest('.position-relative')) {
@@ -334,38 +357,84 @@ export const NucleiResultsModal = ({
     const handleGlobalKeyDown = (event) => {
       if (!show) return;
       
-      if (allFindings.length === 0) return;
+      if (paginatedFindings.length === 0) return;
 
       switch (event.key) {
         case 'ArrowDown':
           event.preventDefault();
-          const nextIndex = Math.min(selectedIndex + 1, allFindings.length - 1);
-          if (nextIndex !== selectedIndex) {
-            setSelectedIndex(nextIndex);
-            setSelectedFinding(allFindings[nextIndex]);
+          const currentIndexInPage = paginatedFindings.findIndex(f => 
+            f.info?.name === selectedFinding?.info?.name && 
+            f.host === selectedFinding?.host &&
+            f['template-id'] === selectedFinding?.['template-id']
+          );
+          
+          if (currentIndexInPage < paginatedFindings.length - 1) {
+            const nextFinding = paginatedFindings[currentIndexInPage + 1];
+            setSelectedFinding(nextFinding);
+            const globalIndex = allFindings.findIndex(f => 
+              f.info?.name === nextFinding.info?.name && 
+              f.host === nextFinding.host &&
+              f['template-id'] === nextFinding['template-id']
+            );
+            setSelectedIndex(globalIndex);
+          } else if (currentPage < totalPages) {
+            setCurrentPage(currentPage + 1);
+            setTimeout(() => {
+              if (allFindings[(currentPage) * FINDINGS_PER_PAGE]) {
+                setSelectedFinding(allFindings[(currentPage) * FINDINGS_PER_PAGE]);
+                setSelectedIndex((currentPage) * FINDINGS_PER_PAGE);
+              }
+            }, 100);
           }
           break;
         case 'ArrowUp':
           event.preventDefault();
-          const prevIndex = Math.max(selectedIndex - 1, 0);
-          if (prevIndex !== selectedIndex) {
-            setSelectedIndex(prevIndex);
-            setSelectedFinding(allFindings[prevIndex]);
+          const currentIndexInPageUp = paginatedFindings.findIndex(f => 
+            f.info?.name === selectedFinding?.info?.name && 
+            f.host === selectedFinding?.host &&
+            f['template-id'] === selectedFinding?.['template-id']
+          );
+          
+          if (currentIndexInPageUp > 0) {
+            const prevFinding = paginatedFindings[currentIndexInPageUp - 1];
+            setSelectedFinding(prevFinding);
+            const globalIndex = allFindings.findIndex(f => 
+              f.info?.name === prevFinding.info?.name && 
+              f.host === prevFinding.host &&
+              f['template-id'] === prevFinding['template-id']
+            );
+            setSelectedIndex(globalIndex);
+          } else if (currentPage > 1) {
+            setCurrentPage(currentPage - 1);
+            setTimeout(() => {
+              const newPageStartIndex = (currentPage - 2) * FINDINGS_PER_PAGE;
+              const lastInPrevPage = Math.min(newPageStartIndex + FINDINGS_PER_PAGE - 1, allFindings.length - 1);
+              if (allFindings[lastInPrevPage]) {
+                setSelectedFinding(allFindings[lastInPrevPage]);
+                setSelectedIndex(lastInPrevPage);
+              }
+            }, 100);
           }
           break;
         case 'Home':
           event.preventDefault();
-          if (selectedIndex !== 0) {
-            setSelectedIndex(0);
-            setSelectedFinding(allFindings[0]);
+          if (allFindings.length > 0) {
+            setCurrentPage(1);
+            setTimeout(() => {
+              setSelectedIndex(0);
+              setSelectedFinding(allFindings[0]);
+            }, 100);
           }
           break;
         case 'End':
           event.preventDefault();
-          const lastIndex = allFindings.length - 1;
-          if (selectedIndex !== lastIndex) {
-            setSelectedIndex(lastIndex);
-            setSelectedFinding(allFindings[lastIndex]);
+          if (allFindings.length > 0) {
+            setCurrentPage(totalPages);
+            setTimeout(() => {
+              const lastIndex = allFindings.length - 1;
+              setSelectedIndex(lastIndex);
+              setSelectedFinding(allFindings[lastIndex]);
+            }, 100);
           }
           break;
       }
@@ -378,7 +447,83 @@ export const NucleiResultsModal = ({
     return () => {
       document.removeEventListener('keydown', handleGlobalKeyDown);
     };
-  }, [show, allFindings, selectedIndex]);
+  }, [show, paginatedFindings, allFindings, selectedFinding, currentPage, totalPages]);
+
+  const renderPagination = () => {
+    if (totalPages <= 1) return null;
+
+    const maxPagesToShow = 7;
+    let startPage = Math.max(1, currentPage - Math.floor(maxPagesToShow / 2));
+    let endPage = Math.min(totalPages, startPage + maxPagesToShow - 1);
+
+    if (endPage - startPage < maxPagesToShow - 1) {
+      startPage = Math.max(1, endPage - maxPagesToShow + 1);
+    }
+
+    const pages = [];
+    
+    for (let i = startPage; i <= endPage; i++) {
+      pages.push(
+        <Pagination.Item
+          key={i}
+          active={i === currentPage}
+          onClick={() => {
+            setCurrentPage(i);
+            if (findingsListRef.current) {
+              findingsListRef.current.scrollTop = 0;
+            }
+          }}
+        >
+          {i}
+        </Pagination.Item>
+      );
+    }
+
+    return (
+      <div className="d-flex justify-content-center align-items-center my-3">
+        <Pagination size="sm" className="mb-0">
+          <Pagination.First 
+            onClick={() => setCurrentPage(1)} 
+            disabled={currentPage === 1}
+          />
+          <Pagination.Prev 
+            onClick={() => setCurrentPage(Math.max(1, currentPage - 1))} 
+            disabled={currentPage === 1}
+          />
+          
+          {startPage > 1 && (
+            <>
+              <Pagination.Item onClick={() => setCurrentPage(1)}>1</Pagination.Item>
+              {startPage > 2 && <Pagination.Ellipsis disabled />}
+            </>
+          )}
+          
+          {pages}
+          
+          {endPage < totalPages && (
+            <>
+              {endPage < totalPages - 1 && <Pagination.Ellipsis disabled />}
+              <Pagination.Item onClick={() => setCurrentPage(totalPages)}>{totalPages}</Pagination.Item>
+            </>
+          )}
+          
+          <Pagination.Next 
+            onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))} 
+            disabled={currentPage === totalPages}
+          />
+          <Pagination.Last 
+            onClick={() => setCurrentPage(totalPages)} 
+            disabled={currentPage === totalPages}
+          />
+        </Pagination>
+        <div className="ms-3">
+          <small className="text-muted">
+            Showing {((currentPage - 1) * FINDINGS_PER_PAGE) + 1}-{Math.min(currentPage * FINDINGS_PER_PAGE, allFindings.length)} of {allFindings.length}
+          </small>
+        </div>
+      </div>
+    );
+  };
 
   const renderFindingsList = () => {
     if (filteredFindings.length === 0) {
@@ -391,97 +536,100 @@ export const NucleiResultsModal = ({
     }
 
     return (
-      <div ref={findingsListRef} style={{ height: '75vh', overflowY: 'auto' }}>
-        {Object.entries(filteredGroupedFindings).map(([severity, severityFindings]) => (
-          <div key={severity} className="mb-3">
-            <div className="d-flex align-items-center mb-2">
-              <Badge bg={getSeverityBadge(severity)} className="me-2">
-                {severity.toUpperCase()}
-              </Badge>
-              <small className="text-muted">
-                {severityFindings.length} finding{severityFindings.length !== 1 ? 's' : ''}
-              </small>
-            </div>
-            
-            <ListGroup variant="flush">
-              {severityFindings.map((finding, index) => {
-                const findingIndex = allFindings.findIndex(f => 
-                  f.info?.name === finding.info?.name && 
-                  f.host === finding.host && 
-                  f['template-id'] === finding['template-id'] &&
-                  f.matched === finding.matched &&
-                  f['matched-at'] === finding['matched-at'] &&
-                  f.ip === finding.ip &&
-                  f.port === finding.port &&
-                  f.info?.severity === finding.info?.severity &&
-                  f['matcher-name'] === finding['matcher-name'] &&
-                  f.timestamp === finding.timestamp
-                );
-                const isSelected = selectedFinding && 
-                  selectedFinding.info?.name === finding.info?.name && 
-                  selectedFinding.host === finding.host && 
-                  selectedFinding['template-id'] === finding['template-id'] &&
-                  selectedFinding.matched === finding.matched &&
-                  selectedFinding['matched-at'] === finding['matched-at'] &&
-                  selectedFinding.ip === finding.ip &&
-                  selectedFinding.port === finding.port &&
-                  selectedFinding.info?.severity === finding.info?.severity &&
-                  selectedFinding['matcher-name'] === finding['matcher-name'] &&
-                  selectedFinding.timestamp === finding.timestamp;
-                
-                return (
-                  <ListGroup.Item
-                    key={`${severity}-${index}`}
-                    action
-                    active={isSelected}
-                    onClick={() => {
-                      setSelectedFinding(finding);
-                      setSelectedIndex(findingIndex);
-                    }}
-                    className="py-2 border-0 mb-1"
-                    style={{ 
-                      backgroundColor: isSelected ? 
-                        (severity === 'critical' ? 'rgba(220, 53, 69, 0.25)' : 
-                         severity === 'high' ? 'rgba(255, 193, 7, 0.25)' : 
-                         severity === 'medium' ? 'rgba(13, 202, 240, 0.25)' : 
-                         severity === 'low' ? 'rgba(25, 135, 84, 0.25)' : 
-                         'rgba(108, 117, 125, 0.25)') : 
-                        'rgba(255, 255, 255, 0.05)',
-                      borderRadius: '4px',
-                      border: isSelected ? 
-                        (severity === 'critical' ? '2px solid #dc3545' : 
-                         severity === 'high' ? '2px solid #ffc107' : 
-                         severity === 'medium' ? '2px solid #0dcaf0' : 
-                         severity === 'low' ? '2px solid #198754' : 
-                         '2px solid #6c757d') : 
-                        '2px solid transparent'
-                    }}
-                  >
-                  <div className="d-flex align-items-start">
-                    <i className={`bi bi-${getSeverityIcon(severity)} text-${getSeverityBadge(severity) === 'danger' ? 'danger' : getSeverityBadge(severity) === 'warning' ? 'warning' : 'info'} me-2 mt-1`}></i>
-                    <div className="flex-grow-1">
-                      <div className="fw-bold">
-                        {finding.info?.name || finding.template_id || 'Unknown'}
-                      </div>
-                      <div className="text-muted small">
-                        {finding.host || finding.matched || 'Unknown target'}
-                      </div>
-                      <div className="text-muted small">
-                        {finding['template-id']}
-                      </div>
-                      <div className="text-info small">
-                        <i className="bi bi-gear me-1"></i>
-                        {finding['matcher-name'] || 'N/A'}
+      <>
+        <div ref={findingsListRef} style={{ height: '65vh', overflowY: 'auto' }}>
+          {Object.entries(paginatedGroupedFindings).map(([severity, severityFindings]) => (
+            <div key={severity} className="mb-3">
+              <div className="d-flex align-items-center mb-2">
+                <Badge bg={getSeverityBadge(severity)} className="me-2">
+                  {severity.toUpperCase()}
+                </Badge>
+                <small className="text-muted">
+                  {severityFindings.length} finding{severityFindings.length !== 1 ? 's' : ''} on this page
+                </small>
+              </div>
+              
+              <ListGroup variant="flush">
+                {severityFindings.map((finding, index) => {
+                  const findingIndex = allFindings.findIndex(f => 
+                    f.info?.name === finding.info?.name && 
+                    f.host === finding.host && 
+                    f['template-id'] === finding['template-id'] &&
+                    f.matched === finding.matched &&
+                    f['matched-at'] === finding['matched-at'] &&
+                    f.ip === finding.ip &&
+                    f.port === finding.port &&
+                    f.info?.severity === finding.info?.severity &&
+                    f['matcher-name'] === finding['matcher-name'] &&
+                    f.timestamp === finding.timestamp
+                  );
+                  const isSelected = selectedFinding && 
+                    selectedFinding.info?.name === finding.info?.name && 
+                    selectedFinding.host === finding.host && 
+                    selectedFinding['template-id'] === finding['template-id'] &&
+                    selectedFinding.matched === finding.matched &&
+                    selectedFinding['matched-at'] === finding['matched-at'] &&
+                    selectedFinding.ip === finding.ip &&
+                    selectedFinding.port === finding.port &&
+                    selectedFinding.info?.severity === finding.info?.severity &&
+                    selectedFinding['matcher-name'] === finding['matcher-name'] &&
+                    selectedFinding.timestamp === finding.timestamp;
+                  
+                  return (
+                    <ListGroup.Item
+                      key={`${severity}-${index}-${findingIndex}`}
+                      action
+                      active={isSelected}
+                      onClick={() => {
+                        setSelectedFinding(finding);
+                        setSelectedIndex(findingIndex);
+                      }}
+                      className="py-2 border-0 mb-1"
+                      style={{ 
+                        backgroundColor: isSelected ? 
+                          (severity === 'critical' ? 'rgba(220, 53, 69, 0.25)' : 
+                           severity === 'high' ? 'rgba(255, 193, 7, 0.25)' : 
+                           severity === 'medium' ? 'rgba(13, 202, 240, 0.25)' : 
+                           severity === 'low' ? 'rgba(25, 135, 84, 0.25)' : 
+                           'rgba(108, 117, 125, 0.25)') : 
+                          'rgba(255, 255, 255, 0.05)',
+                        borderRadius: '4px',
+                        border: isSelected ? 
+                          (severity === 'critical' ? '2px solid #dc3545' : 
+                           severity === 'high' ? '2px solid #ffc107' : 
+                           severity === 'medium' ? '2px solid #0dcaf0' : 
+                           severity === 'low' ? '2px solid #198754' : 
+                           '2px solid #6c757d') : 
+                          '2px solid transparent'
+                      }}
+                    >
+                    <div className="d-flex align-items-start">
+                      <i className={`bi bi-${getSeverityIcon(severity)} text-${getSeverityBadge(severity) === 'danger' ? 'danger' : getSeverityBadge(severity) === 'warning' ? 'warning' : 'info'} me-2 mt-1`}></i>
+                      <div className="flex-grow-1">
+                        <div className="fw-bold">
+                          {finding.info?.name || finding.template_id || 'Unknown'}
+                        </div>
+                        <div className="text-muted small">
+                          {finding.host || finding.matched || 'Unknown target'}
+                        </div>
+                        <div className="text-muted small">
+                          {finding['template-id']}
+                        </div>
+                        <div className="text-info small">
+                          <i className="bi bi-gear me-1"></i>
+                          {finding['matcher-name'] || 'N/A'}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </ListGroup.Item>
-                );
-              })}
-            </ListGroup>
-          </div>
-        ))}
-      </div>
+                  </ListGroup.Item>
+                  );
+                })}
+              </ListGroup>
+            </div>
+          ))}
+        </div>
+        {renderPagination()}
+      </>
     );
   };
 
@@ -726,12 +874,18 @@ export const NucleiResultsModal = ({
                   className="form-control bg-dark text-light border-secondary"
                   placeholder="Search findings (use -term for negative search)"
                   value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
+                  onChange={(e) => {
+                    setSearchTerm(e.target.value);
+                    setCurrentPage(1);
+                  }}
                 />
                 {searchTerm && (
                   <button
                     className="btn btn-outline-secondary btn-sm"
-                    onClick={() => setSearchTerm('')}
+                    onClick={() => {
+                      setSearchTerm('');
+                      setCurrentPage(1);
+                    }}
                   >
                     <i className="bi bi-x"></i>
                   </button>
@@ -742,7 +896,10 @@ export const NucleiResultsModal = ({
               <select
                 className="form-select form-select-sm bg-dark text-light border-secondary"
                 value={severityFilter}
-                onChange={(e) => setSeverityFilter(e.target.value)}
+                onChange={(e) => {
+                  setSeverityFilter(e.target.value);
+                  setCurrentPage(1);
+                }}
               >
                 <option value="all">All Severities</option>
                 <option value="critical">Critical</option>
@@ -756,7 +913,10 @@ export const NucleiResultsModal = ({
               <select
                 className="form-select form-select-sm bg-dark text-light border-secondary"
                 value={categoryFilter}
-                onChange={(e) => setCategoryFilter(e.target.value)}
+                onChange={(e) => {
+                  setCategoryFilter(e.target.value);
+                  setCurrentPage(1);
+                }}
               >
                 <option value="all">All Categories</option>
                 {getAvailableCategories.map(category => (
@@ -768,7 +928,10 @@ export const NucleiResultsModal = ({
               <select
                 className="form-select form-select-sm bg-dark text-light border-secondary"
                 value={templateFilter}
-                onChange={(e) => setTemplateFilter(e.target.value)}
+                onChange={(e) => {
+                  setTemplateFilter(e.target.value);
+                  setCurrentPage(1);
+                }}
               >
                 <option value="all">All Templates</option>
                 {getAvailableTemplates.map(template => (
@@ -789,6 +952,7 @@ export const NucleiResultsModal = ({
                     setSeverityFilter('all');
                     setCategoryFilter('all');
                     setTemplateFilter('all');
+                    setCurrentPage(1);
                   }}
                   disabled={!searchTerm && severityFilter === 'all' && categoryFilter === 'all' && templateFilter === 'all'}
                   title="Clear all filters"
@@ -933,7 +1097,7 @@ export const NucleiResultsModal = ({
                 </h6>
                 <small className="text-muted">
                   <i className="bi bi-keyboard me-1"></i>
-                  Use ↑↓ arrows to navigate, Home/End for first/last
+                  Use ↑↓ arrows
                 </small>
               </div>
               {renderFindingsList()}
@@ -1093,4 +1257,4 @@ export const NucleiHistoryModal = ({
       </Modal.Footer>
     </Modal>
   );
-}; 
+};

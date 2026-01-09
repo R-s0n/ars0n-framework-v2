@@ -99,7 +99,7 @@ export const ThreatModelModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/threat-model/${activeTarget.id}`
+        `/api/threat-model/${activeTarget.id}`
       );
 
       if (!response.ok) {
@@ -157,8 +157,8 @@ export const ThreatModelModal = ({
 
       const method = selectedThreat ? 'PUT' : 'POST';
       const url = selectedThreat
-        ? `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/threat-model/${selectedThreat}`
-        : `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/threat-model/${activeTarget.id}`;
+        ? `/api/threat-model/${selectedThreat}`
+        : `/api/threat-model/${activeTarget.id}`;
 
       const response = await fetch(url, {
         method: method,
@@ -208,7 +208,7 @@ export const ThreatModelModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/threat-model/${threatToDelete}`,
+        `/api/threat-model/${threatToDelete}`,
         {
           method: 'DELETE'
         }

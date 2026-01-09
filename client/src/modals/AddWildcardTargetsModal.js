@@ -279,7 +279,7 @@ const AddWildcardTargetsModal = ({
       // Prepend *. to make it a wildcard format
       const wildcardDomain = `*.${domain}`;
       
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/add`, {
+      const response = await fetch(`/api/scopetarget/add`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

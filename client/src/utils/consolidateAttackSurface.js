@@ -6,7 +6,7 @@ const consolidateAttackSurface = async (activeTarget) => {
 
     try {
         const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/consolidate-attack-surface/${activeTarget.id}`,
+            `/api/consolidate-attack-surface/${activeTarget.id}`,
             {
                 method: 'POST',
                 headers: {

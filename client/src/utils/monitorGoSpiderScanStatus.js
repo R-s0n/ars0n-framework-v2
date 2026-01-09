@@ -14,7 +14,7 @@ const monitorGoSpiderScanStatus = async (
 
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/gospider`
+      `/api/scopetarget/${activeTarget.id}/scans/gospider`
     );
 
     if (!response.ok) {

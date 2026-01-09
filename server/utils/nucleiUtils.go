@@ -111,6 +111,22 @@ func convertAttackSurfaceAssetsToTargets(assetIDs []string, scopeTargetID string
 	return targets, nil
 }
 
+// logWriter is a custom writer that logs each line with a prefix
+type logWriter struct {
+	prefix string
+}
+
+func (lw *logWriter) Write(p []byte) (n int, err error) {
+	output := string(p)
+	lines := strings.Split(strings.TrimRight(output, "\n\r"), "\n")
+	for _, line := range lines {
+		if line != "" {
+			log.Printf("%s %s", lw.prefix, line)
+		}
+	}
+	return len(p), nil
+}
+
 // executeNucleiScan executes a Nuclei scan with the given parameters
 func executeNucleiScan(targets []string, templates []string, severities []string, uploadedTemplates []map[string]interface{}, outputFile string) error {
 	log.Printf("[DEBUG] Starting Nuclei scan with %d targets", len(targets))
@@ -242,12 +258,24 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 	log.Printf("[INFO] Executing Nuclei command: docker %s", strings.Join(dockerArgs, " "))
 	dockerCmd := exec.Command("docker", dockerArgs...)
 
-	// Capture output for debugging
-	output, err := dockerCmd.CombinedOutput()
-	log.Printf("[DEBUG] Docker command output: %s", string(output))
+	// Create custom writers that log output in real-time
+	stdoutWriter := &logWriter{prefix: "[NUCLEI]"}
+	stderrWriter := &logWriter{prefix: "[NUCLEI-ERR]"}
+	
+	dockerCmd.Stdout = stdoutWriter
+	dockerCmd.Stderr = stderrWriter
 
-	if err != nil {
-		log.Printf("[ERROR] Nuclei command failed: %v, output: %s", err, string(output))
+	// Start the command
+	if err = dockerCmd.Start(); err != nil {
+		log.Printf("[ERROR] Failed to start Nuclei command: %v", err)
+		return fmt.Errorf("failed to start nuclei: %v", err)
+	}
+
+	log.Printf("[INFO] Nuclei scan started, streaming output...")
+
+	// Wait for command to complete
+	if err = dockerCmd.Wait(); err != nil {
+		log.Printf("[ERROR] Nuclei command failed: %v", err)
 		return fmt.Errorf("nuclei execution failed: %v", err)
 	}
 

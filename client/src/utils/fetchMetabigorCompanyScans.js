@@ -9,7 +9,7 @@ const fetchMetabigorCompanyScans = async (
 
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/metabigor-company`
+      `/api/scopetarget/${activeTarget.id}/scans/metabigor-company`
     );
     if (!response.ok) {
       throw new Error('Failed to fetch Metabigor Company scans');
@@ -26,7 +26,7 @@ const fetchMetabigorCompanyScans = async (
       if (mostRecentScan.scan_id && setMetabigorNetworkRanges) {
         try {
           const networkRangesResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/metabigor-company/${mostRecentScan.scan_id}/networks`
+            `/api/metabigor-company/${mostRecentScan.scan_id}/networks`
           );
           if (networkRangesResponse.ok) {
             const networkRanges = await networkRangesResponse.json();

@@ -1,5 +1,5 @@
 const initiateIPPortScan = async (scopeTargetId, autoScanSessionId = null) => {
-  const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8443';
+  const API_BASE_URL = '/api';
 
   const payload = {
     scope_target_id: scopeTargetId

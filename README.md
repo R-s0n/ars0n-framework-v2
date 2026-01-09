@@ -95,6 +95,7 @@ This framework consists of 20+ Docker containers along w/ a Docker Compose Manif
 2. Unzip the files
 3. Navigate to the directory with the `docker-compose.yml` file
 4. Run `docker-compose up --build`
+5. Access the framework at `http://localhost` (or `http://<server-ip>` from other machines)
 
 *HINT: If you get a docker error, the problem is probably w/ docker, not my framework*
 
@@ -120,6 +121,8 @@ cd ars0n-framework-v2
 docker-compose up --build
 ```
 
+**Step 5:** Access the framework at `http://localhost`
+
 ### Mac
 
 **Step 1:** Download the framework
@@ -142,6 +145,8 @@ cd ars0n-framework-v2
 docker-compose up --build
 ```
 
+**Step 5:** Access the framework at `http://localhost`
+
 ### Linux
 
 **Step 1:** Download the framework
@@ -163,6 +168,8 @@ cd ars0n-framework-v2
 ```bash
 docker-compose up --build
 ```
+
+**Step 5:** Access the framework at `http://localhost`
 
 ## Getting Started
 
@@ -376,6 +383,79 @@ Each module follows the proven "Discover → Understand → Test → Validate" a
 
 **Current Alternative:** While the URL workflow is in development, students can use the Wildcard workflow to discover targets, then apply manual testing techniques learned through external resources.
 
+## Remote Access
+
+The Ars0n Framework v2 supports remote access from any machine on your network using an nginx reverse proxy architecture.
+
+### Accessing the Framework
+
+**From the same machine:**
+```
+http://localhost
+```
+
+**From another machine on your network:**
+```
+http://<server-ip>
+```
+
+### Finding Your Server IP
+
+**Windows:**
+```powershell
+ipconfig
+```
+Look for "IPv4 Address" (e.g., 192.168.1.100)
+
+**Linux/Mac:**
+```bash
+hostname -I
+```
+
+### Firewall Configuration (if needed)
+
+If you need to access the framework from other machines, ensure port 80 is open on your server:
+
+**Windows (PowerShell as Administrator):**
+```powershell
+New-NetFirewallRule -DisplayName "Ars0n Framework" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo ufw allow 80/tcp
+```
+
+**Linux (CentOS/RHEL):**
+```bash
+sudo firewall-cmd --permanent --add-port=80/tcp
+sudo firewall-cmd --reload
+```
+
+### How It Works
+
+The framework uses nginx as a reverse proxy to provide a single entry point:
+
+```
+Browser → http://server-ip:80 → nginx
+                                  ├─→ /api/* → Backend API
+                                  └─→ /* → React Frontend
+```
+
+All services communicate internally via Docker networking. Only port 80 needs to be exposed for full functionality.
+
+### Custom Port
+
+To use a different port (e.g., 8080), edit `docker-compose.yml`:
+
+```yaml
+nginx:
+  ports:
+    - "8080:80"
+```
+
+Then access at `http://<server-ip>:8080`
+
 ## Troubleshooting
 
 This section covers common issues you may encounter when setting up and running the Ars0n Framework v2. Most problems are related to Docker configuration or system requirements.
@@ -458,17 +538,15 @@ You should see the same hello-world message. If both tests pass, your Docker ins
 **Error:** `port is already allocated` or `bind: address already in use`
 
 **Solution:**
-- Check if ports 3000, 8000, 8443, or 5432 are already in use:
+- Check if port 80 is already in use:
   ```bash
   # Linux/Mac
-  sudo netstat -tulpn | grep :3000
-  sudo netstat -tulpn | grep :8443
+  sudo netstat -tulpn | grep :80
   
   # Windows
-  netstat -ano | findstr :3000
-  netstat -ano | findstr :8443
+  netstat -ano | findstr :80
   ```
-- Stop conflicting services or modify the docker-compose.yml to use different ports
+- Stop conflicting services or modify the docker-compose.yml to use a different port (e.g., change `"80:80"` to `"8080:80"` in the nginx service)
 
 ### Insufficient Resources
 
@@ -551,6 +629,18 @@ You should see the same hello-world message. If both tests pass, your Docker ins
   export HTTP_PROXY=http://proxy.company.com:8080
   export HTTPS_PROXY=http://proxy.company.com:8080
   ```
+
+### Remote Access Issues
+
+**Error:** Cannot connect from another machine on the network
+
+**Solution:**
+- Verify all containers are running: `docker-compose ps`
+- Check that port 80 is open in your firewall (see Remote Access section above)
+- Confirm you're using the correct server IP address
+- Test local access first: `http://localhost`
+- Check nginx logs: `docker logs ars0n-framework-v2-nginx-1`
+- Verify nginx container is running and healthy
 
 ### Windows-Specific Issues
 
@@ -709,6 +799,9 @@ A: Many tools work without API keys, but you'll get significantly better results
 
 **Q: How do I configure API keys?**  
 A: Navigate to Settings → API Keys in the web interface. The framework will guide you through setting up each service and validate that your keys are working correctly.
+
+**Q: Can I access the framework from other machines on my network?**  
+A: Yes! The framework uses nginx as a reverse proxy and is accessible from any machine on your network. Simply navigate to `http://<server-ip>` from any browser. You may need to open port 80 in your firewall. See the "Remote Access" section for detailed instructions.
 
 ### Usage Questions
 

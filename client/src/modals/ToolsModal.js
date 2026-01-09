@@ -72,7 +72,7 @@ function ToolsModal({ show, handleClose, initialTab = 'url-populator', initialUr
     setError(null);
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/user/settings`
+        `/api/user/settings`
       );
       
       if (!response.ok) {
@@ -109,7 +109,7 @@ function ToolsModal({ show, handleClose, initialTab = 'url-populator', initialUr
       };
 
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/user/settings`,
+        `/api/user/settings`,
         {
           method: 'POST',
           headers: {
@@ -217,7 +217,7 @@ function ToolsModal({ show, handleClose, initialTab = 'url-populator', initialUr
         
         try {
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/burpsuite/populate`,
+            `/api/burpsuite/populate`,
             {
               method: 'POST',
               headers: {
@@ -488,7 +488,7 @@ function ToolsModal({ show, handleClose, initialTab = 'url-populator', initialUr
           };
 
           const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api-populator/process`,
+            `/api/api-populator/process`,
             {
               method: 'POST',
               headers: {

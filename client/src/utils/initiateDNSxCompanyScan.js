@@ -5,7 +5,7 @@ export const initiateDNSxCompanyScan = async (activeTarget, domains, setIsScanni
   
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/dnsx-company/run/${activeTarget.id}`,
+      `/api/dnsx-company/run/${activeTarget.id}`,
       {
         method: 'POST',
         headers: {

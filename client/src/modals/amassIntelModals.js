@@ -36,7 +36,7 @@ export const AmassIntelResultsModal = ({
 
     try {
       const networkResponse = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-intel/${scanId}/networks`
+        `/api/amass-intel/${scanId}/networks`
       );
       
       if (networkResponse.ok) {
@@ -48,7 +48,7 @@ export const AmassIntelResultsModal = ({
       }
 
       const asnResponse = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-intel/${scanId}/asn`
+        `/api/amass-intel/${scanId}/asn`
       );
       
       if (asnResponse.ok) {

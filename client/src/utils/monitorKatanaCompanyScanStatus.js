@@ -12,7 +12,7 @@ const monitorKatanaCompanyScanStatus = async (
     console.log('[KATANA-COMPANY] Monitoring scan status for target:', activeTarget.id);
     
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/katana-company`
+      `/api/scopetarget/${activeTarget.id}/scans/katana-company`
     );
 
     if (!response.ok) {
@@ -55,7 +55,7 @@ const monitorKatanaCompanyScanStatus = async (
         if (setKatanaCompanyCloudAssets && mostRecentScan.status === 'success') {
           try {
             const assetsResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/katana-company/target/${activeTarget.id}/cloud-assets`
+              `/api/katana-company/target/${activeTarget.id}/cloud-assets`
             );
             if (assetsResponse.ok) {
               const assets = await assetsResponse.json();
@@ -96,7 +96,7 @@ export const monitorActiveScan = async (
   const poll = async () => {
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/katana-company/status/${scanId}`
+        `/api/katana-company/status/${scanId}`
       );
       
       if (!response.ok) {
@@ -130,7 +130,7 @@ export const monitorActiveScan = async (
         if (setKatanaCompanyCloudAssets && activeTarget) {
           try {
             const assetsResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/katana-company/target/${activeTarget.id}/cloud-assets`
+              `/api/katana-company/target/${activeTarget.id}/cloud-assets`
             );
             if (assetsResponse.ok) {
               const assets = await assetsResponse.json();
@@ -149,7 +149,7 @@ export const monitorActiveScan = async (
         if (activeTarget && setKatanaCompanyScans) {
           try {
             const refreshResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/katana-company`
+              `/api/scopetarget/${activeTarget.id}/scans/katana-company`
             );
             if (refreshResponse.ok) {
               const refreshedScans = await refreshResponse.json();

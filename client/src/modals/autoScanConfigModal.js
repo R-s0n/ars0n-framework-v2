@@ -200,7 +200,7 @@ function AutoScanConfigModal({ show, handleClose, config, onSave, loading: exter
     setError(null);
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-config`,
+        `/api/api/auto-scan-config`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

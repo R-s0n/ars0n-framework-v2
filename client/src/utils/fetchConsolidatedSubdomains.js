@@ -8,7 +8,7 @@ const fetchConsolidatedSubdomains = async (activeTarget, setConsolidatedSubdomai
 
     try {
         const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/consolidated-subdomains/${activeTarget.id}`
+            `/api/consolidated-subdomains/${activeTarget.id}`
         );
 
         if (!response.ok) {

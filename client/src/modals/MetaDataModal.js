@@ -74,7 +74,7 @@ const MetaDataModal = memo(({
 
   const fetchExistingScopeTargets = async () => {
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/read`);
+      const response = await fetch(`/api/scopetarget/read`);
       if (response.ok) {
         const data = await response.json();
         setExistingScopeTargets(data);
@@ -191,7 +191,7 @@ const MetaDataModal = memo(({
     setDeletingUrls(prev => new Set(prev).add(urlId));
     
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/target-urls/${urlId}`, {
+      const response = await fetch(`/api/api/target-urls/${urlId}`, {
         method: 'DELETE',
       });
 
@@ -225,7 +225,7 @@ const MetaDataModal = memo(({
         active: false,
       };
       
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/add`, {
+      const response = await fetch(`/api/scopetarget/add`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -320,9 +320,15 @@ const MetaDataModal = memo(({
       return true;
     });
 
-    if (!sortColumn) return filtered;
-
     return filtered.sort((a, b) => {
+      const aHasScreenshot = a.screenshot && a.screenshot.trim() !== '';
+      const bHasScreenshot = b.screenshot && b.screenshot.trim() !== '';
+      
+      if (aHasScreenshot && !bHasScreenshot) return -1;
+      if (!aHasScreenshot && bHasScreenshot) return 1;
+      
+      if (!sortColumn) return 0;
+
       let valueA, valueB;
 
       switch (sortColumn) {
@@ -712,6 +718,14 @@ const MetaDataModal = memo(({
                             />
                           )}
                           <span>{url.url}</span>
+                          {url.screenshot && url.screenshot.trim() !== '' && (
+                            <OverlayTrigger
+                              placement="top"
+                              overlay={<Tooltip>Screenshot captured</Tooltip>}
+                            >
+                              <i className="bi bi-camera-fill text-success ms-2" style={{ fontSize: '0.9em' }}></i>
+                            </OverlayTrigger>
+                          )}
                         </div>
                         <div className="d-flex align-items-center gap-2">
                           <Badge 

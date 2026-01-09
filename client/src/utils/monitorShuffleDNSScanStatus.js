@@ -14,7 +14,7 @@ const monitorShuffleDNSScanStatus = async (
 
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/shuffledns`
+      `/api/scopetarget/${activeTarget.id}/scans/shuffledns`
     );
 
     if (!response.ok) {

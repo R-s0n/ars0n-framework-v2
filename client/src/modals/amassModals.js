@@ -171,10 +171,10 @@ const InfrastructureMapModal = ({ showInfraModal, handleCloseInfraModal, scanId 
   useEffect(() => {
     if (scanId && scanId !== 'No scans available') {
       Promise.all([
-        fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${scanId}/asn`),
-        fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${scanId}/sp`),
-        fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${scanId}/subnet`),
-        fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${scanId}/dns`)
+        fetch(`/api/amass/${scanId}/asn`),
+        fetch(`/api/amass/${scanId}/sp`),
+        fetch(`/api/amass/${scanId}/subnet`),
+        fetch(`/api/amass/${scanId}/dns`)
       ])
         .then(async ([asnRes, spRes, subnetRes, dnsRes]) => {
           try {

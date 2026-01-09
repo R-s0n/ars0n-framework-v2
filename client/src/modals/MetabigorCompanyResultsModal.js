@@ -36,7 +36,7 @@ export const MetabigorCompanyResultsModal = ({
 
     try {
       const networkResponse = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/metabigor-company/${scanId}/networks`
+        `/api/metabigor-company/${scanId}/networks`
       );
       
       if (networkResponse.ok) {
@@ -48,7 +48,7 @@ export const MetabigorCompanyResultsModal = ({
       }
 
       const asnResponse = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/metabigor-company/${scanId}/asn`
+        `/api/metabigor-company/${scanId}/asn`
       );
       
       if (asnResponse.ok) {

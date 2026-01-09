@@ -9,7 +9,7 @@ const monitorGAUURLScanStatus = async (
 
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/gau-url`
+      `/api/scopetarget/${activeTarget.id}/scans/gau-url`
     );
 
     if (!response.ok) {
@@ -59,7 +59,7 @@ export const monitorActiveScan = async (
   const poll = async () => {
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/gau-url/status/${scanId}`
+        `/api/gau-url/status/${scanId}`
       );
       
       if (!response.ok) {

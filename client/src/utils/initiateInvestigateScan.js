@@ -16,7 +16,7 @@ const initiateInvestigateScan = async (
   try {
     const body = { scope_target_id: targetId };
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/investigate/run`,
+      `/api/investigate/run`,
       {
         method: 'POST',
         headers: {

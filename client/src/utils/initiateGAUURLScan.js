@@ -16,7 +16,7 @@ export const initiateGAUURLScan = async (
 
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/gau-url/run`, 
+      `/api/gau-url/run`, 
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

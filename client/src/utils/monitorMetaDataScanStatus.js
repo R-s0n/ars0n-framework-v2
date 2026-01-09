@@ -9,7 +9,7 @@ const monitorMetaDataScanStatus = async (
 
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/metadata`
+      `/api/scopetarget/${activeTarget.id}/scans/metadata`
     );
 
     if (!response.ok) {
@@ -39,7 +39,7 @@ const monitorMetaDataScanStatus = async (
         // Fetch updated target URLs when scan completes
         try {
           const urlsResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${activeTarget.id}/target-urls`
+            `/api/api/scope-targets/${activeTarget.id}/target-urls`
           );
           if (!urlsResponse.ok) {
             throw new Error('Failed to fetch target URLs');
@@ -69,7 +69,7 @@ const monitorCompanyMetaDataScanStatus = async (
 
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/ip-port-scan/${ipPortScanId}/metadata-scans`
+      `/api/ip-port-scan/${ipPortScanId}/metadata-scans`
     );
 
     if (!response.ok) {
@@ -100,7 +100,7 @@ const monitorCompanyMetaDataScanStatus = async (
         // Fetch updated metadata results when scan completes
         try {
           const metadataResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/ip-port-scan/${ipPortScanId}/metadata-results`
+            `/api/ip-port-scan/${ipPortScanId}/metadata-results`
           );
           if (!metadataResponse.ok) {
             throw new Error('Failed to fetch metadata results');

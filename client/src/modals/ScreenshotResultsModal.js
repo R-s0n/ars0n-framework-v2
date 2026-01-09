@@ -24,7 +24,7 @@ const ScreenshotResultsModal = ({
       
       try {
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${activeTarget.id}/target-urls`
+          `/api/api/scope-targets/${activeTarget.id}/target-urls`
         );
         if (!response.ok) {
           throw new Error('Failed to fetch target URLs');

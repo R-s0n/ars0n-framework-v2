@@ -49,7 +49,7 @@ function ExportModal({ show, handleClose }) {
   const fetchScopeTargets = async () => {
     setLoadingScopeTargets(true);
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets-for-export`);
+      const response = await fetch(`/api/api/scope-targets-for-export`);
       if (response.ok) {
         const targets = await response.json();
         setScopeTargets(targets);
@@ -111,7 +111,7 @@ function ExportModal({ show, handleClose }) {
   const handleExport = async () => {
     try {
       setIsExporting(true);
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/export-data`, {
+      const response = await fetch(`/api/api/export-data`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -151,7 +151,7 @@ function ExportModal({ show, handleClose }) {
 
     try {
       setIsDatabaseExporting(true);
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/database-export`, {
+      const response = await fetch(`/api/api/database-export`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

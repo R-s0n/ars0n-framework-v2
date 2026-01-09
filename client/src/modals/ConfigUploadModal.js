@@ -262,7 +262,7 @@ function ConfigUploadModal({ show, handleClose, onSuccess, showBackButton, onBac
         try {
           const { id, original, ...targetData } = target;
           
-          const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/add`, {
+          const response = await fetch(`/api/scopetarget/add`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',

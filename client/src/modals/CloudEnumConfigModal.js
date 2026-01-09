@@ -104,7 +104,7 @@ const CloudEnumConfigModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/cloud-enum-config/${activeTarget.id}`
+        `/api/cloud-enum-config/${activeTarget.id}`
       );
       
       if (response.ok) {
@@ -142,7 +142,7 @@ const CloudEnumConfigModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/build-wordlist/${activeTarget.id}/${type}`,
+        `/api/api/build-wordlist/${activeTarget.id}/${type}`,
         {
           method: 'POST',
           headers: {
@@ -222,7 +222,7 @@ const CloudEnumConfigModal = ({
       }
 
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/cloud-enum-config/${activeTarget.id}`,
+        `/api/cloud-enum-config/${activeTarget.id}`,
         {
           method: 'POST',
           body: formData,

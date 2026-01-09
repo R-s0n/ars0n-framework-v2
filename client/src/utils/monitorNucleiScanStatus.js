@@ -10,7 +10,7 @@ const monitorNucleiScanStatus = async (
   const checkStatus = async () => {
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/nuclei-scan/${scanId}/status`
+        `/api/nuclei-scan/${scanId}/status`
       );
 
       if (!response.ok) {
@@ -65,7 +65,7 @@ const monitorNucleiScanStatus = async (
 const refreshNucleiScans = async (scopeTargetId, setNucleiScans) => {
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${scopeTargetId}/scans/nuclei`
+      `/api/scopetarget/${scopeTargetId}/scans/nuclei`
     );
 
     if (response.ok) {

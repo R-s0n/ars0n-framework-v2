@@ -81,7 +81,7 @@ export const FFUFConfigModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/ffuf-config/${activeTarget.id}`
+        `/api/ffuf-config/${activeTarget.id}`
       );
 
       if (response.ok) {
@@ -104,7 +104,7 @@ export const FFUFConfigModal = ({
   const loadAvailableWordlists = async () => {
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/ffuf-wordlists`
+        `/api/ffuf-wordlists`
       );
 
       if (response.ok) {
@@ -125,7 +125,7 @@ export const FFUFConfigModal = ({
 
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/ffuf-config/${activeTarget.id}`,
+        `/api/ffuf-config/${activeTarget.id}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -160,7 +160,7 @@ export const FFUFConfigModal = ({
       formData.append('name', file.name);
 
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/ffuf-wordlists/upload`,
+        `/api/ffuf-wordlists/upload`,
         {
           method: 'POST',
           body: formData

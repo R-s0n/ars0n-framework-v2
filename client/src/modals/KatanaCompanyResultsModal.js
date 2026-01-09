@@ -94,7 +94,7 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
     
     try {
       const assetsResponse = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/katana-company/target/${activeTarget.id}/cloud-assets`
+        `/api/katana-company/target/${activeTarget.id}/cloud-assets`
       );
 
       if (!assetsResponse.ok) {
@@ -118,7 +118,7 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
     try {
       // Use the same endpoint as the config modal
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/consolidated-company-domains/${activeTarget.id}`
+        `/api/consolidated-company-domains/${activeTarget.id}`
       );
       
       if (response.ok) {
@@ -144,7 +144,7 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
     try {
       // Get all scope targets to find which root domains have been added as wildcard targets
       const scopeTargetsResponse = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/read`
+        `/api/scopetarget/read`
       );
       
       if (!scopeTargetsResponse.ok) {
@@ -182,7 +182,7 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
       for (const wildcardTarget of wildcardTargets) {
         try {
           const liveWebServersResponse = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/scope-targets/${wildcardTarget.id}/target-urls`
+            `/api/api/scope-targets/${wildcardTarget.id}/target-urls`
           );
 
           if (liveWebServersResponse.ok) {
@@ -240,7 +240,7 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
     try {
       // Fetch live web servers from IP port scans
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/ip-port-scans/${activeTarget.id}`
+        `/api/ip-port-scans/${activeTarget.id}`
       );
       
       if (response.ok) {
@@ -253,7 +253,7 @@ const KatanaCompanyResultsModal = ({ show, handleClose, activeTarget, mostRecent
           if (latestScan && latestScan.scan_id) {
             // Fetch live web servers for the latest scan
             const liveWebServersResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/live-web-servers/${latestScan.scan_id}`
+              `/api/live-web-servers/${latestScan.scan_id}`
             );
             
             if (liveWebServersResponse.ok) {

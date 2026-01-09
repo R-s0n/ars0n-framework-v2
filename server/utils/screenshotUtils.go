@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os/exec"
@@ -17,6 +18,22 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/jackc/pgx/v5"
 )
+
+// ScreenshotLogWriter is a custom writer that logs each line with a prefix
+type ScreenshotLogWriter struct {
+	prefix string
+}
+
+func (slw *ScreenshotLogWriter) Write(p []byte) (n int, err error) {
+	output := string(p)
+	lines := strings.Split(strings.TrimRight(output, "\n\r"), "\n")
+	for _, line := range lines {
+		if line != "" {
+			log.Printf("%s %s", slw.prefix, line)
+		}
+	}
+	return len(p), nil
+}
 
 // NucleiScreenshotStatus represents the status of a Nuclei screenshot scan
 type NucleiScreenshotStatus struct {
@@ -174,11 +191,15 @@ func ExecuteAndParseNucleiScreenshotScan(scanID, domain string) {
 	log.Printf("[INFO] Prepared Nuclei command for scan ID %s: %s", scanID, cmd.String())
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdoutWriter := &ScreenshotLogWriter{prefix: "[NUCLEI-SCREENSHOT]"}
+	stderrWriter := &ScreenshotLogWriter{prefix: "[NUCLEI-SCREENSHOT-ERR]"}
+	
+	cmd.Stdout = io.MultiWriter(&stdout, stdoutWriter)
+	cmd.Stderr = io.MultiWriter(&stderr, stderrWriter)
 
 	// Execute the command
-	log.Printf("[INFO] Executing Nuclei command for scan ID: %s", scanID)
+	log.Printf("[INFO] Executing Nuclei screenshot command for scan ID: %s", scanID)
+	log.Printf("[INFO] Nuclei screenshot scan started, streaming output...")
 	err = cmd.Run()
 	if err != nil {
 		log.Printf("[ERROR] Nuclei command failed for scan ID %s: %v", scanID, err)
@@ -193,7 +214,7 @@ func ExecuteAndParseNucleiScreenshotScan(scanID, domain string) {
 		return
 	}
 
-	log.Printf("[INFO] Successfully completed Nuclei scan for scan ID: %s", scanID)
+	log.Printf("[INFO] Successfully completed Nuclei screenshot scan for scan ID: %s", scanID)
 	log.Printf("[INFO] Scan duration for %s: %s", scanID, time.Since(startTime).String())
 
 	// Read and process screenshot files

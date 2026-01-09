@@ -49,7 +49,7 @@ function APIIntegrationModal({ show, handleClose, onSuccess, showBackButton, onB
     setKeyTestResult(null);
 
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/hackerone/test-key`, {
+      const response = await fetch(`/api/api/hackerone/test-key`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -155,7 +155,7 @@ function APIIntegrationModal({ show, handleClose, onSuccess, showBackButton, onB
     setSearchResult(null);
 
     try {
-      let response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/hackerone/program?handle=${encodeURIComponent(programName.trim())}`, {
+      let response = await fetch(`/api/api/hackerone/program?handle=${encodeURIComponent(programName.trim())}`, {
         method: 'GET',
         headers: {
           'X-HackerOne-API-Key': apiKey,
@@ -164,7 +164,7 @@ function APIIntegrationModal({ show, handleClose, onSuccess, showBackButton, onB
 
       if (response.status === 404) {
         const searchName = programName.trim().toLowerCase();
-        const programsResponse = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/hackerone/programs?page[size]=100`, {
+        const programsResponse = await fetch(`/api/api/hackerone/programs?page[size]=100`, {
           method: 'GET',
           headers: {
             'X-HackerOne-API-Key': apiKey,
@@ -182,7 +182,7 @@ function APIIntegrationModal({ show, handleClose, onSuccess, showBackButton, onB
 
           if (matchedProgram) {
             const correctHandle = matchedProgram.attributes.handle;
-            response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/hackerone/program?handle=${encodeURIComponent(correctHandle)}`, {
+            response = await fetch(`/api/api/hackerone/program?handle=${encodeURIComponent(correctHandle)}`, {
               method: 'GET',
               headers: {
                 'X-HackerOne-API-Key': apiKey,
@@ -240,7 +240,7 @@ function APIIntegrationModal({ show, handleClose, onSuccess, showBackButton, onB
     setSearchError('');
 
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/hackerone/programs?page[size]=100`, {
+      const response = await fetch(`/api/api/hackerone/programs?page[size]=100`, {
         method: 'GET',
         headers: {
           'X-HackerOne-API-Key': apiKey,
@@ -269,7 +269,7 @@ function APIIntegrationModal({ show, handleClose, onSuccess, showBackButton, onB
         const randomProgram = eligiblePrograms[Math.floor(Math.random() * eligiblePrograms.length)];
         const handle = randomProgram.attributes?.handle;
         
-        const detailResponse = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/hackerone/program?handle=${encodeURIComponent(handle)}`, {
+        const detailResponse = await fetch(`/api/api/hackerone/program?handle=${encodeURIComponent(handle)}`, {
           method: 'GET',
           headers: {
             'X-HackerOne-API-Key': apiKey,
@@ -317,7 +317,7 @@ function APIIntegrationModal({ show, handleClose, onSuccess, showBackButton, onB
       let page = 1;
       
       while (allPrograms.length < 500) {
-        const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/hackerone/programs?page[number]=${page}&page[size]=100`, {
+        const response = await fetch(`/api/api/hackerone/programs?page[number]=${page}&page[size]=100`, {
           method: 'GET',
           headers: {
             'X-HackerOne-API-Key': apiKey,
@@ -350,7 +350,7 @@ function APIIntegrationModal({ show, handleClose, onSuccess, showBackButton, onB
 
   const fetchProgramDetails = async (handle) => {
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/hackerone/program?handle=${encodeURIComponent(handle)}`, {
+      const response = await fetch(`/api/api/hackerone/program?handle=${encodeURIComponent(handle)}`, {
         method: 'GET',
         headers: {
           'X-HackerOne-API-Key': apiKey,
@@ -455,7 +455,7 @@ function APIIntegrationModal({ show, handleClose, onSuccess, showBackButton, onB
         try {
           const { id, ...targetData } = target;
           
-          const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/add`, {
+          const response = await fetch(`/api/scopetarget/add`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',

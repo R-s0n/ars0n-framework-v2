@@ -14,7 +14,7 @@ const monitorSubdomainizerScanStatus = async (
 
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/subdomainizer`
+      `/api/scopetarget/${activeTarget.id}/scans/subdomainizer`
     );
 
     if (!response.ok) {

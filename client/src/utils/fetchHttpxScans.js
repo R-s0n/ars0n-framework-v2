@@ -1,7 +1,7 @@
 const fetchHttpxScans = async (activeTarget, setHttpxScans, setMostRecentHttpxScan, setMostRecentHttpxScanStatus) => {
   try {
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/httpx`
+      `/api/scopetarget/${activeTarget.id}/scans/httpx`
     );
     if (!response.ok) throw new Error('Failed to fetch httpx scans');
 
@@ -19,7 +19,7 @@ const fetchHttpxScans = async (activeTarget, setHttpxScans, setMostRecentHttpxSc
     }, scans[0]);
 
     const scanDetailsResponse = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/httpx/${mostRecentScan.scan_id}`
+      `/api/httpx/${mostRecentScan.scan_id}`
     );
     if (!scanDetailsResponse.ok) throw new Error('Failed to fetch httpx scan details');
 

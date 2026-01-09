@@ -47,7 +47,7 @@ const TrimRootDomainsModal = ({
     
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/company-domains/${activeTarget.id}/${toolKey}`
+        `/api/api/company-domains/${activeTarget.id}/${toolKey}`
       );
       
       if (!response.ok) {
@@ -153,7 +153,7 @@ const TrimRootDomainsModal = ({
     
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/company-domains/${activeTarget.id}/${selectedTool}/${encodeURIComponent(domain)}`,
+        `/api/api/company-domains/${activeTarget.id}/${selectedTool}/${encodeURIComponent(domain)}`,
         { method: 'DELETE' }
       );
       
@@ -192,7 +192,7 @@ const TrimRootDomainsModal = ({
     try {
       const deletePromises = domainsToDelete.map(async domain => {
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/company-domains/${activeTarget.id}/${selectedTool}/${encodeURIComponent(domain)}`,
+          `/api/api/company-domains/${activeTarget.id}/${selectedTool}/${encodeURIComponent(domain)}`,
           { method: 'DELETE' }
         );
         
@@ -232,7 +232,7 @@ const TrimRootDomainsModal = ({
     setDeletingAll(true);
     
     try {
-      const url = `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/company-domains/${activeTarget.id}/${selectedTool}/all`;
+      const url = `/api/api/company-domains/${activeTarget.id}/${selectedTool}/all`;
       console.log('[TRIM-MODAL] Delete All Domains - URL:', url);
       
       const response = await fetch(url, { method: 'DELETE' });

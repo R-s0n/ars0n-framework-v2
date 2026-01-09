@@ -2,7 +2,7 @@ const fetchAmassScans = async (activeTarget, setAmassScans, setMostRecentAmassSc
   
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/amass`
+        `/api/scopetarget/${activeTarget.id}/scans/amass`
       );
       if (!response.ok) throw new Error('Failed to fetch Amass scans');
   
@@ -17,7 +17,7 @@ const fetchAmassScans = async (activeTarget, setAmassScans, setMostRecentAmassSc
       }, data[0]);
   
       const scanDetailsResponse = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${mostRecentScan.scan_id}`
+        `/api/amass/${mostRecentScan.scan_id}`
       );
       if (!scanDetailsResponse.ok) throw new Error('Failed to fetch Amass scan details');
   
@@ -26,7 +26,7 @@ const fetchAmassScans = async (activeTarget, setAmassScans, setMostRecentAmassSc
       setMostRecentAmassScanStatus(scanDetails.status);
       const fetchDNSRecords = async () => {
         try {
-          const dnsResponse = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${scanDetails.scan_id}/dns`);
+          const dnsResponse = await fetch(`/api/amass/${scanDetails.scan_id}/dns`);
           if (dnsResponse.ok) {
             const dnsData = await dnsResponse.json();
             if (dnsData !== null) {
@@ -45,7 +45,7 @@ const fetchAmassScans = async (activeTarget, setAmassScans, setMostRecentAmassSc
 
       const fetchSubdomains = async () => {
         try {
-          const subdomainResponse = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${scanDetails.scan_id}/subdomain`);
+          const subdomainResponse = await fetch(`/api/amass/${scanDetails.scan_id}/subdomain`);
           if (subdomainResponse.ok) {
             const subdomainsData = await subdomainResponse.json();
             setSubdomains(subdomainsData);
@@ -60,7 +60,7 @@ const fetchAmassScans = async (activeTarget, setAmassScans, setMostRecentAmassSc
 
       const fetchCloudDomains = async () => {
         try {
-          const cloudResponse = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass/${scanDetails.scan_id}/cloud`);
+          const cloudResponse = await fetch(`/api/amass/${scanDetails.scan_id}/cloud`);
           if (cloudResponse.ok) {
             const cloudData = await cloudResponse.json();
             const formattedCloudDomains = [];

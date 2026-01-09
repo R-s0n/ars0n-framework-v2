@@ -8,7 +8,7 @@ const fetchConsolidatedNetworkRanges = async (activeTarget, setConsolidatedNetwo
 
     try {
         const response = await fetch(
-            `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/consolidated-network-ranges/${activeTarget.id}`
+            `/api/consolidated-network-ranges/${activeTarget.id}`
         );
 
         if (!response.ok) {

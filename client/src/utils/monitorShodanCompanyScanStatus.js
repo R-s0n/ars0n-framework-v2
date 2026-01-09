@@ -11,7 +11,7 @@ const monitorShodanCompanyScanStatus = async (
     console.log('[SHODAN-COMPANY] Monitoring scan status for target:', activeTarget.id);
     
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/shodan-company`
+      `/api/scopetarget/${activeTarget.id}/scans/shodan-company`
     );
 
     if (!response.ok) {

@@ -45,7 +45,7 @@ const TrimNetworkRangesModal = ({
       if (toolKey === 'amass_intel') {
         // For Amass Intel, we need to get the most recent scan first, then fetch its network ranges
         const scansResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/amass-intel`
+          `/api/scopetarget/${activeTarget.id}/scans/amass-intel`
         );
         
         if (scansResponse.ok) {
@@ -53,7 +53,7 @@ const TrimNetworkRangesModal = ({
           if (scans && scans.length > 0) {
             const mostRecentScan = scans[0];
             response = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/amass-intel/${mostRecentScan.scan_id}/networks`
+              `/api/amass-intel/${mostRecentScan.scan_id}/networks`
             );
           } else {
             setToolNetworkRanges([]);
@@ -66,7 +66,7 @@ const TrimNetworkRangesModal = ({
       } else if (toolKey === 'metabigor') {
         // For Metabigor, we need to get the most recent scan first, then fetch its network ranges
         const scansResponse = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/metabigor-company`
+          `/api/scopetarget/${activeTarget.id}/scans/metabigor-company`
         );
         
         if (scansResponse.ok) {
@@ -74,7 +74,7 @@ const TrimNetworkRangesModal = ({
           if (scans && scans.length > 0) {
             const mostRecentScan = scans[0];
             response = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/metabigor-company/${mostRecentScan.scan_id}/networks`
+              `/api/metabigor-company/${mostRecentScan.scan_id}/networks`
             );
           } else {
             setToolNetworkRanges([]);
@@ -208,7 +208,7 @@ const TrimNetworkRangesModal = ({
     
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/${selectedTool === 'amass_intel' ? 'amass-intel' : 'metabigor'}/network-range/${rangeId}`,
+        `/api/${selectedTool === 'amass_intel' ? 'amass-intel' : 'metabigor'}/network-range/${rangeId}`,
         { method: 'DELETE' }
       );
       
@@ -247,7 +247,7 @@ const TrimNetworkRangesModal = ({
     try {
       const deletePromises = rangesToDelete.map(async rangeId => {
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/${selectedTool === 'amass_intel' ? 'amass-intel' : 'metabigor'}/network-range/${rangeId}`,
+          `/api/${selectedTool === 'amass_intel' ? 'amass-intel' : 'metabigor'}/network-range/${rangeId}`,
           { method: 'DELETE' }
         );
         
@@ -292,7 +292,7 @@ const TrimNetworkRangesModal = ({
         throw new Error('No scan ID available for deletion');
       }
       
-      const url = `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/${selectedTool === 'amass_intel' ? 'amass-intel' : 'metabigor'}/scan/${mostRecentScan.scan_id}/network-ranges`;
+      const url = `/api/${selectedTool === 'amass_intel' ? 'amass-intel' : 'metabigor'}/scan/${mostRecentScan.scan_id}/network-ranges`;
       console.log('[TRIM-NETWORK-RANGES-MODAL] Delete All Ranges - URL:', url);
       
       const response = await fetch(url, { method: 'DELETE' });

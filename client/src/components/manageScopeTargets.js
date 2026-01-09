@@ -39,7 +39,7 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
     const fetchConfig = async () => {
       setConfigLoading(true);
       try {
-        const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-config`);
+        const response = await fetch(`/api/api/auto-scan-config`);
         if (response.ok) {
           const data = await response.json();
           setAutoScanConfig(data);
@@ -151,7 +151,7 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
     // Fetch latest config before showing the modal
     setConfigLoading(true);
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-config`);
+      const response = await fetch(`/api/api/auto-scan-config`);
       if (response.ok) {
         const data = await response.json();
         setAutoScanConfig(data);
@@ -186,7 +186,7 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
       setIsAutoScanPausing(true);
       try {
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`,
+          `/api/api/auto-scan-state/${activeTarget.id}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -210,7 +210,7 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
       setIsResuming(true);
       try {
         const response = await fetch(
-          `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`,
+          `/api/api/auto-scan-state/${activeTarget.id}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -230,7 +230,7 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
         const checkInterval = setInterval(async () => {
           try {
             const statusResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`
+              `/api/api/auto-scan-state/${activeTarget.id}`
             );
             
             if (statusResponse.ok) {
@@ -263,7 +263,7 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
     setIsAutoScanCancelling(true);
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`,
+        `/api/api/auto-scan-state/${activeTarget.id}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -283,7 +283,7 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
         const checkInterval = setInterval(async () => {
           try {
             const statusResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/auto-scan-state/${activeTarget.id}`
+              `/api/api/auto-scan-state/${activeTarget.id}`
             );
             
             if (statusResponse.ok) {

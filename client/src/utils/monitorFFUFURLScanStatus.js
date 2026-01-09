@@ -11,7 +11,7 @@ const monitorFFUFURLScanStatus = async (
     console.log('[FFUF-URL] Monitoring scan status for target:', activeTarget.id);
     
     const response = await fetch(
-      `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/ffuf-url`
+      `/api/scopetarget/${activeTarget.id}/scans/ffuf-url`
     );
 
     if (!response.ok) {
@@ -64,7 +64,7 @@ export const monitorActiveScan = async (
   const poll = async () => {
     try {
       const response = await fetch(
-        `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/ffuf-url/status/${scanId}`
+        `/api/ffuf-url/status/${scanId}`
       );
       
       if (!response.ok) {
@@ -95,7 +95,7 @@ export const monitorActiveScan = async (
         if (activeTarget && setFFUFURLScans) {
           try {
             const refreshResponse = await fetch(
-              `${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/${activeTarget.id}/scans/ffuf-url`
+              `/api/scopetarget/${activeTarget.id}/scans/ffuf-url`
             );
             if (refreshResponse.ok) {
               const refreshedScans = await refreshResponse.json();

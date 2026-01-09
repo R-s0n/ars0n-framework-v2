@@ -286,6 +286,14 @@ const TargetSection = memo(({ targetURL, roiScore, onDelete, onAddAsScope, isDel
                   <div className="display-4 text-danger me-3">{displayScore}</div>
                   <div className="h3 mb-0 text-white">
                     <a href={targetURL.url} target="_blank" rel="noopener noreferrer">{targetURL.url}</a>
+                    {targetURL.screenshot && targetURL.screenshot.trim() !== '' && (
+                      <OverlayTrigger
+                        placement="top"
+                        overlay={<Tooltip>Screenshot captured</Tooltip>}
+                      >
+                        <i className="bi bi-camera-fill text-success ms-2" style={{ fontSize: '0.7em' }}></i>
+                      </OverlayTrigger>
+                    )}
                   </div>
                 </div>
                 <div className="d-flex align-items-center gap-2 ms-3">
@@ -624,7 +632,7 @@ const ROIReport = memo(({ show, onHide, targetURLs = [], setTargetURLs, fetchSco
 
   const fetchExistingScopeTargets = async () => {
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/read`);
+      const response = await fetch(`/api/scopetarget/read`);
       if (response.ok) {
         const data = await response.json();
         setExistingScopeTargets(data);
@@ -645,7 +653,7 @@ const ROIReport = memo(({ show, onHide, targetURLs = [], setTargetURLs, fetchSco
     setDeletingUrls(prev => new Set(prev).add(urlId));
     
     try {
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/api/target-urls/${urlId}`, {
+      const response = await fetch(`/api/api/target-urls/${urlId}`, {
         method: 'DELETE',
       });
 
@@ -685,7 +693,7 @@ const ROIReport = memo(({ show, onHide, targetURLs = [], setTargetURLs, fetchSco
         active: false,
       };
       
-      const response = await fetch(`${process.env.REACT_APP_SERVER_PROTOCOL}://${process.env.REACT_APP_SERVER_IP}:${process.env.REACT_APP_SERVER_PORT}/scopetarget/add`, {
+      const response = await fetch(`/api/scopetarget/add`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -719,9 +727,14 @@ const ROIReport = memo(({ show, onHide, targetURLs = [], setTargetURLs, fetchSco
       return [...safeTargetURLs]
         .map(target => ({
           ...target,
-          _calculatedScore: target.roi_score || calculateROIScore(target)
+          _calculatedScore: target.roi_score || calculateROIScore(target),
+          _hasScreenshot: target.screenshot && target.screenshot.trim() !== ''
         }))
-        .sort((a, b) => b._calculatedScore - a._calculatedScore);
+        .sort((a, b) => {
+          if (a._hasScreenshot && !b._hasScreenshot) return -1;
+          if (!a._hasScreenshot && b._hasScreenshot) return 1;
+          return b._calculatedScore - a._calculatedScore;
+        });
     }
     return [];
   }, [show, safeTargetURLs]);

@@ -371,7 +371,8 @@ func createTables() {
 			execution_time TEXT,
 			created_at TIMESTAMP DEFAULT NOW(),
 			scope_target_id UUID REFERENCES scope_targets(id) ON DELETE CASCADE,
-			auto_scan_session_id UUID REFERENCES auto_scan_sessions(id) ON DELETE SET NULL
+			auto_scan_session_id UUID REFERENCES auto_scan_sessions(id) ON DELETE SET NULL,
+			config JSONB
 		);`,
 
 		`CREATE TABLE IF NOT EXISTS company_metadata_scans (
@@ -1261,6 +1262,9 @@ func createTables() {
 		`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS burp_api_ip TEXT DEFAULT '127.0.0.1';`,
 		`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS burp_api_port INTEGER DEFAULT 1337;`,
 		`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS burp_api_key TEXT DEFAULT '';`,
+
+		// Add config column to metadata_scans table for existing installations
+		`ALTER TABLE metadata_scans ADD COLUMN IF NOT EXISTS config JSONB;`,
 
 		// Create indexes for performance
 		`CREATE INDEX IF NOT EXISTS target_urls_url_idx ON target_urls (url);`,
