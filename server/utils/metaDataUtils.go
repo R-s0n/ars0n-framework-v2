@@ -423,7 +423,7 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 			"-v",
 			"-timeout", "30",
 			"-c", "15",
-			"p", "15",
+			"-p", "15",
 		)
 
 		katanaCmd.WaitDelay = 30 * time.Second
@@ -1543,7 +1543,7 @@ func ExecuteAndParseCompanyMetaDataScan(scanID, scopeTargetID, ipPortScanID stri
 			"-v",
 			"-timeout", "30",
 			"-c", "15",
-			"p", "15",
+			"-p", "15",
 		)
 
 		katanaCmd.WaitDelay = 30 * time.Second

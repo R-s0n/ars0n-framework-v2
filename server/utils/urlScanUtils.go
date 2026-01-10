@@ -64,6 +64,7 @@ func ExecuteAndParseKatanaURLScan(scanID, targetURL string) {
 		"-kf", "all",
 		"-silent",
 		"-nc",
+		"-p", "15",
 	}
 
 	cmd := exec.Command(dockerCmd[0], dockerCmd[1:]...)
