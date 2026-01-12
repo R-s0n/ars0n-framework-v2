@@ -20,8 +20,15 @@ Ars0n Framework v2
 <p align="center">My full bug bounty hunting methodology built into a single framework!  Automate the most common bug bounty hunting workflows and <em>Earn While You Learn</em>!</p>
 
 <div align="center">
+  <em><b>Watch This Video First&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Watch This Video Second</em><b>
+</div>
+
+<div align="center">
   <a href="https://www.youtube.com/watch?v=Kw1tPiVxBTg">
-    <img src="journey.png" width="600px" alt="Youtube Thumbnail" style="border-radius: 12px;">
+    <img src="journey.png" width="250px" alt="Youtube Thumbnail" style="border-radius: 12px;">
+  </a>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://www.youtube.com/watch?v=4UcyfLk5TYw">
+    <img src="update.png" width="250px" alt="Youtube Thumbnail" style="border-radius: 12px;">
   </a>
 </div><br>
 
