@@ -22,9 +22,28 @@ const monitorMetaDataScanStatus = async (
     if (scans && scans.length > 0) {
       const mostRecentScan = scans[0];
       setMostRecentMetaDataScan(mostRecentScan);
-      setMostRecentMetaDataScanStatus(mostRecentScan.status);
 
-      if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running') {
+      console.log('[DEBUG monitorMetaDataScanStatus] Current scan status:', mostRecentScan.status);
+      console.log('[DEBUG monitorMetaDataScanStatus] Cancel requested:', mostRecentScan.cancel_requested);
+
+      if (mostRecentScan.status === 'cancelled' || mostRecentScan.status === 'success' || mostRecentScan.status === 'failed' || mostRecentScan.status === 'error') {
+        console.log('[DEBUG monitorMetaDataScanStatus] Scan completed with final status:', mostRecentScan.status);
+        setMostRecentMetaDataScanStatus(mostRecentScan.status);
+        setIsMetaDataScanning(false);
+      } else if (mostRecentScan.cancel_requested && (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running')) {
+        console.log('[DEBUG monitorMetaDataScanStatus] Cancellation in progress, showing cancelling state...');
+        setMostRecentMetaDataScanStatus('cancelling');
+        setTimeout(() => {
+          monitorMetaDataScanStatus(
+            activeTarget,
+            setMetaDataScans,
+            setMostRecentMetaDataScan,
+            setIsMetaDataScanning,
+            setMostRecentMetaDataScanStatus
+          );
+        }, 2000);
+      } else if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running') {
+        setMostRecentMetaDataScanStatus(mostRecentScan.status);
         setTimeout(() => {
           monitorMetaDataScanStatus(
             activeTarget,
@@ -35,6 +54,8 @@ const monitorMetaDataScanStatus = async (
           );
         }, 5000);
       } else {
+        console.log('[DEBUG monitorMetaDataScanStatus] Unexpected status:', mostRecentScan.status);
+        setMostRecentMetaDataScanStatus(mostRecentScan.status);
         setIsMetaDataScanning(false);
         // Fetch updated target URLs when scan completes
         try {

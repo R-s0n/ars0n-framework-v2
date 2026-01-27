@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -309,12 +310,9 @@ func ExecuteAndParseHttpxScan(scanID, domain string) {
 		UpdateHttpxScanStatus(scanID, "completed", "", "No results found", strings.Join(dockerCmd, " "), execTime)
 		return
 	}
-	log.Printf("[DEBUG] Successfully read %d bytes from output file", len(resultStr))
-
 	// Process results and update target URLs
 	var liveURLs []string
 	lines := strings.Split(resultStr, "\n")
-	log.Printf("[DEBUG] Processing %d result lines", len(lines))
 	for _, line := range lines {
 		if line == "" {
 			continue
@@ -329,23 +327,19 @@ func ExecuteAndParseHttpxScan(scanID, domain string) {
 		if url, ok := httpxResult["url"].(string); ok {
 			liveURLs = append(liveURLs, url)
 			if err := UpdateTargetURLFromHttpx(scopeTargetID, httpxResult); err != nil {
-				log.Printf("[WARN] Failed to update target URL for %s: %v", url, err)
-			} else {
-				log.Printf("[DEBUG] Successfully updated target URL: %s", url)
+				log.Printf("[WARN] Failed to store URL %s: %v", url, err)
 			}
 		}
 	}
-	log.Printf("[INFO] Found %d live URLs", len(liveURLs))
+	log.Printf("[INFO] HTTPX scan complete - %d live URLs found and stored", len(liveURLs))
 
 	// Mark URLs not found in this scan as no longer live
-	log.Printf("[DEBUG] Marking old URLs as no longer live")
 	if err := MarkOldTargetURLsAsNoLongerLive(scopeTargetID, liveURLs); err != nil {
 		log.Printf("[WARN] Failed to mark old target URLs as no longer live: %v", err)
 	}
 
-	log.Printf("[DEBUG] Updating final scan status")
 	UpdateHttpxScanStatus(scanID, "success", resultStr, stderr.String(), strings.Join(dockerCmd, " "), execTime)
-	log.Printf("[INFO] httpx scan completed successfully in %s", execTime)
+	log.Printf("[INFO] HTTPX scan completed in %s", execTime)
 }
 
 // UpdateHttpxScanStatus updates the status of a httpx scan in the database
@@ -806,6 +800,37 @@ func GetConsolidatedSubdomains(w http.ResponseWriter, r *http.Request) {
 }
 
 // UpdateTargetURLFromHttpx updates target URL information from httpx scan results
+func getIntFromInterface(val interface{}) int {
+	if val == nil {
+		return 0
+	}
+	switch v := val.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case string:
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
+		return 0
+	default:
+		return 0
+	}
+}
+
+func getStringFromInterface(val interface{}) string {
+	if val == nil {
+		return ""
+	}
+	if str, ok := val.(string); ok {
+		return str
+	}
+	return fmt.Sprintf("%v", val)
+}
+
 func UpdateTargetURLFromHttpx(scopeTargetID string, httpxData map[string]interface{}) error {
 	url, ok := httpxData["url"].(string)
 	if !ok || url == "" {
@@ -813,6 +838,12 @@ func UpdateTargetURLFromHttpx(scopeTargetID string, httpxData map[string]interfa
 	}
 
 	url = NormalizeURL(url)
+	
+	statusCode := getIntFromInterface(httpxData["status_code"])
+	title := getStringFromInterface(httpxData["title"])
+	webServer := getStringFromInterface(httpxData["webserver"])
+	contentLength := getIntFromInterface(httpxData["content_length"])
+	
 	var technologies []string
 	if techInterface, ok := httpxData["tech"].([]interface{}); ok {
 		for _, tech := range techInterface {
@@ -855,13 +886,17 @@ func UpdateTargetURLFromHttpx(scopeTargetID string, httpxData map[string]interfa
 				findings_json, roi_score
 			) VALUES ($1, $2, $3, $4, $5::text[], $6, $7, true, false, $8::jsonb, 50)`,
 			url,
-			httpxData["status_code"],
-			httpxData["title"],
-			httpxData["webserver"],
+			statusCode,
+			title,
+			webServer,
 			technologies,
-			httpxData["content_length"],
+			contentLength,
 			scopeTargetID,
 			findingsJSONBytes)
+		
+		if err == nil {
+			log.Printf("[STATUS_CODE] URL: %s | Status: %d | Inserted from HTTPX", url, statusCode)
+		}
 	} else if err == nil {
 		// Update existing target URL
 		updateQuery := `UPDATE target_urls SET 
@@ -878,17 +913,27 @@ func UpdateTargetURLFromHttpx(scopeTargetID string, httpxData map[string]interfa
 
 		_, err = dbPool.Exec(context.Background(),
 			updateQuery,
-			httpxData["status_code"],
-			httpxData["title"],
-			httpxData["webserver"],
+			statusCode,
+			title,
+			webServer,
 			technologies,
-			httpxData["content_length"],
+			contentLength,
 			isNoLongerLive, // If previously marked as no longer live, mark as newly discovered
 			findingsJSONBytes,
 			existingID)
+		
+		if err == nil {
+			log.Printf("[STATUS_CODE] URL: %s | Status: %d | Updated from HTTPX", url, statusCode)
+		}
+	} else {
+		return err
 	}
 
-	return err
+	if err != nil && err != pgx.ErrNoRows {
+		return err
+	}
+	
+	return nil
 }
 
 // MarkOldTargetURLsAsNoLongerLive marks URLs not found in recent scans as no longer live

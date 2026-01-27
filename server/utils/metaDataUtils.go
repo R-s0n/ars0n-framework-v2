@@ -40,6 +40,11 @@ type MetaDataStatus struct {
 	ScopeTargetID     string         `json:"scope_target_id"`
 	AutoScanSessionID sql.NullString `json:"auto_scan_session_id"`
 	Config            []byte         `json:"config,omitempty"`
+	CancelRequested   bool           `json:"cancel_requested"`
+	CurrentStep       sql.NullString `json:"current_step,omitempty"`
+	TotalURLs         sql.NullInt32  `json:"total_urls,omitempty"`
+	ProcessedURLs     sql.NullInt32  `json:"processed_urls,omitempty"`
+	CurrentURL        sql.NullString `json:"current_url,omitempty"`
 }
 
 type NucleiLogWriter struct {
@@ -127,6 +132,46 @@ func extractTitle(htmlContent string) string {
 		return title
 	}
 	return ""
+}
+
+func CancelMetaDataScan(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	scanID := vars["scan_id"]
+	if scanID == "" {
+		http.Error(w, "scan_id is required", http.StatusBadRequest)
+		return
+	}
+
+	_, err := dbPool.Exec(context.Background(),
+		`UPDATE metadata_scans SET cancel_requested = true WHERE scan_id = $1`, scanID)
+	if err != nil {
+		log.Printf("[ERROR] Failed to cancel metadata scan %s: %v", scanID, err)
+		http.Error(w, "Failed to cancel scan", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("[INFO] Cancel requested for metadata scan %s", scanID)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Scan cancellation requested"})
+}
+
+func checkIfCancelled(scanID string) bool {
+	var cancelRequested bool
+	err := dbPool.QueryRow(context.Background(),
+		`SELECT cancel_requested FROM metadata_scans WHERE scan_id = $1`, scanID).Scan(&cancelRequested)
+	if err != nil {
+		log.Printf("[ERROR] Failed to check cancellation status for scan %s: %v", scanID, err)
+		return false
+	}
+	return cancelRequested
+}
+
+func updateScanProgress(scanID, currentStep, currentURL string, totalURLs, processedURLs int) {
+	query := `UPDATE metadata_scans SET current_step = $1, total_urls = $2, processed_urls = $3, current_url = $4 WHERE scan_id = $5`
+	_, err := dbPool.Exec(context.Background(), query, currentStep, totalURLs, processedURLs, currentURL, scanID)
+	if err != nil {
+		log.Printf("[ERROR] Failed to update scan progress for %s: %v", scanID, err)
+	}
 }
 
 func RunMetaDataScan(w http.ResponseWriter, r *http.Request) {
@@ -236,13 +281,11 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 			}
 			if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
 				urls = append(urls, url)
-				log.Printf("[DEBUG] Added URL from config: %s", url)
 			} else {
 				log.Printf("[WARN] Skipping invalid URL (no http/https prefix): %s", url)
 			}
 		}
 	} else {
-		log.Printf("[INFO] No URL IDs in config, using all URLs from httpx results")
 		var httpxResults string
 		err = dbPool.QueryRow(context.Background(), `
 			SELECT result 
@@ -281,6 +324,14 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 	}
 
 	log.Printf("[INFO] Processing %d URLs for scan ID: %s", len(urls), scanID)
+	
+	// Update status to running and initialize progress
+	_, err = dbPool.Exec(context.Background(),
+		`UPDATE metadata_scans SET status = 'running', current_step = 'initializing', total_urls = $1, processed_urls = 0 WHERE scan_id = $2`,
+		len(urls), scanID)
+	if err != nil {
+		log.Printf("[ERROR] Failed to update scan status to running: %v", err)
+	}
 
 	// Create a temporary file for URLs
 	tempFile, err := os.CreateTemp("", "urls-*.txt")
@@ -290,7 +341,6 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 		return
 	}
 	defer os.Remove(tempFile.Name())
-	log.Printf("[INFO] Created temporary file for URLs: %s", tempFile.Name())
 
 	// Write URLs to temp file
 	if err := os.WriteFile(tempFile.Name(), []byte(strings.Join(urls, "\n")), 0644); err != nil {
@@ -298,20 +348,45 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 		UpdateMetaDataScanStatus(scanID, "error", "", fmt.Sprintf("Failed to write URLs to temp file: %v", err), "", time.Since(startTime).String())
 		return
 	}
-	log.Printf("[INFO] Successfully wrote %d URLs to temp file for scan ID: %s", len(urls), scanID)
 
-	// Check which steps to run
-	runScreenshots := config == nil || config.Steps == nil || config.Steps["screenshots"]
-	runKatana := config == nil || config.Steps == nil || config.Steps["katana"]
-	runFfuf := config == nil || config.Steps == nil || config.Steps["ffuf"]
-	runTech := config == nil || config.Steps == nil || config.Steps["technology"]
-	runSSL := config == nil || config.Steps == nil || config.Steps["ssl"]
+	// Check which steps to run (default values match frontend defaults)
+	runScreenshots := true
+	runKatana := false
+	runFfuf := false
+	runTech := true
+	runSSL := true
+	
+	// Override with config values if provided
+	if config != nil && config.Steps != nil {
+		if val, exists := config.Steps["screenshots"]; exists {
+			runScreenshots = val
+		}
+		if val, exists := config.Steps["katana"]; exists {
+			runKatana = val
+		}
+		if val, exists := config.Steps["ffuf"]; exists {
+			runFfuf = val
+		}
+		if val, exists := config.Steps["technology"]; exists {
+			runTech = val
+		}
+		if val, exists := config.Steps["ssl"]; exists {
+			runSSL = val
+		}
+	}
 
-	log.Printf("[INFO] Scan steps enabled - Screenshots: %v, Katana: %v, FFuf: %v, Technology: %v, SSL: %v", runScreenshots, runKatana, runFfuf, runTech, runSSL)
+
+	// Check for cancellation before starting
+	if checkIfCancelled(scanID) {
+		log.Printf("[INFO] Scan %s cancelled before starting screenshots", scanID)
+		UpdateMetaDataScanStatus(scanID, "cancelled", "", "Scan cancelled by user", "", time.Since(startTime).String())
+		return
+	}
 
 	// Run screenshots if enabled
 	if runScreenshots {
-		log.Printf("[INFO] Starting screenshot capture for scan ID: %s - Total URLs to scan: %d", scanID, len(urls))
+		log.Printf("[INFO] Starting screenshot capture - %d URLs", len(urls))
+		updateScanProgress(scanID, "screenshots", "", len(urls), 0)
 		
 		// Get custom HTTP settings
 		customUserAgent, customHeader := GetCustomHTTPSettings()
@@ -402,14 +477,29 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 		log.Printf("[INFO] Screenshot capture skipped (disabled in config)")
 	}
 
+	// Check for cancellation before starting Katana
+	if checkIfCancelled(scanID) {
+		log.Printf("[INFO] Scan %s cancelled before starting Katana", scanID)
+		UpdateMetaDataScanStatus(scanID, "cancelled", "", "Scan cancelled by user", "", time.Since(startTime).String())
+		return
+	}
+
 	// Run Katana scan if enabled
 	katanaResults := make(map[string][]string)
 	if runKatana {
 		log.Printf("[INFO] Starting Katana scan for scan ID: %s - Total URLs to scan: %d", scanID, len(urls))
+		updateScanProgress(scanID, "katana", "", len(urls), 0)
 		completedKatana := 0
 		for _, url := range urls {
+			// Check for cancellation during Katana loop
+			if checkIfCancelled(scanID) {
+				log.Printf("[INFO] Scan %s cancelled during Katana scan (completed %d/%d URLs)", scanID, completedKatana, len(urls))
+				UpdateMetaDataScanStatus(scanID, "cancelled", "", "Scan cancelled by user", "", time.Since(startTime).String())
+				return
+			}
+
 			completedKatana++
-			log.Printf("[INFO] Running Katana scan for URL: %s (%d/%d)", url, completedKatana, len(urls))
+			updateScanProgress(scanID, "katana", url, len(urls), completedKatana)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
@@ -441,7 +531,6 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 			log.Printf("[WARN] Katana scan failed for URL %s (%d/%d): %v\nStderr: %s", url, completedKatana, len(urls), err, stderr.String())
 			continue
 		}
-		log.Printf("[INFO] Completed Katana scan for URL: %s (%d/%d)", url, completedKatana, len(urls))
 
 		var crawledURLs []string
 		seenURLs := make(map[string]bool)
@@ -531,7 +620,7 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 			katanaResults[url] = crawledURLs
 		}
 
-		log.Printf("[INFO] Katana scan completed for all URLs. Total results: %d URLs across %d targets",
+		log.Printf("[INFO] Katana scan complete - found %d URLs across %d targets",
 			func() int {
 				total := 0
 				for _, urls := range katanaResults {
@@ -581,16 +670,20 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 				string(katanaResultsJSON), baseURL, scopeTargetID)
 			if err != nil {
 				log.Printf("[ERROR] Failed to update Katana results for URL %s: %v", baseURL, err)
-			} else {
-				log.Printf("[INFO] Successfully stored %d Katana results for URL %s", len(crawledURLs), baseURL)
 			}
 		}
-	} else {
-		log.Printf("[INFO] Katana scan skipped (disabled in config)")
+	}
+
+	// Check for cancellation before starting SSL scan
+	if checkIfCancelled(scanID) {
+		log.Printf("[INFO] Scan %s cancelled before starting SSL scan", scanID)
+		UpdateMetaDataScanStatus(scanID, "cancelled", "", "Scan cancelled by user", "", time.Since(startTime).String())
+		return
 	}
 
 	// Run SSL scan if enabled
 	if runSSL {
+		updateScanProgress(scanID, "ssl", "", len(urls), 0)
 		// Copy the URLs file into the container for SSL scan
 		copyCmd := exec.Command(
 			"docker", "cp",
@@ -721,9 +814,17 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 		log.Printf("[INFO] SSL scan skipped (disabled in config)")
 	}
 
+	// Check for cancellation before starting tech scan
+	if checkIfCancelled(scanID) {
+		log.Printf("[INFO] Scan %s cancelled before starting technology scan", scanID)
+		UpdateMetaDataScanStatus(scanID, "cancelled", "", "Scan cancelled by user", "", time.Since(startTime).String())
+		return
+	}
+
 	// Run the HTTP/technologies scan if enabled
 	if runTech {
 		log.Printf("[INFO] Starting technology detection scan")
+		updateScanProgress(scanID, "technology", "", len(urls), 0)
 		if err := ExecuteAndParseNucleiTechScan(urls, scopeTargetID); err != nil {
 			log.Printf("[ERROR] Failed to run HTTP/technologies scan: %v", err)
 			UpdateMetaDataScanStatus(scanID, "error", "", fmt.Sprintf("Tech scan failed: %v", err), "", time.Since(startTime).String())
@@ -734,10 +835,26 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 		log.Printf("[INFO] Technology detection scan skipped (disabled in config)")
 	}
 
+	// Check for cancellation before starting FFuf scans
+	if checkIfCancelled(scanID) {
+		log.Printf("[INFO] Scan %s cancelled before starting FFuf scans", scanID)
+		UpdateMetaDataScanStatus(scanID, "cancelled", "", "Scan cancelled by user", "", time.Since(startTime).String())
+		return
+	}
+
 	// Run ffuf scan for each URL if enabled
 	if runFfuf {
 		log.Printf("[INFO] Starting ffuf scans for all URLs")
-		for _, url := range urls {
+		updateScanProgress(scanID, "ffuf", "", len(urls), 0)
+		for i, url := range urls {
+			// Check for cancellation during FFuf loop
+			if checkIfCancelled(scanID) {
+				log.Printf("[INFO] Scan %s cancelled during FFuf scans (completed %d/%d URLs)", scanID, i, len(urls))
+				UpdateMetaDataScanStatus(scanID, "cancelled", "", "Scan cancelled by user", "", time.Since(startTime).String())
+				return
+			}
+			
+			updateScanProgress(scanID, "ffuf", url, len(urls), i+1)
 			if err := ExecuteFfufScan(url, scopeTargetID); err != nil {
 				log.Printf("[ERROR] Failed to run ffuf scan for URL %s: %v", url, err)
 				continue
@@ -765,6 +882,10 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 	log.Printf("[INFO] Starting Nuclei HTTP/technologies scan")
 	startTime := time.Now()
 
+	// Track successful/failed requests
+	successfulRequests := 0
+	failedRequests := 0
+
 	// Create an HTTP client with reasonable timeouts and TLS config
 	client := &http.Client{
 		Timeout: 30 * time.Second,
@@ -779,7 +900,6 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 
 	// Process each URL first to get response headers and body
 	for _, urlStr := range urls {
-		log.Printf("[DEBUG] Processing URL for headers: %s", urlStr)
 
 		// Make HTTP request
 		req, err := http.NewRequest("GET", urlStr, nil)
@@ -792,11 +912,10 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("[ERROR] Failed to make request to URL %s: %v", urlStr, err)
+			failedRequests++
+			log.Printf("[STATUS_CODE] URL: %s | Failed to fetch: %v", urlStr, err)
 			continue
 		}
-
-		log.Printf("[DEBUG] Got response for URL %s - Status: %d, Number of headers: %d", urlStr, resp.StatusCode, len(resp.Header))
 
 		// Read response body
 		body, err := io.ReadAll(resp.Body)
@@ -811,16 +930,11 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 
 		// Convert headers to map for JSON storage
 		headers := make(map[string]interface{})
-		log.Printf("[DEBUG] Processing headers for URL %s:", urlStr)
 		for k, v := range resp.Header {
-			log.Printf("[DEBUG] Header: %s = %v", k, v)
-			// Convert header values to a consistent format
 			if len(v) == 1 {
-				headers[k] = v[0] // Store single value directly
-				log.Printf("[DEBUG] Stored single value header: %s = %s", k, v[0])
+				headers[k] = v[0]
 			} else {
-				headers[k] = v // Store multiple values as string slice
-				log.Printf("[DEBUG] Stored multi-value header: %s = %v", k, v)
+				headers[k] = v
 			}
 		}
 
@@ -830,7 +944,6 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 			log.Printf("[ERROR] Failed to marshal headers for URL %s: %v", urlStr, err)
 			continue
 		}
-		log.Printf("[DEBUG] Marshaled headers JSON (length: %d): %s", len(headersJSON), string(headersJSON))
 
 		// Store response data in database using UPSERT
 		_, err = dbPool.Exec(context.Background(),
@@ -852,10 +965,18 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 			sanitizedBody,
 			string(headersJSON))
 		if err != nil {
-			log.Printf("[ERROR] Failed to store response data for URL %s: %v", urlStr, err)
+			failedRequests++
+			log.Printf("[ERROR] Failed to store metadata for URL %s: %v", urlStr, err)
 			continue
 		}
-		log.Printf("[INFO] Successfully stored response data for URL %s with %d headers", urlStr, len(headers))
+		successfulRequests++
+		log.Printf("[STATUS_CODE] URL: %s | Status: %d | Stored successfully", urlStr, resp.StatusCode)
+	}
+	
+	log.Printf("[INFO] Screenshot capture complete - Success: %d | Failed: %d | Total: %d", 
+		successfulRequests, failedRequests, len(urls))
+	if failedRequests > 0 {
+		log.Printf("[WARN] %d URLs failed to fetch - these will not have metadata", failedRequests)
 	}
 
 	// Create a temporary file for URLs
@@ -1195,7 +1316,7 @@ func GetMetaDataScanStatus(w http.ResponseWriter, r *http.Request) {
 	scanID := vars["scan_id"]
 
 	var scan MetaDataStatus
-	query := `SELECT * FROM metadata_scans WHERE scan_id = $1`
+	query := `SELECT id, scan_id, domain, status, result, error, stdout, stderr, command, execution_time, created_at, scope_target_id, auto_scan_session_id, config, COALESCE(cancel_requested, false), current_step, total_urls, processed_urls, current_url FROM metadata_scans WHERE scan_id = $1`
 	err := dbPool.QueryRow(context.Background(), query, scanID).Scan(
 		&scan.ID,
 		&scan.ScanID,
@@ -1211,6 +1332,11 @@ func GetMetaDataScanStatus(w http.ResponseWriter, r *http.Request) {
 		&scan.ScopeTargetID,
 		&scan.AutoScanSessionID,
 		&scan.Config,
+		&scan.CancelRequested,
+		&scan.CurrentStep,
+		&scan.TotalURLs,
+		&scan.ProcessedURLs,
+		&scan.CurrentURL,
 	)
 
 	if err != nil {
@@ -1221,6 +1347,11 @@ func GetMetaDataScanStatus(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to get scan status", http.StatusInternalServerError)
 		}
 		return
+	}
+
+	configStr := ""
+	if scan.Config != nil && len(scan.Config) > 0 {
+		configStr = string(scan.Config)
 	}
 
 	response := map[string]interface{}{
@@ -1237,6 +1368,12 @@ func GetMetaDataScanStatus(w http.ResponseWriter, r *http.Request) {
 		"created_at":           scan.CreatedAt.Format(time.RFC3339),
 		"scope_target_id":      scan.ScopeTargetID,
 		"auto_scan_session_id": nullStringToString(scan.AutoScanSessionID),
+		"cancel_requested":     scan.CancelRequested,
+		"current_step":         nullStringToString(scan.CurrentStep),
+		"total_urls":           nullIntToInt(scan.TotalURLs),
+		"processed_urls":       nullIntToInt(scan.ProcessedURLs),
+		"current_url":          nullStringToString(scan.CurrentURL),
+		"config":               configStr,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1247,7 +1384,7 @@ func GetMetaDataScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	scopeTargetID := vars["id"]
 
-	query := `SELECT * FROM metadata_scans WHERE scope_target_id = $1 ORDER BY created_at DESC`
+	query := `SELECT id, scan_id, domain, status, result, error, stdout, stderr, command, execution_time, created_at, scope_target_id, auto_scan_session_id, config, COALESCE(cancel_requested, false), current_step, total_urls, processed_urls, current_url FROM metadata_scans WHERE scope_target_id = $1 ORDER BY created_at DESC`
 	rows, err := dbPool.Query(context.Background(), query, scopeTargetID)
 	if err != nil {
 		log.Printf("[ERROR] Failed to get scans: %v", err)
@@ -1274,10 +1411,20 @@ func GetMetaDataScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			&scan.ScopeTargetID,
 			&scan.AutoScanSessionID,
 			&scan.Config,
+			&scan.CancelRequested,
+			&scan.CurrentStep,
+			&scan.TotalURLs,
+			&scan.ProcessedURLs,
+			&scan.CurrentURL,
 		)
 		if err != nil {
 			log.Printf("[ERROR] Failed to scan row: %v", err)
 			continue
+		}
+
+		configStr := ""
+		if scan.Config != nil && len(scan.Config) > 0 {
+			configStr = string(scan.Config)
 		}
 
 		scans = append(scans, map[string]interface{}{
@@ -1294,6 +1441,12 @@ func GetMetaDataScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			"created_at":           scan.CreatedAt.Format(time.RFC3339),
 			"scope_target_id":      scan.ScopeTargetID,
 			"auto_scan_session_id": nullStringToString(scan.AutoScanSessionID),
+			"cancel_requested":     scan.CancelRequested,
+			"current_step":         nullStringToString(scan.CurrentStep),
+			"total_urls":           nullIntToInt(scan.TotalURLs),
+			"processed_urls":       nullIntToInt(scan.ProcessedURLs),
+			"current_url":          nullStringToString(scan.CurrentURL),
+			"config":               configStr,
 		})
 	}
 

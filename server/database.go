@@ -1265,6 +1265,11 @@ func createTables() {
 
 		// Add config column to metadata_scans table for existing installations
 		`ALTER TABLE metadata_scans ADD COLUMN IF NOT EXISTS config JSONB;`,
+		`ALTER TABLE metadata_scans ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN DEFAULT false;`,
+		`ALTER TABLE metadata_scans ADD COLUMN IF NOT EXISTS current_step VARCHAR(100);`,
+		`ALTER TABLE metadata_scans ADD COLUMN IF NOT EXISTS total_urls INTEGER DEFAULT 0;`,
+		`ALTER TABLE metadata_scans ADD COLUMN IF NOT EXISTS processed_urls INTEGER DEFAULT 0;`,
+		`ALTER TABLE metadata_scans ADD COLUMN IF NOT EXISTS current_url TEXT;`,
 
 		// Create indexes for performance
 		`CREATE INDEX IF NOT EXISTS target_urls_url_idx ON target_urls (url);`,

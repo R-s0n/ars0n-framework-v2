@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Modal, Button, Form, Table, Badge, OverlayTrigger, Tooltip, InputGroup, Row, Col } from 'react-bootstrap';
+import { Modal, Button, Form, Table, Badge, OverlayTrigger, Tooltip, InputGroup, Row, Col, Alert } from 'react-bootstrap';
 
 const ConfigureMetaDataModal = ({ 
   show, 
@@ -11,29 +11,19 @@ const ConfigureMetaDataModal = ({
   const [selectedURLs, setSelectedURLs] = useState(new Set());
   const [selectedSteps, setSelectedSteps] = useState({
     screenshots: true,
-    katana: true,
-    ffuf: true,
+    katana: false,
+    ffuf: false,
     technology: true,
     ssl: true
   });
   const [searchTerm, setSearchTerm] = useState('');
   const [selectAll, setSelectAll] = useState(true);
 
-  const availableSteps = [
+  const standardSteps = [
     { 
       key: 'screenshots', 
       label: 'Screenshots',
       description: 'Capture visual screenshots of web applications for manual analysis'
-    },
-    { 
-      key: 'katana', 
-      label: 'Katana - Crawl for Endpoints',
-      description: 'Fast web crawler for discovering hidden endpoints and content'
-    },
-    { 
-      key: 'ffuf', 
-      label: 'FFuf - Fuzz for Endpoints',
-      description: 'Fast web fuzzer with support for multiple protocols and advanced filtering'
     },
     { 
       key: 'technology', 
@@ -47,14 +37,27 @@ const ConfigureMetaDataModal = ({
     }
   ];
 
+  const advancedSteps = [
+    { 
+      key: 'katana', 
+      label: 'Katana - Crawl for Endpoints',
+      description: 'Fast web crawler for discovering hidden endpoints and content'
+    },
+    { 
+      key: 'ffuf', 
+      label: 'FFuf - Fuzz for Endpoints',
+      description: 'Fast web fuzzer with support for multiple protocols and advanced filtering'
+    }
+  ];
+
   useEffect(() => {
     if (show) {
       if (currentConfig) {
         setSelectedURLs(new Set(currentConfig.urls || []));
         setSelectedSteps(currentConfig.steps || {
           screenshots: true,
-          katana: true,
-          ffuf: true,
+          katana: false,
+          ffuf: false,
           technology: true,
           ssl: true
         });
@@ -65,8 +68,8 @@ const ConfigureMetaDataModal = ({
         setSelectAll(true);
         setSelectedSteps({
           screenshots: true,
-          katana: true,
-          ffuf: true,
+          katana: false,
+          ffuf: false,
           technology: true,
           ssl: true
         });
@@ -140,30 +143,64 @@ const ConfigureMetaDataModal = ({
         <Row>
           <Col md={6}>
             <h5 className="text-danger mb-3">Select Scan Steps</h5>
-            <Form className="mb-4">
-              {availableSteps.map(step => (
-                <div key={step.key} className="mb-3">
-                  <Form.Check
-                    type="checkbox"
-                    id={`step-${step.key}`}
-                    checked={selectedSteps[step.key]}
-                    onChange={() => handleToggleStep(step.key)}
-                    label={
-                      <div>
-                        <div className="text-white fw-bold">{step.label}</div>
-                        <div className="text-white-50 small">{step.description}</div>
-                      </div>
-                    }
-                  />
-                </div>
-              ))}
-            </Form>
+            
+            <div className="mb-4">
+              <h6 className="text-white mb-3">Standard Scans</h6>
+              <Form>
+                {standardSteps.map(step => (
+                  <div key={step.key} className="mb-3">
+                    <Form.Check
+                      type="checkbox"
+                      id={`step-${step.key}`}
+                      checked={selectedSteps[step.key]}
+                      onChange={() => handleToggleStep(step.key)}
+                      label={
+                        <div>
+                          <div className="text-white fw-bold">{step.label}</div>
+                          <div className="text-white-50 small">{step.description}</div>
+                        </div>
+                      }
+                    />
+                  </div>
+                ))}
+              </Form>
+            </div>
+
+            <div className="border-top border-secondary pt-4 mb-4">
+              <div className="d-flex align-items-center mb-3">
+                <h6 className="text-warning mb-0 me-2">Advanced Scans</h6>
+                <i className="bi bi-exclamation-triangle-fill text-warning"></i>
+              </div>
+              <Alert variant="warning" className="py-2 px-3 mb-3" style={{ fontSize: '0.85rem' }}>
+                <i className="bi bi-clock-history me-2"></i>
+                <strong>Warning:</strong> These scans can significantly increase scan time (10x-100x longer). 
+                Use selectively for high-value targets.
+              </Alert>
+              <Form>
+                {advancedSteps.map(step => (
+                  <div key={step.key} className="mb-3">
+                    <Form.Check
+                      type="checkbox"
+                      id={`step-${step.key}`}
+                      checked={selectedSteps[step.key]}
+                      onChange={() => handleToggleStep(step.key)}
+                      label={
+                        <div>
+                          <div className="text-white fw-bold">{step.label}</div>
+                          <div className="text-white-50 small">{step.description}</div>
+                        </div>
+                      }
+                    />
+                  </div>
+                ))}
+              </Form>
+            </div>
 
             {!atLeastOneStepSelected && (
-              <div className="alert alert-warning">
+              <Alert variant="danger">
                 <i className="bi bi-exclamation-triangle me-2"></i>
                 Please select at least one scan step
-              </div>
+              </Alert>
             )}
           </Col>
 

@@ -28,6 +28,8 @@ import {
   Toast,
   ToastContainer,
   Spinner,
+  ProgressBar,
+  Alert,
 } from 'react-bootstrap';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import 'bootstrap-icons/font/bootstrap-icons.css';
@@ -84,7 +86,7 @@ import initiateNucleiScan from './utils/initiateNucleiScan';
 import monitorNucleiScanStatus from './utils/monitorNucleiScanStatus';
 import initiateNucleiScreenshotScan from './utils/initiateNucleiScreenshotScan';
 import monitorNucleiScreenshotScanStatus from './utils/monitorNucleiScreenshotScanStatus';
-import initiateMetaDataScan, { initiateCompanyMetaDataScan } from './utils/initiateMetaDataScan';
+import initiateMetaDataScan, { initiateCompanyMetaDataScan, cancelMetaDataScan } from './utils/initiateMetaDataScan';
 import monitorMetaDataScanStatus, { monitorCompanyMetaDataScanStatus } from './utils/monitorMetaDataScanStatus';
 import fetchHttpxScans from './utils/fetchHttpxScans';
 import {
@@ -158,6 +160,7 @@ import monitorCloudEnumScanStatus from './utils/monitorCloudEnumScanStatus';
 
 // Add Attack Surface Visualization import
 import AttackSurfaceVisualizationModal from './modals/AttackSurfaceVisualizationModal.js';
+import ManageAttackSurfaceModal from './modals/ManageAttackSurfaceModal.js';
 
 // Add URL workflow imports
 import initiateKatanaURLScan from './utils/initiateKatanaURLScan';
@@ -632,6 +635,7 @@ function App() {
   const [showKatanaCompanyConfigModal, setShowKatanaCompanyConfigModal] = useState(false);
   const [showExploreAttackSurfaceModal, setShowExploreAttackSurfaceModal] = useState(false);
   const [showAttackSurfaceVisualizationModal, setShowAttackSurfaceVisualizationModal] = useState(false);
+  const [showManageAttackSurfaceModal, setShowManageAttackSurfaceModal] = useState(false);
   const [katanaCompanyCloudAssets, setKatanaCompanyCloudAssets] = useState([]);
   
   const [katanaURLScans, setKatanaURLScans] = useState([]);
@@ -2544,6 +2548,13 @@ function App() {
   const handleOpenExploreAttackSurfaceModal = () => setShowExploreAttackSurfaceModal(true);
   const handleCloseAttackSurfaceVisualizationModal = () => setShowAttackSurfaceVisualizationModal(false);
   const handleOpenAttackSurfaceVisualizationModal = () => setShowAttackSurfaceVisualizationModal(true);
+  const handleCloseManageAttackSurfaceModal = () => setShowManageAttackSurfaceModal(false);
+  const handleOpenManageAttackSurfaceModal = () => setShowManageAttackSurfaceModal(true);
+  const handleAttackSurfaceAssetChange = () => {
+    if (activeTarget) {
+      fetchAttackSurfaceAssetCounts(activeTarget, setAttackSurfaceASNsCount, setAttackSurfaceNetworkRangesCount, setAttackSurfaceIPAddressesCount, setAttackSurfaceLiveWebServersCount, setAttackSurfaceCloudAssetsCount, setAttackSurfaceFQDNsCount);
+    }
+  };
   const handleOpenKatanaCompanyConfigModal = () => setShowKatanaCompanyConfigModal(true);
 
   const handleKatanaCompanyConfigSave = async (config) => {
@@ -2974,7 +2985,38 @@ function App() {
     }
   }, [activeTarget]);
 
-  const startMetaDataScan = () => {
+  const startMetaDataScan = async () => {
+    console.log('[DEBUG] startMetaDataScan called');
+    console.log('[DEBUG] isMetaDataScanning:', isMetaDataScanning);
+    console.log('[DEBUG] mostRecentMetaDataScanStatus:', mostRecentMetaDataScanStatus);
+    console.log('[DEBUG] mostRecentMetaDataScan:', mostRecentMetaDataScan);
+    
+    if (isMetaDataScanning || mostRecentMetaDataScanStatus === "pending" || mostRecentMetaDataScanStatus === "running") {
+      console.log('[DEBUG] Scan is running, attempting to cancel...');
+      if (mostRecentMetaDataScan && mostRecentMetaDataScan.scan_id) {
+        console.log('[DEBUG] Cancelling metadata scan with ID:', mostRecentMetaDataScan.scan_id);
+        const result = await cancelMetaDataScan(mostRecentMetaDataScan.scan_id);
+        console.log('[DEBUG] Cancel result:', result);
+        if (result.success) {
+          console.log('[DEBUG] Metadata scan cancellation requested successfully');
+          monitorMetaDataScanStatus(
+            activeTarget,
+            setMetaDataScans,
+            setMostRecentMetaDataScan,
+            setIsMetaDataScanning,
+            setMostRecentMetaDataScanStatus
+          );
+        } else {
+          console.error('[DEBUG] Failed to cancel metadata scan:', result.error);
+        }
+      } else {
+        console.log('[DEBUG] No scan_id available in mostRecentMetaDataScan');
+      }
+      return;
+    }
+
+    console.log('[DEBUG] Starting new metadata scan...');
+
     const config = activeTarget ? metaDataScanConfigs[activeTarget.id] : null;
     initiateMetaDataScan(
       activeTarget,
@@ -2999,6 +3041,24 @@ function App() {
       );
     }
   }, [activeTarget]);
+
+  const [metaDataElapsedTime, setMetaDataElapsedTime] = useState('0m 00s');
+
+  useEffect(() => {
+    let intervalId;
+    if ((mostRecentMetaDataScanStatus === 'running' || mostRecentMetaDataScanStatus === 'pending' || mostRecentMetaDataScanStatus === 'cancelling') && 
+        mostRecentMetaDataScan && mostRecentMetaDataScan.created_at) {
+      intervalId = setInterval(() => {
+        const elapsed = Math.floor((new Date() - new Date(mostRecentMetaDataScan.created_at)) / 1000);
+        const minutes = Math.floor(elapsed / 60);
+        const seconds = elapsed % 60;
+        setMetaDataElapsedTime(`${minutes}m ${seconds.toString().padStart(2, '0')}s`);
+      }, 1000);
+    }
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [mostRecentMetaDataScanStatus, mostRecentMetaDataScan]);
 
   useEffect(() => {
     if (activeTarget && activeTarget.id) {
@@ -5912,6 +5972,13 @@ function App() {
                         <Button 
                           variant="outline-danger" 
                           className="flex-fill" 
+                          onClick={handleOpenManageAttackSurfaceModal}
+                        >
+                          Manage
+                        </Button>
+                        <Button 
+                          variant="outline-danger" 
+                          className="flex-fill" 
                           onClick={handleInvestigateFQDNs}
                           disabled={isInvestigatingFQDNs}
                         >
@@ -6502,29 +6569,230 @@ function App() {
                 <Row className="mb-4">
                   <Col>
                     <Card className="shadow-sm" style={{ minHeight: '250px' }}>
-                      <Card.Body className="d-flex flex-column justify-content-between text-center">
+                      <Card.Body className="d-flex flex-column justify-content-between">
                         <div>
-                          <Card.Title className="text-danger fs-3 mb-3">Add URL Scope Target</Card.Title>
-                          <Card.Text className="text-white small fst-italic">
-                            We now have a list of unique subdomains pointing to live web servers. The next step is to gather comprehensive data about each web application to identify targets that will give us the greatest ROI as a bug bounty hunter. Configure your scan to select which URLs to analyze and which reconnaissance steps to perform. Focus on signs that the target may have vulnerabilities, may not be maintained, or offers a large attack surface.
+                          <Card.Title className="text-danger fs-3 mb-3 text-center">MetaData Reconnaissance</Card.Title>
+                          <Card.Text className="text-white small fst-italic text-center mb-3">
+                            Gather comprehensive intelligence about each web application to identify high-value targets for bug bounty hunting.
                           </Card.Text>
-                          <div className="d-flex justify-content-center mt-4 mb-4">
-                            <div className="text-center px-4">
-                              <div className="digital-clock text-danger fw-bold" style={{
-                                fontFamily: "'Digital-7', monospace",
-                                fontSize: "2.5rem",
-                                textShadow: "0 0 10px rgba(255, 0, 0, 0.5)",
-                                letterSpacing: "2px"
-                              }}>
-                                {mostRecentMetaDataScan ? 
-                                  Math.floor((new Date() - new Date(mostRecentMetaDataScan.created_at)) / (1000 * 60 * 60 * 24)) : 
-                                  '8'}
+                          
+                          {/* Show alert if viewing data from cancelled scan */}
+                          {mostRecentMetaDataScan && mostRecentMetaDataScan.status === 'cancelled' && (
+                            <Alert variant="warning" className="small mb-3 py-2">
+                              <i className="bi bi-info-circle me-2"></i>
+                              <strong>Partial Data:</strong> This scan was cancelled. You can view the data collected before cancellation.
+                            </Alert>
+                          )}
+                          
+                          {/* MetaData Scan Progress Section */}
+                          <div className="mb-3">
+                            <div className="d-flex justify-content-between align-items-center mb-2">
+                              <div className="d-flex flex-column">
+                                <div className="d-flex align-items-center mb-1">
+                                  <span className={`fw-bold text-${
+                                    mostRecentMetaDataScanStatus === 'running' || mostRecentMetaDataScanStatus === 'pending' ? 'danger' : 
+                                    mostRecentMetaDataScanStatus === 'cancelling' ? 'warning' :
+                                    mostRecentMetaDataScanStatus === 'success' ? 'success' : 
+                                    mostRecentMetaDataScanStatus === 'cancelled' ? 'secondary' :
+                                    mostRecentMetaDataScanStatus === 'error' || mostRecentMetaDataScanStatus === 'failed' ? 'danger' :
+                                    'secondary'
+                                  }`}>
+                                    Status: {
+                                      mostRecentMetaDataScanStatus === 'running' || mostRecentMetaDataScanStatus === 'pending' ? 'Running' :
+                                      mostRecentMetaDataScanStatus === 'cancelling' ? 'Cancelling' :
+                                      mostRecentMetaDataScanStatus === 'success' ? 'Completed' :
+                                      mostRecentMetaDataScanStatus === 'cancelled' ? 'Cancelled' :
+                                      mostRecentMetaDataScanStatus === 'error' || mostRecentMetaDataScanStatus === 'failed' ? 'Failed' :
+                                      'Ready'
+                                    }
+                                  </span>
+                                  {(mostRecentMetaDataScanStatus === 'running' || mostRecentMetaDataScanStatus === 'pending' || mostRecentMetaDataScanStatus === 'cancelling') && 
+                                    <Spinner animation="border" size="sm" variant="danger" className="ms-2" />
+                                  }
+                                </div>
+                                {mostRecentMetaDataScan && mostRecentMetaDataScan.created_at && (
+                                  <div className="mb-1">
+                                    <span className="text-white-50 small">Start Time: </span>
+                                    <span className="text-white small">{new Date(mostRecentMetaDataScan.created_at).toLocaleTimeString()}</span>
+                                  </div>
+                                )}
+                                {(mostRecentMetaDataScanStatus === 'running' || mostRecentMetaDataScanStatus === 'pending' || mostRecentMetaDataScanStatus === 'cancelling') && mostRecentMetaDataScan && mostRecentMetaDataScan.created_at && (
+                                  <div className="mb-1">
+                                    <span className="text-white-50 small">Elapsed: </span>
+                                    <span className="text-white small">{metaDataElapsedTime}</span>
+                                  </div>
+                                )}
                               </div>
-                              <div className="text-white small mt-2">day{mostRecentMetaDataScan && 
-                                Math.floor((new Date() - new Date(mostRecentMetaDataScan.created_at)) / (1000 * 60 * 60 * 24)) !== 1 ? 's' : ''} since last MetaData Scan</div>
+                              <div className="text-end">
+                                {mostRecentMetaDataScan && mostRecentMetaDataScan.execution_time && (
+                                  <div className="text-white-50 small">
+                                    Duration: {mostRecentMetaDataScan.execution_time}
+                                  </div>
+                                )}
+                              </div>
                             </div>
+                            
+                            {/* Current Step and URL Display */}
+                            {(mostRecentMetaDataScanStatus === 'running' || mostRecentMetaDataScanStatus === 'pending' || mostRecentMetaDataScanStatus === 'cancelling') && (
+                              <div className="mt-2 mb-2">
+                                <div className="d-flex justify-content-between align-items-center">
+                                  <div className="text-white-50 small">
+                                    <span className={`text-${mostRecentMetaDataScanStatus === 'cancelling' ? 'warning' : 'danger'}`}>●</span>
+                                    {mostRecentMetaDataScan && mostRecentMetaDataScan.current_step && (
+                                      <span className="ms-2">
+                                        {mostRecentMetaDataScan.current_step === 'initializing' ? 'Initializing scan...' :
+                                         mostRecentMetaDataScan.current_step === 'screenshots' ? 'Capturing screenshots' :
+                                         mostRecentMetaDataScan.current_step === 'katana' ? 'Web crawling with Katana' :
+                                         mostRecentMetaDataScan.current_step === 'ssl' ? 'Analyzing SSL/TLS certificates' :
+                                         mostRecentMetaDataScan.current_step === 'technology' ? 'Detecting technologies' :
+                                         mostRecentMetaDataScan.current_step === 'ffuf' ? 'Directory fuzzing' :
+                                         mostRecentMetaDataScan.current_step}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                                {mostRecentMetaDataScan && mostRecentMetaDataScan.current_url && (
+                                  <div className="text-white-50 small mt-1" style={{ 
+                                    overflow: 'hidden', 
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap'
+                                  }}>
+                                    <span className="text-secondary">↳</span> {mostRecentMetaDataScan.current_url}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            
+                            {/* Progress Bar */}
+                            {(mostRecentMetaDataScanStatus === 'running' || mostRecentMetaDataScanStatus === 'pending' || mostRecentMetaDataScanStatus === 'cancelling') && mostRecentMetaDataScan && (
+                              <div className="mt-2">
+                                <div className="d-flex justify-content-between mb-1">
+                                  <span className="text-white-50 small">Overall Progress</span>
+                                  <span className="text-white small">
+                                    {mostRecentMetaDataScan.total_urls > 0 
+                                      ? (() => {
+                                          let config = null;
+                                          try {
+                                            config = mostRecentMetaDataScan.config ? JSON.parse(mostRecentMetaDataScan.config) : null;
+                                          } catch (e) {
+                                            config = null;
+                                          }
+                                          
+                                          const enabledSteps = config?.steps || {
+                                            screenshots: true,
+                                            technology: true,
+                                            ssl: true,
+                                            katana: false,
+                                            ffuf: false
+                                          };
+                                          
+                                        const allStepWeights = {
+                                          'initializing': 2,
+                                          'screenshots': 25,
+                                          'katana': 30,
+                                          'technology': 15,
+                                          'ssl': 20,
+                                          'ffuf': 30
+                                        };
+                                        
+                                        const activeSteps = Object.keys(enabledSteps).filter(key => enabledSteps[key] && allStepWeights[key]);
+                                        const totalWeight = activeSteps.reduce((sum, step) => sum + allStepWeights[step], 0) + allStepWeights['initializing'];
+                                        
+                                        const normalizedWeights = {};
+                                        normalizedWeights['initializing'] = (allStepWeights['initializing'] / totalWeight) * 95;
+                                        activeSteps.forEach(step => {
+                                          normalizedWeights[step] = (allStepWeights[step] / totalWeight) * 95;
+                                        });
+                                        
+                                        const stepOrder = ['initializing', 'screenshots', 'katana', 'ssl', 'technology', 'ffuf'];
+                                        const activeStepOrder = ['initializing'].concat(stepOrder.slice(1).filter(s => activeSteps.includes(s)));
+                                        
+                                        const completedStepsProgress = {};
+                                        let accumulated = 0;
+                                        activeStepOrder.forEach(step => {
+                                          completedStepsProgress[step] = accumulated;
+                                          accumulated += normalizedWeights[step];
+                                        });
+                                        
+                                        const currentStep = mostRecentMetaDataScan.current_step || 'initializing';
+                                        const baseProgress = completedStepsProgress[currentStep] || 0;
+                                        const currentStepWeight = normalizedWeights[currentStep] || 0;
+                                        const stepProgress = mostRecentMetaDataScan.processed_urls > 0 
+                                          ? (mostRecentMetaDataScan.processed_urls / mostRecentMetaDataScan.total_urls) * currentStepWeight
+                                          : 0;
+                                        
+                                        return Math.min(Math.round(baseProgress + stepProgress), 95);
+                                        })()
+                                      : 5}%
+                                  </span>
+                                </div>
+                                <ProgressBar 
+                                  now={mostRecentMetaDataScan.total_urls > 0 
+                                    ? (() => {
+                                        let config = null;
+                                        try {
+                                          config = mostRecentMetaDataScan.config ? JSON.parse(mostRecentMetaDataScan.config) : null;
+                                        } catch (e) {
+                                          config = null;
+                                        }
+                                        
+                                        const enabledSteps = config?.steps || {
+                                          screenshots: true,
+                                          technology: true,
+                                          ssl: true,
+                                          katana: false,
+                                          ffuf: false
+                                        };
+                                        
+                                        const allStepWeights = {
+                                          'initializing': 2,
+                                          'screenshots': 25,
+                                          'katana': 30,
+                                          'technology': 15,
+                                          'ssl': 20,
+                                          'ffuf': 30
+                                        };
+                                        
+                                        const activeSteps = Object.keys(enabledSteps).filter(key => enabledSteps[key] && allStepWeights[key]);
+                                        const totalWeight = activeSteps.reduce((sum, step) => sum + allStepWeights[step], 0) + allStepWeights['initializing'];
+                                        
+                                        const normalizedWeights = {};
+                                        normalizedWeights['initializing'] = (allStepWeights['initializing'] / totalWeight) * 95;
+                                        activeSteps.forEach(step => {
+                                          normalizedWeights[step] = (allStepWeights[step] / totalWeight) * 95;
+                                        });
+                                        
+                                        const stepOrder = ['initializing', 'screenshots', 'katana', 'ssl', 'technology', 'ffuf'];
+                                        const activeStepOrder = ['initializing'].concat(stepOrder.slice(1).filter(s => activeSteps.includes(s)));
+                                        
+                                        const completedStepsProgress = {};
+                                        let accumulated = 0;
+                                        activeStepOrder.forEach(step => {
+                                          completedStepsProgress[step] = accumulated;
+                                          accumulated += normalizedWeights[step];
+                                        });
+                                        
+                                        const currentStep = mostRecentMetaDataScan.current_step || 'initializing';
+                                        const baseProgress = completedStepsProgress[currentStep] || 0;
+                                        const currentStepWeight = normalizedWeights[currentStep] || 0;
+                                        const stepProgress = mostRecentMetaDataScan.processed_urls > 0 
+                                          ? (mostRecentMetaDataScan.processed_urls / mostRecentMetaDataScan.total_urls) * currentStepWeight
+                                          : 0;
+                                        
+                                        return Math.min(Math.round(baseProgress + stepProgress), 95);
+                                      })()
+                                    : 5}
+                                  variant={mostRecentMetaDataScanStatus === 'cancelling' ? 'warning' : 'danger'}
+                                  className="bg-dark" 
+                                  style={{ height: '8px' }}
+                                  animated={mostRecentMetaDataScanStatus !== 'cancelling'}
+                                />
+                              </div>
+                            )}
                           </div>
                         </div>
+                        
+                        {/* Action Buttons */}
                         <div className="d-flex flex-column gap-3 w-100 mt-3">
                           <div className="d-flex justify-content-between gap-2">
                             <Button variant="outline-danger" className="flex-fill" onClick={handleOpenReconResultsModal}>Recon Results</Button>
@@ -6540,17 +6808,33 @@ function App() {
                               Configure
                             </Button>
                             <Button 
-                              variant="outline-danger" 
+                              variant={(isMetaDataScanning || mostRecentMetaDataScanStatus === "pending" || mostRecentMetaDataScanStatus === "running" || mostRecentMetaDataScanStatus === "cancelling") ? "danger" : "outline-danger"}
                               className="flex-fill"
                               onClick={() => startMetaDataScan()}
-                              disabled={!mostRecentHttpxScan || 
-                                      mostRecentHttpxScan.status !== "success" || 
-                                      !httpxScans || 
-                                      httpxScans.length === 0}
+                              disabled={
+                                mostRecentMetaDataScanStatus === "cancelling" ? true :
+                                (isMetaDataScanning || mostRecentMetaDataScanStatus === "pending" || mostRecentMetaDataScanStatus === "running") 
+                                  ? false 
+                                  : (!mostRecentHttpxScan || 
+                                     mostRecentHttpxScan.status !== "success" || 
+                                     !httpxScans || 
+                                     httpxScans.length === 0)
+                              }
+                              style={{
+                                cursor: (isMetaDataScanning || mostRecentMetaDataScanStatus === "pending" || mostRecentMetaDataScanStatus === "running") ? "pointer" : undefined
+                              }}
                             >
                               <div className="btn-content">
-                                {isMetaDataScanning || mostRecentMetaDataScanStatus === "pending" || mostRecentMetaDataScanStatus === "running" ? (
-                                  <div className="spinner"></div>
+                                {mostRecentMetaDataScanStatus === "cancelling" ? (
+                                  <>
+                                    <div className="spinner"></div>
+                                    <span style={{ marginLeft: '8px' }}>Cancelling...</span>
+                                  </>
+                                ) : (isMetaDataScanning || mostRecentMetaDataScanStatus === "pending" || mostRecentMetaDataScanStatus === "running") ? (
+                                  <>
+                                    <div className="spinner"></div>
+                                    <span style={{ marginLeft: '8px' }}>Cancel Scan</span>
+                                  </>
                                 ) : 'Gather Metadata'}
                               </div>
                             </Button>
@@ -6558,7 +6842,9 @@ function App() {
                               variant="outline-danger" 
                               className="flex-fill"
                               onClick={handleOpenMetaDataModal}
-                              disabled={!mostRecentMetaDataScan || mostRecentMetaDataScan.status !== "success"}
+                              disabled={!mostRecentMetaDataScan || 
+                                      (mostRecentMetaDataScan.status !== "success" && 
+                                       mostRecentMetaDataScan.status !== "cancelled")}
                             >
                               View Metadata
                             </Button>
@@ -6567,7 +6853,8 @@ function App() {
                               className="flex-fill"
                               onClick={handleOpenROIReport}
                               disabled={!mostRecentMetaDataScan || 
-                                      mostRecentMetaDataScan.status !== "success"}
+                                      (mostRecentMetaDataScan.status !== "success" && 
+                                       mostRecentMetaDataScan.status !== "cancelled")}
                             >
                               ROI Report
                             </Button>
@@ -7355,6 +7642,13 @@ function App() {
         show={showExploreAttackSurfaceModal}
         handleClose={handleCloseExploreAttackSurfaceModal}
         activeTarget={activeTarget}
+      />
+
+      <ManageAttackSurfaceModal
+        show={showManageAttackSurfaceModal}
+        handleClose={handleCloseManageAttackSurfaceModal}
+        activeTarget={activeTarget}
+        onAssetChange={handleAttackSurfaceAssetChange}
       />
 
       <AttackSurfaceVisualizationModal

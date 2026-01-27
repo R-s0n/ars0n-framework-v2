@@ -105,5 +105,44 @@ const initiateCompanyMetaDataScan = async (
   }
 };
 
-export { initiateCompanyMetaDataScan };
+const cancelMetaDataScan = async (scanId) => {
+  console.log('[DEBUG cancelMetaDataScan] Called with scanId:', scanId);
+  
+  if (!scanId) {
+    console.error('[DEBUG cancelMetaDataScan] No scan ID provided for cancellation');
+    return { success: false, error: 'No scan ID' };
+  }
+
+  try {
+    const url = `/api/metadata/${scanId}/cancel`;
+    console.log('[DEBUG cancelMetaDataScan] Making POST request to:', url);
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    console.log('[DEBUG cancelMetaDataScan] Response status:', response.status);
+    console.log('[DEBUG cancelMetaDataScan] Response ok:', response.ok);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[DEBUG cancelMetaDataScan] Error response:', errorText);
+      throw new Error(`Failed to cancel metadata scan: ${response.status} ${errorText}`);
+    }
+
+    const result = await response.json();
+    console.log('[DEBUG cancelMetaDataScan] Success response:', result);
+    console.log('Metadata scan cancellation requested');
+    return { success: true };
+  } catch (error) {
+    console.error('[DEBUG cancelMetaDataScan] Exception:', error);
+    console.error('Error cancelling metadata scan:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+export { initiateCompanyMetaDataScan, cancelMetaDataScan };
 export default initiateMetaDataScan; 
