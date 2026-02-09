@@ -6955,6 +6955,25 @@ function App() {
                     </Card>
                   </Col>
                 </Row>
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Manual Crawling</h4>
+                <div className="alert alert-warning mb-3" role="alert">
+                  <i className="bi bi-exclamation-triangle-fill me-2"></i>
+                  This section is still under development
+                </div>
+                <Row className="mb-4">
+                  <Col md={12}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          Manual Crawling
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Manually explore the target application through interactive browser-based crawling. This hands-on approach allows you to discover authenticated areas, dynamic content, and complex user flows that automated tools may miss. By actively navigating the application as a real user would, you'll build a comprehensive understanding of its functionality, identify potential attack surfaces, and uncover hidden endpoints that require authentication or specific user interactions to access.
+                        </Card.Text>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
                 <h4 className="text-secondary mb-3 fs-5 mt-4">URL Discovery & Endpoint Enumeration</h4>
                 <div className="alert alert-warning mb-3" role="alert">
                   <i className="bi bi-exclamation-triangle-fill me-2"></i>
@@ -6972,7 +6991,10 @@ function App() {
                       onScan: startKatanaURLScan,
                       onResults: handleOpenKatanaURLResultsModal,
                       resultCount: mostRecentKatanaURLScan && mostRecentKatanaURLScan.result ? 
-                        mostRecentKatanaURLScan.result.split('\n').filter(line => line.trim()).length : 0,
+                        (() => {
+                          const match = mostRecentKatanaURLScan.result.match(/Found (\d+) direct endpoints and (\d+) adjacent endpoints/);
+                          return match ? parseInt(match[1]) + parseInt(match[2]) : 0;
+                        })() : 0,
                       resultLabel: 'Endpoints'
                     },
                     {
@@ -6985,7 +7007,10 @@ function App() {
                       onScan: startLinkFinderURLScan,
                       onResults: handleOpenLinkFinderURLResultsModal,
                       resultCount: mostRecentLinkFinderURLScan && mostRecentLinkFinderURLScan.result ? 
-                        mostRecentLinkFinderURLScan.result.split('\n').filter(line => line.trim()).length : 0,
+                        (() => {
+                          const match = mostRecentLinkFinderURLScan.result.match(/Found (\d+) direct endpoints and (\d+) adjacent endpoints/);
+                          return match ? parseInt(match[1]) + parseInt(match[2]) : 0;
+                        })() : 0,
                       resultLabel: 'Endpoints'
                     },
                     {
@@ -6998,7 +7023,10 @@ function App() {
                       onScan: startWaybackURLsScan,
                       onResults: handleOpenWaybackURLsResultsModal,
                       resultCount: mostRecentWaybackURLsScan && mostRecentWaybackURLsScan.result ? 
-                        mostRecentWaybackURLsScan.result.split('\n').filter(line => line.trim()).length : 0,
+                        (() => {
+                          const match = mostRecentWaybackURLsScan.result.match(/Found (\d+) direct endpoints and (\d+) adjacent endpoints/);
+                          return match ? parseInt(match[1]) + parseInt(match[2]) : 0;
+                        })() : 0,
                       resultLabel: 'Endpoints'
                     },
                     {
@@ -7012,14 +7040,8 @@ function App() {
                       onResults: handleOpenGAUURLResultsModal,
                       resultCount: mostRecentGAUURLScan && mostRecentGAUURLScan.result ? 
                         (() => {
-                          try {
-                            const results = mostRecentGAUURLScan.result.split('\n')
-                              .filter(line => line.trim())
-                              .map(line => JSON.parse(line));
-                            return results.length;
-                          } catch (e) {
-                            return mostRecentGAUURLScan.result.split('\n').filter(line => line.trim()).length;
-                          }
+                          const match = mostRecentGAUURLScan.result.match(/Found (\d+) direct endpoints and (\d+) adjacent endpoints/);
+                          return match ? parseInt(match[1]) + parseInt(match[2]) : 0;
                         })() : 0,
                       resultLabel: 'Endpoints'
                     }

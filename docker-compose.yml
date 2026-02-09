@@ -27,6 +27,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - temp_data:/tmp
+      - ./wordlists:/app/wordlists
     dns:
       - 127.0.0.11
       - 8.8.8.8
@@ -235,7 +236,8 @@ services:
     depends_on:
       - api
     volumes:
-      - ./wordlists:/wordlists
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
     entrypoint: ["sleep", "infinity"]
     restart: "no"
     networks:

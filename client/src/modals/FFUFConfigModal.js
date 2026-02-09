@@ -110,6 +110,14 @@ export const FFUFConfigModal = ({
       if (response.ok) {
         const data = await response.json();
         setAvailableWordlists(data || []);
+        
+        if (data && data.length > 0 && !config.wordlistId) {
+          setConfig(prev => ({
+            ...prev,
+            wordlistId: data[0].id,
+            wordlistName: data[0].name
+          }));
+        }
       }
     } catch (error) {
       console.error('Error loading wordlists:', error);
@@ -138,7 +146,9 @@ export const FFUFConfigModal = ({
       }
 
       setSuccess('Configuration saved successfully!');
-      setTimeout(() => setSuccess(''), 3000);
+      setTimeout(() => {
+        handleClose();
+      }, 500);
     } catch (error) {
       console.error('Error saving config:', error);
       setError('Failed to save configuration');
@@ -404,13 +414,23 @@ export const FFUFConfigModal = ({
                   }}
                   data-bs-theme="dark"
                 >
-                  <option value="">-- Select a wordlist --</option>
+                  {availableWordlists.length === 0 && (
+                    <option value="">Loading wordlists...</option>
+                  )}
+                  {availableWordlists.length > 0 && !config.wordlistId && (
+                    <option value="">-- Select a wordlist --</option>
+                  )}
                   {availableWordlists.map((wordlist) => (
                     <option key={wordlist.id} value={wordlist.id}>
                       {wordlist.name} ({wordlist.size} entries)
                     </option>
                   ))}
                 </Form.Select>
+                {config.wordlistId?.startsWith('builtin-') && (
+                  <Form.Text className="text-success">
+                    Using a built-in wordlist. You can upload a custom wordlist above for more specific testing.
+                  </Form.Text>
+                )}
               </Form.Group>
 
               <Form.Group className="mb-3">

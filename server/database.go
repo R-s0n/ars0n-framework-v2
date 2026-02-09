@@ -1271,6 +1271,46 @@ func createTables() {
 		`ALTER TABLE metadata_scans ADD COLUMN IF NOT EXISTS processed_urls INTEGER DEFAULT 0;`,
 		`ALTER TABLE metadata_scans ADD COLUMN IF NOT EXISTS current_url TEXT;`,
 
+		// Add status_code column to URL scan tables
+		`ALTER TABLE katana_url_scans ADD COLUMN IF NOT EXISTS status_code JSONB;`,
+		`ALTER TABLE linkfinder_url_scans ADD COLUMN IF NOT EXISTS status_code JSONB;`,
+		`ALTER TABLE waybackurls_scans ADD COLUMN IF NOT EXISTS status_code JSONB;`,
+		`ALTER TABLE gau_url_scans ADD COLUMN IF NOT EXISTS status_code JSONB;`,
+
+		`CREATE TABLE IF NOT EXISTS discovered_endpoints (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scan_id UUID NOT NULL,
+			scan_type VARCHAR(50) NOT NULL,
+			scope_target_id UUID REFERENCES scope_targets(id) ON DELETE CASCADE,
+			url TEXT NOT NULL,
+			domain TEXT NOT NULL,
+			path TEXT NOT NULL,
+			normalized_path TEXT NOT NULL,
+			status_code INTEGER,
+			is_direct BOOLEAN DEFAULT true,
+			created_at TIMESTAMP DEFAULT NOW(),
+			UNIQUE(scan_id, url)
+		);`,
+
+		`CREATE INDEX IF NOT EXISTS idx_endpoints_scan_id ON discovered_endpoints(scan_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_endpoints_scope_target_id ON discovered_endpoints(scope_target_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_endpoints_is_direct ON discovered_endpoints(is_direct);`,
+		`CREATE INDEX IF NOT EXISTS idx_endpoints_normalized_path ON discovered_endpoints(normalized_path);`,
+
+		`CREATE TABLE IF NOT EXISTS endpoint_parameters (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			endpoint_id UUID NOT NULL REFERENCES discovered_endpoints(id) ON DELETE CASCADE,
+			param_type VARCHAR(20) NOT NULL,
+			param_name TEXT NOT NULL,
+			example_value TEXT,
+			position INTEGER,
+			created_at TIMESTAMP DEFAULT NOW(),
+			UNIQUE(endpoint_id, param_type, param_name, position)
+		);`,
+
+		`CREATE INDEX IF NOT EXISTS idx_parameters_endpoint_id ON endpoint_parameters(endpoint_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_parameters_type ON endpoint_parameters(param_type);`,
+
 		// Create indexes for performance
 		`CREATE INDEX IF NOT EXISTS target_urls_url_idx ON target_urls (url);`,
 		`CREATE INDEX IF NOT EXISTS target_urls_scope_target_id_idx ON target_urls (scope_target_id);`,

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Modal, Button, Table, Badge, Spinner, Alert, Form, InputGroup } from 'react-bootstrap';
+import { Modal, Button, Table, Badge, Spinner, Alert, Form, InputGroup, Tabs, Tab, Accordion } from 'react-bootstrap';
 
 export const GAUURLResultsModal = ({ 
   show, 
@@ -7,60 +7,40 @@ export const GAUURLResultsModal = ({
   activeTarget, 
   mostRecentGAUURLScan 
 }) => {
-  const [urls, setUrls] = useState([]);
+  const [directEndpoints, setDirectEndpoints] = useState([]);
+  const [adjacentEndpoints, setAdjacentEndpoints] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   
   const [searchFilters, setSearchFilters] = useState([{ searchTerm: '', isNegative: false }]);
-  const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+  const [activeTab, setActiveTab] = useState('direct');
 
   useEffect(() => {
-    if (show && mostRecentGAUURLScan && mostRecentGAUURLScan.result) {
+    if (show && mostRecentGAUURLScan && mostRecentGAUURLScan.scan_id) {
       parseResults();
     }
   }, [show, mostRecentGAUURLScan]);
 
-  const parseResults = () => {
+  const parseResults = async () => {
     setLoading(true);
     setError(null);
 
     try {
-      if (!mostRecentGAUURLScan.result) {
-        setUrls([]);
-        setLoading(false);
-        return;
+      const response = await fetch(
+        `/api/discovered-endpoints/${mostRecentGAUURLScan.scan_id}?scan_type=gau`
+      );
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch endpoints');
       }
 
-      const lines = mostRecentGAUURLScan.result.split('\n')
-        .filter(line => line.trim())
-        .map(line => line.trim())
-        .filter(line => line.length > 0);
-
-      const urlList = [];
-      lines.forEach((line, index) => {
-        try {
-          const jsonData = JSON.parse(line);
-          urlList.push({
-            id: index,
-            url: jsonData.url || line,
-            domain: extractDomain(jsonData.url || line),
-            path: extractPath(jsonData.url || line),
-            timestamp: jsonData.timestamp || null,
-            source: jsonData.source || 'unknown'
-          });
-        } catch {
-          urlList.push({
-            id: index,
-            url: line,
-            domain: extractDomain(line),
-            path: extractPath(line),
-            timestamp: null,
-            source: 'unknown'
-          });
-        }
-      });
-
-      setUrls(urlList);
+      const endpoints = await response.json();
+      
+      const direct = endpoints.filter(ep => ep.is_direct);
+      const adjacent = endpoints.filter(ep => !ep.is_direct);
+      
+      setDirectEndpoints(direct);
+      setAdjacentEndpoints(adjacent);
     } catch (error) {
       console.error('Error parsing GAU results:', error);
       setError('Failed to parse scan results');
@@ -69,27 +49,17 @@ export const GAUURLResultsModal = ({
     }
   };
 
-  const extractDomain = (url) => {
-    try {
-      const urlObj = new URL(url);
-      return urlObj.hostname;
-    } catch {
-      return url.split('/')[0] || url;
-    }
+  const getStatusBadgeColor = (statusCode) => {
+    if (!statusCode) return 'secondary';
+    if (statusCode >= 200 && statusCode < 300) return 'success';
+    if (statusCode >= 300 && statusCode < 400) return 'info';
+    if (statusCode >= 400 && statusCode < 500) return 'warning';
+    if (statusCode >= 500) return 'danger';
+    return 'secondary';
   };
 
-  const extractPath = (url) => {
-    try {
-      const urlObj = new URL(url);
-      return urlObj.pathname + urlObj.search;
-    } catch {
-      const parts = url.split('/');
-      return parts.length > 1 ? '/' + parts.slice(1).join('/') : '/';
-    }
-  };
-
-  const getFilteredUrls = () => {
-    const filtered = urls.filter(item => {
+  const getFilteredEndpoints = (endpoints) => {
+    const filtered = endpoints.filter(item => {
       const activeFilters = searchFilters.filter(filter => filter.searchTerm.trim() !== '');
       
       if (activeFilters.length > 0) {
@@ -99,7 +69,7 @@ export const GAUURLResultsModal = ({
             (item.url && item.url.toLowerCase().includes(searchTerm)) ||
             (item.domain && item.domain.toLowerCase().includes(searchTerm)) ||
             (item.path && item.path.toLowerCase().includes(searchTerm)) ||
-            (item.source && item.source.toLowerCase().includes(searchTerm));
+            (item.normalized_path && item.normalized_path.toLowerCase().includes(searchTerm));
           return filter.isNegative ? !itemContainsSearch : itemContainsSearch;
         });
       }
@@ -107,7 +77,7 @@ export const GAUURLResultsModal = ({
       return true;
     });
 
-    return getSortedUrls(filtered);
+    return filtered;
   };
 
   const addSearchFilter = () => {
@@ -131,60 +101,106 @@ export const GAUURLResultsModal = ({
     setSearchFilters([{ searchTerm: '', isNegative: false }]);
   };
 
-  const handleSort = (key) => {
-    let direction = 'asc';
-    if (sortConfig.key === key && sortConfig.direction === 'asc') {
-      direction = 'desc';
+  const renderEndpoints = (endpoints) => {
+    if (endpoints.length === 0) {
+      return (
+        <div className="text-center py-5">
+          <div className="text-white-50 mb-3">
+            <i className="bi bi-globe" style={{ fontSize: '3rem' }}></i>
+          </div>
+          <h5 className="text-white-50 mb-3">No Endpoints Found</h5>
+        </div>
+      );
     }
-    setSortConfig({ key, direction });
-  };
 
-  const getSortedUrls = (urlList) => {
-    if (!sortConfig.key) return urlList;
+    const filtered = getFilteredEndpoints(endpoints);
 
-    return [...urlList].sort((a, b) => {
-      let aValue = a[sortConfig.key];
-      let bValue = b[sortConfig.key];
+    return (
+      <>
+        <div className="mb-3">
+          <small className="text-white-50">
+            Showing {filtered.length} of {endpoints.length} endpoints
+          </small>
+        </div>
 
-      if (sortConfig.key === 'timestamp') {
-        aValue = aValue || '';
-        bValue = bValue || '';
-      } else if (typeof aValue === 'string') {
-        aValue = aValue.toLowerCase();
-        bValue = bValue.toLowerCase();
-      }
+        <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
+          <Accordion>
+            {filtered.map((endpoint, index) => (
+              <Accordion.Item eventKey={index.toString()} key={endpoint.id}>
+                <Accordion.Header>
+                  <div className="d-flex justify-content-between align-items-center w-100 me-3">
+                    <span className="text-info" style={{ fontFamily: 'monospace', fontSize: '0.9rem', flex: 1, wordBreak: 'break-all' }}>
+                      {endpoint.url}
+                    </span>
+                    {endpoint.status_code && (
+                      <Badge bg={getStatusBadgeColor(endpoint.status_code)} className="ms-2">
+                        {endpoint.status_code}
+                      </Badge>
+                    )}
+                  </div>
+                </Accordion.Header>
+                <Accordion.Body>
+                  <Table size="sm" variant="dark" className="mb-0">
+                    <tbody>
+                      <tr>
+                        <td width="20%"><strong>Domain:</strong></td>
+                        <td>{endpoint.domain}</td>
+                      </tr>
+                      <tr>
+                        <td><strong>Path:</strong></td>
+                        <td style={{ fontFamily: 'monospace' }}>{endpoint.path}</td>
+                      </tr>
+                      <tr>
+                        <td><strong>Normalized:</strong></td>
+                        <td style={{ fontFamily: 'monospace' }}>{endpoint.normalized_path}</td>
+                      </tr>
+                    </tbody>
+                  </Table>
+                  
+                  {endpoint.parameters && endpoint.parameters.length > 0 && (
+                    <>
+                      <h6 className="mt-3 mb-2 text-white">Parameters:</h6>
+                      <Table size="sm" variant="dark" striped>
+                        <thead>
+                          <tr>
+                            <th width="20%">Type</th>
+                            <th width="30%">Name</th>
+                            <th>Example Value</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {endpoint.parameters.map((param, idx) => (
+                            <tr key={idx}>
+                              <td>
+                                <Badge bg={param.type === 'query' ? 'info' : 'warning'}>
+                                  {param.type}
+                                </Badge>
+                              </td>
+                              <td><code>{param.name}</code></td>
+                              <td><code>{param.example_value || 'N/A'}</code></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </Table>
+                    </>
+                  )}
+                </Accordion.Body>
+              </Accordion.Item>
+            ))}
+          </Accordion>
+        </div>
 
-      if (aValue < bValue) {
-        return sortConfig.direction === 'asc' ? -1 : 1;
-      }
-      if (aValue > bValue) {
-        return sortConfig.direction === 'asc' ? 1 : -1;
-      }
-      return 0;
-    });
-  };
-
-  const getSortIcon = (columnKey) => {
-    if (sortConfig.key !== columnKey) {
-      return <i className="bi bi-arrow-down-up text-white-50 ms-1" style={{ fontSize: '0.8rem' }}></i>;
-    }
-    return sortConfig.direction === 'asc' 
-      ? <i className="bi bi-arrow-up text-white ms-1" style={{ fontSize: '0.8rem' }}></i>
-      : <i className="bi bi-arrow-down text-white ms-1" style={{ fontSize: '0.8rem' }}></i>;
-  };
-
-  const getSourceBadge = (source) => {
-    const sourceLower = (source || 'unknown').toLowerCase();
-    if (sourceLower.includes('wayback')) {
-      return <Badge bg="info">Wayback</Badge>;
-    }
-    if (sourceLower.includes('commoncrawl') || sourceLower.includes('common')) {
-      return <Badge bg="success">CommonCrawl</Badge>;
-    }
-    if (sourceLower.includes('otx') || sourceLower.includes('alienvault')) {
-      return <Badge bg="warning">OTX</Badge>;
-    }
-    return <Badge bg="secondary">{source || 'Unknown'}</Badge>;
+        {filtered.length === 0 && endpoints.length > 0 && (
+          <div className="text-center py-4">
+            <i className="bi bi-funnel text-white-50" style={{ fontSize: '2rem' }}></i>
+            <h6 className="text-white-50 mt-2">No endpoints match the current filters</h6>
+            <Button variant="outline-secondary" size="sm" onClick={clearFilters}>
+              Clear Filters
+            </Button>
+          </div>
+        )}
+      </>
+    );
   };
 
   const renderResults = () => {
@@ -205,22 +221,6 @@ export const GAUURLResultsModal = ({
         </Alert>
       );
     }
-
-    if (urls.length === 0) {
-      return (
-        <div className="text-center py-5">
-          <div className="text-white-50 mb-3">
-            <i className="bi bi-globe" style={{ fontSize: '3rem' }}></i>
-          </div>
-          <h5 className="text-white-50 mb-3">No URLs Found</h5>
-          <p className="text-white-50">
-            The scan completed but no URLs were discovered from AlienVault OTX, Wayback Machine, or Common Crawl.
-          </p>
-        </div>
-      );
-    }
-
-    const filteredUrls = getFilteredUrls();
 
     return (
       <>
@@ -259,7 +259,7 @@ export const GAUURLResultsModal = ({
                 </Form.Select>
                 <Form.Control
                   type="text"
-                  placeholder="Search URLs, domains, paths, or sources..."
+                  placeholder="Search URLs, domains, or paths..."
                   value={filter.searchTerm}
                   onChange={(e) => updateSearchFilter(index, 'searchTerm', e.target.value)}
                   data-bs-theme="dark"
@@ -278,106 +278,14 @@ export const GAUURLResultsModal = ({
           ))}
         </div>
 
-        <div className="mb-3">
-          <small className="text-white-50">
-            Showing {filteredUrls.length} of {urls.length} URLs
-          </small>
-        </div>
-
-        <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
-          <style>
-            {`
-              .sortable-header:hover {
-                background-color: rgba(220, 53, 69, 0.2) !important;
-                transition: background-color 0.15s ease-in-out;
-              }
-            `}
-          </style>
-          <Table variant="dark" hover size="sm" style={{ tableLayout: 'fixed', width: '100%' }}>
-            <thead style={{ position: 'sticky', top: 0, zIndex: 10 }}>
-              <tr>
-                <th 
-                  className="sortable-header"
-                  style={{ 
-                    backgroundColor: 'var(--bs-dark)', 
-                    width: '35%', 
-                    cursor: 'pointer',
-                    userSelect: 'none'
-                  }}
-                  onClick={() => handleSort('url')}
-                >
-                  URL{getSortIcon('url')}
-                </th>
-                <th 
-                  className="sortable-header"
-                  style={{ 
-                    backgroundColor: 'var(--bs-dark)', 
-                    width: '25%', 
-                    cursor: 'pointer',
-                    userSelect: 'none'
-                  }}
-                  onClick={() => handleSort('domain')}
-                >
-                  Domain{getSortIcon('domain')}
-                </th>
-                <th 
-                  className="sortable-header"
-                  style={{ 
-                    backgroundColor: 'var(--bs-dark)', 
-                    width: '25%', 
-                    cursor: 'pointer',
-                    userSelect: 'none'
-                  }}
-                  onClick={() => handleSort('path')}
-                >
-                  Path{getSortIcon('path')}
-                </th>
-                <th 
-                  className="sortable-header"
-                  style={{ 
-                    backgroundColor: 'var(--bs-dark)', 
-                    width: '15%', 
-                    cursor: 'pointer',
-                    userSelect: 'none'
-                  }}
-                  onClick={() => handleSort('source')}
-                >
-                  Source{getSortIcon('source')}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredUrls.map((item) => (
-                <tr key={item.id}>
-                  <td className="text-info" style={{ fontFamily: 'monospace', fontSize: '0.875rem', wordBreak: 'break-all' }}>
-                    <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-info text-decoration-none">
-                      {item.url}
-                    </a>
-                  </td>
-                  <td style={{ fontFamily: 'monospace', fontSize: '0.875rem' }}>
-                    {item.domain}
-                  </td>
-                  <td style={{ fontFamily: 'monospace', fontSize: '0.875rem', wordBreak: 'break-all' }}>
-                    {item.path}
-                  </td>
-                  <td>
-                    {getSourceBadge(item.source)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        </div>
-
-        {filteredUrls.length === 0 && urls.length > 0 && (
-          <div className="text-center py-4">
-            <i className="bi bi-funnel text-white-50" style={{ fontSize: '2rem' }}></i>
-            <h6 className="text-white-50 mt-2">No URLs match the current filters</h6>
-            <Button variant="outline-secondary" size="sm" onClick={clearFilters}>
-              Clear Filters
-            </Button>
-          </div>
-        )}
+        <Tabs activeKey={activeTab} onSelect={(k) => setActiveTab(k)} className="mb-3">
+          <Tab eventKey="direct" title={`Direct (${directEndpoints.length})`}>
+            {renderEndpoints(directEndpoints)}
+          </Tab>
+          <Tab eventKey="adjacent" title={`Adjacent (${adjacentEndpoints.length})`}>
+            {renderEndpoints(adjacentEndpoints)}
+          </Tab>
+        </Tabs>
       </>
     );
   };
@@ -437,4 +345,3 @@ export const GAUURLResultsModal = ({
     </Modal>
   );
 };
-

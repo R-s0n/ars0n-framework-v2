@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -191,6 +192,104 @@ func UploadFFUFWordlist(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetFFUFWordlists(w http.ResponseWriter, r *http.Request) {
+	var wordlists []FFUFWordlist
+
+	possiblePaths := []string{
+		"/app/wordlists/ffuf-wordlist-5000.txt",
+		"./wordlists/ffuf-wordlist-5000.txt",
+		"../wordlists/ffuf-wordlist-5000.txt",
+	}
+
+	var builtInWordlist string
+	for _, path := range possiblePaths {
+		if _, err := os.Stat(path); err == nil {
+			builtInWordlist = path
+			break
+		}
+	}
+
+	if builtInWordlist != "" {
+		content, err := os.ReadFile(builtInWordlist)
+		lineCount := 0
+		if err == nil {
+			for _, b := range content {
+				if b == '\n' {
+					lineCount++
+				}
+			}
+		}
+		wordlists = append(wordlists, FFUFWordlist{
+			ID:   "builtin-default",
+			Name: "Default",
+			Path: builtInWordlist,
+			Size: lineCount,
+		})
+	}
+
+	possibleSmallPath := []string{
+		"/app/wordlists/ffuf-wordlist-default-small.txt",
+		"./wordlists/ffuf-wordlist-default-small.txt",
+		"../wordlists/ffuf-wordlist-default-small.txt",
+	}
+
+	var smallWordlist string
+	for _, path := range possibleSmallPath {
+		if _, err := os.Stat(path); err == nil {
+			smallWordlist = path
+			break
+		}
+	}
+
+	if smallWordlist != "" {
+		content, err := os.ReadFile(smallWordlist)
+		lineCount := 0
+		if err == nil {
+			for _, b := range content {
+				if b == '\n' {
+					lineCount++
+				}
+			}
+		}
+		wordlists = append(wordlists, FFUFWordlist{
+			ID:   "builtin-small",
+			Name: "Small",
+			Path: smallWordlist,
+			Size: lineCount,
+		})
+	}
+
+	possibleLongPath := []string{
+		"/app/wordlists/ffuf-wordlist-default-long.txt",
+		"./wordlists/ffuf-wordlist-default-long.txt",
+		"../wordlists/ffuf-wordlist-default-long.txt",
+	}
+
+	var longWordlist string
+	for _, path := range possibleLongPath {
+		if _, err := os.Stat(path); err == nil {
+			longWordlist = path
+			break
+		}
+	}
+
+	if longWordlist != "" {
+		content, err := os.ReadFile(longWordlist)
+		lineCount := 0
+		if err == nil {
+			for _, b := range content {
+				if b == '\n' {
+					lineCount++
+				}
+			}
+		}
+		wordlists = append(wordlists, FFUFWordlist{
+			ID:   "builtin-large",
+			Name: "Large",
+			Path: longWordlist,
+			Size: lineCount,
+		})
+	}
+
 	query := `
 		SELECT id, name, path, size
 		FROM ffuf_wordlists
@@ -198,19 +297,15 @@ func GetFFUFWordlists(w http.ResponseWriter, r *http.Request) {
 	`
 
 	rows, err := dbPool.Query(context.Background(), query)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
-	var wordlists []FFUFWordlist
-	for rows.Next() {
-		var wl FFUFWordlist
-		if err := rows.Scan(&wl.ID, &wl.Name, &wl.Path, &wl.Size); err != nil {
-			continue
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var wl FFUFWordlist
+			if err := rows.Scan(&wl.ID, &wl.Name, &wl.Path, &wl.Size); err != nil {
+				continue
+			}
+			wordlists = append(wordlists, wl)
 		}
-		wordlists = append(wordlists, wl)
 	}
 
 	if wordlists == nil {
@@ -224,6 +319,11 @@ func GetFFUFWordlists(w http.ResponseWriter, r *http.Request) {
 func DeleteFFUFWordlist(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	wordlistID := vars["wordlist_id"]
+
+	if strings.HasPrefix(wordlistID, "builtin-") {
+		http.Error(w, "Cannot delete built-in wordlists", http.StatusBadRequest)
+		return
+	}
 
 	var filepath string
 	query := `SELECT path FROM ffuf_wordlists WHERE id = $1`
