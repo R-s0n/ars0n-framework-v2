@@ -30,6 +30,7 @@ import {
   Spinner,
   ProgressBar,
   Alert,
+  Badge,
 } from 'react-bootstrap';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import 'bootstrap-icons/font/bootstrap-icons.css';
@@ -184,6 +185,7 @@ import { NotableObjectsModal } from './modals/NotableObjectsModal';
 import { SecurityControlsModal } from './modals/SecurityControlsModal';
 import { ThreatModelModal } from './modals/ThreatModelModal';
 import { FFUFConfigModal } from './modals/FFUFConfigModal';
+import ManualCrawlResultsModal from './modals/ManualCrawlResultsModal';
 
 const ExportModal = lazy(() => import('./modals/ExportModal.js'));
 const ImportModal = lazy(() => import('./modals/ImportModal.js'));
@@ -674,6 +676,8 @@ function App() {
   const [showSecurityControlsModal, setShowSecurityControlsModal] = useState(false);
   const [showThreatModelModal, setShowThreatModelModal] = useState(false);
   const [showFFUFConfigModal, setShowFFUFConfigModal] = useState(false);
+  const [showManualCrawlResultsModal, setShowManualCrawlResultsModal] = useState(false);
+  const [manualCrawlConnected, setManualCrawlConnected] = useState(false);
   const [mechanismsForThreatModel, setMechanismsForThreatModel] = useState([]);
   const [notableObjectsForThreatModel, setNotableObjectsForThreatModel] = useState([]);
   const [securityControlsForThreatModel, setSecurityControlsForThreatModel] = useState([]);
@@ -4088,6 +4092,38 @@ function App() {
   const handleCloseGAUURLResultsModal = () => setShowGAUURLResultsModal(false);
   const handleOpenFFUFURLResultsModal = () => setShowFFUFURLResultsModal(true);
   const handleCloseFFUFURLResultsModal = () => setShowFFUFURLResultsModal(false);
+  const handleOpenManualCrawlResultsModal = async () => {
+    setShowManualCrawlResultsModal(true);
+    if (activeTarget) {
+      checkManualCrawlConnection();
+    }
+  };
+  const handleCloseManualCrawlResultsModal = () => setShowManualCrawlResultsModal(false);
+
+  const checkManualCrawlConnection = async () => {
+    if (!activeTarget) return;
+    try {
+      const response = await fetch(`/api/manual-crawl/sessions/${activeTarget.id}`);
+      if (response.ok) {
+        const sessions = await response.json();
+        const hasActive = Array.isArray(sessions) && sessions.some(s => s.status === 'active');
+        setManualCrawlConnected(hasActive);
+      } else {
+        setManualCrawlConnected(false);
+      }
+    } catch (err) {
+      console.error('Error checking manual crawl connection:', err);
+      setManualCrawlConnected(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTarget && activeTarget.type === 'URL') {
+      checkManualCrawlConnection();
+      const interval = setInterval(checkManualCrawlConnection, 15000);
+      return () => clearInterval(interval);
+    }
+  }, [activeTarget]);
   const handleOpenApplicationQuestionsModal = () => setShowApplicationQuestionsModal(true);
   const handleCloseApplicationQuestionsModal = () => setShowApplicationQuestionsModal(false);
   const handleOpenMechanismsModal = () => setShowMechanismsModal(true);
@@ -6956,9 +6992,9 @@ function App() {
                   </Col>
                 </Row>
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Manual Crawling</h4>
-                <div className="alert alert-warning mb-3" role="alert">
-                  <i className="bi bi-exclamation-triangle-fill me-2"></i>
-                  This section is still under development
+                <div className="alert alert-info mb-3" role="alert">
+                  <i className="bi bi-info-circle-fill me-2"></i>
+                  Use the Chrome extension to manually browse the target and capture HTTP traffic
                 </div>
                 <Row className="mb-4">
                   <Col md={12}>
@@ -6970,6 +7006,44 @@ function App() {
                         <Card.Text className="text-white small fst-italic">
                           Manually explore the target application through interactive browser-based crawling. This hands-on approach allows you to discover authenticated areas, dynamic content, and complex user flows that automated tools may miss. By actively navigating the application as a real user would, you'll build a comprehensive understanding of its functionality, identify potential attack surfaces, and uncover hidden endpoints that require authentication or specific user interactions to access.
                         </Card.Text>
+                        <div className="my-3 py-2" style={{ borderTop: '1px solid #444', borderBottom: '1px solid #444' }}>
+                          {manualCrawlConnected ? (
+                            <div className="text-success">
+                              <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
+                              <strong>Extension Connected - Capturing Traffic</strong>
+                            </div>
+                          ) : (
+                            <div className="text-muted">
+                              <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
+                              Extension Not Connected
+                            </div>
+                          )}
+                        </div>
+                        <div className="mt-auto">
+                          <Row className="g-2">
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenManualCrawlResultsModal}
+                              >
+                                <i className="bi bi-list-ul me-2"></i>
+                                View Results
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button
+                                variant="outline-info"
+                                className="w-100"
+                                href="https://github.com/R-s0n/ars0n-framework-v2/tree/main/extension"
+                                target="_blank"
+                              >
+                                <i className="bi bi-download me-2"></i>
+                                Get Extension
+                              </Button>
+                            </Col>
+                          </Row>
+                        </div>
                       </Card.Body>
                     </Card>
                   </Col>
@@ -7652,6 +7726,12 @@ function App() {
         mechanisms={mechanismsForThreatModel}
         notableObjects={notableObjectsForThreatModel}
         securityControls={securityControlsForThreatModel}
+      />
+
+      <ManualCrawlResultsModal
+        show={showManualCrawlResultsModal}
+        onHide={handleCloseManualCrawlResultsModal}
+        scopeTargetId={activeTarget?.id}
       />
 
       <FFUFConfigModal

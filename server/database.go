@@ -1311,6 +1311,41 @@ func createTables() {
 		`CREATE INDEX IF NOT EXISTS idx_parameters_endpoint_id ON endpoint_parameters(endpoint_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_parameters_type ON endpoint_parameters(param_type);`,
 
+		`CREATE TABLE IF NOT EXISTS manual_crawl_sessions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			target_url TEXT NOT NULL,
+			status VARCHAR(50) NOT NULL,
+			started_at TIMESTAMP DEFAULT NOW(),
+			ended_at TIMESTAMP,
+			request_count INTEGER DEFAULT 0,
+			endpoint_count INTEGER DEFAULT 0,
+			created_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS manual_crawl_captures (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			session_id UUID NOT NULL REFERENCES manual_crawl_sessions(id) ON DELETE CASCADE,
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			url TEXT NOT NULL,
+			endpoint TEXT NOT NULL,
+			method VARCHAR(10) NOT NULL,
+			status_code INTEGER,
+			headers JSONB,
+			response_headers JSONB,
+			post_data TEXT,
+			timestamp TIMESTAMP DEFAULT NOW(),
+			mime_type TEXT,
+			created_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_sessions_scope_target ON manual_crawl_sessions(scope_target_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_sessions_status ON manual_crawl_sessions(status);`,
+		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_session ON manual_crawl_captures(session_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_scope_target ON manual_crawl_captures(scope_target_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_endpoint ON manual_crawl_captures(endpoint);`,
+		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_method ON manual_crawl_captures(method);`,
+
 		// Create indexes for performance
 		`CREATE INDEX IF NOT EXISTS target_urls_url_idx ON target_urls (url);`,
 		`CREATE INDEX IF NOT EXISTS target_urls_scope_target_id_idx ON target_urls (scope_target_id);`,

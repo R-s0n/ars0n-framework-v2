@@ -338,6 +338,16 @@ func main() {
 	r.HandleFunc("/threat-model/{threat_id}", utils.UpdateThreatModel).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/threat-model/{threat_id}", utils.DeleteThreatModel).Methods("DELETE", "OPTIONS")
 
+	r.HandleFunc("/health", utils.HealthCheck).Methods("GET", "OPTIONS")
+	r.HandleFunc("/manual-crawl/start", utils.StartManualCrawl).Methods("POST", "OPTIONS")
+	r.HandleFunc("/manual-crawl/capture", utils.CaptureManualCrawlRequest).Methods("POST", "OPTIONS")
+	r.HandleFunc("/manual-crawl/stop", utils.StopManualCrawl).Methods("POST", "OPTIONS")
+	r.HandleFunc("/manual-crawl/cleanup", utils.CleanupStaleSessions).Methods("POST", "OPTIONS")
+	r.HandleFunc("/manual-crawl/sessions/all", utils.GetAllManualCrawlSessions).Methods("GET", "OPTIONS")
+	r.HandleFunc("/manual-crawl/sessions/{scope_target_id}", utils.GetManualCrawlSessions).Methods("GET", "OPTIONS")
+	r.HandleFunc("/manual-crawl/captures/{session_id}", utils.GetManualCrawlCaptures).Methods("GET", "OPTIONS")
+	r.HandleFunc("/manual-crawl/endpoints/{scope_target_id}", utils.GetManualCrawlEndpoints).Methods("GET", "OPTIONS")
+
 	log.Println("API server started on :8443")
 	http.ListenAndServe(":8443", r)
 }
