@@ -1334,6 +1334,10 @@ func createTables() {
 			headers JSONB,
 			response_headers JSONB,
 			post_data TEXT,
+			response_body TEXT,
+			get_params JSONB,
+			post_params JSONB,
+			body_type TEXT,
 			timestamp TIMESTAMP DEFAULT NOW(),
 			mime_type TEXT,
 			created_at TIMESTAMP DEFAULT NOW()
@@ -1345,6 +1349,23 @@ func createTables() {
 		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_scope_target ON manual_crawl_captures(scope_target_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_endpoint ON manual_crawl_captures(endpoint);`,
 		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_method ON manual_crawl_captures(method);`,
+
+		// Migration: Add new columns to manual_crawl_captures if they don't exist
+		`DO $$ 
+		BEGIN 
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='manual_crawl_captures' AND column_name='get_params') THEN
+				ALTER TABLE manual_crawl_captures ADD COLUMN get_params JSONB;
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='manual_crawl_captures' AND column_name='post_params') THEN
+				ALTER TABLE manual_crawl_captures ADD COLUMN post_params JSONB;
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='manual_crawl_captures' AND column_name='body_type') THEN
+				ALTER TABLE manual_crawl_captures ADD COLUMN body_type TEXT;
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='manual_crawl_captures' AND column_name='response_body') THEN
+				ALTER TABLE manual_crawl_captures ADD COLUMN response_body TEXT;
+			END IF;
+		END $$;`,
 
 		// Create indexes for performance
 		`CREATE INDEX IF NOT EXISTS target_urls_url_idx ON target_urls (url);`,

@@ -13,18 +13,22 @@ import (
 )
 
 type ManualCrawlCapture struct {
-	ID              string            `json:"id"`
-	SessionID       string            `json:"session_id"`
-	ScopeTargetID   string            `json:"scope_target_id"`
-	URL             string            `json:"url"`
-	Endpoint        string            `json:"endpoint"`
-	Method          string            `json:"method"`
-	StatusCode      int               `json:"status_code"`
-	Headers         map[string]string `json:"headers"`
-	ResponseHeaders map[string]string `json:"response_headers"`
-	PostData        string            `json:"post_data,omitempty"`
-	Timestamp       time.Time         `json:"timestamp"`
-	MimeType        string            `json:"mime_type"`
+	ID              string                 `json:"id"`
+	SessionID       string                 `json:"session_id"`
+	ScopeTargetID   string                 `json:"scope_target_id"`
+	URL             string                 `json:"url"`
+	Endpoint        string                 `json:"endpoint"`
+	Method          string                 `json:"method"`
+	StatusCode      int                    `json:"status_code"`
+	Headers         map[string]interface{} `json:"headers"`
+	ResponseHeaders map[string]interface{} `json:"response_headers"`
+	PostData        string                 `json:"post_data,omitempty"`
+	ResponseBody    string                 `json:"response_body,omitempty"`
+	GetParams       map[string]interface{} `json:"get_params,omitempty"`
+	PostParams      map[string]interface{} `json:"post_params,omitempty"`
+	BodyType        string                 `json:"body_type,omitempty"`
+	Timestamp       time.Time              `json:"timestamp"`
+	MimeType        string                 `json:"mime_type"`
 }
 
 type ManualCrawlSession struct {
@@ -46,6 +50,10 @@ type CaptureRequest struct {
 	Headers         map[string]interface{} `json:"headers"`
 	ResponseHeaders map[string]interface{} `json:"responseHeaders"`
 	PostData        string                 `json:"postData,omitempty"`
+	ResponseBody    string                 `json:"responseBody,omitempty"`
+	GetParams       map[string]interface{} `json:"getParams,omitempty"`
+	PostParams      map[string]interface{} `json:"postParams,omitempty"`
+	BodyType        string                 `json:"bodyType,omitempty"`
 	Timestamp       string                 `json:"timestamp"`
 	MimeType        string                 `json:"mimeType"`
 }
@@ -160,13 +168,15 @@ func CaptureManualCrawlRequest(w http.ResponseWriter, r *http.Request) {
 
 	headersJSON, _ := json.Marshal(req.Headers)
 	responseHeadersJSON, _ := json.Marshal(req.ResponseHeaders)
+	getParamsJSON, _ := json.Marshal(req.GetParams)
+	postParamsJSON, _ := json.Marshal(req.PostParams)
 
 	captureID := uuid.New().String()
 	
 	query := `
 		INSERT INTO manual_crawl_captures 
-		(id, session_id, scope_target_id, url, endpoint, method, status_code, headers, response_headers, post_data, timestamp, mime_type)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		(id, session_id, scope_target_id, url, endpoint, method, status_code, headers, response_headers, post_data, response_body, get_params, post_params, body_type, timestamp, mime_type)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 	`
 	
 	_, err = dbPool.Exec(
@@ -182,6 +192,10 @@ func CaptureManualCrawlRequest(w http.ResponseWriter, r *http.Request) {
 		headersJSON,
 		responseHeadersJSON,
 		req.PostData,
+		req.ResponseBody,
+		getParamsJSON,
+		postParamsJSON,
+		req.BodyType,
 		timestamp,
 		req.MimeType,
 	)
@@ -397,7 +411,7 @@ func GetManualCrawlCaptures(w http.ResponseWriter, r *http.Request) {
 
 	query := `
 		SELECT id, session_id, scope_target_id, url, endpoint, method, status_code, 
-		       headers, response_headers, post_data, timestamp, mime_type
+		       headers, response_headers, post_data, response_body, get_params, post_params, body_type, timestamp, mime_type
 		FROM manual_crawl_captures
 		WHERE session_id = $1
 		ORDER BY timestamp ASC
@@ -414,7 +428,10 @@ func GetManualCrawlCaptures(w http.ResponseWriter, r *http.Request) {
 	captures := make([]ManualCrawlCapture, 0)
 	for rows.Next() {
 		var capture ManualCrawlCapture
-		var headersJSON, responseHeadersJSON []byte
+		var headersJSON, responseHeadersJSON, getParamsJSON, postParamsJSON []byte
+		var bodyType *string
+		var postData *string
+		var responseBody *string
 		
 		err := rows.Scan(
 			&capture.ID,
@@ -426,7 +443,11 @@ func GetManualCrawlCaptures(w http.ResponseWriter, r *http.Request) {
 			&capture.StatusCode,
 			&headersJSON,
 			&responseHeadersJSON,
-			&capture.PostData,
+			&postData,
+			&responseBody,
+			&getParamsJSON,
+			&postParamsJSON,
+			&bodyType,
 			&capture.Timestamp,
 			&capture.MimeType,
 		)
@@ -436,8 +457,24 @@ func GetManualCrawlCaptures(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		if postData != nil {
+			capture.PostData = *postData
+		}
+		if responseBody != nil {
+			capture.ResponseBody = *responseBody
+		}
+		if bodyType != nil {
+			capture.BodyType = *bodyType
+		}
+
 		json.Unmarshal(headersJSON, &capture.Headers)
 		json.Unmarshal(responseHeadersJSON, &capture.ResponseHeaders)
+		if len(getParamsJSON) > 0 {
+			json.Unmarshal(getParamsJSON, &capture.GetParams)
+		}
+		if len(postParamsJSON) > 0 {
+			json.Unmarshal(postParamsJSON, &capture.PostParams)
+		}
 		
 		captures = append(captures, capture)
 	}

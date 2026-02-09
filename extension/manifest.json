@@ -4,10 +4,11 @@
   "version": "1.0.0",
   "description": "Capture HTTP traffic during manual exploration for the Ars0n Framework v2",
   "permissions": [
-    "debugger",
     "tabs",
     "storage",
-    "activeTab"
+    "activeTab",
+    "webNavigation",
+    "webRequest"
   ],
   "host_permissions": [
     "<all_urls>"

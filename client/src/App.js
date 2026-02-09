@@ -186,6 +186,7 @@ import { SecurityControlsModal } from './modals/SecurityControlsModal';
 import { ThreatModelModal } from './modals/ThreatModelModal';
 import { FFUFConfigModal } from './modals/FFUFConfigModal';
 import ManualCrawlResultsModal from './modals/ManualCrawlResultsModal';
+import ExtensionInstallModal from './modals/ExtensionInstallModal';
 
 const ExportModal = lazy(() => import('./modals/ExportModal.js'));
 const ImportModal = lazy(() => import('./modals/ImportModal.js'));
@@ -677,7 +678,10 @@ function App() {
   const [showThreatModelModal, setShowThreatModelModal] = useState(false);
   const [showFFUFConfigModal, setShowFFUFConfigModal] = useState(false);
   const [showManualCrawlResultsModal, setShowManualCrawlResultsModal] = useState(false);
+  const [showExtensionInstallModal, setShowExtensionInstallModal] = useState(false);
   const [manualCrawlConnected, setManualCrawlConnected] = useState(false);
+  const [manualCrawlEndpointCount, setManualCrawlEndpointCount] = useState(0);
+  const [manualCrawlSessionCount, setManualCrawlSessionCount] = useState(0);
   const [mechanismsForThreatModel, setMechanismsForThreatModel] = useState([]);
   const [notableObjectsForThreatModel, setNotableObjectsForThreatModel] = useState([]);
   const [securityControlsForThreatModel, setSecurityControlsForThreatModel] = useState([]);
@@ -1874,6 +1878,7 @@ function App() {
     setMostRecentGitHubReconScanStatus(null);
     
     setActiveTarget(target);
+    
     // Update the backend to set this target as active
     try {
       const response = await fetch(
@@ -4096,9 +4101,52 @@ function App() {
     setShowManualCrawlResultsModal(true);
     if (activeTarget) {
       checkManualCrawlConnection();
+      loadManualCrawlMetrics();
     }
   };
   const handleCloseManualCrawlResultsModal = () => setShowManualCrawlResultsModal(false);
+  
+  const handleOpenExtensionInstallModal = () => setShowExtensionInstallModal(true);
+  const handleCloseExtensionInstallModal = () => setShowExtensionInstallModal(false);
+  
+  const handleOpenTargetUrl = () => {
+    if (activeTarget && activeTarget.scope_target) {
+      window.open(activeTarget.scope_target, '_blank');
+    }
+  };
+
+  const loadManualCrawlMetrics = async () => {
+    if (!activeTarget) {
+      setManualCrawlSessionCount(0);
+      setManualCrawlEndpointCount(0);
+      return;
+    }
+    
+    try {
+      const [sessionsResponse, endpointsResponse] = await Promise.all([
+        fetch(`/api/manual-crawl/sessions/${activeTarget.id}`),
+        fetch(`/api/manual-crawl/endpoints/${activeTarget.id}`)
+      ]);
+      
+      if (sessionsResponse.ok) {
+        const sessions = await sessionsResponse.json();
+        setManualCrawlSessionCount(sessions?.length || 0);
+      } else {
+        setManualCrawlSessionCount(0);
+      }
+      
+      if (endpointsResponse.ok) {
+        const endpoints = await endpointsResponse.json();
+        setManualCrawlEndpointCount(endpoints?.length || 0);
+      } else {
+        setManualCrawlEndpointCount(0);
+      }
+    } catch (err) {
+      console.error('Error loading manual crawl metrics:', err);
+      setManualCrawlSessionCount(0);
+      setManualCrawlEndpointCount(0);
+    }
+  };
 
   const checkManualCrawlConnection = async () => {
     if (!activeTarget) return;
@@ -4118,10 +4166,16 @@ function App() {
   };
 
   useEffect(() => {
-    if (activeTarget && activeTarget.type === 'URL') {
-      checkManualCrawlConnection();
-      const interval = setInterval(checkManualCrawlConnection, 15000);
-      return () => clearInterval(interval);
+    if (activeTarget) {
+      loadManualCrawlMetrics();
+      if (activeTarget.type === 'URL') {
+        checkManualCrawlConnection();
+        const interval = setInterval(checkManualCrawlConnection, 15000);
+        return () => clearInterval(interval);
+      }
+    } else {
+      setManualCrawlEndpointCount(0);
+      setManualCrawlSessionCount(0);
     }
   }, [activeTarget]);
   const handleOpenApplicationQuestionsModal = () => setShowApplicationQuestionsModal(true);
@@ -6905,97 +6959,7 @@ function App() {
             {activeTarget.type === 'URL' && (
               <div className="mb-4">
                 <h3 className="text-danger mb-3">URL</h3>
-                <h4 className="text-secondary mb-3 fs-5">Threat Modeling</h4>
-                <HelpMeLearn section="threatModeling" />
-                <Row className="mb-4">
-                  <Col md={12}>
-                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
-                      <Card.Body className="d-flex flex-column">
-                        <Card.Title className="text-danger mb-3">
-                          STRIDE Threat Model
-                        </Card.Title>
-                        <Card.Text className="text-white small fst-italic">
-                          Perform comprehensive threat modeling using the STRIDE methodology to identify security threats across six categories:
-                          <div style={{ columnCount: 2, columnGap: '20px', marginTop: '15px', marginBottom: '15px', textAlign: 'center' }}>
-                            <div style={{ marginBottom: '8px' }}>
-                              <strong>(S)poofing</strong> - Impersonation of users, systems, or data
-                            </div>
-                            <div style={{ marginBottom: '8px' }}>
-                              <strong>(T)ampering</strong> - Malicious modification of data or code
-                            </div>
-                            <div style={{ marginBottom: '8px' }}>
-                              <strong>(R)epudiation</strong> - Denial of actions without proper logging
-                            </div>
-                            <div style={{ marginBottom: '8px' }}>
-                              <strong>(I)nformation Disclosure</strong> - Exposure of sensitive information
-                            </div>
-                            <div style={{ marginBottom: '8px' }}>
-                              <strong>(D)enial of Service</strong> - Preventing legitimate access
-                            </div>
-                            <div style={{ marginBottom: '8px' }}>
-                              <strong>(E)levation of Privilege</strong> - Gaining unauthorized elevated permissions
-                            </div>
-                          </div>
-                          Build your threat model by documenting reconnaissance findings, identifying mechanisms and objects, assessing security controls, and systematically analyzing potential attack vectors and their business impact.
-                        </Card.Text>
-                        <div className="mt-auto">
-                          <Row className="g-2">
-                            <Col>
-                              <Button
-                                variant="outline-danger"
-                                className="w-100"
-                                onClick={handleOpenApplicationQuestionsModal}
-                              >
-                                High-Level Questions
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button
-                                variant="outline-danger"
-                                className="w-100"
-                                onClick={handleOpenMechanismsModal}
-                              >
-                                Mechanisms
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button
-                                variant="outline-danger"
-                                className="w-100"
-                                onClick={handleOpenNotableObjectsModal}
-                              >
-                                Notable Objects
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button
-                                variant="outline-danger"
-                                className="w-100"
-                                onClick={handleOpenSecurityControlsModal}
-                              >
-                                Security Controls
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button
-                                variant="outline-danger"
-                                className="w-100"
-                                onClick={handleOpenThreatModelModal}
-                              >
-                                Threat Model
-                              </Button>
-                            </Col>
-                          </Row>
-                        </div>
-                      </Card.Body>
-                    </Card>
-                  </Col>
-                </Row>
-                <h4 className="text-secondary mb-3 fs-5 mt-4">Manual Crawling</h4>
-                <div className="alert alert-info mb-3" role="alert">
-                  <i className="bi bi-info-circle-fill me-2"></i>
-                  Use the Chrome extension to manually browse the target and capture HTTP traffic
-                </div>
+                <h4 className="text-secondary mb-3 fs-5">Manual Crawling</h4>
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
@@ -7006,16 +6970,28 @@ function App() {
                         <Card.Text className="text-white small fst-italic">
                           Manually explore the target application through interactive browser-based crawling. This hands-on approach allows you to discover authenticated areas, dynamic content, and complex user flows that automated tools may miss. By actively navigating the application as a real user would, you'll build a comprehensive understanding of its functionality, identify potential attack surfaces, and uncover hidden endpoints that require authentication or specific user interactions to access.
                         </Card.Text>
-                        <div className="my-3 py-2" style={{ borderTop: '1px solid #444', borderBottom: '1px solid #444' }}>
+                        <div className="my-3 py-3" style={{ borderTop: '1px solid #444', borderBottom: '1px solid #444' }}>
+                          <Row className="text-center">
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">{manualCrawlEndpointCount}</div>
+                              <div className="text-muted small">Endpoints Discovered</div>
+                            </Col>
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">{manualCrawlSessionCount}</div>
+                              <div className="text-muted small">Crawl Sessions</div>
+                            </Col>
+                          </Row>
+                        </div>
+                        <div className="py-2" style={{ borderBottom: '1px solid #444' }}>
                           {manualCrawlConnected ? (
                             <div className="text-success">
-                              <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
-                              <strong>Extension Connected - Capturing Traffic</strong>
+                              <i className="bi bi-record-circle-fill me-2" style={{ fontSize: '0.8rem' }}></i>
+                              <strong>Actively Recording Session</strong>
                             </div>
                           ) : (
                             <div className="text-muted">
                               <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
-                              Extension Not Connected
+                              No Active Recording
                             </div>
                           )}
                         </div>
@@ -7025,21 +7001,28 @@ function App() {
                               <Button
                                 variant="outline-danger"
                                 className="w-100"
-                                onClick={handleOpenManualCrawlResultsModal}
+                                onClick={handleOpenExtensionInstallModal}
                               >
-                                <i className="bi bi-list-ul me-2"></i>
-                                View Results
+                                Install Extension
                               </Button>
                             </Col>
                             <Col>
                               <Button
-                                variant="outline-info"
+                                variant="outline-danger"
                                 className="w-100"
-                                href="https://github.com/R-s0n/ars0n-framework-v2/tree/main/extension"
-                                target="_blank"
+                                onClick={handleOpenTargetUrl}
+                                disabled={!activeTarget || !activeTarget.scope_target}
                               >
-                                <i className="bi bi-download me-2"></i>
-                                Get Extension
+                                Crawl Target URL
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenManualCrawlResultsModal}
+                              >
+                                View Results
                               </Button>
                             </Col>
                           </Row>
@@ -7228,6 +7211,93 @@ function App() {
                               Results
                             </Button>
                           </div>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
+
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Threat Modeling</h4>
+                <HelpMeLearn section="threatModeling" />
+                <Row className="mb-4">
+                  <Col md={12}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          STRIDE Threat Model
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Perform comprehensive threat modeling using the STRIDE methodology to identify security threats across six categories:
+                          <div style={{ columnCount: 2, columnGap: '20px', marginTop: '15px', marginBottom: '15px', textAlign: 'center' }}>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(S)poofing</strong> - Impersonation of users, systems, or data
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(T)ampering</strong> - Malicious modification of data or code
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(R)epudiation</strong> - Denial of actions without proper logging
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(I)nformation Disclosure</strong> - Exposure of sensitive information
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(D)enial of Service</strong> - Preventing legitimate access
+                            </div>
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong>(E)levation of Privilege</strong> - Gaining unauthorized elevated permissions
+                            </div>
+                          </div>
+                          Build your threat model by documenting reconnaissance findings, identifying mechanisms and objects, assessing security controls, and systematically analyzing potential attack vectors and their business impact.
+                        </Card.Text>
+                        <div className="mt-auto">
+                          <Row className="g-2">
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenApplicationQuestionsModal}
+                              >
+                                High-Level Questions
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenMechanismsModal}
+                              >
+                                Mechanisms
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenNotableObjectsModal}
+                              >
+                                Notable Objects
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenSecurityControlsModal}
+                              >
+                                Security Controls
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenThreatModelModal}
+                              >
+                                Threat Model
+                              </Button>
+                            </Col>
+                          </Row>
                         </div>
                       </Card.Body>
                     </Card>
@@ -7732,6 +7802,11 @@ function App() {
         show={showManualCrawlResultsModal}
         onHide={handleCloseManualCrawlResultsModal}
         scopeTargetId={activeTarget?.id}
+      />
+
+      <ExtensionInstallModal
+        show={showExtensionInstallModal}
+        onHide={handleCloseExtensionInstallModal}
       />
 
       <FFUFConfigModal

@@ -137,6 +137,57 @@ async function loadURLTargets() {
           console.log('[POPUP] Adding target:', t.id, targetUrl);
           return `<option value="${t.id}" data-url="${targetUrl}">${targetUrl}</option>`;
         }).join('');
+      
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (tabs && tabs[0] && tabs[0].url) {
+        const currentUrl = tabs[0].url;
+        console.log('[POPUP] Current tab URL:', currentUrl);
+        
+        try {
+          const currentUrlObj = new URL(currentUrl);
+          const currentHostname = currentUrlObj.hostname.replace(/^www\./, '');
+          const currentProtocol = currentUrlObj.protocol;
+          console.log('[POPUP] Looking for match to:', currentProtocol + '//' + currentHostname, '(www ignored)');
+          
+          const matchingTarget = availableTargets.find(t => {
+            const targetUrl = t.scope_target || t.target || t.url;
+            if (!targetUrl) {
+              console.log('[POPUP] Target has no URL:', t);
+              return false;
+            }
+            
+            try {
+              let targetUrlToCheck = targetUrl;
+              if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+                targetUrlToCheck = 'https://' + targetUrl;
+                console.log('[POPUP] Target missing protocol, assuming https:', targetUrlToCheck);
+              }
+              
+              const targetUrlObj = new URL(targetUrlToCheck);
+              const targetHostname = targetUrlObj.hostname.replace(/^www\./, '');
+              const targetProtocol = targetUrlObj.protocol;
+              
+              const matches = (targetProtocol === currentProtocol) && (targetHostname === currentHostname);
+              console.log('[POPUP] Comparing', targetProtocol + '//' + targetHostname, '===', currentProtocol + '//' + currentHostname, ':', matches);
+              return matches;
+            } catch (e) {
+              console.log('[POPUP] Error parsing target URL:', targetUrl, e.message);
+              return false;
+            }
+          });
+          
+          if (matchingTarget) {
+            console.log('[POPUP] ✓ Auto-selecting matching target:', matchingTarget.id);
+            targetSelect.value = matchingTarget.id;
+          } else {
+            console.log('[POPUP] No matching target found for current tab');
+          }
+        } catch (urlError) {
+          console.log('[POPUP] Could not parse current tab URL:', urlError.message);
+        }
+      } else {
+        console.log('[POPUP] No active tab found or tab has no URL');
+      }
     }
     
     console.log('[POPUP] ✓ Targets loaded successfully');

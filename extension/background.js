@@ -1,3 +1,5 @@
+console.log('[MANUAL-CRAWL] ========== EXTENSION LOADED - VERSION 3.0 WITH WEBREQUEST API ==========');
+
 let captureSession = {
   active: false,
   tabId: null,
@@ -9,7 +11,7 @@ let captureSession = {
     endpointCount: 0
   },
   capturedEndpoints: new Set(),
-  pendingRequests: new Map()
+  requestData: new Map()
 };
 
 let frameworkApiUrl = 'http://localhost/api';
@@ -78,6 +80,34 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
+function isDebuggableUrl(url) {
+  if (!url) return false;
+  
+  const protectedPrefixes = [
+    'chrome://',
+    'chrome-extension://',
+    'edge://',
+    'about:',
+    'view-source:',
+    'chrome-search://',
+    'devtools://'
+  ];
+  
+  if (protectedPrefixes.some(prefix => url.startsWith(prefix))) {
+    return false;
+  }
+  
+  if (url.includes('chrome.google.com/webstore')) {
+    return false;
+  }
+  
+  if (url.includes('microsoftedge.microsoft.com/addons')) {
+    return false;
+  }
+  
+  return true;
+}
+
 async function startCaptureSession(settings) {
   try {
     console.log('[MANUAL-CRAWL] ========== STARTING CAPTURE SESSION ==========');
@@ -87,36 +117,29 @@ async function startCaptureSession(settings) {
     captureSession.settings = settings;
     captureSession.stats = { requestCount: 0, endpointCount: 0 };
     captureSession.capturedEndpoints = new Set();
-    captureSession.pendingRequests = new Map();
+    captureSession.requestData = new Map();
     
     console.log('[MANUAL-CRAWL] Getting current active tab...');
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     
-    if (!tab) {
-      throw new Error('No active tab found');
+    let tab = tabs[0];
+    console.log('[MANUAL-CRAWL] Initial tab found:', tab ? `ID: ${tab.id}, URL: ${tab.url}` : 'none');
+    
+    if (!tab || !isDebuggableUrl(tab.url)) {
+      console.log('[MANUAL-CRAWL] First tab not debuggable, looking for alternative...');
+      const allTabs = await chrome.tabs.query({ windowType: 'normal' });
+      console.log('[MANUAL-CRAWL] All tabs:', allTabs.map(t => `ID: ${t.id}, URL: ${t.url}`));
+      tab = allTabs.find(t => isDebuggableUrl(t.url));
+      
+      if (!tab) {
+        throw new Error('No debuggable tab found. Please open a regular website (http:// or https://) in a tab before starting capture. Extension pages, Chrome internal pages, and browser stores cannot be debugged.');
+      }
+      
+      console.log('[MANUAL-CRAWL] Found alternative debuggable tab:', tab.url);
     }
     
     captureSession.tabId = tab.id;
-    console.log('[MANUAL-CRAWL] ✓ Using current tab:', tab.id, tab.url);
-    
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    console.log('[MANUAL-CRAWL] Attaching debugger to tab', tab.id);
-    await chrome.debugger.attach({ tabId: tab.id }, "1.3");
-    console.log('[MANUAL-CRAWL] ✓ Debugger attached successfully');
-    
-    console.log('[MANUAL-CRAWL] Enabling Network domain...');
-    await chrome.debugger.sendCommand(
-      { tabId: tab.id },
-      "Network.enable"
-    );
-    console.log('[MANUAL-CRAWL] ✓ Network domain enabled');
-    
-    chrome.debugger.onEvent.addListener(handleDebuggerEvent);
-    console.log('[MANUAL-CRAWL] ✓ Event listener registered');
-    
-    chrome.debugger.onDetach.addListener(handleDebuggerDetach);
-    console.log('[MANUAL-CRAWL] ✓ Detach listener registered');
+    console.log('[MANUAL-CRAWL] ✓ Using tab:', tab.id, tab.url);
     
     console.log('[MANUAL-CRAWL] Notifying framework at:', frameworkApiUrl);
     const notifyResult = await notifyFramework('start', { 
@@ -189,18 +212,6 @@ async function stopCaptureSession() {
   try {
     console.log('[MANUAL-CRAWL] Stopping capture session...');
     
-    if (captureSession.tabId) {
-      try {
-        console.log('[MANUAL-CRAWL] Detaching debugger from tab', captureSession.tabId);
-        await chrome.debugger.detach({ tabId: captureSession.tabId });
-      } catch (error) {
-        console.log('[MANUAL-CRAWL] Error detaching debugger:', error.message);
-      }
-    }
-    
-    chrome.debugger.onEvent.removeListener(handleDebuggerEvent);
-    chrome.debugger.onDetach.removeListener(handleDebuggerDetach);
-    
     console.log('[MANUAL-CRAWL] Notifying framework of stop...');
     await notifyFramework('stop', { 
       stats: captureSession.stats 
@@ -215,7 +226,7 @@ async function stopCaptureSession() {
     captureSession.scopeTargetId = null;
     captureSession.settings = null;
     captureSession.capturedEndpoints = new Set();
-    captureSession.pendingRequests = new Map();
+    captureSession.requestData = new Map();
     
     await chrome.storage.local.set({ 
       isCapturing: false,
@@ -242,151 +253,134 @@ async function stopCaptureSession() {
   }
 }
 
-function handleDebuggerEvent(source, method, params) {
-  if (!captureSession.active) {
-    console.log('[MANUAL-CRAWL] Event received but session not active:', method);
-    return;
+function parseRequestBody(requestBody) {
+  if (!requestBody) {
+    return null;
   }
   
-  console.log('[MANUAL-CRAWL] Debugger event:', method);
-  
-  if (method === 'Network.requestWillBeSent') {
-    handleRequestWillBeSent(params);
-  } else if (method === 'Network.responseReceived') {
-    handleResponseReceived(params);
-  } else if (method === 'Network.loadingFinished') {
-    handleLoadingFinished(params);
-  } else if (method === 'Network.loadingFailed') {
-    handleLoadingFailed(params);
+  if (requestBody.formData) {
+    const formData = {};
+    for (const [key, values] of Object.entries(requestBody.formData)) {
+      formData[key] = values.length === 1 ? values[0] : values;
+    }
+    return JSON.stringify(formData);
   }
+  
+  if (requestBody.raw && requestBody.raw.length > 0) {
+    try {
+      const bytes = requestBody.raw[0].bytes;
+      if (bytes) {
+        const decoder = new TextDecoder('utf-8');
+        const uint8Array = new Uint8Array(bytes);
+        return decoder.decode(uint8Array);
+      }
+    } catch (error) {
+      console.error('[MANUAL-CRAWL] Error parsing raw request body:', error);
+    }
+  }
+  
+  return null;
 }
 
-async function handleDebuggerDetach(source, reason) {
-  console.log('[MANUAL-CRAWL] ========== DEBUGGER DETACHED ==========');
-  console.log('[MANUAL-CRAWL] Tab:', source.tabId, 'Reason:', reason);
-  console.log('[MANUAL-CRAWL] Session active:', captureSession.active, 'Session tab:', captureSession.tabId);
-  
-  if (!captureSession.active) {
-    console.log('[MANUAL-CRAWL] Session already inactive, ignoring detach');
-    return;
-  }
-  
-  if (source.tabId !== captureSession.tabId) {
-    console.log('[MANUAL-CRAWL] Detach from different tab, ignoring');
-    return;
-  }
-  
-  if (reason === 'target_closed') {
-    console.log('[MANUAL-CRAWL] Tab closed, stopping session');
-    await stopCaptureSession();
-    return;
-  }
-  
-  if (reason === 'canceled_by_user') {
-    console.log('[MANUAL-CRAWL] User canceled debugging (DevTools closed or manual), re-attaching...');
-  } else {
-    console.log('[MANUAL-CRAWL] Unexpected detach (reason: ' + reason + '), re-attaching...');
-  }
-  
-  try {
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    const tab = await chrome.tabs.get(source.tabId);
-    if (!tab) {
-      console.log('[MANUAL-CRAWL] Tab no longer exists, stopping session');
-      await stopCaptureSession();
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (!captureSession.active || details.tabId !== captureSession.tabId) {
       return;
     }
     
-    console.log('[MANUAL-CRAWL] Re-attaching debugger to tab', source.tabId);
-    await chrome.debugger.attach({ tabId: source.tabId }, "1.3");
-    await chrome.debugger.sendCommand({ tabId: source.tabId }, "Network.enable");
-    console.log('[MANUAL-CRAWL] ✓ Successfully re-attached debugger');
+    if (!shouldCaptureRequest(details.url)) {
+      return;
+    }
     
-    setTimeout(() => {
-      chrome.tabs.sendMessage(source.tabId, { 
-        action: 'showRecordingIndicator' 
-      }).catch(err => {
-        console.log('[MANUAL-CRAWL] Could not show indicator after re-attach:', err.message);
+    console.log('[MANUAL-CRAWL] Request detected:', details.method, details.url);
+    
+    const requestBody = parseRequestBody(details.requestBody);
+    if (requestBody) {
+      console.log('[MANUAL-CRAWL] Request body captured (for ' + details.method + '):', requestBody.substring(0, 200));
+    }
+    
+    captureSession.requestData.set(details.requestId, {
+      url: details.url,
+      method: details.method,
+      timestamp: Date.now(),
+      requestId: details.requestId,
+      postData: requestBody
+    });
+  },
+  { urls: ["<all_urls>"] },
+  ["requestBody"]
+);
+
+chrome.webRequest.onSendHeaders.addListener(
+  (details) => {
+    if (!captureSession.active || details.tabId !== captureSession.tabId) {
+      return;
+    }
+    
+    const request = captureSession.requestData.get(details.requestId);
+    if (request) {
+      request.headers = {};
+      details.requestHeaders?.forEach(header => {
+        request.headers[header.name] = header.value;
       });
-      
-      chrome.tabs.sendMessage(source.tabId, {
-        action: 'updateStats',
-        stats: captureSession.stats
-      }).catch(() => {});
-    }, 500);
-  } catch (error) {
-    console.error('[MANUAL-CRAWL] ✗ Failed to re-attach debugger:', error);
-    console.log('[MANUAL-CRAWL] Will try again on next navigation or manual restart');
-  }
-}
+    }
+  },
+  { urls: ["<all_urls>"] },
+  ["requestHeaders"]
+);
 
-function handleRequestWillBeSent(params) {
-  const request = params.request;
-  const requestId = params.requestId;
-  
-  console.log('[MANUAL-CRAWL] Request detected:', request.method, request.url);
-  
-  if (!shouldCaptureRequest(request.url)) {
-    return;
-  }
-  
-  console.log('[MANUAL-CRAWL] ✓ Adding to pending requests:', request.method, request.url);
-  
-  captureSession.pendingRequests.set(requestId, {
-    url: request.url,
-    method: request.method,
-    headers: request.headers,
-    postData: request.postData,
-    timestamp: params.timestamp,
-    requestId: requestId
-  });
-  
-  console.log('[MANUAL-CRAWL] Pending requests count:', captureSession.pendingRequests.size);
-}
+chrome.webRequest.onHeadersReceived.addListener(
+  (details) => {
+    if (!captureSession.active || details.tabId !== captureSession.tabId) {
+      return;
+    }
+    
+    const request = captureSession.requestData.get(details.requestId);
+    if (request) {
+      request.statusCode = details.statusCode;
+      request.responseHeaders = {};
+      details.responseHeaders?.forEach(header => {
+        request.responseHeaders[header.name] = header.value;
+      });
+    }
+  },
+  { urls: ["<all_urls>"] },
+  ["responseHeaders"]
+);
 
-function handleResponseReceived(params) {
-  const requestId = params.requestId;
-  const response = params.response;
-  
-  if (!captureSession.pendingRequests.has(requestId)) {
-    console.log('[MANUAL-CRAWL] Response for unknown request:', requestId);
-    return;
-  }
-  
-  console.log('[MANUAL-CRAWL] Response received:', response.status, response.url);
-  
-  const request = captureSession.pendingRequests.get(requestId);
-  request.statusCode = response.status;
-  request.responseHeaders = response.headers;
-  request.mimeType = response.mimeType;
-}
+chrome.webRequest.onCompleted.addListener(
+  (details) => {
+    if (!captureSession.active || details.tabId !== captureSession.tabId) {
+      return;
+    }
+    
+    const request = captureSession.requestData.get(details.requestId);
+    if (request) {
+      console.log('[MANUAL-CRAWL] Request completed:', request.method, request.url);
+      processAndSendRequest(request);
+      captureSession.requestData.delete(details.requestId);
+    }
+  },
+  { urls: ["<all_urls>"] }
+);
 
-async function handleLoadingFinished(params) {
-  const requestId = params.requestId;
-  
-  if (!captureSession.pendingRequests.has(requestId)) {
-    console.log('[MANUAL-CRAWL] Loading finished for unknown request:', requestId);
-    return;
-  }
-  
-  console.log('[MANUAL-CRAWL] Loading finished for request:', requestId);
-  
-  const request = captureSession.pendingRequests.get(requestId);
-  captureSession.pendingRequests.delete(requestId);
-  
-  console.log('[MANUAL-CRAWL] Processing request:', request.method, request.url);
-  await processAndSendRequest(request);
-}
-
-function handleLoadingFailed(params) {
-  const requestId = params.requestId;
-  captureSession.pendingRequests.delete(requestId);
-}
+chrome.webRequest.onErrorOccurred.addListener(
+  (details) => {
+    if (!captureSession.active || details.tabId !== captureSession.tabId) {
+      return;
+    }
+    
+    captureSession.requestData.delete(details.requestId);
+  },
+  { urls: ["<all_urls>"] }
+);
 
 function shouldCaptureRequest(url) {
   if (!captureSession.settings) {
-    console.log('[MANUAL-CRAWL] No settings, skipping:', url);
+    return false;
+  }
+  
+  if (!isDebuggableUrl(url)) {
     return false;
   }
   
@@ -394,16 +388,12 @@ function shouldCaptureRequest(url) {
     const requestUrl = new URL(url);
     const targetUrl = new URL(captureSession.settings.targetUrl);
     
-    console.log('[MANUAL-CRAWL] Checking URL:', requestUrl.hostname, 'vs target:', targetUrl.hostname);
-    
     if (captureSession.settings.includeSubdomains) {
       if (!requestUrl.hostname.endsWith(targetUrl.hostname) && !requestUrl.hostname.includes(targetUrl.hostname.replace('www.', ''))) {
-        console.log('[MANUAL-CRAWL] Hostname mismatch (with subdomains)');
         return false;
       }
     } else {
       if (requestUrl.hostname !== targetUrl.hostname) {
-        console.log('[MANUAL-CRAWL] Hostname mismatch (exact)');
         return false;
       }
     }
@@ -412,12 +402,10 @@ function shouldCaptureRequest(url) {
       const staticExtensions = ['.css', '.js', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot'];
       const pathname = requestUrl.pathname.toLowerCase();
       if (staticExtensions.some(ext => pathname.endsWith(ext))) {
-        console.log('[MANUAL-CRAWL] Static file, skipping:', pathname);
         return false;
       }
     }
     
-    console.log('[MANUAL-CRAWL] ✓ Should capture:', url);
     return true;
   } catch (error) {
     console.error('[MANUAL-CRAWL] Error in shouldCaptureRequest:', error);
@@ -444,6 +432,22 @@ async function processAndSendRequest(request) {
       return;
     }
     
+    const urlObj = new URL(request.url);
+    const getParams = {};
+    urlObj.searchParams.forEach((value, key) => {
+      if (getParams[key]) {
+        if (Array.isArray(getParams[key])) {
+          getParams[key].push(value);
+        } else {
+          getParams[key] = [getParams[key], value];
+        }
+      } else {
+        getParams[key] = value;
+      }
+    });
+    
+    const contentType = request.headers?.['content-type'] || request.headers?.['Content-Type'] || '';
+    
     const captureData = {
       url: request.url,
       endpoint: endpoint,
@@ -451,15 +455,61 @@ async function processAndSendRequest(request) {
       statusCode: request.statusCode || 0,
       headers: request.headers || {},
       responseHeaders: request.responseHeaders || {},
-      timestamp: new Date(request.timestamp * 1000).toISOString(),
-      mimeType: request.mimeType || 'unknown'
+      timestamp: new Date(request.timestamp).toISOString(),
+      mimeType: request.responseHeaders?.['content-type'] || 'unknown',
+      getParams: Object.keys(getParams).length > 0 ? getParams : null,
+      postParams: null,
+      bodyType: contentType
     };
     
     if (request.postData) {
       captureData.postData = request.postData;
+      
+      if (contentType.includes('application/json')) {
+        try {
+          captureData.postParams = JSON.parse(request.postData);
+        } catch (e) {
+          console.log('[MANUAL-CRAWL] Could not parse JSON body');
+        }
+      } else if (contentType.includes('application/x-www-form-urlencoded')) {
+        try {
+          const params = new URLSearchParams(request.postData);
+          const postParams = {};
+          params.forEach((value, key) => {
+            if (postParams[key]) {
+              if (Array.isArray(postParams[key])) {
+                postParams[key].push(value);
+              } else {
+                postParams[key] = [postParams[key], value];
+              }
+            } else {
+              postParams[key] = value;
+            }
+          });
+          captureData.postParams = postParams;
+        } catch (e) {
+          console.log('[MANUAL-CRAWL] Could not parse form data');
+        }
+      }
     }
     
-    console.log('[MANUAL-CRAWL] Sending to framework:', captureData);
+    console.log('[MANUAL-CRAWL] Captured request data:');
+    console.log('  URL:', captureData.url);
+    console.log('  Method:', captureData.method);
+    console.log('  Status:', captureData.statusCode);
+    if (captureData.getParams) {
+      console.log('  GET params:', captureData.getParams);
+    }
+    if (captureData.postParams) {
+      console.log('  POST params:', captureData.postParams);
+    }
+    if (captureData.bodyType) {
+      console.log('  Body type:', captureData.bodyType);
+    }
+    if (captureData.postData && !captureData.postParams) {
+      console.log('  Raw body (first 200 chars):', captureData.postData.substring(0, 200));
+    }
+    
     await sendToFramework(captureData);
     
     await chrome.storage.local.set({ 
@@ -467,7 +517,6 @@ async function processAndSendRequest(request) {
       isCapturing: true,
       captureTabId: captureSession.tabId
     });
-    console.log('[MANUAL-CRAWL] ✓ Storage updated with stats:', captureSession.stats);
     
     chrome.runtime.sendMessage({
       action: 'updateStats',
@@ -516,7 +565,6 @@ function extractEndpoint(url) {
 
 async function sendToFramework(data) {
   try {
-    console.log('[MANUAL-CRAWL] Sending to:', `${frameworkApiUrl}/manual-crawl/capture`);
     const response = await fetch(`${frameworkApiUrl}/manual-crawl/capture`, {
       method: 'POST',
       headers: {

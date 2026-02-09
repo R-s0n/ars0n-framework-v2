@@ -1,36 +1,29 @@
 import React, { useState, useEffect } from 'react';
-import { Modal, Button, Table, Badge, Tabs, Tab, Alert, Spinner } from 'react-bootstrap';
+import { Modal, Button, Accordion, Badge, Alert, Spinner, Tabs, Tab } from 'react-bootstrap';
 
 const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
   const [sessions, setSessions] = useState([]);
-  const [selectedSession, setSelectedSession] = useState(null);
   const [captures, setCaptures] = useState([]);
-  const [endpoints, setEndpoints] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState('sessions');
+  const [activeTab, setActiveTab] = useState('endpoints');
   const [allSessions, setAllSessions] = useState([]);
 
   useEffect(() => {
     if (show && scopeTargetId) {
       loadSessions();
-      loadEndpoints();
       loadAllSessions();
+      loadAllCaptures();
     }
   }, [show, scopeTargetId]);
 
   const handleRefresh = () => {
     loadSessions();
-    loadEndpoints();
     loadAllSessions();
-    if (selectedSession) {
-      loadCaptures(selectedSession);
-    }
+    loadAllCaptures();
   };
 
   const loadSessions = async () => {
-    setLoading(true);
-    setError('');
     try {
       const response = await fetch(`/api/manual-crawl/sessions/${scopeTargetId}`);
       if (response.ok) {
@@ -41,8 +34,6 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
       }
     } catch (err) {
       setError('Error connecting to framework: ' + err.message);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -60,27 +51,85 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
     }
   };
 
-  const loadEndpoints = async () => {
-    try {
-      const response = await fetch(`/api/manual-crawl/endpoints/${scopeTargetId}`);
-      if (response.ok) {
-        const data = await response.json();
-        setEndpoints(data || []);
+  const getParameterSignature = (capture) => {
+    const getParamNames = capture.get_params 
+      ? Object.keys(capture.get_params).sort().join(',') 
+      : '';
+    
+    let bodySignature = '';
+    if (capture.post_params) {
+      bodySignature = Object.keys(capture.post_params).sort().join(',');
+    } else if (capture.post_data) {
+      bodySignature = `RAW_BODY:${capture.body_type || 'unknown'}`;
+    }
+    
+    if (getParamNames && bodySignature) {
+      return `GET:${getParamNames}|BODY:${bodySignature}`;
+    } else if (getParamNames) {
+      return `GET:${getParamNames}`;
+    } else if (bodySignature) {
+      return `BODY:${bodySignature}`;
+    }
+    return 'NO_PARAMS';
+  };
+
+  const groupCapturesByEndpoint = (captures) => {
+    const grouped = {};
+    
+    captures.forEach(capture => {
+      const paramSignature = getParameterSignature(capture);
+      const key = `${capture.method}:${capture.endpoint}:${paramSignature}`;
+      
+      if (!grouped[key]) {
+        grouped[key] = {
+          ...capture,
+          paramSignature: paramSignature
+        };
+      } else {
+        if (new Date(capture.timestamp) > new Date(grouped[key].timestamp)) {
+          grouped[key] = {
+            ...capture,
+            paramSignature: paramSignature
+          };
+        }
       }
+    });
+    
+    return Object.values(grouped).sort((a, b) => 
+      new Date(b.timestamp) - new Date(a.timestamp)
+    );
+  };
+
+  const loadAllCaptures = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const allCaptures = [];
+      for (const session of sessions) {
+        const response = await fetch(`/api/manual-crawl/captures/${session.id}`);
+        if (response.ok) {
+          const data = await response.json();
+          allCaptures.push(...(data || []));
+        }
+      }
+      const uniqueEndpoints = groupCapturesByEndpoint(allCaptures);
+      setCaptures(uniqueEndpoints);
     } catch (err) {
-      console.error('Error loading endpoints:', err);
+      setError('Error loading captures: ' + err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const loadCaptures = async (sessionId) => {
+  const loadSessionCaptures = async (sessionId) => {
     setLoading(true);
     try {
       const response = await fetch(`/api/manual-crawl/captures/${sessionId}`);
       if (response.ok) {
         const data = await response.json();
-        setCaptures(data || []);
-        setSelectedSession(sessionId);
-        setActiveTab('captures');
+        const uniqueEndpoints = groupCapturesByEndpoint(data || []);
+        setCaptures(uniqueEndpoints);
+        setActiveTab('endpoints');
       }
     } catch (err) {
       setError('Error loading captures: ' + err.message);
@@ -88,6 +137,12 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (sessions.length > 0 && captures.length === 0 && activeTab === 'endpoints') {
+      loadAllCaptures();
+    }
+  }, [sessions]);
 
   const formatDate = (dateString) => {
     if (!dateString) return 'N/A';
@@ -114,15 +169,94 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
     return <Badge bg={variants[method] || 'secondary'}>{method}</Badge>;
   };
 
+  const buildRawRequest = (capture) => {
+    let raw = `${capture.method} ${new URL(capture.url).pathname}${new URL(capture.url).search} HTTP/1.1\n`;
+    raw += `Host: ${new URL(capture.url).hostname}\n`;
+    
+    if (capture.headers) {
+      Object.entries(capture.headers).forEach(([key, value]) => {
+        raw += `${key}: ${value}\n`;
+      });
+    }
+    
+    raw += '\n';
+    if (capture.post_data) {
+      raw += capture.post_data;
+    }
+    
+    return raw;
+  };
+
+  const buildRawResponse = (capture) => {
+    let raw = `HTTP/1.1 ${capture.status_code} ${capture.status_code < 400 ? 'OK' : 'Error'}\n`;
+    
+    if (capture.response_headers) {
+      Object.entries(capture.response_headers).forEach(([key, value]) => {
+        raw += `${key}: ${value}\n`;
+      });
+    }
+    
+    raw += '\n';
+    if (capture.response_body) {
+      raw += capture.response_body;
+    } else {
+      raw += '(Response body not captured)';
+    }
+    
+    return raw;
+  };
+
   return (
-    <Modal show={show} onHide={onHide} size="xl">
+    <Modal show={show} onHide={onHide} size="xl" fullscreen="lg-down">
+      <style>
+        {`
+          .accordion-button {
+            background-color: #343a40 !important;
+            color: white !important;
+          }
+          .accordion-button:not(.collapsed) {
+            background-color: #343a40 !important;
+            color: white !important;
+          }
+          .accordion-button:focus {
+            box-shadow: none !important;
+          }
+          .accordion-button::after {
+            filter: invert(1);
+          }
+          .list-group-item-action:hover {
+            background-color: #3a3a3a !important;
+          }
+          .list-group-item-action:focus {
+            background-color: #3a3a3a !important;
+          }
+          .nav-tabs {
+            border-bottom: 1px solid #495057;
+          }
+          .nav-tabs .nav-link {
+            color: #adb5bd;
+            background-color: transparent;
+            border: none;
+          }
+          .nav-tabs .nav-link:hover {
+            color: white;
+            border: none;
+          }
+          .nav-tabs .nav-link.active {
+            color: #dc3545;
+            background-color: transparent;
+            border: none;
+            border-bottom: 2px solid #dc3545;
+          }
+        `}
+      </style>
       <Modal.Header closeButton className="bg-dark text-white">
         <Modal.Title>
           <i className="bi bi-cursor-fill me-2"></i>
           Manual Crawling Results
         </Modal.Title>
       </Modal.Header>
-      <Modal.Body className="bg-dark text-white">
+      <Modal.Body className="bg-dark text-white" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
         {error && (
           <Alert variant="danger" onClose={() => setError('')} dismissible>
             {error}
@@ -134,17 +268,17 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
           onSelect={(k) => setActiveTab(k)}
           className="mb-3"
         >
-          <Tab eventKey="sessions" title={`Sessions (${sessions.length})`}>
-            {loading && activeTab === 'sessions' ? (
+          <Tab eventKey="endpoints" title={`Endpoints (${captures.length})`}>
+            {loading ? (
               <div className="text-center py-5">
                 <Spinner animation="border" variant="danger" />
-                <p className="mt-3">Loading sessions...</p>
+                <p className="mt-3">Loading endpoints...</p>
               </div>
-            ) : sessions.length === 0 ? (
+            ) : captures.length === 0 ? (
               <>
                 <Alert variant="info">
                   <i className="bi bi-info-circle me-2"></i>
-                  No capture sessions found for this target. Start the Chrome extension and begin capturing to see results here.
+                  No endpoints captured yet. Start the Chrome extension and begin capturing to see results here.
                 </Alert>
                 {allSessions.length > 0 && (
                   <Alert variant="warning">
@@ -157,147 +291,179 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                         </li>
                       ))}
                     </ul>
-                    <div className="mt-3 small">
-                      <i className="bi bi-info-circle me-1"></i>
-                      These sessions are for different targets. The extension auto-creates targets based on the crawled domain. To view these results, find the corresponding target in your scope list.
-                    </div>
                   </Alert>
                 )}
               </>
             ) : (
-              <Table striped bordered hover variant="dark">
-                <thead>
-                  <tr>
-                    <th>Status</th>
-                    <th>Target URL</th>
-                    <th>Started</th>
-                    <th>Ended</th>
-                    <th>Requests</th>
-                    <th>Endpoints</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sessions.map((session) => (
-                    <tr key={session.id}>
-                      <td>{getStatusBadge(session.status)}</td>
-                      <td>
-                        <small className="text-info">{session.target_url}</small>
-                      </td>
-                      <td>
-                        <small>{formatDate(session.started_at)}</small>
-                      </td>
-                      <td>
-                        <small>{formatDate(session.ended_at)}</small>
-                      </td>
-                      <td>
-                        <Badge bg="info">{session.request_count || 0}</Badge>
-                      </td>
-                      <td>
-                        <Badge bg="success">{session.endpoint_count || 0}</Badge>
-                      </td>
-                      <td>
-                        <Button
-                          variant="outline-danger"
-                          size="sm"
-                          onClick={() => loadCaptures(session.id)}
-                        >
-                          <i className="bi bi-eye me-1"></i>
-                          View Details
-                        </Button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </Table>
-            )}
-          </Tab>
-
-          <Tab eventKey="endpoints" title={`Endpoints (${endpoints.length})`}>
-            {endpoints.length === 0 ? (
-              <Alert variant="info">
-                <i className="bi bi-info-circle me-2"></i>
-                No endpoints discovered yet.
-              </Alert>
-            ) : (
-              <Table striped bordered hover variant="dark">
-                <thead>
-                  <tr>
-                    <th>Method</th>
-                    <th>Endpoint</th>
-                    <th>Request Count</th>
-                    <th>First Seen</th>
-                    <th>Last Seen</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {endpoints.map((endpoint, idx) => (
-                    <tr key={idx}>
-                      <td>{getMethodBadge(endpoint.method)}</td>
-                      <td>
-                        <code className="text-warning">{endpoint.endpoint}</code>
-                      </td>
-                      <td>
-                        <Badge bg="info">{endpoint.request_count}</Badge>
-                      </td>
-                      <td>
-                        <small>{formatDate(endpoint.first_seen)}</small>
-                      </td>
-                      <td>
-                        <small>{formatDate(endpoint.last_seen)}</small>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </Table>
-            )}
-          </Tab>
-
-          <Tab eventKey="captures" title="Request Details" disabled={!selectedSession}>
-            {loading ? (
-              <div className="text-center py-5">
-                <Spinner animation="border" variant="danger" />
-                <p className="mt-3">Loading request details...</p>
-              </div>
-            ) : captures.length === 0 ? (
-              <Alert variant="info">
-                <i className="bi bi-info-circle me-2"></i>
-                Select a session to view captured requests.
-              </Alert>
-            ) : (
-              <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
-                <Table striped bordered hover variant="dark" size="sm">
-                  <thead>
-                    <tr>
-                      <th>Timestamp</th>
-                      <th>Method</th>
-                      <th>URL</th>
-                      <th>Status</th>
-                      <th>Type</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {captures.map((capture) => (
-                      <tr key={capture.id}>
-                        <td>
-                          <small>{formatDate(capture.timestamp)}</small>
-                        </td>
-                        <td>{getMethodBadge(capture.method)}</td>
-                        <td>
-                          <small className="text-info">{capture.url}</small>
-                        </td>
-                        <td>
-                          <Badge bg={capture.status_code < 400 ? 'success' : 'danger'}>
+              <Accordion>
+                {captures.map((capture, index) => (
+                  <Accordion.Item 
+                    eventKey={index.toString()} 
+                    key={capture.id} 
+                    className="border-secondary mb-2"
+                    style={{ backgroundColor: '#2b2b2b' }}
+                  >
+                    <Accordion.Header style={{ backgroundColor: '#343a40' }}>
+                      <div className="d-flex justify-content-between align-items-center w-100 me-3">
+                        <div className="d-flex align-items-center flex-grow-1">
+                          {getMethodBadge(capture.method)}
+                          <code className="text-info ms-2" style={{ fontSize: '0.9rem' }}>
+                            {capture.endpoint}
+                          </code>
+                          {capture.get_params && Object.keys(capture.get_params).length > 0 && (
+                            <Badge bg="primary" className="ms-2" style={{ fontSize: '0.7rem' }}>
+                              ?{Object.keys(capture.get_params).join(', ')}
+                            </Badge>
+                          )}
+                          {capture.post_params && Object.keys(capture.post_params).length > 0 && (
+                            <Badge bg="success" className="ms-2" style={{ fontSize: '0.7rem' }}>
+                              body: {Object.keys(capture.post_params).join(', ')}
+                            </Badge>
+                          )}
+                          {!capture.post_params && capture.post_data && (
+                            <Badge bg="warning" className="ms-2" style={{ fontSize: '0.7rem' }}>
+                              body: {capture.body_type || 'raw'}
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="d-flex align-items-center">
+                          <Badge bg={capture.status_code < 400 ? 'success' : 'danger'} className="me-2">
                             {capture.status_code}
                           </Badge>
-                        </td>
-                        <td>
-                          <small className="text-muted">{capture.mime_type}</small>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </Table>
+                          <small className="text-light">{formatDate(capture.timestamp)}</small>
+                        </div>
+                      </div>
+                    </Accordion.Header>
+                    <Accordion.Body className="text-white" style={{ backgroundColor: '#2b2b2b' }}>
+                      <div className="mb-3">
+                        <strong className="text-warning d-block mb-1">Full URL:</strong>
+                        <code className="text-info small">{capture.url}</code>
+                      </div>
+
+                      {capture.get_params && Object.keys(capture.get_params).length > 0 && (
+                        <div className="mb-3">
+                          <strong className="text-warning d-block mb-1">
+                            <i className="bi bi-question-circle me-1"></i>
+                            GET Parameters:
+                          </strong>
+                          <pre className="bg-dark text-white p-2 rounded" style={{ fontSize: '0.85rem', maxHeight: '150px', overflowY: 'auto' }}>
+                            {JSON.stringify(capture.get_params, null, 2)}
+                          </pre>
+                        </div>
+                      )}
+
+                      {(capture.post_params || capture.post_data) && (
+                        <div className="mb-3">
+                          <strong className="text-success d-block mb-1">
+                            <i className="bi bi-file-earmark-text me-1"></i>
+                            Request Body:
+                            {capture.body_type && (
+                              <Badge bg="secondary" className="ms-2" style={{ fontSize: '0.7rem' }}>
+                                {capture.body_type}
+                              </Badge>
+                            )}
+                          </strong>
+                          {capture.post_params ? (
+                            <pre className="bg-dark text-white p-2 rounded" style={{ fontSize: '0.85rem', maxHeight: '150px', overflowY: 'auto' }}>
+                              {JSON.stringify(capture.post_params, null, 2)}
+                            </pre>
+                          ) : (
+                            <pre className="bg-dark text-white p-2 rounded" style={{ fontSize: '0.85rem', maxHeight: '150px', overflowY: 'auto' }}>
+                              {capture.post_data}
+                            </pre>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="row mb-3">
+                        <div className="col-md-6">
+                          <strong className="text-info d-block mb-1">
+                            <i className="bi bi-box-arrow-up-right me-1"></i>
+                            Request Headers:
+                          </strong>
+                          {capture.headers && Object.keys(capture.headers).length > 0 ? (
+                            <pre className="bg-dark text-white p-2 rounded" style={{ fontSize: '0.75rem', maxHeight: '150px', overflowY: 'auto' }}>
+                              {JSON.stringify(capture.headers, null, 2)}
+                            </pre>
+                          ) : (
+                            <div className="text-light small" style={{ opacity: 0.6 }}>No headers captured</div>
+                          )}
+                        </div>
+                        <div className="col-md-6">
+                          <strong className="text-info d-block mb-1">
+                            <i className="bi bi-box-arrow-in-down me-1"></i>
+                            Response Headers:
+                          </strong>
+                          {capture.response_headers && Object.keys(capture.response_headers).length > 0 ? (
+                            <pre className="bg-dark text-white p-2 rounded" style={{ fontSize: '0.75rem', maxHeight: '150px', overflowY: 'auto' }}>
+                              {JSON.stringify(capture.response_headers, null, 2)}
+                            </pre>
+                          ) : (
+                            <div className="text-light small" style={{ opacity: 0.6 }}>No headers captured</div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="row">
+                        <div className="col-md-6 mb-3">
+                          <strong className="text-warning d-block mb-1">
+                            <i className="bi bi-code-square me-1"></i>
+                            Raw HTTP Request:
+                          </strong>
+                          <pre className="bg-dark text-white p-2 rounded" style={{ fontSize: '0.75rem', maxHeight: '300px', overflowY: 'auto', whiteSpace: 'pre-wrap' }}>
+                            {buildRawRequest(capture)}
+                          </pre>
+                        </div>
+                        <div className="col-md-6 mb-3">
+                          <strong className="text-success d-block mb-1">
+                            <i className="bi bi-reply me-1"></i>
+                            Raw HTTP Response:
+                          </strong>
+                          <pre className="bg-dark text-white p-2 rounded" style={{ fontSize: '0.75rem', maxHeight: '300px', overflowY: 'auto', whiteSpace: 'pre-wrap' }}>
+                            {buildRawResponse(capture)}
+                          </pre>
+                        </div>
+                      </div>
+                    </Accordion.Body>
+                  </Accordion.Item>
+                ))}
+              </Accordion>
+            )}
+          </Tab>
+
+          <Tab eventKey="sessions" title={`Sessions (${sessions.length})`}>
+            {sessions.length === 0 ? (
+              <Alert variant="info">
+                <i className="bi bi-info-circle me-2"></i>
+                No capture sessions found for this target.
+              </Alert>
+            ) : (
+              <div className="list-group">
+                {sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className="list-group-item list-group-item-action text-white border-secondary mb-2"
+                    onClick={() => loadSessionCaptures(session.id)}
+                    style={{ cursor: 'pointer', backgroundColor: '#2b2b2b' }}
+                  >
+                    <div className="d-flex justify-content-between align-items-center">
+                      <div>
+                        <h6 className="mb-1 text-white">
+                          {getStatusBadge(session.status)}
+                          <span className="ms-2 text-info">{session.target_url}</span>
+                        </h6>
+                        <small className="text-light" style={{ opacity: 0.7 }}>
+                          Started: {formatDate(session.started_at)}
+                          {session.ended_at && ` | Ended: ${formatDate(session.ended_at)}`}
+                        </small>
+                      </div>
+                      <div>
+                        <Badge bg="info" className="me-2">{session.request_count || 0} requests</Badge>
+                        <Badge bg="success">{session.endpoint_count || 0} endpoints</Badge>
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </Tab>
