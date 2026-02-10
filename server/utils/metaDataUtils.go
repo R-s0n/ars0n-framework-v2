@@ -1529,6 +1529,7 @@ func ExecuteFfufScan(url string, scopeTargetID string) error {
 		"-c",
 		"-r",
 		"-t", "50",
+		"-sa",
 	)
 
 	var stderr bytes.Buffer
@@ -1536,10 +1537,22 @@ func ExecuteFfufScan(url string, scopeTargetID string) error {
 
 	log.Printf("[DEBUG] Running ffuf command: %s", cmd.String())
 	if err := cmd.Run(); err != nil {
-		log.Printf("[ERROR] ffuf scan failed for URL %s: %v\nStderr: %s",
-			url, err, stderr.String())
+		stderrOutput := stderr.String()
+		log.Printf("[ERROR] ffuf scan failed for URL %s: %v\nStderr: %s", url, err, stderrOutput)
+		
+		if strings.Contains(stderrOutput, "403 Forbidden") || strings.Contains(stderrOutput, "95%") {
+			return fmt.Errorf("ffuf scan stopped: more than 95%% of responses returned 403 Forbidden - target may be blocking requests")
+		} else if strings.Contains(stderrOutput, "spurious") {
+			return fmt.Errorf("ffuf scan stopped: spurious errors detected - %s", stderrOutput)
+		}
 		return fmt.Errorf("ffuf scan failed: %v", err)
 	}
+	
+	stderrOutput := stderr.String()
+	if strings.Contains(stderrOutput, "stopped") || strings.Contains(stderrOutput, "403") {
+		log.Printf("[WARN] FFUF may have stopped early for URL %s: %s", url, stderrOutput)
+	}
+	
 	log.Printf("[INFO] Completed ffuf scan for URL: %s", url)
 
 	// Read and parse results

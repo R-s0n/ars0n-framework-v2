@@ -50,6 +50,9 @@ type FFUFConfig struct {
 	ProxyURL           string              `json:"proxyURL"`
 	ClientCert         string              `json:"clientCert"`
 	ClientKey          string              `json:"clientKey"`
+	StopOnAll          bool                `json:"stopOnAll"`
+	StopOn403          bool                `json:"stopOn403"`
+	StopOnErrors       bool                `json:"stopOnErrors"`
 }
 
 type FFUFWordlist struct {

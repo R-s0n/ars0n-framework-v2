@@ -650,40 +650,19 @@ func processURLGroup(urls []string, isDirect bool, scanID, scanType, scopeTarget
 			continue
 		}
 		
-		paramPositions := detectPathParametersByEntropy(groupURLs, 3)
-		
-		normalizedGroups := make(map[string][]string)
-		
 		for _, urlStr := range groupURLs {
 			if processedURLs[urlStr] {
 				continue
 			}
+			processedURLs[urlStr] = true
 			
-			normalizedURL := urlStr
-			if len(paramPositions) > 0 {
-				normalizedURL = normalizePathWithDetectedParams(urlStr, paramPositions)
-			}
-			normalizedGroups[normalizedURL] = append(normalizedGroups[normalizedURL], urlStr)
-		}
-		
-		for normalizedURL, originalURLs := range normalizedGroups {
-			representativeURL := originalURLs[0]
-			processedURLs[representativeURL] = true
+			endpoint := createEndpoint(urlStr, scanID, scanType, scopeTargetID, isDirect)
+			endpoint.NormalizedPath = endpoint.Path
 			
-			endpoint := createEndpoint(representativeURL, scanID, scanType, scopeTargetID, isDirect)
-			endpoint.NormalizedPath = extractPath(normalizedURL)
-			
-			queryParams := extractQueryParameters(representativeURL)
+			queryParams := extractQueryParameters(urlStr)
 			endpoint.Parameters = append(endpoint.Parameters, queryParams...)
 			
-			pathParams := extractPathParameters(representativeURL, normalizedURL)
-			endpoint.Parameters = append(endpoint.Parameters, pathParams...)
-			
 			endpoints = append(endpoints, endpoint)
-			
-			for i := 1; i < len(originalURLs); i++ {
-				processedURLs[originalURLs[i]] = true
-			}
 		}
 	}
 	
@@ -716,9 +695,16 @@ func createEndpoint(urlStr, scanID, scanType, scopeTargetID string, isDirect boo
 func extractPath(urlStr string) string {
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
-		return ""
+		return "/"
 	}
-	return parsedURL.Path
+	path := parsedURL.Path
+	if path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return path
 }
 
 func storeDiscoveredEndpoints(endpoints []DiscoveredEndpoint) error {
@@ -860,12 +846,9 @@ func ExecuteAndParseKatanaURLScan(scanID, targetURL, scopeTargetID string) {
 
 	rawResult := stdout.String()
 	lines := strings.Split(rawResult, "\n")
-	log.Printf("[DEBUG] Found %d total URLs before filtering", len(lines))
+	log.Printf("[DEBUG] Found %d total URLs", len(lines))
 
 	var cleanURLs []string
-	imagesFiltered := 0
-	staticFiltered := 0
-	invalidPathFiltered := 0
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -873,26 +856,10 @@ func ExecuteAndParseKatanaURLScan(scanID, targetURL, scopeTargetID string) {
 			continue
 		}
 
-		if isImageFile(line) {
-			imagesFiltered++
-			continue
-		}
-
-		if isStaticAsset(line) {
-			staticFiltered++
-			continue
-		}
-
-		if !isValidPath(line) {
-			invalidPathFiltered++
-			continue
-		}
-
 		cleanURLs = append(cleanURLs, line)
 	}
 
-	log.Printf("[INFO] Filtered to %d clean URLs (from %d total): %d images, %d static assets, %d invalid paths",
-		len(cleanURLs), len(lines), imagesFiltered, staticFiltered, invalidPathFiltered)
+	log.Printf("[INFO] Processing %d URLs (no filtering applied)", len(cleanURLs))
 
 	endpoints, err := processURLsWithParameters(cleanURLs, targetDomain, scanID, "katana", scopeTargetID)
 	if err != nil {
@@ -1101,12 +1068,9 @@ func ExecuteAndParseLinkFinderURLScan(scanID, targetURL, scopeTargetID string) {
 
 	rawResult := stdout.String()
 	lines := strings.Split(rawResult, "\n")
-	log.Printf("[DEBUG] Found %d total endpoints/URLs before filtering", len(lines))
+	log.Printf("[DEBUG] Found %d total endpoints/URLs", len(lines))
 
 	var cleanURLs []string
-	imagesFiltered := 0
-	staticFiltered := 0
-	invalidPathFiltered := 0
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -1123,26 +1087,10 @@ func ExecuteAndParseLinkFinderURLScan(scanID, targetURL, scopeTargetID string) {
 			continue
 		}
 
-		if isImageFile(fullURL) {
-			imagesFiltered++
-			continue
-		}
-
-		if isStaticAsset(fullURL) {
-			staticFiltered++
-			continue
-		}
-
-		if !isValidPath(fullURL) {
-			invalidPathFiltered++
-			continue
-		}
-
 		cleanURLs = append(cleanURLs, fullURL)
 	}
 
-	log.Printf("[INFO] Filtered to %d clean URLs (from %d total): %d images, %d static assets, %d invalid paths",
-		len(cleanURLs), len(lines), imagesFiltered, staticFiltered, invalidPathFiltered)
+	log.Printf("[INFO] Processing %d URLs (no filtering applied)", len(cleanURLs))
 
 	endpoints, err := processURLsWithParameters(cleanURLs, targetDomain, scanID, "linkfinder", scopeTargetID)
 	if err != nil {
@@ -1350,12 +1298,9 @@ func ExecuteAndParseWaybackURLsScan(scanID, targetURL, scopeTargetID string) {
 
 	rawResult := stdout.String()
 	lines := strings.Split(rawResult, "\n")
-	log.Printf("[DEBUG] Found %d total URLs before filtering", len(lines))
+	log.Printf("[DEBUG] Found %d total URLs", len(lines))
 
 	var cleanURLs []string
-	imagesFiltered := 0
-	staticFiltered := 0
-	invalidPathFiltered := 0
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -1363,26 +1308,10 @@ func ExecuteAndParseWaybackURLsScan(scanID, targetURL, scopeTargetID string) {
 			continue
 		}
 
-		if isImageFile(line) {
-			imagesFiltered++
-			continue
-		}
-
-		if isStaticAsset(line) {
-			staticFiltered++
-			continue
-		}
-
-		if !isValidPath(line) {
-			invalidPathFiltered++
-			continue
-		}
-
 		cleanURLs = append(cleanURLs, line)
 	}
 
-	log.Printf("[INFO] Filtered to %d clean URLs (from %d total): %d images, %d static assets, %d invalid paths",
-		len(cleanURLs), len(lines), imagesFiltered, staticFiltered, invalidPathFiltered)
+	log.Printf("[INFO] Processing %d URLs (no filtering applied)", len(cleanURLs))
 
 	endpoints, err := processURLsWithParameters(cleanURLs, targetDomain, scanID, "waybackurls", scopeTargetID)
 	if err != nil {
@@ -1595,12 +1524,9 @@ func ExecuteAndParseGAUURLScan(scanID, targetURL, scopeTargetID string) {
 
 	rawResult := stdout.String()
 	lines := strings.Split(rawResult, "\n")
-	log.Printf("[DEBUG] Found %d total URLs before filtering", len(lines))
+	log.Printf("[DEBUG] Found %d total URLs", len(lines))
 
 	var cleanURLs []string
-	imagesFiltered := 0
-	staticFiltered := 0
-	invalidPathFiltered := 0
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -1614,27 +1540,11 @@ func ExecuteAndParseGAUURLScan(scanID, targetURL, scopeTargetID string) {
 		}
 
 		if urlStr, ok := gauResult["url"].(string); ok {
-			if isImageFile(urlStr) {
-				imagesFiltered++
-				continue
-			}
-
-			if isStaticAsset(urlStr) {
-				staticFiltered++
-				continue
-			}
-
-			if !isValidPath(urlStr) {
-				invalidPathFiltered++
-				continue
-			}
-
 			cleanURLs = append(cleanURLs, urlStr)
 		}
 	}
 
-	log.Printf("[INFO] Filtered to %d clean URLs (from %d total): %d images, %d static assets, %d invalid paths",
-		len(cleanURLs), len(lines), imagesFiltered, staticFiltered, invalidPathFiltered)
+	log.Printf("[INFO] Processing %d URLs (no filtering applied)", len(cleanURLs))
 
 	endpoints, err := processURLsWithParameters(cleanURLs, targetDomain, scanID, "gau", scopeTargetID)
 	if err != nil {
@@ -1801,6 +1711,8 @@ func GetDiscoveredEndpoints(w http.ResponseWriter, r *http.Request) {
 
 	baseQuery += " ORDER BY e.created_at DESC"
 
+	log.Printf("[DEBUG] Querying discovered endpoints with scan_id=%s, scan_type=%s", scanID, scanType)
+	
 	rows, err := dbPool.Query(context.Background(), baseQuery, args...)
 	if err != nil {
 		log.Printf("[ERROR] Failed to get discovered endpoints: %v", err)
@@ -1809,7 +1721,7 @@ func GetDiscoveredEndpoints(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var endpoints []map[string]interface{}
+	endpoints := make([]map[string]interface{}, 0)
 
 	for rows.Next() {
 		var endpoint struct {
@@ -1879,6 +1791,8 @@ func GetDiscoveredEndpoints(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	log.Printf("[DEBUG] Returning %d discovered endpoints for scan_id=%s, scan_type=%s", len(endpoints), scanID, scanType)
+	
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(endpoints)
 }
@@ -1932,11 +1846,18 @@ func ExecuteAndParseFFUFURLScan(scanID, targetURL, scopeTargetID string) {
 	threads := "40"
 	matchCodes := "200-299,301,302,307,401,403,405,500"
 
+	stopOnAll := false
+	stopOn403 := false
+	stopOnErrors := false
+
 	if err == nil {
 		var config struct {
 			WordlistID       string `json:"wordlistId"`
 			Threads          int    `json:"threads"`
 			MatchStatusCodes string `json:"matchStatusCodes"`
+			StopOnAll        bool   `json:"stopOnAll"`
+			StopOn403        bool   `json:"stopOn403"`
+			StopOnErrors     bool   `json:"stopOnErrors"`
 		}
 		if err := json.Unmarshal(configJSON, &config); err == nil {
 			if config.Threads > 0 {
@@ -1945,6 +1866,9 @@ func ExecuteAndParseFFUFURLScan(scanID, targetURL, scopeTargetID string) {
 			if config.MatchStatusCodes != "" {
 				matchCodes = config.MatchStatusCodes
 			}
+			stopOnAll = config.StopOnAll
+			stopOn403 = config.StopOn403
+			stopOnErrors = config.StopOnErrors
 			if config.WordlistID != "" {
 				if strings.HasPrefix(config.WordlistID, "builtin-") {
 					switch config.WordlistID {
@@ -2017,6 +1941,17 @@ func ExecuteAndParseFFUFURLScan(scanID, targetURL, scopeTargetID string) {
 		"-timeout", "30",
 	}
 
+	if stopOnAll {
+		dockerCmd = append(dockerCmd, "-sa")
+	} else {
+		if stopOn403 {
+			dockerCmd = append(dockerCmd, "-sf")
+		}
+		if stopOnErrors {
+			dockerCmd = append(dockerCmd, "-se")
+		}
+	}
+
 	cmd := exec.Command(dockerCmd[0], dockerCmd[1:]...)
 	log.Printf("[FFUF-URL] Executing command: %s", strings.Join(dockerCmd, " "))
 
@@ -2026,12 +1961,27 @@ func ExecuteAndParseFFUFURLScan(scanID, targetURL, scopeTargetID string) {
 
 	err = cmd.Run()
 	execTime := time.Since(startTime).String()
+	stderrOutput := stderr.String()
 
 	if err != nil {
 		log.Printf("[FFUF-URL] FFUF URL scan failed for %s: %v", targetURL, err)
-		log.Printf("[FFUF-URL] stderr output: %s", stderr.String())
-		UpdateFFUFURLScanStatus(scanID, "error", "", stderr.String(), strings.Join(dockerCmd, " "), execTime)
+		log.Printf("[FFUF-URL] stderr output: %s", stderrOutput)
+		
+		errorMsg := stderrOutput
+		if strings.Contains(stderrOutput, "403 Forbidden") || strings.Contains(stderrOutput, "95%") {
+			errorMsg = "SCAN STOPPED: More than 95% of responses returned 403 Forbidden. The target may be blocking requests or require authentication."
+		} else if strings.Contains(stderrOutput, "spurious") || strings.Contains(stderrOutput, "error") {
+			errorMsg = "SCAN STOPPED: Spurious errors detected. " + stderrOutput
+		} else if stopOnAll || stopOn403 || stopOnErrors {
+			errorMsg = "SCAN STOPPED: " + stderrOutput
+		}
+		
+		UpdateFFUFURLScanStatus(scanID, "error", "", errorMsg, strings.Join(dockerCmd, " "), execTime)
 		return
+	}
+
+	if strings.Contains(stderrOutput, "stopped") || strings.Contains(stderrOutput, "403") {
+		log.Printf("[FFUF-URL] Warning: FFUF may have stopped early: %s", stderrOutput)
 	}
 
 	outputCmd := exec.Command("docker", "exec", "ars0n-framework-v2-ffuf-1", "cat", "/tmp/ffuf-output.json")
@@ -2152,6 +2102,229 @@ func GetFFUFURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			&scan.Error, &scan.Command, &scan.ExecutionTime, &scan.CreatedAt)
 		if err != nil {
 			log.Printf("[FFUF-URL] Failed to scan row: %v", err)
+			continue
+		}
+
+		scans = append(scans, map[string]interface{}{
+			"scan_id":        scan.ScanID,
+			"url":            scan.URL,
+			"status":         scan.Status,
+			"result":         scan.Result,
+			"error":          scan.Error,
+			"command":        scan.Command,
+			"execution_time": scan.ExecutionTime,
+			"created_at":     scan.CreatedAt,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(scans)
+}
+
+func RunGoSpiderURLScan(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		URL string `json:"url" binding:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.URL == "" {
+		http.Error(w, "Invalid request body. `url` is required.", http.StatusBadRequest)
+		return
+	}
+
+	targetURL := payload.URL
+
+	query := `SELECT id FROM scope_targets WHERE type = 'URL' AND scope_target = $1`
+	var scopeTargetID string
+	err := dbPool.QueryRow(context.Background(), query, targetURL).Scan(&scopeTargetID)
+	if err != nil {
+		log.Printf("[ERROR] No matching URL scope target found for %s", targetURL)
+		http.Error(w, "No matching URL scope target found.", http.StatusBadRequest)
+		return
+	}
+
+	scanID := uuid.New().String()
+	insertQuery := `INSERT INTO gospider_url_scans (scan_id, url, status, scope_target_id) VALUES ($1, $2, $3, $4)`
+	_, err = dbPool.Exec(context.Background(), insertQuery, scanID, targetURL, "pending", scopeTargetID)
+	if err != nil {
+		log.Printf("[ERROR] Failed to create GoSpider URL scan record: %v", err)
+		http.Error(w, "Failed to create scan record.", http.StatusInternalServerError)
+		return
+	}
+
+	go ExecuteAndParseGoSpiderURLScan(scanID, targetURL, scopeTargetID)
+
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"scan_id": scanID})
+}
+
+func ExecuteAndParseGoSpiderURLScan(scanID, targetURL, scopeTargetID string) {
+	log.Printf("[GOSPIDER-URL] Starting GoSpider URL scan for %s (scan ID: %s)", targetURL, scanID)
+	startTime := time.Now()
+
+	targetDomain := extractDomain(targetURL)
+	if targetDomain == "" {
+		log.Printf("[GOSPIDER-URL] Failed to extract domain from target URL: %s", targetURL)
+		UpdateGoSpiderURLScanStatus(scanID, "error", "", "Failed to extract domain from target URL", "", time.Since(startTime).String())
+		return
+	}
+	log.Printf("[GOSPIDER-URL] Target domain for filtering: %s", targetDomain)
+
+	dockerCmd := []string{
+		"docker", "exec",
+		"ars0n-framework-v2-gospider-1",
+		"gospider",
+		"-s", targetURL,
+		"-d", "5",
+		"-c", "10",
+		"-t", "2",
+		"--sitemap",
+		"--robots",
+		"-a",
+		"--no-redirect",
+		"--json",
+	}
+
+	cmd := exec.Command(dockerCmd[0], dockerCmd[1:]...)
+	log.Printf("[GOSPIDER-URL] Executing command: %s", strings.Join(dockerCmd, " "))
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	execTime := time.Since(startTime).String()
+
+	if err != nil {
+		log.Printf("[GOSPIDER-URL] GoSpider URL scan failed for %s: %v", targetURL, err)
+		log.Printf("[GOSPIDER-URL] stderr output: %s", stderr.String())
+		UpdateGoSpiderURLScanStatus(scanID, "error", "", stderr.String(), strings.Join(dockerCmd, " "), execTime)
+		return
+	}
+
+	rawResult := stdout.String()
+	lines := strings.Split(rawResult, "\n")
+	log.Printf("[GOSPIDER-URL] Found %d total lines", len(lines))
+
+	var cleanURLs []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		var result map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &result); err == nil {
+			if output, ok := result["output"].(string); ok && output != "" {
+				cleanURLs = append(cleanURLs, output)
+			}
+		}
+	}
+
+	log.Printf("[GOSPIDER-URL] Processing %d URLs (no filtering applied)", len(cleanURLs))
+
+	endpoints, err := processURLsWithParameters(cleanURLs, targetDomain, scanID, "gospider", scopeTargetID)
+	if err != nil {
+		log.Printf("[GOSPIDER-URL] Failed to process URLs with parameters: %v", err)
+		UpdateGoSpiderURLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to process URLs: %v", err), strings.Join(dockerCmd, " "), time.Since(startTime).String())
+		return
+	}
+
+	err = storeDiscoveredEndpoints(endpoints)
+	if err != nil {
+		log.Printf("[GOSPIDER-URL] Failed to store discovered endpoints: %v", err)
+		UpdateGoSpiderURLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to store endpoints: %v", err), strings.Join(dockerCmd, " "), time.Since(startTime).String())
+		return
+	}
+
+	directCount := 0
+	adjacentCount := 0
+	for _, ep := range endpoints {
+		if ep.IsDirect {
+			directCount++
+		} else {
+			adjacentCount++
+		}
+	}
+
+	resultSummary := fmt.Sprintf("Found %d direct endpoints and %d adjacent endpoints with parameters", directCount, adjacentCount)
+
+	execTime = time.Since(startTime).String()
+	log.Printf("[GOSPIDER-URL] GoSpider URL scan completed in %s for %s", execTime, targetURL)
+
+	UpdateGoSpiderURLScanStatus(scanID, "success", resultSummary, "", strings.Join(dockerCmd, " "), execTime)
+}
+
+func UpdateGoSpiderURLScanStatus(scanID, status, result, errorMsg, command, execTime string) {
+	query := `UPDATE gospider_url_scans SET status = $1, result = $2, error = $3, command = $4, execution_time = $5 WHERE scan_id = $6`
+	_, err := dbPool.Exec(context.Background(), query, status, result, errorMsg, command, execTime, scanID)
+	if err != nil {
+		log.Printf("[GOSPIDER-URL] Failed to update GoSpider URL scan status: %v", err)
+	}
+}
+
+func GetGoSpiderURLScanStatus(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	scanID := vars["scan_id"]
+
+	query := `SELECT scan_id, url, status, result, error, command, execution_time, created_at FROM gospider_url_scans WHERE scan_id = $1`
+	var scan struct {
+		ScanID        string    `json:"scan_id"`
+		URL           string    `json:"url"`
+		Status        string    `json:"status"`
+		Result        *string   `json:"result"`
+		Error         *string   `json:"error"`
+		Command       *string   `json:"command"`
+		ExecutionTime *string   `json:"execution_time"`
+		CreatedAt     time.Time `json:"created_at"`
+	}
+
+	err := dbPool.QueryRow(context.Background(), query, scanID).Scan(
+		&scan.ScanID, &scan.URL, &scan.Status, &scan.Result,
+		&scan.Error, &scan.Command, &scan.ExecutionTime, &scan.CreatedAt,
+	)
+
+	if err != nil {
+		log.Printf("[GOSPIDER-URL] Failed to get GoSpider URL scan status: %v", err)
+		http.Error(w, "Scan not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(scan)
+}
+
+func GetGoSpiderURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	scopeTargetID := vars["id"]
+
+	query := `SELECT scan_id, url, status, result, error, command, execution_time, created_at 
+	          FROM gospider_url_scans WHERE scope_target_id = $1 ORDER BY created_at DESC`
+
+	rows, err := dbPool.Query(context.Background(), query, scopeTargetID)
+	if err != nil {
+		log.Printf("[GOSPIDER-URL] Failed to get GoSpider URL scans: %v", err)
+		http.Error(w, "Failed to fetch scans", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var scans []map[string]interface{}
+	for rows.Next() {
+		var scan struct {
+			ScanID        string    `json:"scan_id"`
+			URL           string    `json:"url"`
+			Status        string    `json:"status"`
+			Result        *string   `json:"result"`
+			Error         *string   `json:"error"`
+			Command       *string   `json:"command"`
+			ExecutionTime *string   `json:"execution_time"`
+			CreatedAt     time.Time `json:"created_at"`
+		}
+
+		err := rows.Scan(&scan.ScanID, &scan.URL, &scan.Status, &scan.Result,
+			&scan.Error, &scan.Command, &scan.ExecutionTime, &scan.CreatedAt)
+		if err != nil {
+			log.Printf("[GOSPIDER-URL] Failed to scan row: %v", err)
 			continue
 		}
 

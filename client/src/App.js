@@ -172,13 +172,28 @@ import initiateWaybackURLsScan from './utils/initiateWaybackURLsScan';
 import monitorWaybackURLsScanStatus from './utils/monitorWaybackURLsScanStatus';
 import initiateGAUURLScan from './utils/initiateGAUURLScan';
 import monitorGAUURLScanStatus from './utils/monitorGAUURLScanStatus';
+import initiateGoSpiderURLScan from './utils/initiateGoSpiderURLScan';
+import monitorGoSpiderURLScanStatus from './utils/monitorGoSpiderURLScanStatus';
 import initiateFFUFURLScan from './utils/initiateFFUFURLScan';
 import monitorFFUFURLScanStatus from './utils/monitorFFUFURLScanStatus';
 import { KatanaURLResultsModal } from './modals/KatanaURLResultsModal';
 import { LinkFinderURLResultsModal } from './modals/LinkFinderURLResultsModal';
 import { WaybackURLsResultsModal } from './modals/WaybackURLsResultsModal';
 import { GAUURLResultsModal } from './modals/GAUURLResultsModal';
+import { GoSpiderURLResultsModal } from './modals/GoSpiderURLResultsModal';
 import { FFUFURLResultsModal } from './modals/FFUFURLResultsModal';
+import initiateArjunScan from './utils/initiateArjunScan';
+import monitorArjunScanStatus from './utils/monitorArjunScanStatus';
+import initiateParamethScan from './utils/initiateParamethScan';
+import monitorParamethScanStatus from './utils/monitorParamethScanStatus';
+import initiateX8Scan from './utils/initiateX8Scan';
+import monitorX8ScanStatus from './utils/monitorX8ScanStatus';
+import { ArjunConfigModal } from './modals/ArjunConfigModal';
+import { ArjunResultsModal } from './modals/ArjunResultsModal';
+import { ParamethConfigModal } from './modals/ParamethConfigModal';
+import { ParamethResultsModal } from './modals/ParamethResultsModal';
+import { X8ConfigModal } from './modals/X8ConfigModal';
+import { X8ResultsModal } from './modals/X8ResultsModal';
 import { ApplicationQuestionsModal } from './modals/ApplicationQuestionsModal';
 import { MechanismsModal } from './modals/MechanismsModal';
 import { NotableObjectsModal } from './modals/NotableObjectsModal';
@@ -187,6 +202,7 @@ import { ThreatModelModal } from './modals/ThreatModelModal';
 import { FFUFConfigModal } from './modals/FFUFConfigModal';
 import ManualCrawlResultsModal from './modals/ManualCrawlResultsModal';
 import ExtensionInstallModal from './modals/ExtensionInstallModal';
+import ManageEndpointsModal from './modals/ManageEndpointsModal';
 
 const ExportModal = lazy(() => import('./modals/ExportModal.js'));
 const ImportModal = lazy(() => import('./modals/ImportModal.js'));
@@ -486,6 +502,8 @@ function App() {
   const [mostRecentInvestigateScanStatus, setMostRecentInvestigateScanStatus] = useState(null);
   const [mostRecentInvestigateScan, setMostRecentInvestigateScan] = useState(null);
   const [isInvestigateScanning, setIsInvestigateScanning] = useState(false);
+  const [isInvestigatingEndpoints, setIsInvestigatingEndpoints] = useState(false);
+  const [endpointInvestigationResults, setEndpointInvestigationResults] = useState(null);
   const [targetURLs, setTargetURLs] = useState([]);
   const [showROIReport, setShowROIReport] = useState(false);
   const [selectedTargetURL, setSelectedTargetURL] = useState(null);
@@ -661,16 +679,44 @@ function App() {
   const [mostRecentGAUURLScan, setMostRecentGAUURLScan] = useState(null);
   const [isGAUURLScanning, setIsGAUURLScanning] = useState(false);
   
+  const [goSpiderURLScans, setGoSpiderURLScans] = useState([]);
+  const [mostRecentGoSpiderURLScanStatus, setMostRecentGoSpiderURLScanStatus] = useState(null);
+  const [mostRecentGoSpiderURLScan, setMostRecentGoSpiderURLScan] = useState(null);
+  const [isGoSpiderURLScanning, setIsGoSpiderURLScanning] = useState(false);
+  
   const [ffufURLScans, setFFUFURLScans] = useState([]);
   const [mostRecentFFUFURLScanStatus, setMostRecentFFUFURLScanStatus] = useState(null);
   const [mostRecentFFUFURLScan, setMostRecentFFUFURLScan] = useState(null);
   const [isFFUFURLScanning, setIsFFUFURLScanning] = useState(false);
   
+  const [arjunScans, setArjunScans] = useState([]);
+  const [mostRecentArjunScanStatus, setMostRecentArjunScanStatus] = useState(null);
+  const [mostRecentArjunScan, setMostRecentArjunScan] = useState(null);
+  const [isArjunScanning, setIsArjunScanning] = useState(false);
+  
+  const [paramethScans, setParamethScans] = useState([]);
+  const [mostRecentParamethScanStatus, setMostRecentParamethScanStatus] = useState(null);
+  const [mostRecentParamethScan, setMostRecentParamethScan] = useState(null);
+  const [isParamethScanning, setIsParamethScanning] = useState(false);
+  
+  const [x8Scans, setX8Scans] = useState([]);
+  const [mostRecentX8ScanStatus, setMostRecentX8ScanStatus] = useState(null);
+  const [mostRecentX8Scan, setMostRecentX8Scan] = useState(null);
+  const [isX8Scanning, setIsX8Scanning] = useState(false);
+  
   const [showKatanaURLResultsModal, setShowKatanaURLResultsModal] = useState(false);
   const [showLinkFinderURLResultsModal, setShowLinkFinderURLResultsModal] = useState(false);
   const [showWaybackURLsResultsModal, setShowWaybackURLsResultsModal] = useState(false);
   const [showGAUURLResultsModal, setShowGAUURLResultsModal] = useState(false);
+  const [showGoSpiderURLResultsModal, setShowGoSpiderURLResultsModal] = useState(false);
   const [showFFUFURLResultsModal, setShowFFUFURLResultsModal] = useState(false);
+  
+  const [showArjunConfigModal, setShowArjunConfigModal] = useState(false);
+  const [showArjunResultsModal, setShowArjunResultsModal] = useState(false);
+  const [showParamethConfigModal, setShowParamethConfigModal] = useState(false);
+  const [showParamethResultsModal, setShowParamethResultsModal] = useState(false);
+  const [showX8ConfigModal, setShowX8ConfigModal] = useState(false);
+  const [showX8ResultsModal, setShowX8ResultsModal] = useState(false);
   const [showApplicationQuestionsModal, setShowApplicationQuestionsModal] = useState(false);
   const [showMechanismsModal, setShowMechanismsModal] = useState(false);
   const [showNotableObjectsModal, setShowNotableObjectsModal] = useState(false);
@@ -682,6 +728,9 @@ function App() {
   const [manualCrawlConnected, setManualCrawlConnected] = useState(false);
   const [manualCrawlEndpointCount, setManualCrawlEndpointCount] = useState(0);
   const [manualCrawlSessionCount, setManualCrawlSessionCount] = useState(0);
+  const [showManageEndpointsModal, setShowManageEndpointsModal] = useState(false);
+  const [consolidatedEndpointCount, setConsolidatedEndpointCount] = useState(0);
+  const [isConsolidatingEndpoints, setIsConsolidatingEndpoints] = useState(false);
   const [mechanismsForThreatModel, setMechanismsForThreatModel] = useState([]);
   const [notableObjectsForThreatModel, setNotableObjectsForThreatModel] = useState([]);
   const [securityControlsForThreatModel, setSecurityControlsForThreatModel] = useState([]);
@@ -1142,6 +1191,49 @@ function App() {
     );
   };
 
+  const handleInvestigateEndpoints = async () => {
+    if (!activeTarget) return;
+    
+    setIsInvestigatingEndpoints(true);
+    try {
+      const response = await fetch(`/api/endpoint-investigation/${activeTarget.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        const scanID = data.scan_id;
+        
+        const pollStatus = async () => {
+          const statusResp = await fetch(`/api/endpoint-investigation/${activeTarget.id}/status/${scanID}`);
+          if (statusResp.ok) {
+            const status = await statusResp.json();
+            
+            if (status.status === 'success') {
+              const resultsResp = await fetch(`/api/endpoint-investigation/${activeTarget.id}/results`);
+              if (resultsResp.ok) {
+                const results = await resultsResp.json();
+                setEndpointInvestigationResults(results);
+              }
+              setIsInvestigatingEndpoints(false);
+            } else if (status.status === 'error') {
+              console.error('Endpoint investigation failed:', status.error);
+              setIsInvestigatingEndpoints(false);
+            } else {
+              setTimeout(pollStatus, 2000);
+            }
+          }
+        };
+        
+        pollStatus();
+      }
+    } catch (err) {
+      console.error('Error investigating endpoints:', err);
+      setIsInvestigatingEndpoints(false);
+    }
+  };
+
   const handleValidateRootDomains = () => {
     console.log('Validate Root Domains clicked');
   };
@@ -1206,6 +1298,15 @@ function App() {
       loadDNSxConfig();
     }
   }, [activeTarget?.id]); // Run when activeTarget.id changes (including initial load)
+
+  // Load consolidated endpoint count when activeTarget changes
+  useEffect(() => {
+    if (activeTarget) {
+      loadConsolidatedEndpointCount();
+    } else {
+      setConsolidatedEndpointCount(0);
+    }
+  }, [activeTarget?.id]);
 
   useEffect(() => {
     if (activeTarget) {
@@ -1336,6 +1437,42 @@ function App() {
         setMostRecentSubfinderScan,
         setIsSubfinderScanning,
         setMostRecentSubfinderScanStatus
+      );
+    }
+  }, [activeTarget]);
+
+  useEffect(() => {
+    if (activeTarget && activeTarget.type === 'URL') {
+      monitorArjunScanStatus(
+        activeTarget,
+        setArjunScans,
+        setMostRecentArjunScan,
+        setIsArjunScanning,
+        setMostRecentArjunScanStatus
+      );
+    }
+  }, [activeTarget]);
+
+  useEffect(() => {
+    if (activeTarget && activeTarget.type === 'URL') {
+      monitorParamethScanStatus(
+        activeTarget,
+        setParamethScans,
+        setMostRecentParamethScan,
+        setIsParamethScanning,
+        setMostRecentParamethScanStatus
+      );
+    }
+  }, [activeTarget]);
+
+  useEffect(() => {
+    if (activeTarget && activeTarget.type === 'URL') {
+      monitorX8ScanStatus(
+        activeTarget,
+        setX8Scans,
+        setMostRecentX8Scan,
+        setIsX8Scanning,
+        setMostRecentX8ScanStatus
       );
     }
   }, [activeTarget]);
@@ -3927,6 +4064,18 @@ function App() {
 
   useEffect(() => {
     if (activeTarget && activeTarget.type === 'URL') {
+      monitorGoSpiderURLScanStatus(
+        activeTarget,
+        setGoSpiderURLScans,
+        setMostRecentGoSpiderURLScan,
+        setIsGoSpiderURLScanning,
+        setMostRecentGoSpiderURLScanStatus
+      );
+    }
+  }, [activeTarget]);
+
+  useEffect(() => {
+    if (activeTarget && activeTarget.type === 'URL') {
       monitorFFUFURLScanStatus(
         activeTarget,
         setFFUFURLScans,
@@ -4077,6 +4226,16 @@ function App() {
     );
   };
 
+  const startGoSpiderURLScan = () => {
+    initiateGoSpiderURLScan(
+      activeTarget,
+      setIsGoSpiderURLScanning,
+      setGoSpiderURLScans,
+      setMostRecentGoSpiderURLScan,
+      setMostRecentGoSpiderURLScanStatus
+    );
+  };
+
   const startFFUFURLScan = () => {
     initiateFFUFURLScan(
       activeTarget,
@@ -4087,14 +4246,61 @@ function App() {
     );
   };
 
+  const startArjunScan = () => {
+    initiateArjunScan(
+      activeTarget,
+      setIsArjunScanning,
+      setArjunScans,
+      setMostRecentArjunScan,
+      setMostRecentArjunScanStatus
+    );
+  };
+
+  const startParamethScan = () => {
+    initiateParamethScan(
+      activeTarget,
+      setIsParamethScanning,
+      setParamethScans,
+      setMostRecentParamethScan,
+      setMostRecentParamethScanStatus
+    );
+  };
+
+  const startX8Scan = () => {
+    initiateX8Scan(
+      activeTarget,
+      setIsX8Scanning,
+      setX8Scans,
+      setMostRecentX8Scan,
+      setMostRecentX8ScanStatus
+    );
+  };
+
   const handleOpenKatanaURLResultsModal = () => setShowKatanaURLResultsModal(true);
   const handleCloseKatanaURLResultsModal = () => setShowKatanaURLResultsModal(false);
   const handleOpenLinkFinderURLResultsModal = () => setShowLinkFinderURLResultsModal(true);
   const handleCloseLinkFinderURLResultsModal = () => setShowLinkFinderURLResultsModal(false);
   const handleOpenWaybackURLsResultsModal = () => setShowWaybackURLsResultsModal(true);
   const handleCloseWaybackURLsResultsModal = () => setShowWaybackURLsResultsModal(false);
+  
+  const handleOpenArjunConfigModal = () => setShowArjunConfigModal(true);
+  const handleCloseArjunConfigModal = () => setShowArjunConfigModal(false);
+  const handleOpenArjunResultsModal = () => setShowArjunResultsModal(true);
+  const handleCloseArjunResultsModal = () => setShowArjunResultsModal(false);
+  
+  const handleOpenParamethConfigModal = () => setShowParamethConfigModal(true);
+  const handleCloseParamethConfigModal = () => setShowParamethConfigModal(false);
+  const handleOpenParamethResultsModal = () => setShowParamethResultsModal(true);
+  const handleCloseParamethResultsModal = () => setShowParamethResultsModal(false);
+  
+  const handleOpenX8ConfigModal = () => setShowX8ConfigModal(true);
+  const handleCloseX8ConfigModal = () => setShowX8ConfigModal(false);
+  const handleOpenX8ResultsModal = () => setShowX8ResultsModal(true);
+  const handleCloseX8ResultsModal = () => setShowX8ResultsModal(false);
   const handleOpenGAUURLResultsModal = () => setShowGAUURLResultsModal(true);
   const handleCloseGAUURLResultsModal = () => setShowGAUURLResultsModal(false);
+  const handleOpenGoSpiderURLResultsModal = () => setShowGoSpiderURLResultsModal(true);
+  const handleCloseGoSpiderURLResultsModal = () => setShowGoSpiderURLResultsModal(false);
   const handleOpenFFUFURLResultsModal = () => setShowFFUFURLResultsModal(true);
   const handleCloseFFUFURLResultsModal = () => setShowFFUFURLResultsModal(false);
   const handleOpenManualCrawlResultsModal = async () => {
@@ -4108,6 +4314,50 @@ function App() {
   
   const handleOpenExtensionInstallModal = () => setShowExtensionInstallModal(true);
   const handleCloseExtensionInstallModal = () => setShowExtensionInstallModal(false);
+
+  const handleConsolidateEndpoints = async () => {
+    if (!activeTarget) return;
+    
+    setIsConsolidatingEndpoints(true);
+    try {
+      const response = await fetch(`/api/consolidated-endpoints/${activeTarget.id}/consolidate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        setConsolidatedEndpointCount(data.endpoint_count || 0);
+      }
+    } catch (err) {
+      console.error('Error consolidating endpoints:', err);
+    } finally {
+      setIsConsolidatingEndpoints(false);
+    }
+  };
+
+  const handleOpenManageEndpointsModal = async () => {
+    setShowManageEndpointsModal(true);
+    if (activeTarget) {
+      loadConsolidatedEndpointCount();
+    }
+  };
+
+  const handleCloseManageEndpointsModal = () => setShowManageEndpointsModal(false);
+
+  const loadConsolidatedEndpointCount = async () => {
+    if (!activeTarget) return;
+    
+    try {
+      const response = await fetch(`/api/consolidated-endpoints/${activeTarget.id}`);
+      if (response.ok) {
+        const data = await response.json();
+        setConsolidatedEndpointCount(data.length || 0);
+      }
+    } catch (err) {
+      console.error('Error loading consolidated endpoint count:', err);
+    }
+  };
   
   const handleOpenTargetUrl = () => {
     if (activeTarget && activeTarget.scope_target) {
@@ -6968,32 +7218,32 @@ function App() {
                           Manual Crawling
                         </Card.Title>
                         <Card.Text className="text-white small fst-italic">
-                          Manually explore the target application through interactive browser-based crawling. This hands-on approach allows you to discover authenticated areas, dynamic content, and complex user flows that automated tools may miss. By actively navigating the application as a real user would, you'll build a comprehensive understanding of its functionality, identify potential attack surfaces, and uncover hidden endpoints that require authentication or specific user interactions to access.
+                          Manually browse the application to discover authenticated areas, dynamic content, and endpoints that automated tools miss. Navigate as a real user to capture hidden functionality and attack surfaces.
                         </Card.Text>
-                        <div className="my-3 py-3" style={{ borderTop: '1px solid #444', borderBottom: '1px solid #444' }}>
-                          <Row className="text-center">
+                        <div className="my-3 py-3">
+                          <Row className="text-center align-items-center">
                             <Col>
                               <div className="text-danger fw-bold fs-4">{manualCrawlEndpointCount}</div>
                               <div className="text-muted small">Endpoints Discovered</div>
+                            </Col>
+                            <Col>
+                              {manualCrawlConnected ? (
+                                <div className="text-success">
+                                  <i className="bi bi-record-circle-fill me-2" style={{ fontSize: '0.8rem' }}></i>
+                                  <strong>Actively Recording Session</strong>
+                                </div>
+                              ) : (
+                                <div className="text-muted">
+                                  <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
+                                  No Active Recording
+                                </div>
+                              )}
                             </Col>
                             <Col>
                               <div className="text-danger fw-bold fs-4">{manualCrawlSessionCount}</div>
                               <div className="text-muted small">Crawl Sessions</div>
                             </Col>
                           </Row>
-                        </div>
-                        <div className="py-2" style={{ borderBottom: '1px solid #444' }}>
-                          {manualCrawlConnected ? (
-                            <div className="text-success">
-                              <i className="bi bi-record-circle-fill me-2" style={{ fontSize: '0.8rem' }}></i>
-                              <strong>Actively Recording Session</strong>
-                            </div>
-                          ) : (
-                            <div className="text-muted">
-                              <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
-                              No Active Recording
-                            </div>
-                          )}
                         </div>
                         <div className="mt-auto">
                           <Row className="g-2">
@@ -7032,10 +7282,6 @@ function App() {
                   </Col>
                 </Row>
                 <h4 className="text-secondary mb-3 fs-5 mt-4">URL Discovery & Endpoint Enumeration</h4>
-                <div className="alert alert-warning mb-3" role="alert">
-                  <i className="bi bi-exclamation-triangle-fill me-2"></i>
-                  This section is still under development
-                </div>
                 <Row className="mb-4">
                   {[
                     {
@@ -7101,9 +7347,25 @@ function App() {
                           return match ? parseInt(match[1]) + parseInt(match[2]) : 0;
                         })() : 0,
                       resultLabel: 'Endpoints'
+                    },
+                    {
+                      name: 'GoSpider',
+                      link: 'https://github.com/jaeles-project/gospider',
+                      description: 'Fast Go-based web crawler for large-scale link enumeration with concurrent crawling and third-party source integration.',
+                      isActive: true,
+                      status: mostRecentGoSpiderURLScanStatus,
+                      isScanning: isGoSpiderURLScanning,
+                      onScan: startGoSpiderURLScan,
+                      onResults: handleOpenGoSpiderURLResultsModal,
+                      resultCount: mostRecentGoSpiderURLScan && mostRecentGoSpiderURLScan.result ? 
+                        (() => {
+                          const match = mostRecentGoSpiderURLScan.result.match(/Found (\d+) direct endpoints and (\d+) adjacent endpoints/);
+                          return match ? parseInt(match[1]) + parseInt(match[2]) : 0;
+                        })() : 0,
+                      resultLabel: 'Endpoints'
                     }
                   ].map((tool, index) => (
-                    <Col md={3} key={index}>
+                    <Col key={index}>
                       <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
                         <Card.Body className="d-flex flex-column">
                           <Card.Title className="text-danger mb-3">
@@ -7150,10 +7412,6 @@ function App() {
                 </Row>
 
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Endpoint Brute Forcing</h4>
-                <div className="alert alert-warning mb-3" role="alert">
-                  <i className="bi bi-exclamation-triangle-fill me-2"></i>
-                  This section is still under development
-                </div>
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
@@ -7217,6 +7475,161 @@ function App() {
                   </Col>
                 </Row>
 
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Target URL Endpoints</h4>
+                <Row className="mb-4">
+                  <Col md={12}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          Endpoint Consolidation
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Consolidate all discovered endpoints from crawling, link discovery, and brute forcing into a unified collection of HTTP requests and responses. Prepare your attack surface for parameter enumeration and vulnerability testing.
+                        </Card.Text>
+                        <div className="mt-auto">
+                          <Card.Text className="text-white small mb-3">
+                            Consolidated Endpoints: {consolidatedEndpointCount}
+                          </Card.Text>
+                          <div className="d-flex gap-2">
+                            <Button 
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleConsolidateEndpoints}
+                              disabled={!activeTarget || isConsolidatingEndpoints}
+                            >
+                              {isConsolidatingEndpoints ? (
+                                <><Spinner animation="border" size="sm" className="me-2" />Consolidating...</>
+                              ) : (
+                                'Consolidate'
+                              )}
+                            </Button>
+                            <Button 
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleInvestigateEndpoints}
+                              disabled={!activeTarget || isInvestigatingEndpoints || consolidatedEndpointCount === 0}
+                            >
+                              {isInvestigatingEndpoints ? (
+                                <><Spinner animation="border" size="sm" className="me-2" />Investigating...</>
+                              ) : (
+                                'Investigate'
+                              )}
+                            </Button>
+                            <Button 
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleOpenManageEndpointsModal}
+                              disabled={!activeTarget}
+                            >
+                              Manage Endpoints
+                            </Button>
+                          </div>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
+
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Parameter Enumeration</h4>
+                <Alert variant="warning" className="mb-3">
+                  This section is still under development.
+                </Alert>
+                <Row className="mb-4">
+                  {[
+                    {
+                      name: 'Arjun',
+                      link: 'https://github.com/s0md3v/Arjun',
+                      description: 'Python suite that brute-forces common HTTP parameters on a given URL. Uses a ~25,890-word default dictionary and can try GET/POST/JSON/XML parameters. Very fast (∼10 seconds, ~50–60 requests per target) thanks to optimized diffing.',
+                      isActive: activeTarget,
+                      isScanning: isArjunScanning,
+                      status: mostRecentArjunScanStatus,
+                      resultCount: mostRecentArjunScan?.parameters_found || 0,
+                      onScan: startArjunScan,
+                      onResults: handleOpenArjunResultsModal,
+                      onConfig: handleOpenArjunConfigModal,
+                      resultLabel: 'Parameters'
+                    },
+                    {
+                      name: 'parameth',
+                      link: 'https://github.com/maK-/parameth',
+                      description: 'Python script for brute-forcing GET/POST parameters by monitoring response changes. Sends requests with candidate param names and flags those that alter response size/content. Configurable (threading, ignore codes/sizes, variance offset).',
+                      isActive: activeTarget,
+                      isScanning: isParamethScanning,
+                      status: mostRecentParamethScanStatus,
+                      resultCount: mostRecentParamethScan?.parameters_found || 0,
+                      onScan: startParamethScan,
+                      onResults: handleOpenParamethResultsModal,
+                      onConfig: handleOpenParamethConfigModal,
+                      resultLabel: 'Parameters'
+                    },
+                    {
+                      name: 'x8',
+                      link: 'https://github.com/Sh1Yo/x8',
+                      description: 'Rust-based hidden parameter fuzzing suite. Injects parameters (via query, body or headers) and uses line-by-line page comparisons and response checks to verify valid parameters. Very high accuracy (detects non-random values like admin=true), highly configurable templates, and extremely fast.',
+                      isActive: activeTarget,
+                      isScanning: isX8Scanning,
+                      status: mostRecentX8ScanStatus,
+                      resultCount: mostRecentX8Scan?.parameters_found || 0,
+                      onScan: startX8Scan,
+                      onResults: handleOpenX8ResultsModal,
+                      onConfig: handleOpenX8ConfigModal,
+                      resultLabel: 'Parameters'
+                    }
+                  ].map((tool, index) => (
+                    <Col key={index}>
+                      <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
+                        <Card.Body className="d-flex flex-column">
+                          <Card.Title className="text-danger mb-3">
+                            <a href={tool.link} className="text-danger text-decoration-none" target="_blank" rel="noopener noreferrer">
+                              {tool.name}
+                            </a>
+                          </Card.Title>
+                          <Card.Text className="text-white small fst-italic">
+                            {tool.description}
+                          </Card.Text>
+                          <div className="mt-auto">
+                            <Card.Text className="text-white small mb-3">
+                              {tool.resultLabel}: {tool.resultCount || "0"}
+                            </Card.Text>
+                            <div className="d-flex justify-content-center gap-2">
+                              <Button
+                                variant="outline-danger"
+                                className="flex-fill"
+                                onClick={tool.onScan}
+                                disabled
+                              >
+                                <div className="btn-content">
+                                  {tool.isScanning ? (
+                                    <Spinner animation="border" size="sm" />
+                                  ) : (
+                                    'Scan'
+                                  )}
+                                </div>
+                              </Button>
+                              <Button
+                                variant="outline-danger"
+                                className="flex-fill"
+                                onClick={tool.onConfig}
+                                disabled
+                              >
+                                Config
+                              </Button>
+                              <Button
+                                variant="outline-danger"
+                                className="flex-fill"
+                                onClick={tool.onResults}
+                                disabled
+                              >
+                                Results
+                              </Button>
+                            </div>
+                          </div>
+                        </Card.Body>
+                      </Card>
+                    </Col>
+                  ))}
+                </Row>
+
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Threat Modeling</h4>
                 <HelpMeLearn section="threatModeling" />
                 <Row className="mb-4">
@@ -7248,7 +7661,6 @@ function App() {
                               <strong>(E)levation of Privilege</strong> - Gaining unauthorized elevated permissions
                             </div>
                           </div>
-                          Build your threat model by documenting reconnaissance findings, identifying mechanisms and objects, assessing security controls, and systematically analyzing potential attack vectors and their business impact.
                         </Card.Text>
                         <div className="mt-auto">
                           <Row className="g-2">
@@ -7758,6 +8170,52 @@ function App() {
         mostRecentGAUURLScan={mostRecentGAUURLScan}
       />
 
+      <GoSpiderURLResultsModal
+        show={showGoSpiderURLResultsModal}
+        handleClose={handleCloseGoSpiderURLResultsModal}
+        activeTarget={activeTarget}
+        mostRecentGoSpiderURLScan={mostRecentGoSpiderURLScan}
+      />
+
+      <ArjunConfigModal
+        show={showArjunConfigModal}
+        handleClose={handleCloseArjunConfigModal}
+        activeTarget={activeTarget}
+      />
+
+      <ArjunResultsModal
+        show={showArjunResultsModal}
+        handleClose={handleCloseArjunResultsModal}
+        activeTarget={activeTarget}
+        mostRecentArjunScan={mostRecentArjunScan}
+      />
+
+      <ParamethConfigModal
+        show={showParamethConfigModal}
+        handleClose={handleCloseParamethConfigModal}
+        activeTarget={activeTarget}
+      />
+
+      <ParamethResultsModal
+        show={showParamethResultsModal}
+        handleClose={handleCloseParamethResultsModal}
+        activeTarget={activeTarget}
+        mostRecentParamethScan={mostRecentParamethScan}
+      />
+
+      <X8ConfigModal
+        show={showX8ConfigModal}
+        handleClose={handleCloseX8ConfigModal}
+        activeTarget={activeTarget}
+      />
+
+      <X8ResultsModal
+        show={showX8ResultsModal}
+        handleClose={handleCloseX8ResultsModal}
+        activeTarget={activeTarget}
+        mostRecentX8Scan={mostRecentX8Scan}
+      />
+
       <FFUFURLResultsModal
         show={showFFUFURLResultsModal}
         handleClose={handleCloseFFUFURLResultsModal}
@@ -7807,6 +8265,12 @@ function App() {
       <ExtensionInstallModal
         show={showExtensionInstallModal}
         onHide={handleCloseExtensionInstallModal}
+      />
+
+      <ManageEndpointsModal
+        show={showManageEndpointsModal}
+        onHide={handleCloseManageEndpointsModal}
+        scopeTargetId={activeTarget?.id}
       />
 
       <FFUFConfigModal

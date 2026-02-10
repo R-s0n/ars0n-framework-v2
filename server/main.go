@@ -301,6 +301,10 @@ func main() {
 	r.HandleFunc("/gau-url/status/{scan_id}", utils.GetGAUURLScanStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/scopetarget/{id}/scans/gau-url", utils.GetGAUURLScansForScopeTarget).Methods("GET", "OPTIONS")
 	
+	r.HandleFunc("/gospider-url/run", utils.RunGoSpiderURLScan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/gospider-url/status/{scan_id}", utils.GetGoSpiderURLScanStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/scopetarget/{id}/scans/gospider-url", utils.GetGoSpiderURLScansForScopeTarget).Methods("GET", "OPTIONS")
+	
 	r.HandleFunc("/discovered-endpoints/{scan_id}", utils.GetDiscoveredEndpoints).Methods("GET", "OPTIONS")
 	
 	r.HandleFunc("/ffuf-url/run", utils.RunFFUFURLScan).Methods("POST", "OPTIONS")
@@ -312,6 +316,27 @@ func main() {
 	r.HandleFunc("/ffuf-wordlists/upload", utils.UploadFFUFWordlist).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ffuf-wordlists", utils.GetFFUFWordlists).Methods("GET", "OPTIONS")
 	r.HandleFunc("/ffuf-wordlists/{wordlist_id}", utils.DeleteFFUFWordlist).Methods("DELETE", "OPTIONS")
+
+	r.HandleFunc("/arjun/run", utils.RunArjunScan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/arjun/status/{scan_id}", utils.GetArjunScanStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/scopetarget/{id}/scans/arjun", utils.GetArjunScansForScopeTarget).Methods("GET", "OPTIONS")
+	r.HandleFunc("/arjun/results/{scan_id}", utils.GetArjunScanResults).Methods("GET", "OPTIONS")
+	r.HandleFunc("/arjun-config/{scope_target_id}", utils.SaveArjunConfig).Methods("POST", "OPTIONS")
+	r.HandleFunc("/arjun-config/{scope_target_id}", utils.GetArjunConfig).Methods("GET", "OPTIONS")
+
+	r.HandleFunc("/parameth/run", utils.RunParamethScan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/parameth/status/{scan_id}", utils.GetParamethScanStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/scopetarget/{id}/scans/parameth", utils.GetParamethScansForScopeTarget).Methods("GET", "OPTIONS")
+	r.HandleFunc("/parameth/results/{scan_id}", utils.GetParamethScanResults).Methods("GET", "OPTIONS")
+	r.HandleFunc("/parameth-config/{scope_target_id}", utils.SaveParamethConfig).Methods("POST", "OPTIONS")
+	r.HandleFunc("/parameth-config/{scope_target_id}", utils.GetParamethConfig).Methods("GET", "OPTIONS")
+
+	r.HandleFunc("/x8/run", utils.RunX8Scan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/x8/status/{scan_id}", utils.GetX8ScanStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/scopetarget/{id}/scans/x8", utils.GetX8ScansForScopeTarget).Methods("GET", "OPTIONS")
+	r.HandleFunc("/x8/results/{scan_id}", utils.GetX8ScanResults).Methods("GET", "OPTIONS")
+	r.HandleFunc("/x8-config/{scope_target_id}", utils.SaveX8Config).Methods("POST", "OPTIONS")
+	r.HandleFunc("/x8-config/{scope_target_id}", utils.GetX8Config).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/application-questions/{scope_target_id}/answers", utils.GetApplicationQuestionsAnswers).Methods("GET", "OPTIONS")
 	r.HandleFunc("/application-questions/{scope_target_id}/answers", utils.CreateApplicationQuestionAnswer).Methods("POST", "OPTIONS")
@@ -347,6 +372,12 @@ func main() {
 	r.HandleFunc("/manual-crawl/sessions/{scope_target_id}", utils.GetManualCrawlSessions).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/captures/{session_id}", utils.GetManualCrawlCaptures).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/endpoints/{scope_target_id}", utils.GetManualCrawlEndpoints).Methods("GET", "OPTIONS")
+
+	r.HandleFunc("/consolidated-endpoints/{scope_target_id}/consolidate", utils.ConsolidateURLEndpoints).Methods("POST", "OPTIONS")
+	r.HandleFunc("/consolidated-endpoints/{scope_target_id}", utils.GetConsolidatedURLEndpoints).Methods("GET", "OPTIONS")
+	r.HandleFunc("/endpoint-investigation/{scope_target_id}", utils.RunEndpointInvestigation).Methods("POST", "OPTIONS")
+	r.HandleFunc("/endpoint-investigation/{scope_target_id}/status/{scan_id}", utils.GetEndpointInvestigationStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/endpoint-investigation/{scope_target_id}/results", utils.GetEndpointInvestigationResults).Methods("GET", "OPTIONS")
 
 	log.Println("API server started on :8443")
 	http.ListenAndServe(":8443", r)

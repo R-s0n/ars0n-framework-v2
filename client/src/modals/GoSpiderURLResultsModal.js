@@ -1,11 +1,11 @@
 import { useState, useEffect } from 'react';
 import { Modal, Button, Table, Badge, Spinner, Alert, Form, InputGroup, Tabs, Tab, Accordion } from 'react-bootstrap';
 
-export const LinkFinderURLResultsModal = ({ 
+export const GoSpiderURLResultsModal = ({ 
   show, 
   handleClose, 
   activeTarget, 
-  mostRecentLinkFinderURLScan 
+  mostRecentGoSpiderURLScan 
 }) => {
   const [directEndpoints, setDirectEndpoints] = useState([]);
   const [adjacentEndpoints, setAdjacentEndpoints] = useState([]);
@@ -13,13 +13,14 @@ export const LinkFinderURLResultsModal = ({
   const [error, setError] = useState(null);
   
   const [searchFilters, setSearchFilters] = useState([{ searchTerm: '', isNegative: false }]);
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
   const [activeTab, setActiveTab] = useState('direct');
 
   useEffect(() => {
-    if (show && mostRecentLinkFinderURLScan && mostRecentLinkFinderURLScan.scan_id) {
+    if (show && mostRecentGoSpiderURLScan && mostRecentGoSpiderURLScan.scan_id) {
       parseResults();
     }
-  }, [show, mostRecentLinkFinderURLScan]);
+  }, [show, mostRecentGoSpiderURLScan]);
 
   const parseResults = async () => {
     setLoading(true);
@@ -27,21 +28,14 @@ export const LinkFinderURLResultsModal = ({
 
     try {
       const response = await fetch(
-        `/api/discovered-endpoints/${mostRecentLinkFinderURLScan.scan_id}?scan_type=linkfinder`
+        `/api/discovered-endpoints/${mostRecentGoSpiderURLScan.scan_id}?scan_type=gospider`
       );
       
       if (!response.ok) {
-        const errorText = await response.text();
-        console.error('API error response:', errorText);
-        throw new Error(`Failed to fetch endpoints: ${response.status} ${response.statusText}`);
+        throw new Error('Failed to fetch endpoints');
       }
 
       const endpoints = await response.json();
-      console.log('LinkFinder endpoints received:', endpoints.length);
-      
-      if (!Array.isArray(endpoints)) {
-        throw new Error('Invalid response format: expected array of endpoints');
-      }
       
       const direct = endpoints.filter(ep => ep.is_direct);
       const adjacent = endpoints.filter(ep => !ep.is_direct);
@@ -49,8 +43,8 @@ export const LinkFinderURLResultsModal = ({
       setDirectEndpoints(direct);
       setAdjacentEndpoints(adjacent);
     } catch (error) {
-      console.error('Error parsing LinkFinder results:', error);
-      setError(error.message || 'Failed to parse scan results');
+      console.error('Error parsing GoSpider results:', error);
+      setError('Failed to parse scan results');
     } finally {
       setLoading(false);
     }
@@ -84,7 +78,7 @@ export const LinkFinderURLResultsModal = ({
       return true;
     });
 
-    return filtered;
+    return getSortedEndpoints(filtered);
   };
 
   const addSearchFilter = () => {
@@ -108,12 +102,42 @@ export const LinkFinderURLResultsModal = ({
     setSearchFilters([{ searchTerm: '', isNegative: false }]);
   };
 
+  const getSortedEndpoints = (endpointList) => {
+    if (!sortConfig.key) return endpointList;
+
+    return [...endpointList].sort((a, b) => {
+      let aValue = a[sortConfig.key];
+      let bValue = b[sortConfig.key];
+
+      if (typeof aValue === 'string') {
+        aValue = aValue.toLowerCase();
+        bValue = bValue.toLowerCase();
+      }
+
+      if (aValue < bValue) {
+        return sortConfig.direction === 'asc' ? -1 : 1;
+      }
+      if (aValue > bValue) {
+        return sortConfig.direction === 'asc' ? 1 : -1;
+      }
+      return 0;
+    });
+  };
+
+  const handleSort = (key) => {
+    let direction = 'asc';
+    if (sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSortConfig({ key, direction });
+  };
+
   const renderEndpoints = (endpoints) => {
     if (endpoints.length === 0) {
       return (
         <div className="text-center py-5">
           <div className="text-white-50 mb-3">
-            <i className="bi bi-code-slash" style={{ fontSize: '3rem' }}></i>
+            <i className="bi bi-link-45deg" style={{ fontSize: '3rem' }}></i>
           </div>
           <h5 className="text-white-50 mb-3">No Endpoints Found</h5>
         </div>
@@ -306,34 +330,34 @@ export const LinkFinderURLResultsModal = ({
     >
       <Modal.Header closeButton>
         <Modal.Title className="text-danger">
-          <i className="bi bi-code-slash me-2" />
-          LinkFinder URL Scan Results
+          <i className="bi bi-globe me-2" />
+          GoSpider URL Scan Results
         </Modal.Title>
       </Modal.Header>
       <Modal.Body>
-        {mostRecentLinkFinderURLScan && (
+        {mostRecentGoSpiderURLScan && (
           <div className="mb-3">
             <div className="d-flex justify-content-between align-items-center">
               <div>
                 <h6 className="text-white mb-1">
-                  Latest Scan: {mostRecentLinkFinderURLScan.scan_id?.substring(0, 8)}...
+                  Latest Scan: {mostRecentGoSpiderURLScan.scan_id?.substring(0, 8)}...
                 </h6>
                 <div className="text-white-50 small">
                   Status: <Badge className={`${
-                    mostRecentLinkFinderURLScan.status === 'success' ? 'bg-success' : 
-                    mostRecentLinkFinderURLScan.status === 'error' ? 'bg-danger' : 
+                    mostRecentGoSpiderURLScan.status === 'success' ? 'bg-success' : 
+                    mostRecentGoSpiderURLScan.status === 'error' ? 'bg-danger' : 
                     'bg-warning'
                   }`}>
-                    {mostRecentLinkFinderURLScan.status}
+                    {mostRecentGoSpiderURLScan.status}
                   </Badge>
-                  {mostRecentLinkFinderURLScan.created_at && (
+                  {mostRecentGoSpiderURLScan.created_at && (
                     <span className="ms-2">
-                      • {new Date(mostRecentLinkFinderURLScan.created_at).toLocaleString()}
+                      • {new Date(mostRecentGoSpiderURLScan.created_at).toLocaleString()}
                     </span>
                   )}
-                  {mostRecentLinkFinderURLScan.execution_time && (
+                  {mostRecentGoSpiderURLScan.execution_time && (
                     <span className="ms-2">
-                      • Duration: {mostRecentLinkFinderURLScan.execution_time}
+                      • Duration: {mostRecentGoSpiderURLScan.execution_time}
                     </span>
                   )}
                 </div>

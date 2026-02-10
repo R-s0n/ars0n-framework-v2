@@ -45,17 +45,21 @@ export const FFUFConfigModal = ({
     filterMode: 'or',
     
     threads: 40,
-    rateLimit: 0,
+    rateLimit: '',
     delay: '',
-    maxTime: 0,
+    maxTime: '',
     verbose: false,
     autoCalibrate: false,
     recursion: false,
-    recursionDepth: 0,
+    recursionDepth: '',
     
     proxyURL: '',
     clientCert: '',
-    clientKey: ''
+    clientKey: '',
+    
+    stopOnAll: true,
+    stopOn403: false,
+    stopOnErrors: false
   });
 
   const [availableWordlists, setAvailableWordlists] = useState([]);
@@ -69,7 +73,10 @@ export const FFUFConfigModal = ({
 
   useEffect(() => {
     if (activeTarget?.scope_target) {
-      setConfig(prev => ({ ...prev, url: activeTarget.scope_target }));
+      const targetUrl = activeTarget.scope_target.endsWith('/') 
+        ? `${activeTarget.scope_target}FUZZ`
+        : `${activeTarget.scope_target}/FUZZ`;
+      setConfig(prev => ({ ...prev, url: targetUrl }));
     }
   }, [activeTarget]);
 
@@ -90,8 +97,19 @@ export const FFUFConfigModal = ({
           setConfig(prev => ({
             ...prev,
             ...data,
-            url: activeTarget.scope_target || data.url
+            url: data.url || (activeTarget.scope_target 
+              ? (activeTarget.scope_target.endsWith('/') 
+                ? `${activeTarget.scope_target}FUZZ`
+                : `${activeTarget.scope_target}/FUZZ`)
+              : '')
           }));
+        } else {
+          const targetUrl = activeTarget.scope_target 
+            ? (activeTarget.scope_target.endsWith('/') 
+              ? `${activeTarget.scope_target}FUZZ`
+              : `${activeTarget.scope_target}/FUZZ`)
+            : '';
+          setConfig(prev => ({ ...prev, url: targetUrl }));
         }
       }
     } catch (error) {
@@ -132,12 +150,21 @@ export const FFUFConfigModal = ({
     setSuccess('');
 
     try {
+      const sanitizedConfig = {
+        ...config,
+        threads: typeof config.threads === 'number' ? config.threads : (parseInt(config.threads) || 40),
+        rateLimit: typeof config.rateLimit === 'number' ? config.rateLimit : (parseInt(config.rateLimit) || 0),
+        timeout: typeof config.timeout === 'number' ? config.timeout : (parseInt(config.timeout) || 10),
+        maxTime: typeof config.maxTime === 'number' ? config.maxTime : (parseInt(config.maxTime) || 0),
+        recursionDepth: typeof config.recursionDepth === 'number' ? config.recursionDepth : (parseInt(config.recursionDepth) || 0),
+      };
+
       const response = await fetch(
         `/api/ffuf-config/${activeTarget.id}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(config)
+          body: JSON.stringify(sanitizedConfig)
         }
       );
 
@@ -615,7 +642,15 @@ export const FFUFConfigModal = ({
                 <Form.Control
                   type="number"
                   value={config.threads}
-                  onChange={(e) => setConfig({ ...config, threads: parseInt(e.target.value) || 40 })}
+                  onChange={(e) => {
+                    const val = e.target.value === '' ? '' : parseInt(e.target.value);
+                    setConfig({ ...config, threads: val });
+                  }}
+                  onBlur={(e) => {
+                    if (e.target.value === '' || parseInt(e.target.value) < 1) {
+                      setConfig({ ...config, threads: 40 });
+                    }
+                  }}
                   min="1"
                   max="200"
                   data-bs-theme="dark"
@@ -630,12 +665,20 @@ export const FFUFConfigModal = ({
                 <Form.Control
                   type="number"
                   value={config.rateLimit}
-                  onChange={(e) => setConfig({ ...config, rateLimit: parseInt(e.target.value) || 0 })}
+                  onChange={(e) => {
+                    const val = e.target.value === '' ? '' : parseInt(e.target.value);
+                    setConfig({ ...config, rateLimit: val });
+                  }}
+                  onBlur={(e) => {
+                    if (e.target.value === '' || parseInt(e.target.value) < 0) {
+                      setConfig({ ...config, rateLimit: 0 });
+                    }
+                  }}
                   min="0"
                   data-bs-theme="dark"
                 />
                 <Form.Text className="text-white-50">
-                  0 = no limit
+                  0 = no limit. Leave empty to reset to 0.
                 </Form.Text>
               </Form.Group>
 
@@ -645,11 +688,11 @@ export const FFUFConfigModal = ({
                   type="text"
                   value={config.delay}
                   onChange={(e) => setConfig({ ...config, delay: e.target.value })}
-                  placeholder="0.1 or 0.1-2.0"
+                  placeholder="0.1 or 0.1-2.0 (leave empty for none)"
                   data-bs-theme="dark"
                 />
                 <Form.Text className="text-white-50">
-                  Seconds or range (e.g., "0.1" or "0.1-2.0")
+                  Seconds or range (e.g., "0.1" or "0.1-2.0"). Leave empty for no delay.
                 </Form.Text>
               </Form.Group>
 
@@ -658,7 +701,15 @@ export const FFUFConfigModal = ({
                 <Form.Control
                   type="number"
                   value={config.timeout}
-                  onChange={(e) => setConfig({ ...config, timeout: parseInt(e.target.value) || 10 })}
+                  onChange={(e) => {
+                    const val = e.target.value === '' ? '' : parseInt(e.target.value);
+                    setConfig({ ...config, timeout: val });
+                  }}
+                  onBlur={(e) => {
+                    if (e.target.value === '' || parseInt(e.target.value) < 1) {
+                      setConfig({ ...config, timeout: 10 });
+                    }
+                  }}
                   min="1"
                   data-bs-theme="dark"
                 />
@@ -669,12 +720,20 @@ export const FFUFConfigModal = ({
                 <Form.Control
                   type="number"
                   value={config.maxTime}
-                  onChange={(e) => setConfig({ ...config, maxTime: parseInt(e.target.value) || 0 })}
+                  onChange={(e) => {
+                    const val = e.target.value === '' ? '' : parseInt(e.target.value);
+                    setConfig({ ...config, maxTime: val });
+                  }}
+                  onBlur={(e) => {
+                    if (e.target.value === '' || parseInt(e.target.value) < 0) {
+                      setConfig({ ...config, maxTime: 0 });
+                    }
+                  }}
                   min="0"
                   data-bs-theme="dark"
                 />
                 <Form.Text className="text-white-50">
-                  0 = no limit. Max running time for the entire scan.
+                  0 = no limit. Max running time for the entire scan. Leave empty to reset to 0.
                 </Form.Text>
               </Form.Group>
 
@@ -713,13 +772,60 @@ export const FFUFConfigModal = ({
                 className="text-white mb-2"
               />
 
+              <hr className="my-4" style={{ borderColor: '#444' }} />
+              
+              <h6 className="text-white mb-3">Error Handling</h6>
+              
+              <Form.Check
+                type="checkbox"
+                label="Stop on All Errors (-sa) - Recommended"
+                checked={config.stopOnAll}
+                onChange={(e) => setConfig({ ...config, stopOnAll: e.target.checked })}
+                className="text-white mb-2"
+              />
+              <Form.Text className="text-white-50 d-block mb-3">
+                Stops scanning on all error cases. Includes -sf and -se. Prevents wasting time on blocked/failing scans.
+              </Form.Text>
+
+              <Form.Check
+                type="checkbox"
+                label="Stop on 403 Forbidden (-sf)"
+                checked={config.stopOn403}
+                onChange={(e) => setConfig({ ...config, stopOn403: e.target.checked })}
+                disabled={config.stopOnAll}
+                className="text-white mb-2"
+              />
+              <Form.Text className="text-white-50 d-block mb-3">
+                Stops when more than 95% of responses return 403 Forbidden. Useful when target is blocking requests.
+              </Form.Text>
+
+              <Form.Check
+                type="checkbox"
+                label="Stop on Spurious Errors (-se)"
+                checked={config.stopOnErrors}
+                onChange={(e) => setConfig({ ...config, stopOnErrors: e.target.checked })}
+                disabled={config.stopOnAll}
+                className="text-white mb-2"
+              />
+              <Form.Text className="text-white-50 d-block mb-3">
+                Stops when spurious errors are detected during scanning.
+              </Form.Text>
+
               {config.recursion && (
                 <Form.Group className="mb-3 ms-4">
                   <Form.Label className="text-white">Recursion Depth</Form.Label>
                   <Form.Control
                     type="number"
                     value={config.recursionDepth}
-                    onChange={(e) => setConfig({ ...config, recursionDepth: parseInt(e.target.value) || 0 })}
+                    onChange={(e) => {
+                      const val = e.target.value === '' ? '' : parseInt(e.target.value);
+                      setConfig({ ...config, recursionDepth: val });
+                    }}
+                    onBlur={(e) => {
+                      if (e.target.value === '' || parseInt(e.target.value) < 0) {
+                        setConfig({ ...config, recursionDepth: 0 });
+                      }
+                    }}
                     min="0"
                     data-bs-theme="dark"
                   />

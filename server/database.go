@@ -530,6 +530,21 @@ func createTables() {
 			scope_target_id UUID REFERENCES scope_targets(id) ON DELETE CASCADE
 		);`,
 
+		`CREATE TABLE IF NOT EXISTS gospider_url_scans (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scan_id UUID NOT NULL UNIQUE,
+			url TEXT NOT NULL,
+			status VARCHAR(50) NOT NULL,
+			result TEXT,
+			error TEXT,
+			stdout TEXT,
+			stderr TEXT,
+			command TEXT,
+			execution_time TEXT,
+			created_at TIMESTAMP DEFAULT NOW(),
+			scope_target_id UUID REFERENCES scope_targets(id) ON DELETE CASCADE
+		);`,
+
 		`CREATE TABLE IF NOT EXISTS linkfinder_url_scans (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			scan_id UUID NOT NULL UNIQUE,
@@ -1350,6 +1365,70 @@ func createTables() {
 		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_endpoint ON manual_crawl_captures(endpoint);`,
 		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_method ON manual_crawl_captures(method);`,
 
+		`CREATE TABLE IF NOT EXISTS consolidated_url_endpoints (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			url TEXT NOT NULL,
+			normalized_url TEXT NOT NULL,
+			domain TEXT NOT NULL,
+			path TEXT NOT NULL,
+			method VARCHAR(10) DEFAULT 'GET',
+			is_direct BOOLEAN DEFAULT true,
+			origin_url TEXT,
+			status_codes JSONB DEFAULT '[]',
+			headers JSONB DEFAULT '{}',
+			response_headers JSONB DEFAULT '{}',
+			request_count INTEGER DEFAULT 1,
+			first_seen TIMESTAMP DEFAULT NOW(),
+			last_seen TIMESTAMP DEFAULT NOW(),
+			sources TEXT[] DEFAULT '{}',
+			created_at TIMESTAMP DEFAULT NOW(),
+			UNIQUE(scope_target_id, url, method)
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS consolidated_url_parameters (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			endpoint_id UUID NOT NULL REFERENCES consolidated_url_endpoints(id) ON DELETE CASCADE,
+			param_type VARCHAR(20) NOT NULL,
+			param_name TEXT NOT NULL,
+			example_values JSONB DEFAULT '[]',
+			frequency INTEGER DEFAULT 1,
+			created_at TIMESTAMP DEFAULT NOW(),
+			UNIQUE(endpoint_id, param_type, param_name)
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS endpoint_investigation_scans (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scan_id UUID NOT NULL UNIQUE,
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			status VARCHAR(50) NOT NULL,
+			total_endpoints INTEGER DEFAULT 0,
+			processed_endpoints INTEGER DEFAULT 0,
+			result TEXT,
+			error TEXT,
+			execution_time TEXT,
+			created_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		`CREATE INDEX IF NOT EXISTS idx_consolidated_endpoints_scope_target ON consolidated_url_endpoints(scope_target_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_consolidated_endpoints_domain ON consolidated_url_endpoints(domain);`,
+		`CREATE INDEX IF NOT EXISTS idx_consolidated_endpoints_is_direct ON consolidated_url_endpoints(is_direct);`,
+		`CREATE INDEX IF NOT EXISTS idx_consolidated_endpoints_normalized ON consolidated_url_endpoints(normalized_url);`,
+		`CREATE INDEX IF NOT EXISTS idx_consolidated_parameters_endpoint ON consolidated_url_parameters(endpoint_id);`,
+
+		// Migration: Fix example_values column type if it exists as TEXT[]
+		`DO $$ 
+		BEGIN 
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name='consolidated_url_parameters' 
+				AND column_name='example_values' 
+				AND data_type='ARRAY'
+			) THEN
+				ALTER TABLE consolidated_url_parameters ALTER COLUMN example_values TYPE JSONB USING example_values::text::jsonb;
+			END IF;
+		END $$;`,
+
 		// Migration: Add new columns to manual_crawl_captures if they don't exist
 		`DO $$ 
 		BEGIN 
@@ -1387,6 +1466,98 @@ func createTables() {
 		`CREATE INDEX IF NOT EXISTS idx_consolidated_attack_surface_relationships_child ON consolidated_attack_surface_relationships(child_asset_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_consolidated_attack_surface_dns_records_asset_id ON consolidated_attack_surface_dns_records(asset_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_consolidated_attack_surface_metadata_asset_id ON consolidated_attack_surface_metadata(asset_id);`,
+
+		`CREATE TABLE IF NOT EXISTS arjun_configs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
+			config JSONB NOT NULL,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS arjun_scans (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scan_id UUID NOT NULL UNIQUE,
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			status VARCHAR(50) NOT NULL,
+			total_endpoints INT DEFAULT 0,
+			processed_endpoints INT DEFAULT 0,
+			parameters_found INT DEFAULT 0,
+			result TEXT,
+			error TEXT,
+			stdout TEXT,
+			stderr TEXT,
+			command TEXT,
+			execution_time TEXT,
+			created_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS parameth_configs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
+			config JSONB NOT NULL,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS parameth_scans (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scan_id UUID NOT NULL UNIQUE,
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			status VARCHAR(50) NOT NULL,
+			total_endpoints INT DEFAULT 0,
+			processed_endpoints INT DEFAULT 0,
+			parameters_found INT DEFAULT 0,
+			result TEXT,
+			error TEXT,
+			stdout TEXT,
+			stderr TEXT,
+			command TEXT,
+			execution_time TEXT,
+			created_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS x8_configs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
+			config JSONB NOT NULL,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS x8_scans (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scan_id UUID NOT NULL UNIQUE,
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			status VARCHAR(50) NOT NULL,
+			total_endpoints INT DEFAULT 0,
+			processed_endpoints INT DEFAULT 0,
+			parameters_found INT DEFAULT 0,
+			result TEXT,
+			error TEXT,
+			stdout TEXT,
+			stderr TEXT,
+			command TEXT,
+			execution_time TEXT,
+			created_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS parameter_enumeration_results (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scan_id UUID NOT NULL,
+			scan_type VARCHAR(50) NOT NULL,
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			endpoint_url TEXT NOT NULL,
+			parameter_name TEXT NOT NULL,
+			parameter_type VARCHAR(50) NOT NULL,
+			example_value TEXT,
+			confidence VARCHAR(50),
+			created_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		`CREATE INDEX IF NOT EXISTS idx_parameter_enumeration_results_scan_id ON parameter_enumeration_results(scan_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_parameter_enumeration_results_scope_target ON parameter_enumeration_results(scope_target_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_parameter_enumeration_results_endpoint ON parameter_enumeration_results(endpoint_url);`,
 	}
 
 	for _, query := range queries {

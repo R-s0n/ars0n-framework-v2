@@ -285,6 +285,42 @@ services:
     networks:
       - ars0n-network
 
+  arjun:
+    container_name: ars0n-framework-v2-arjun-1
+    build: ./docker/arjun
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  parameth:
+    container_name: ars0n-framework-v2-parameth-1
+    build: ./docker/parameth
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  x8:
+    container_name: ars0n-framework-v2-x8-1
+    build: ./docker/x8
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
 volumes:
   postgres_data:
   temp_data:

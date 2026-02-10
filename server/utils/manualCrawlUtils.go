@@ -311,7 +311,6 @@ func GetManualCrawlSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = append(sessions, session)
 	}
 
-	log.Printf("[MANUAL-CRAWL] Returning %d sessions for target %s", len(sessions), scopeTargetID)
 	json.NewEncoder(w).Encode(sessions)
 }
 
