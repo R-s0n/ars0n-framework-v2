@@ -655,8 +655,9 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 
 	// Build base command
 	dockerCmd := []string{
-		"docker", "run", "--rm",
-		"sxcurity/gau:latest",
+		"docker", "exec", "-i",
+		"ars0n-framework-v2-gau-1",
+		"gau",
 		domain,
 		"--providers", "wayback",
 		"--json",
@@ -697,8 +698,9 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 	if result == "" {
 		// Try a second attempt with different flags
 		dockerCmd = []string{
-			"docker", "run", "--rm",
-			"sxcurity/gau:latest",
+			"docker", "exec", "-i",
+			"ars0n-framework-v2-gau-1",
+			"gau",
 			domain,
 			"--providers", "wayback,otx,urlscan",
 			"--subs",
