@@ -3461,8 +3461,8 @@ function App() {
               subdomainizer: config.subdomainizer !== false,
               consolidate_round3: config.consolidate_httpx_round3 !== false,
               httpx_round3: config.consolidate_httpx_round3 !== false,
-              nuclei_screenshot: config.nuclei_screenshot !== false,
-              metadata: config.metadata !== false
+              metadata: (config.metadata !== false) || (config.nuclei_screenshot !== false),
+              nuclei_screenshot: (config.metadata !== false) || (config.nuclei_screenshot !== false)
             }
           };
         }) : [];
@@ -7768,7 +7768,7 @@ function App() {
                 <th className="text-center bg-dark border-danger">R2</th>
                 <th colSpan={2} className="text-center bg-dark border-danger">JS/Link Discovery</th>
                 <th className="text-center bg-dark border-danger">R3</th>
-                <th colSpan={2} className="text-center bg-dark border-danger">Analysis</th>
+                <th className="text-center bg-dark border-danger">Metadata</th>
               </tr>
               <tr>
                 <th colSpan={5}></th>
@@ -7785,14 +7785,13 @@ function App() {
                 <th className="text-center" style={{width: '40px'}}>GS</th>
                 <th className="text-center" style={{width: '40px'}}>SDZ</th>
                 <th className="text-center" style={{width: '40px'}}>HX3</th>
-                <th className="text-center" style={{width: '40px'}}>NSC</th>
                 <th className="text-center" style={{width: '40px'}}>MD</th>
               </tr>
             </thead>
             <tbody>
               {(!autoScanSessions || autoScanSessions.length === 0) ? (
                 <tr>
-                  <td colSpan={20} className="text-center text-white-50">
+                  <td colSpan={19} className="text-center text-white-50">
                     No auto scan sessions found for this target.
                   </td>
                 </tr>
@@ -7800,29 +7799,28 @@ function App() {
                 autoScanSessions.map((session) => (
                   <tr key={session.session_id}>
                     <td>{session.start_time}</td>
-                    <td>{session.duration || '�'}</td>
+                    <td>{session.duration || '-'}</td>
                     <td>
                       <span className={`text-${session.status === 'completed' ? 'success' : session.status === 'cancelled' ? 'warning' : 'primary'}`}>
                         {session.status.charAt(0).toUpperCase() + session.status.slice(1)}
                       </span>
                     </td>
-                    <td className="text-center"><strong>{session.final_consolidated_subdomains || '�'}</strong></td>
-                    <td className="text-center"><strong>{session.final_live_web_servers || '�'}</strong></td>
-                    <td className="text-center">{session.config?.amass ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.sublist3r ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.assetfinder ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.gau ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.ctl ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.subfinder ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.httpx_round1 ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.shuffledns ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.cewl ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.httpx_round2 ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.gospider ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.subdomainizer ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.httpx_round3 ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.nuclei_screenshot ? <span className="text-danger fw-bold">?</span> : ''}</td>
-                    <td className="text-center">{session.config?.metadata ? <span className="text-danger fw-bold">?</span> : ''}</td>
+                    <td className="text-center"><strong>{session.final_consolidated_subdomains || '0'}</strong></td>
+                    <td className="text-center"><strong>{session.final_live_web_servers || '0'}</strong></td>
+                    <td className="text-center">{session.config?.amass ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{session.config?.sublist3r ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{session.config?.assetfinder ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{session.config?.gau ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{session.config?.ctl ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{session.config?.subfinder ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{session.config?.httpx_round1 ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{session.config?.shuffledns ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{session.config?.cewl ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{session.config?.httpx_round2 ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{session.config?.gospider ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{session.config?.subdomainizer ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{session.config?.httpx_round3 ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
+                    <td className="text-center">{(session.config?.metadata || session.config?.nuclei_screenshot) ? <span className="text-success fw-bold">✓</span> : <span className="text-secondary">-</span>}</td>
                   </tr>
                 ))
               )}
