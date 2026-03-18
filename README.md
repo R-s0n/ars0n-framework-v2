@@ -5,6 +5,7 @@ Ars0n Framework v2
 <p align="center">
   <a href="#about">About</a> •
   <a href="#download-and-install">Download & Install</a> •
+  <a href="#updating">Updating</a> •
   <a href="#getting-started">Getting Started</a> •
   <a href="#workflows">Workflows</a> •
   <a href="#troubleshooting">Troubleshooting</a> •
@@ -179,6 +180,33 @@ docker-compose up --build
 ```
 
 **Step 5:** Access the framework at `http://localhost`
+
+## Updating
+
+The framework includes update scripts that will bring you to the latest version from **any** previous version.  Your scan data, API keys, and settings are stored in Docker volumes and will be preserved automatically.
+
+### Windows
+
+```powershell
+powershell -ExecutionPolicy Bypass -File update.ps1
+```
+
+### Mac / Linux
+
+```bash
+chmod +x update.sh
+./update.sh
+```
+
+### What the update does
+
+1. Stops the running containers (your data in Docker volumes is safe)
+2. Backs up your `docker-compose.yml` and `wordlists` in case you customized them
+3. Pulls the latest release code via git
+4. Rebuilds all containers with the new code
+5. Starts the framework — the database schema is automatically migrated on startup
+
+> **Note:** If you downloaded the framework as a zip file, the update script will initialize a git repository for you automatically.  Future updates will be faster since git only downloads what changed.
 
 ## Getting Started
 
