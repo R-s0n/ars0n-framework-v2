@@ -91,6 +91,8 @@ function Update-ViaGit {
     if (Test-Path ".git") {
         Write-Info "Git repository detected. Updating via git..."
 
+        $script:OriginalBranch = git symbolic-ref --short HEAD 2>$null
+
         $currentRemote = git remote get-url origin 2>$null
         if (-not $currentRemote) {
             git remote add origin $REPO_URL
@@ -141,6 +143,16 @@ function Update-ViaGit {
     Write-Info "Code updated to $script:LatestTag"
 }
 
+function Restore-GitBranch {
+    if ($script:OriginalBranch) {
+        Write-Info "Restoring original branch: $($script:OriginalBranch)"
+        git checkout $script:OriginalBranch 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Could not restore branch '$($script:OriginalBranch)'. You may need to run: git checkout $($script:OriginalBranch)"
+        }
+    }
+}
+
 function Rebuild-Containers {
     Write-Info "Rebuilding and starting containers (this may take a while)..."
 
@@ -189,6 +201,7 @@ Stop-Containers
 Backup-CustomFiles
 Update-ViaGit
 Rebuild-Containers
+Restore-GitBranch
 Confirm-Update
 
 Write-Host ""

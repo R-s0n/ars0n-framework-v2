@@ -87,6 +87,8 @@ update_via_git() {
     if [ -d ".git" ]; then
         log_info "Git repository detected. Updating via git..."
 
+        ORIGINAL_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+
         CURRENT_REMOTE=$(git remote get-url origin 2>/dev/null || echo "")
         if [ -z "$CURRENT_REMOTE" ]; then
             git remote add origin "$REPO_URL"
@@ -125,6 +127,13 @@ update_via_git() {
     fi
 
     log_info "Code updated to $LATEST_TAG"
+}
+
+restore_git_branch() {
+    if [ -n "$ORIGINAL_BRANCH" ]; then
+        log_info "Restoring original branch: $ORIGINAL_BRANCH"
+        git checkout "$ORIGINAL_BRANCH" 2>/dev/null || log_warn "Could not restore branch '$ORIGINAL_BRANCH'. You may need to run: git checkout $ORIGINAL_BRANCH"
+    fi
 }
 
 rebuild_containers() {
@@ -171,6 +180,7 @@ stop_containers
 backup_custom_files
 update_via_git
 rebuild_containers
+restore_git_branch
 verify_update
 
 echo ""
