@@ -114,11 +114,33 @@ type TargetURLResponse struct {
 	ROIScore            int                    `json:"roi_score"`
 }
 
+type HttpxScanConfig struct {
+	Ports            []int             `json:"ports"`
+	Threads          int               `json:"threads"`
+	RateLimit        int               `json:"rateLimit"`
+	Timeout          int               `json:"timeout"`
+	Retries          int               `json:"retries"`
+	MatchCodes       string            `json:"matchCodes"`
+	Probes           map[string]bool   `json:"probes"`
+	Filters          map[string]interface{} `json:"filters"`
+	Matchers         map[string]string `json:"matchers"`
+	Misc             map[string]interface{} `json:"misc"`
+	Headless         map[string]interface{} `json:"headless"`
+	Extractors       map[string]interface{} `json:"extractors"`
+	CustomHeaders    string            `json:"customHeaders"`
+	HttpProxy        string            `json:"httpProxy"`
+	Resolvers        string            `json:"resolvers"`
+	Path             string            `json:"path"`
+	RequestMethods   string            `json:"requestMethods"`
+	Body             string            `json:"body"`
+}
+
 // RunHttpxScan handles the HTTP request to start a new httpx scan
 func RunHttpxScan(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[DEBUG] Received httpx scan request")
 	var payload struct {
-		FQDN string `json:"fqdn" binding:"required"`
+		FQDN   string          `json:"fqdn" binding:"required"`
+		Config *HttpxScanConfig `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.FQDN == "" {
 		log.Printf("[ERROR] Invalid request body: %v", err)
@@ -130,7 +152,6 @@ func RunHttpxScan(w http.ResponseWriter, r *http.Request) {
 	wildcardDomain := fmt.Sprintf("*.%s", domain)
 	log.Printf("[DEBUG] Processing httpx scan for domain: %s (wildcard: %s)", domain, wildcardDomain)
 
-	// Get the scope target ID
 	query := `SELECT id FROM scope_targets WHERE type = 'Wildcard' AND scope_target = $1`
 	var scopeTargetID string
 	err := dbPool.QueryRow(context.Background(), query, wildcardDomain).Scan(&scopeTargetID)
@@ -153,7 +174,7 @@ func RunHttpxScan(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[DEBUG] Created new scan record in database")
 
-	go ExecuteAndParseHttpxScan(scanID, domain)
+	go ExecuteAndParseHttpxScan(scanID, domain, payload.Config)
 	log.Printf("[DEBUG] Started httpx scan execution in background")
 
 	w.WriteHeader(http.StatusAccepted)
@@ -162,20 +183,17 @@ func RunHttpxScan(w http.ResponseWriter, r *http.Request) {
 }
 
 // ExecuteAndParseHttpxScan runs the httpx scan and processes its results
-func ExecuteAndParseHttpxScan(scanID, domain string) {
+func ExecuteAndParseHttpxScan(scanID, domain string, scanConfig *HttpxScanConfig) {
 	log.Printf("[INFO] Starting httpx scan for domain %s (scan ID: %s)", domain, scanID)
 	startTime := time.Now()
 
-	// Get the rate limit from settings
 	rateLimit := GetHttpxRateLimit()
 	log.Printf("[INFO] Using rate limit of %d for HTTPX scan", rateLimit)
 
-	// Get custom HTTP settings
 	customUserAgent, customHeader := GetCustomHTTPSettings()
 	log.Printf("[DEBUG] Custom User Agent: %s", customUserAgent)
 	log.Printf("[DEBUG] Custom Header: %s", customHeader)
 
-	// Get scope target ID
 	var scopeTargetID string
 	err := dbPool.QueryRow(context.Background(),
 		`SELECT scope_target_id FROM httpx_scans WHERE scan_id = $1`,
@@ -187,7 +205,6 @@ func ExecuteAndParseHttpxScan(scanID, domain string) {
 	}
 	log.Printf("[DEBUG] Retrieved scope target ID: %s", scopeTargetID)
 
-	// Get consolidated subdomains
 	log.Printf("[DEBUG] Fetching consolidated subdomains from database")
 	rows, err := dbPool.Query(context.Background(),
 		`SELECT subdomain FROM consolidated_subdomains WHERE scope_target_id = $1`,
@@ -210,13 +227,11 @@ func ExecuteAndParseHttpxScan(scanID, domain string) {
 	}
 	log.Printf("[DEBUG] Found %d subdomains to scan", len(domainsToScan))
 
-	// If no consolidated subdomains found, use the base domain
 	if len(domainsToScan) == 0 {
 		log.Printf("[INFO] No consolidated subdomains found, using base domain: %s", domain)
 		domainsToScan = []string{domain}
 	}
 
-	// Create temporary directory for domains file
 	tempDir := filepath.Join("/tmp", fmt.Sprintf("httpx-%s", scanID))
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		log.Printf("[ERROR] Failed to create temp directory: %v", err)
@@ -229,7 +244,6 @@ func ExecuteAndParseHttpxScan(scanID, domain string) {
 		os.RemoveAll(tempDir)
 	}()
 
-	// Write domains to file
 	domainsFile := filepath.Join(tempDir, "domains.txt")
 	outputFile := filepath.Join(tempDir, "httpx-output.json")
 	if err := os.WriteFile(domainsFile, []byte(strings.Join(domainsToScan, "\n")), 0644); err != nil {
@@ -240,6 +254,32 @@ func ExecuteAndParseHttpxScan(scanID, domain string) {
 	log.Printf("[DEBUG] Wrote %d domains to file: %s", len(domainsToScan), domainsFile)
 
 	ports := []int{80, 443, 7547, 8089, 8085, 8443, 8080, 4567, 7170, 8008, 2083, 8000, 2082, 8081, 2087, 2086, 8888, 8880, 60000, 40000, 9080, 5985, 9100, 2096, 3000, 1024, 30005, 81, 21, 5000, 2095}
+	timeout := 10
+	retries := 2
+	threads := 0
+	matchCodes := "100,101,200,201,202,203,204,205,206,207,208,226,300,301,302,303,304,305,307,308,400,401,402,403,404,405,406,407,408,409,410,411,412,413,414,415,416,417,418,421,422,423,424,426,428,429,431,451,500,501,502,503,504,505,506,507,508,510,511"
+
+	if scanConfig != nil {
+		if len(scanConfig.Ports) > 0 {
+			ports = scanConfig.Ports
+		}
+		if scanConfig.Timeout > 0 {
+			timeout = scanConfig.Timeout
+		}
+		if scanConfig.Retries >= 0 {
+			retries = scanConfig.Retries
+		}
+		if scanConfig.RateLimit > 0 {
+			rateLimit = scanConfig.RateLimit
+		}
+		if scanConfig.Threads > 0 {
+			threads = scanConfig.Threads
+		}
+		if scanConfig.MatchCodes != "" {
+			matchCodes = scanConfig.MatchCodes
+		}
+	}
+
 	portStrings := make([]string, len(ports))
 	for i, port := range ports {
 		portStrings[i] = fmt.Sprintf("%d", port)
@@ -251,22 +291,235 @@ func ExecuteAndParseHttpxScan(scanID, domain string) {
 		"ars0n-framework-v2-httpx-1",
 		"httpx",
 		"-l", filepath.Join("/tmp", fmt.Sprintf("httpx-%s", scanID), "domains.txt"),
-		"-ports", portsFlag,
 		"-json",
-		"-status-code",
-		"-title",
-		"-tech-detect",
-		"-server",
-		"-content-length",
 		"-no-color",
-		"-timeout", "10",
-		"-retries", "2",
+		"-timeout", fmt.Sprintf("%d", timeout),
+		"-retries", fmt.Sprintf("%d", retries),
 		"-rate-limit", fmt.Sprintf("%d", rateLimit),
-		"-mc", "100,101,200,201,202,203,204,205,206,207,208,226,300,301,302,303,304,305,307,308,400,401,402,403,404,405,406,407,408,409,410,411,412,413,414,415,416,417,418,421,422,423,424,426,428,429,431,451,500,501,502,503,504,505,506,507,508,510,511",
 	}
 
-	// Add custom headers if specified
-	// HTTPX uses -H for both headers and user agent
+	if len(ports) > 0 {
+		dockerCmd = append(dockerCmd, "-ports", portsFlag)
+	}
+
+	if threads > 0 {
+		dockerCmd = append(dockerCmd, "-t", fmt.Sprintf("%d", threads))
+	}
+
+	if matchCodes != "" {
+		dockerCmd = append(dockerCmd, "-mc", matchCodes)
+	}
+
+	if scanConfig != nil && scanConfig.Probes != nil {
+		if val, ok := scanConfig.Probes["statusCode"]; ok && val {
+			dockerCmd = append(dockerCmd, "-status-code")
+		}
+		if val, ok := scanConfig.Probes["title"]; ok && val {
+			dockerCmd = append(dockerCmd, "-title")
+		}
+		if val, ok := scanConfig.Probes["techDetect"]; ok && val {
+			dockerCmd = append(dockerCmd, "-tech-detect")
+		}
+		if val, ok := scanConfig.Probes["server"]; ok && val {
+			dockerCmd = append(dockerCmd, "-server")
+		}
+		if val, ok := scanConfig.Probes["contentLength"]; ok && val {
+			dockerCmd = append(dockerCmd, "-content-length")
+		}
+		if val, ok := scanConfig.Probes["location"]; ok && val {
+			dockerCmd = append(dockerCmd, "-location")
+		}
+		if val, ok := scanConfig.Probes["favicon"]; ok && val {
+			dockerCmd = append(dockerCmd, "-favicon")
+		}
+		if val, ok := scanConfig.Probes["jarm"]; ok && val {
+			dockerCmd = append(dockerCmd, "-jarm")
+		}
+		if val, ok := scanConfig.Probes["responseTime"]; ok && val {
+			dockerCmd = append(dockerCmd, "-response-time")
+		}
+		if val, ok := scanConfig.Probes["lineCount"]; ok && val {
+			dockerCmd = append(dockerCmd, "-line-count")
+		}
+		if val, ok := scanConfig.Probes["wordCount"]; ok && val {
+			dockerCmd = append(dockerCmd, "-word-count")
+		}
+		if val, ok := scanConfig.Probes["method"]; ok && val {
+			dockerCmd = append(dockerCmd, "-method")
+		}
+		if val, ok := scanConfig.Probes["websocket"]; ok && val {
+			dockerCmd = append(dockerCmd, "-websocket")
+		}
+		if val, ok := scanConfig.Probes["ip"]; ok && val {
+			dockerCmd = append(dockerCmd, "-ip")
+		}
+		if val, ok := scanConfig.Probes["cname"]; ok && val {
+			dockerCmd = append(dockerCmd, "-cname")
+		}
+		if val, ok := scanConfig.Probes["asn"]; ok && val {
+			dockerCmd = append(dockerCmd, "-asn")
+		}
+		if val, ok := scanConfig.Probes["probe"]; ok && val {
+			dockerCmd = append(dockerCmd, "-probe")
+		}
+	} else {
+		dockerCmd = append(dockerCmd, "-status-code", "-title", "-tech-detect", "-server", "-content-length")
+	}
+
+	if scanConfig != nil {
+		if scanConfig.Filters != nil {
+			if val, ok := scanConfig.Filters["filterCode"].(string); ok && val != "" {
+				dockerCmd = append(dockerCmd, "-fc", val)
+			}
+			if val, ok := scanConfig.Filters["filterLength"].(string); ok && val != "" {
+				dockerCmd = append(dockerCmd, "-fl", val)
+			}
+			if val, ok := scanConfig.Filters["filterLineCount"].(string); ok && val != "" {
+				dockerCmd = append(dockerCmd, "-flc", val)
+			}
+			if val, ok := scanConfig.Filters["filterWordCount"].(string); ok && val != "" {
+				dockerCmd = append(dockerCmd, "-fwc", val)
+			}
+			if val, ok := scanConfig.Filters["filterString"].(string); ok && val != "" {
+				dockerCmd = append(dockerCmd, "-fs", val)
+			}
+			if val, ok := scanConfig.Filters["filterRegex"].(string); ok && val != "" {
+				dockerCmd = append(dockerCmd, "-fe", val)
+			}
+			if val, ok := scanConfig.Filters["filterCdn"].(string); ok && val != "" {
+				dockerCmd = append(dockerCmd, "-fcdn", val)
+			}
+			if val, ok := scanConfig.Filters["filterResponseTime"].(string); ok && val != "" {
+				dockerCmd = append(dockerCmd, "-frt", val)
+			}
+			if val, ok := scanConfig.Filters["filterCondition"].(string); ok && val != "" {
+				dockerCmd = append(dockerCmd, "-fdc", val)
+			}
+			if val, ok := scanConfig.Filters["filterDuplicates"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-fd")
+			}
+		}
+
+		if scanConfig.Matchers != nil {
+			if val, ok := scanConfig.Matchers["matchLength"]; ok && val != "" {
+				dockerCmd = append(dockerCmd, "-ml", val)
+			}
+			if val, ok := scanConfig.Matchers["matchLineCount"]; ok && val != "" {
+				dockerCmd = append(dockerCmd, "-mlc", val)
+			}
+			if val, ok := scanConfig.Matchers["matchWordCount"]; ok && val != "" {
+				dockerCmd = append(dockerCmd, "-mwc", val)
+			}
+			if val, ok := scanConfig.Matchers["matchString"]; ok && val != "" {
+				dockerCmd = append(dockerCmd, "-ms", val)
+			}
+			if val, ok := scanConfig.Matchers["matchRegex"]; ok && val != "" {
+				dockerCmd = append(dockerCmd, "-mr", val)
+			}
+			if val, ok := scanConfig.Matchers["matchCdn"]; ok && val != "" {
+				dockerCmd = append(dockerCmd, "-mcdn", val)
+			}
+			if val, ok := scanConfig.Matchers["matchResponseTime"]; ok && val != "" {
+				dockerCmd = append(dockerCmd, "-mrt", val)
+			}
+			if val, ok := scanConfig.Matchers["matchCondition"]; ok && val != "" {
+				dockerCmd = append(dockerCmd, "-mdc", val)
+			}
+			if val, ok := scanConfig.Matchers["matchFavicon"]; ok && val != "" {
+				dockerCmd = append(dockerCmd, "-mfc", val)
+			}
+		}
+
+		if scanConfig.Misc != nil {
+			if val, ok := scanConfig.Misc["followRedirects"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-follow-redirects")
+			}
+			if val, ok := scanConfig.Misc["maxRedirects"].(float64); ok && int(val) != 10 {
+				dockerCmd = append(dockerCmd, "-max-redirects", fmt.Sprintf("%d", int(val)))
+			}
+			if val, ok := scanConfig.Misc["probeAllIps"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-probe-all-ips")
+			}
+			if val, ok := scanConfig.Misc["tlsProbe"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-tls-probe")
+			}
+			if val, ok := scanConfig.Misc["cspProbe"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-csp-probe")
+			}
+			if val, ok := scanConfig.Misc["tlsGrab"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-tls-grab")
+			}
+			if val, ok := scanConfig.Misc["pipeline"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-pipeline")
+			}
+			if val, ok := scanConfig.Misc["http2"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-http2")
+			}
+			if val, ok := scanConfig.Misc["vhost"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-vhost")
+			}
+			if val, ok := scanConfig.Misc["noFallback"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-no-fallback")
+			}
+			if val, ok := scanConfig.Misc["noFallbackScheme"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-no-fallback-scheme")
+			}
+			if val, ok := scanConfig.Misc["maxHostError"].(float64); ok && int(val) != 30 {
+				dockerCmd = append(dockerCmd, "-max-host-error", fmt.Sprintf("%d", int(val)))
+			}
+		}
+
+		if scanConfig.Headless != nil {
+			if val, ok := scanConfig.Headless["screenshot"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-screenshot")
+				if st, ok := scanConfig.Headless["screenshotTimeout"].(float64); ok && int(st) != 10 {
+					dockerCmd = append(dockerCmd, "-screenshot-timeout", fmt.Sprintf("%d", int(st)))
+				}
+			}
+		}
+
+		if scanConfig.Extractors != nil {
+			if val, ok := scanConfig.Extractors["extractRegex"].(string); ok && val != "" {
+				dockerCmd = append(dockerCmd, "-extract-regex", val)
+			}
+			if val, ok := scanConfig.Extractors["extractPreset"].(string); ok && val != "" {
+				dockerCmd = append(dockerCmd, "-extract-preset", val)
+			}
+			if val, ok := scanConfig.Extractors["extractFqdn"].(bool); ok && val {
+				dockerCmd = append(dockerCmd, "-extract-fqdn")
+			}
+		}
+
+		if scanConfig.CustomHeaders != "" {
+			for _, header := range strings.Split(scanConfig.CustomHeaders, "\n") {
+				header = strings.TrimSpace(header)
+				if header != "" {
+					dockerCmd = append(dockerCmd, "-H", header)
+				}
+			}
+		}
+
+		if scanConfig.HttpProxy != "" {
+			dockerCmd = append(dockerCmd, "-http-proxy", scanConfig.HttpProxy)
+		}
+
+		if scanConfig.Resolvers != "" {
+			dockerCmd = append(dockerCmd, "-resolvers", scanConfig.Resolvers)
+		}
+
+		if scanConfig.Path != "" {
+			dockerCmd = append(dockerCmd, "-path", scanConfig.Path)
+		}
+
+		if scanConfig.RequestMethods != "" {
+			dockerCmd = append(dockerCmd, "-x", scanConfig.RequestMethods)
+		}
+
+		if scanConfig.Body != "" {
+			dockerCmd = append(dockerCmd, "-body", scanConfig.Body)
+		}
+	}
+
 	if customUserAgent != "" {
 		dockerCmd = append(dockerCmd, "-H", fmt.Sprintf("User-Agent: %s", customUserAgent))
 	}
@@ -274,7 +527,6 @@ func ExecuteAndParseHttpxScan(scanID, domain string) {
 		dockerCmd = append(dockerCmd, "-H", customHeader)
 	}
 
-	// Add output file parameter
 	dockerCmd = append(dockerCmd, "-o", filepath.Join("/tmp", fmt.Sprintf("httpx-%s", scanID), "httpx-output.json"))
 
 	cmd := exec.Command(dockerCmd[0], dockerCmd[1:]...)

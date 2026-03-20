@@ -131,6 +131,7 @@ import TrimRootDomainsModal from './modals/TrimRootDomainsModal.js';
 import TrimNetworkRangesModal from './modals/TrimNetworkRangesModal.js';
 import LiveWebServersResultsModal from './modals/LiveWebServersResultsModal.js';
 import AmassEnumConfigModal from './modals/AmassEnumConfigModal.js';
+import ConfigureHttpxModal from './modals/ConfigureHttpxModal.js';
 import AmassIntelConfigModal from './modals/AmassIntelConfigModal.js';
 import DNSxConfigModal from './modals/DNSxConfigModal.js';
 import fetchMetabigorCompanyScans from './utils/fetchMetabigorCompanyScans';
@@ -207,6 +208,7 @@ import ManageEndpointsModal from './modals/ManageEndpointsModal';
 const ExportModal = lazy(() => import('./modals/ExportModal.js'));
 const ImportModal = lazy(() => import('./modals/ImportModal.js'));
 const WelcomeModal = lazy(() => import('./modals/WelcomeModal.js'));
+const LaunchPadModal = lazy(() => import('./modals/LaunchPadModal.js'));
 const ConfigUploadModal = lazy(() => import('./modals/ConfigUploadModal.js'));
 const APIIntegrationModal = lazy(() => import('./modals/APIIntegrationModal.js'));
 const GoogleDorkingModal = lazy(() => import('./modals/GoogleDorkingModal.js'));
@@ -391,6 +393,7 @@ function App() {
   const [showExportModal, setShowExportModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showWelcomeModal, setShowWelcomeModal] = useState(false);
+  const [showLaunchPadModal, setShowLaunchPadModal] = useState(false);
   const [showConfigUploadModal, setShowConfigUploadModal] = useState(false);
   const [showAPIIntegrationModal, setShowAPIIntegrationModal] = useState(false);
   const [selections, setSelections] = useState({
@@ -476,6 +479,8 @@ function App() {
   const [attackSurfaceCloudAssetsCount, setAttackSurfaceCloudAssetsCount] = useState(0);
   const [attackSurfaceFQDNsCount, setAttackSurfaceFQDNsCount] = useState(0);
   const [showUniqueSubdomainsModal, setShowUniqueSubdomainsModal] = useState(false);
+  const [showConfigureHttpxModal, setShowConfigureHttpxModal] = useState(false);
+  const [httpxScanConfig, setHttpxScanConfig] = useState(null);
   const [mostRecentCeWLScanStatus, setMostRecentCeWLScanStatus] = useState(null);
   const [mostRecentCeWLScan, setMostRecentCeWLScan] = useState(null);
   const [isCeWLScanning, setIsCeWLScanning] = useState(false);
@@ -1917,17 +1922,18 @@ function App() {
       setScopeTargets(data || []);
       setFadeIn(true);
       
+      const bblpDismissed = localStorage.getItem('bblp_modal_dismissed');
+      if (!bblpDismissed) {
+        setShowLaunchPadModal(true);
+      }
+
       if (data && data.length > 0) {
-        // Find the active scope target
         const activeTargets = data.filter(target => target.active);
         
         if (activeTargets.length === 1) {
-          // One active target found, use it
           setActiveTarget(activeTargets[0]);
         } else {
-          // No active target or multiple active targets, use first target and set it as active
           setActiveTarget(data[0]);
-          // Call the API to set the first target as active
           try {
             await fetch(
               `/api/scopetarget/${data[0].id}/activate`,
@@ -1939,7 +1945,7 @@ function App() {
             console.error('Error setting active scope target:', error);
           }
         }
-      } else {
+      } else if (bblpDismissed) {
         setShowWelcomeModal(true);
       }
     } catch (error) {
@@ -2350,7 +2356,9 @@ function App() {
       setIsHttpxScanning,
       setHttpxScans,
       setMostRecentHttpxScanStatus,
-      setMostRecentHttpxScan
+      setMostRecentHttpxScan,
+      null,
+      httpxScanConfig
     );
   };
 
@@ -3033,6 +3041,9 @@ function App() {
   };
 
   const handleOpenUniqueSubdomainsModal = () => setShowUniqueSubdomainsModal(true);
+  const handleOpenConfigureHttpxModal = () => setShowConfigureHttpxModal(true);
+  const handleCloseConfigureHttpxModal = () => setShowConfigureHttpxModal(false);
+  const handleSaveHttpxConfig = (config) => setHttpxScanConfig(config);
 
   const handleOpenCeWLResultsModal = () => setShowCeWLResultsModal(true);
   const handleCloseCeWLResultsModal = () => setShowCeWLResultsModal(false);
@@ -3286,6 +3297,13 @@ function App() {
 
   const handleCloseWelcomeModal = () => {
     setShowWelcomeModal(false);
+  };
+
+  const handleCloseLaunchPadModal = () => {
+    setShowLaunchPadModal(false);
+    if (scopeTargets.length === 0) {
+      setShowWelcomeModal(true);
+    }
   };
 
   const handleCloseConfigUploadModal = () => {
@@ -5173,6 +5191,13 @@ function App() {
       </Suspense>
 
       <Suspense fallback={<div />}>
+        <LaunchPadModal
+          show={showLaunchPadModal}
+          handleClose={handleCloseLaunchPadModal}
+        />
+      </Suspense>
+
+      <Suspense fallback={<div />}>
         <WelcomeModal
           show={showWelcomeModal}
           handleClose={handleCloseWelcomeModal}
@@ -5398,6 +5423,13 @@ function App() {
         handleCloseUniqueSubdomainsModal={handleCloseUniqueSubdomainsModal}
         consolidatedSubdomains={consolidatedSubdomains}
         setShowToast={setShowToast}
+      />
+
+      <ConfigureHttpxModal
+        show={showConfigureHttpxModal}
+        handleClose={handleCloseConfigureHttpxModal}
+        httpxConfig={httpxScanConfig}
+        onSaveConfig={handleSaveHttpxConfig}
       />
 
       <CeWLResultsModal
@@ -6625,6 +6657,13 @@ function App() {
                           <Button
                             variant="outline-danger"
                             className="flex-fill"
+                            onClick={handleOpenConfigureHttpxModal}
+                          >
+                            {httpxScanConfig ? <><i className="bi bi-gear-fill me-1"></i>HTTPX Config</> : <><i className="bi bi-gear me-1"></i>Configure HTTPX</>}
+                          </Button>
+                          <Button
+                            variant="outline-danger"
+                            className="flex-fill"
                             onClick={startHttpxScan}
                             disabled={isHttpxScanning || mostRecentHttpxScanStatus === "pending" || consolidatedSubdomains.length === 0}
                           >
@@ -6758,6 +6797,13 @@ function App() {
                           <Button
                             variant="outline-danger"
                             className="flex-fill"
+                            onClick={handleOpenConfigureHttpxModal}
+                          >
+                            {httpxScanConfig ? <><i className="bi bi-gear-fill me-1"></i>HTTPX Config</> : <><i className="bi bi-gear me-1"></i>Configure HTTPX</>}
+                          </Button>
+                          <Button
+                            variant="outline-danger"
+                            className="flex-fill"
                             onClick={startHttpxScan}
                             disabled={isHttpxScanning || mostRecentHttpxScanStatus === "pending" || consolidatedSubdomains.length === 0}
                           >
@@ -6885,6 +6931,13 @@ function App() {
                             disabled={consolidatedSubdomains.length === 0}
                           >
                             Unique Subdomains
+                          </Button>
+                          <Button
+                            variant="outline-danger"
+                            className="flex-fill"
+                            onClick={handleOpenConfigureHttpxModal}
+                          >
+                            {httpxScanConfig ? <><i className="bi bi-gear-fill me-1"></i>HTTPX Config</> : <><i className="bi bi-gear me-1"></i>Configure HTTPX</>}
                           </Button>
                           <Button
                             variant="outline-danger"
