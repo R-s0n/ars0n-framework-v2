@@ -595,6 +595,30 @@ const HelpMeLearn = ({ section }) => {
         }
       ]
     },
+    wildcardNucleiScanning: {
+      title: "Help Me Learn!",
+      items: [
+        {
+          question: "What stage of the methodology are we at and what are we trying to accomplish with wildcard vulnerability scanning?",
+          lessonKey: "wildcardNucleiScanningMethodology",
+          answers: [
+            "We're in the Automated Vulnerability Assessment phase for wildcard domains, where we systematically test all discovered live web servers for known vulnerabilities, misconfigurations, and security issues using Nuclei's comprehensive scanning templates.",
+            "After completing subdomain enumeration, consolidation, and HTTPX probing across multiple rounds, we now have a curated list of live web servers. This phase transforms that recon into actionable security findings by scanning each live server for exploitable weaknesses.",
+            "By focusing exclusively on confirmed live web servers, we maximize scan efficiency and minimize noise. Every target has already been validated as responsive, ensuring our vulnerability scanning efforts are directed at real, accessible attack surface."
+          ]
+        },
+        {
+          question: "How should I configure Nuclei scanning for wildcard domain targets?",
+          lessonKey: "wildcardNucleiScanningStrategy",
+          answers: [
+            "Start with broad template categories like CVEs, vulnerabilities, and exposures to get comprehensive coverage across all live web servers. As you identify interesting technologies and patterns, refine your approach with individual template selection.",
+            "Use the Individual Templates browser tab to search for and select specific templates targeting technologies you've discovered during metadata gathering. This precision approach lets you focus on the most relevant checks for each target's technology stack.",
+            "Configure advanced settings like rate limiting and concurrency based on target sensitivity. For bug bounty programs, respect scope boundaries and rate limits. Use exclusion tags like 'dos' and 'intrusive' to avoid disruptive tests unless explicitly permitted.",
+            "Leverage the Exclusions tab to skip templates that generate excessive noise for your targets, and use the Advanced Filtering options like protocol types and template conditions to fine-tune which templates run against your specific target set."
+          ]
+        }
+      ]
+    },
     threatModeling: {
       title: "Help Me Learn!",
       items: [
@@ -657,6 +681,8 @@ const HelpMeLearn = ({ section }) => {
   };
 
   const currentSection = sections[section];
+
+  if (!currentSection) return null;
 
   return (
     <>

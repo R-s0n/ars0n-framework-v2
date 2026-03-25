@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// NucleiFinding represents a single Nuclei finding from JSON output
 type NucleiFinding struct {
 	TemplateID    string     `json:"template-id"`
 	Info          NucleiInfo `json:"info"`
@@ -34,7 +34,6 @@ type NucleiFinding struct {
 	Response      string     `json:"response,omitempty"`
 }
 
-// NucleiInfo represents the info section of a Nuclei finding
 type NucleiInfo struct {
 	Name        string   `json:"name"`
 	Author      []string `json:"author,omitempty"`
@@ -44,7 +43,6 @@ type NucleiInfo struct {
 	Description string   `json:"description,omitempty"`
 }
 
-// convertAttackSurfaceAssetsToTargets converts attack surface assets to Nuclei-compatible target format
 func convertAttackSurfaceAssetsToTargets(assetIDs []string, scopeTargetID string, dbPool *pgxpool.Pool) ([]string, error) {
 	var targets []string
 
@@ -67,7 +65,6 @@ func convertAttackSurfaceAssetsToTargets(assetIDs []string, scopeTargetID string
 
 		log.Printf("[DEBUG] Processing asset %s: type=%s, identifier=%s", assetID, assetType, assetIdentifier)
 
-		// Convert each asset type to appropriate Nuclei target format
 		switch assetType {
 		case "asn":
 			if asnNumber != nil {
@@ -96,7 +93,6 @@ func convertAttackSurfaceAssetsToTargets(assetIDs []string, scopeTargetID string
 				log.Printf("[DEBUG] Added FQDN target: %s", *fqdn)
 			}
 		case "cloud_asset":
-			// For cloud assets, use the URL or FQDN if available
 			if url != nil {
 				targets = append(targets, *url)
 				log.Printf("[DEBUG] Added cloud asset target (URL): %s", *url)
@@ -111,7 +107,6 @@ func convertAttackSurfaceAssetsToTargets(assetIDs []string, scopeTargetID string
 	return targets, nil
 }
 
-// logWriter is a custom writer that logs each line with a prefix
 type logWriter struct {
 	prefix string
 }
@@ -127,14 +122,81 @@ func (lw *logWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// executeNucleiScan executes a Nuclei scan with the given parameters
-func executeNucleiScan(targets []string, templates []string, severities []string, uploadedTemplates []map[string]interface{}, outputFile string) error {
+type capturingLogWriter struct {
+	prefix  string
+	buf     bytes.Buffer
+}
+
+func (cw *capturingLogWriter) Write(p []byte) (n int, err error) {
+	cw.buf.Write(p)
+	output := string(p)
+	lines := strings.Split(strings.TrimRight(output, "\n\r"), "\n")
+	for _, line := range lines {
+		if line != "" {
+			log.Printf("%s %s", cw.prefix, line)
+		}
+	}
+	return len(p), nil
+}
+
+func getFloatConfig(config map[string]interface{}, key string, defaultVal float64) float64 {
+	if v, ok := config[key]; ok {
+		switch val := v.(type) {
+		case float64:
+			return val
+		case int:
+			return float64(val)
+		}
+	}
+	return defaultVal
+}
+
+func getStringConfig(config map[string]interface{}, key string, defaultVal string) string {
+	if v, ok := config[key]; ok {
+		if val, ok := v.(string); ok {
+			return val
+		}
+	}
+	return defaultVal
+}
+
+func getBoolConfig(config map[string]interface{}, key string, defaultVal bool) bool {
+	if v, ok := config[key]; ok {
+		if val, ok := v.(bool); ok {
+			return val
+		}
+	}
+	return defaultVal
+}
+
+func getStringSliceConfig(config map[string]interface{}, key string) []string {
+	if v, ok := config[key]; ok {
+		if arr, ok := v.([]interface{}); ok {
+			var result []string
+			for _, item := range arr {
+				if s, ok := item.(string); ok && s != "" {
+					result = append(result, s)
+				}
+			}
+			return result
+		}
+	}
+	return nil
+}
+
+func executeNucleiScan(targets []string, templates []string, severities []string,
+	templateIDs []string, excludeIDs []string, excludeTags []string,
+	uploadedTemplates []map[string]interface{}, advancedConfig map[string]interface{},
+	outputFile string, capturedStdout *bytes.Buffer) error {
+
 	log.Printf("[DEBUG] Starting Nuclei scan with %d targets", len(targets))
 	log.Printf("[DEBUG] Targets: %v", targets)
 	log.Printf("[DEBUG] Templates: %v", templates)
+	log.Printf("[DEBUG] TemplateIDs: %v", templateIDs)
 	log.Printf("[DEBUG] Severities: %v", severities)
+	log.Printf("[DEBUG] ExcludeIDs: %v", excludeIDs)
+	log.Printf("[DEBUG] ExcludeTags: %v", excludeTags)
 
-	// Create a temporary targets file on the host
 	tempFile, err := os.CreateTemp("", "nuclei_targets_*.txt")
 	if err != nil {
 		return fmt.Errorf("failed to create temp targets file: %v", err)
@@ -142,18 +204,14 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
 
-	// Write targets to the temp file
 	targetsContent := strings.Join(targets, "\n")
 	if _, err := tempFile.WriteString(targetsContent); err != nil {
 		return fmt.Errorf("failed to write targets to temp file: %v", err)
 	}
 	tempFile.Close()
 
-	log.Printf("[DEBUG] Created temp targets file: %s", tempFile.Name())
-	log.Printf("[DEBUG] Targets file content:\n%s", targetsContent)
-	log.Printf("[DEBUG] Number of targets: %d", len(targets))
+	log.Printf("[DEBUG] Created temp targets file: %s with %d targets", tempFile.Name(), len(targets))
 
-	// Copy the targets file into the container
 	copyCmd := exec.Command(
 		"docker", "cp",
 		tempFile.Name(),
@@ -163,19 +221,107 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 		return fmt.Errorf("failed to copy targets file to container: %v", err)
 	}
 
-	log.Printf("[DEBUG] Successfully copied targets file to container")
-
-	// Prepare Nuclei command arguments
 	var args []string
 	args = append(args, "-list", "/targets.txt", "-jsonl", "-nh", "-o", "/output.jsonl")
-	
-	args = append(args, "-c", "25")
-	args = append(args, "-rl", "150")
-	args = append(args, "-timeout", "10")
-	args = append(args, "-retries", "1")
-	args = append(args, "-bs", "25")
 
-	// Add template categories
+	rateLimit := int(getFloatConfig(advancedConfig, "rate_limit", 150))
+	bulkSize := int(getFloatConfig(advancedConfig, "bulk_size", 25))
+	concurrency := int(getFloatConfig(advancedConfig, "concurrency", 25))
+	timeout := int(getFloatConfig(advancedConfig, "timeout", 10))
+	retries := int(getFloatConfig(advancedConfig, "retries", 1))
+	maxHostError := int(getFloatConfig(advancedConfig, "max_host_error", 30))
+
+	args = append(args, "-c", fmt.Sprintf("%d", concurrency))
+	args = append(args, "-rl", fmt.Sprintf("%d", rateLimit))
+	args = append(args, "-timeout", fmt.Sprintf("%d", timeout))
+	args = append(args, "-retries", fmt.Sprintf("%d", retries))
+	args = append(args, "-bs", fmt.Sprintf("%d", bulkSize))
+	args = append(args, "-mhe", fmt.Sprintf("%d", maxHostError))
+
+	if getBoolConfig(advancedConfig, "follow_redirects", false) {
+		args = append(args, "-fr")
+	}
+	if getBoolConfig(advancedConfig, "follow_host_redirects", false) {
+		args = append(args, "-fhr")
+	}
+
+	maxRedirects := int(getFloatConfig(advancedConfig, "max_redirects", 10))
+	if maxRedirects != 10 {
+		args = append(args, "-mr", fmt.Sprintf("%d", maxRedirects))
+	}
+
+	customHeaders := getStringSliceConfig(advancedConfig, "custom_headers")
+	for _, header := range customHeaders {
+		if header != "" {
+			args = append(args, "-H", header)
+		}
+	}
+
+	proxy := getStringConfig(advancedConfig, "proxy", "")
+	if proxy != "" {
+		args = append(args, "-proxy", proxy)
+	}
+
+	if getBoolConfig(advancedConfig, "no_interactsh", false) {
+		args = append(args, "-ni")
+	}
+	interactshServer := getStringConfig(advancedConfig, "interactsh_server", "")
+	if interactshServer != "" {
+		args = append(args, "-iserver", interactshServer)
+	}
+	interactshToken := getStringConfig(advancedConfig, "interactsh_token", "")
+	if interactshToken != "" {
+		args = append(args, "-itoken", interactshToken)
+	}
+
+	if getBoolConfig(advancedConfig, "headless", false) {
+		args = append(args, "-headless")
+		hbs := int(getFloatConfig(advancedConfig, "headless_bulk_size", 10))
+		hc := int(getFloatConfig(advancedConfig, "headless_concurrency", 10))
+		args = append(args, "-hbs", fmt.Sprintf("%d", hbs))
+		args = append(args, "-headc", fmt.Sprintf("%d", hc))
+	}
+
+	scanStrategy := getStringConfig(advancedConfig, "scan_strategy", "auto")
+	if scanStrategy != "auto" && scanStrategy != "" {
+		args = append(args, "-ss", scanStrategy)
+	}
+
+	if getBoolConfig(advancedConfig, "stop_at_first_match", false) {
+		args = append(args, "-spm")
+	}
+
+	protocolTypes := getStringSliceConfig(advancedConfig, "protocol_types")
+	for _, pt := range protocolTypes {
+		args = append(args, "-pt", pt)
+	}
+
+	templateCondition := getStringConfig(advancedConfig, "template_condition", "")
+	if templateCondition != "" {
+		args = append(args, "-tc", templateCondition)
+	}
+
+	authorFilter := getStringSliceConfig(advancedConfig, "author_filter")
+	for _, author := range authorFilter {
+		args = append(args, "-a", author)
+	}
+
+	if getBoolConfig(advancedConfig, "system_resolvers", false) {
+		args = append(args, "-sr")
+	}
+
+	if getBoolConfig(advancedConfig, "leave_default_ports", false) {
+		args = append(args, "-ldp")
+	}
+
+	if len(templateIDs) > 0 {
+		for _, tid := range templateIDs {
+			if tid != "" {
+				args = append(args, "-id", tid)
+			}
+		}
+	}
+
 	if len(templates) > 0 {
 		for _, template := range templates {
 			switch template {
@@ -201,7 +347,18 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 		}
 	}
 
-	// Add severity filters
+	for _, eid := range excludeIDs {
+		if eid != "" {
+			args = append(args, "-eid", eid)
+		}
+	}
+
+	for _, etag := range excludeTags {
+		if etag != "" {
+			args = append(args, "-etags", etag)
+		}
+	}
+
 	if len(severities) > 0 {
 		severityArgs := []string{}
 		for _, severity := range severities {
@@ -210,9 +367,7 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 		args = append(args, severityArgs...)
 	}
 
-	// Handle custom templates
 	if len(uploadedTemplates) > 0 {
-		// Create custom templates directory in container
 		mkdirCmd := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "mkdir", "-p", "/custom_templates")
 		if err := mkdirCmd.Run(); err != nil {
 			return fmt.Errorf("failed to create custom templates directory: %v", err)
@@ -220,13 +375,12 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 
 		for i, template := range uploadedTemplates {
 			if content, ok := template["content"].(string); ok {
-				// Create a temp file for this template
 				tempTemplateFile, err := os.CreateTemp("", fmt.Sprintf("nuclei_template_%d_*.yaml", i))
 				if err != nil {
 					log.Printf("[WARN] Failed to create temp template file %d: %v", i, err)
 					continue
 				}
-				
+
 				if _, err := tempTemplateFile.WriteString(content); err != nil {
 					log.Printf("[WARN] Failed to write template content %d: %v", i, err)
 					tempTemplateFile.Close()
@@ -235,37 +389,31 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 				}
 				tempTemplateFile.Close()
 
-				// Copy template to container
 				templatePath := fmt.Sprintf("/custom_templates/custom_%d.yaml", i)
 				copyTemplateCmd := exec.Command("docker", "cp", tempTemplateFile.Name(), "ars0n-framework-v2-nuclei-1:"+templatePath)
 				if err := copyTemplateCmd.Run(); err != nil {
 					log.Printf("[WARN] Failed to copy custom template %d to container: %v", i, err)
 				}
-				
+
 				os.Remove(tempTemplateFile.Name())
 			}
 		}
 
-		// Add custom templates directory to command
 		args = append(args, "-t", "/custom_templates")
 	}
 
-	// Build docker exec command
 	dockerArgs := []string{"exec", "-i", "ars0n-framework-v2-nuclei-1", "nuclei"}
 	dockerArgs = append(dockerArgs, args...)
 
-	// Execute Nuclei command via docker exec
 	log.Printf("[INFO] Executing Nuclei command: docker %s", strings.Join(dockerArgs, " "))
 	dockerCmd := exec.Command("docker", dockerArgs...)
 
-	// Create custom writers that log output in real-time
-	stdoutWriter := &logWriter{prefix: "[NUCLEI]"}
+	stdoutWriter := &capturingLogWriter{prefix: "[NUCLEI]"}
 	stderrWriter := &logWriter{prefix: "[NUCLEI-ERR]"}
-	
+
 	dockerCmd.Stdout = stdoutWriter
 	dockerCmd.Stderr = stderrWriter
 
-	// Start the command
 	if err = dockerCmd.Start(); err != nil {
 		log.Printf("[ERROR] Failed to start Nuclei command: %v", err)
 		return fmt.Errorf("failed to start nuclei: %v", err)
@@ -273,7 +421,6 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 
 	log.Printf("[INFO] Nuclei scan started, streaming output...")
 
-	// Wait for command to complete
 	if err = dockerCmd.Wait(); err != nil {
 		log.Printf("[ERROR] Nuclei command failed: %v", err)
 		return fmt.Errorf("nuclei execution failed: %v", err)
@@ -281,7 +428,10 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 
 	log.Printf("[INFO] Nuclei scan completed successfully")
 
-	// Copy the output file from container to host
+	if capturedStdout != nil {
+		capturedStdout.Write(stdoutWriter.buf.Bytes())
+	}
+
 	copyOutputCmd := exec.Command(
 		"docker", "cp",
 		"ars0n-framework-v2-nuclei-1:/output.jsonl",
@@ -289,7 +439,6 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 	)
 	if err := copyOutputCmd.Run(); err != nil {
 		log.Printf("[WARN] Failed to copy output file from container: %v", err)
-		// Try to read output directly from container
 		readOutputCmd := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "cat", "/output.jsonl")
 		if outputContent, readErr := readOutputCmd.Output(); readErr == nil {
 			if writeErr := os.WriteFile(outputFile, outputContent, 0644); writeErr != nil {
@@ -297,13 +446,20 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 			}
 			log.Printf("[INFO] Successfully read output directly from container")
 		} else {
-			return fmt.Errorf("failed to copy output file from container: %v", err)
+			log.Printf("[WARN] Fallback cat also failed: %v, using captured stdout", readErr)
+			if stdoutWriter.buf.Len() > 0 {
+				if writeErr := os.WriteFile(outputFile, stdoutWriter.buf.Bytes(), 0644); writeErr != nil {
+					return fmt.Errorf("failed to write captured stdout to output file: %v", writeErr)
+				}
+				log.Printf("[INFO] Successfully recovered output from captured stdout (%d bytes)", stdoutWriter.buf.Len())
+			} else {
+				return fmt.Errorf("failed to copy output file from container and no stdout captured: %v", err)
+			}
 		}
 	}
 
 	log.Printf("[DEBUG] Output file created at: %s", outputFile)
 
-	// Check if output file exists and has content
 	if fileInfo, err := os.Stat(outputFile); err == nil {
 		log.Printf("[DEBUG] Output file exists, size: %d bytes", fileInfo.Size())
 		if fileInfo.Size() > 0 {
@@ -318,14 +474,12 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 		log.Printf("[DEBUG] Output file does not exist: %v", err)
 	}
 
-	// Clean up files in container
 	cleanupCmd := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "rm", "-f", "/targets.txt", "/output.jsonl")
-	cleanupCmd.Run() // Ignore errors for cleanup
+	cleanupCmd.Run()
 
 	return nil
 }
 
-// parseNucleiResults parses the JSON output from Nuclei and returns findings
 func parseNucleiResults(outputFile string) ([]NucleiFinding, error) {
 	var findings []NucleiFinding
 
@@ -340,7 +494,6 @@ func parseNucleiResults(outputFile string) ([]NucleiFinding, error) {
 	log.Printf("[DEBUG] Read %d bytes from results file", len(content))
 	log.Printf("[DEBUG] Results file content:\n%s", string(content))
 
-	// Parse JSON Lines format (one JSON object per line)
 	lines := strings.Split(string(content), "\n")
 	log.Printf("[DEBUG] Found %d lines in results file", len(lines))
 
@@ -366,9 +519,11 @@ func parseNucleiResults(outputFile string) ([]NucleiFinding, error) {
 	return findings, nil
 }
 
-// ExecuteNucleiScanForScopeTarget executes a complete Nuclei scan for a scope target
-func ExecuteNucleiScanForScopeTarget(scopeTargetID string, selectedTargets []string, selectedTemplates []string, selectedSeverities []string, uploadedTemplates []map[string]interface{}, dbPool *pgxpool.Pool) (string, []NucleiFinding, error) {
-	// Convert attack surface assets to Nuclei targets
+func ExecuteNucleiScanForScopeTarget(scopeTargetID string, selectedTargets []string, selectedTemplates []string,
+	selectedSeverities []string, templateIDs []string, excludeIDs []string, excludeTags []string,
+	uploadedTemplates []map[string]interface{}, advancedConfig map[string]interface{},
+	dbPool *pgxpool.Pool) (string, []NucleiFinding, error) {
+
 	targets, err := convertAttackSurfaceAssetsToTargets(selectedTargets, scopeTargetID, dbPool)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to convert targets: %v", err)
@@ -378,7 +533,6 @@ func ExecuteNucleiScanForScopeTarget(scopeTargetID string, selectedTargets []str
 		return "", nil, fmt.Errorf("no valid targets found")
 	}
 
-	// Create output file
 	outputDir := filepath.Join(os.TempDir(), "nuclei_scans")
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return "", nil, fmt.Errorf("failed to create output directory: %v", err)
@@ -386,12 +540,41 @@ func ExecuteNucleiScanForScopeTarget(scopeTargetID string, selectedTargets []str
 
 	outputFile := filepath.Join(outputDir, fmt.Sprintf("nuclei_scan_%s_%d.jsonl", scopeTargetID, time.Now().Unix()))
 
-	// Execute the scan
-	if err := executeNucleiScan(targets, selectedTemplates, selectedSeverities, uploadedTemplates, outputFile); err != nil {
+	if err := executeNucleiScan(targets, selectedTemplates, selectedSeverities,
+		templateIDs, excludeIDs, excludeTags,
+		uploadedTemplates, advancedConfig, outputFile, nil); err != nil {
 		return "", nil, fmt.Errorf("scan execution failed: %v", err)
 	}
 
-	// Parse results
+	findings, err := parseNucleiResults(outputFile)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to parse results: %v", err)
+	}
+
+	return outputFile, findings, nil
+}
+
+func ExecuteNucleiScanDirect(targets []string, selectedTemplates []string,
+	selectedSeverities []string, templateIDs []string, excludeIDs []string, excludeTags []string,
+	uploadedTemplates []map[string]interface{}, advancedConfig map[string]interface{}) (string, []NucleiFinding, error) {
+
+	if len(targets) == 0 {
+		return "", nil, fmt.Errorf("no targets provided")
+	}
+
+	outputDir := filepath.Join(os.TempDir(), "nuclei_scans")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return "", nil, fmt.Errorf("failed to create output directory: %v", err)
+	}
+
+	outputFile := filepath.Join(outputDir, fmt.Sprintf("nuclei_scan_direct_%d.jsonl", time.Now().Unix()))
+
+	if err := executeNucleiScan(targets, selectedTemplates, selectedSeverities,
+		templateIDs, excludeIDs, excludeTags,
+		uploadedTemplates, advancedConfig, outputFile, nil); err != nil {
+		return "", nil, fmt.Errorf("scan execution failed: %v", err)
+	}
+
 	findings, err := parseNucleiResults(outputFile)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to parse results: %v", err)

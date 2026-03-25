@@ -19,7 +19,8 @@ const AUTO_SCAN_STEPS = {
   HTTPX_ROUND3: 'httpx_round3', // 12.75
   NUCLEI_SCREENSHOT: 'nuclei-screenshot', // 13
   METADATA: 'metadata', // 14
-  COMPLETED: 'completed' // 15
+  NUCLEI: 'nuclei', // 15
+  COMPLETED: 'completed' // 16
 };
 
 // Debug utility function
@@ -50,12 +51,12 @@ const updateAutoScanState = async (targetId, currentStep, isPaused = false, isCa
         [AUTO_SCAN_STEPS.CONSOLIDATE_ROUND3]: 'consolidate_httpx_round3',
         [AUTO_SCAN_STEPS.HTTPX_ROUND3]: 'consolidate_httpx_round3',
         [AUTO_SCAN_STEPS.NUCLEI_SCREENSHOT]: 'nuclei_screenshot',
-        [AUTO_SCAN_STEPS.METADATA]: 'metadata'
+        [AUTO_SCAN_STEPS.METADATA]: 'metadata',
+        [AUTO_SCAN_STEPS.NUCLEI]: 'nuclei'
       };
       
       const configKey = stepConfigMapping[currentStep];
       if (configKey && config[configKey] === false) {
-        // This step is disabled in config, skip updating the state
         debugTrace(`Skipping update of disabled step "${currentStep}" in server state`);
         return true;
       }
@@ -322,22 +323,20 @@ const resumeAutoScan = async (
           [AUTO_SCAN_STEPS.CONSOLIDATE_ROUND3]: 'consolidate_httpx_round3',
           [AUTO_SCAN_STEPS.HTTPX_ROUND3]: 'consolidate_httpx_round3',
           [AUTO_SCAN_STEPS.NUCLEI_SCREENSHOT]: 'nuclei_screenshot',
-          [AUTO_SCAN_STEPS.METADATA]: 'metadata'
+          [AUTO_SCAN_STEPS.METADATA]: 'metadata',
+          [AUTO_SCAN_STEPS.NUCLEI]: 'nuclei'
         };
         
         const stepName = steps[i].name;
         const configKey = stepConfigMapping[stepName];
         
-        // Only update UI state if the step is enabled or it's a system step
         if (!configKey || stepName === AUTO_SCAN_STEPS.IDLE || stepName === AUTO_SCAN_STEPS.COMPLETED || config[configKey] !== false) {
           setAutoScanCurrentStep(stepName);
           await updateAutoScanState(activeTarget.id, stepName, false, false, config);
         }
         
-        // Run the current step
         await steps[i].action();
         
-        // Check if paused or cancelled after step completes
         const pauseResponse = await fetch(
           `/api/api/auto-scan-state/${activeTarget.id}`
         );
@@ -443,7 +442,6 @@ const startAutoScan = async (
       mostRecentHttpxScan, consolidatedSubdomains);
     for (let i = 0; i < steps.length; i++) {
       try {
-        // Update current step - skip UI update if step is disabled
         const stepConfigMapping = {
           [AUTO_SCAN_STEPS.AMASS]: 'amass',
           [AUTO_SCAN_STEPS.SUBLIST3R]: 'sublist3r',
@@ -462,19 +460,18 @@ const startAutoScan = async (
           [AUTO_SCAN_STEPS.CONSOLIDATE_ROUND3]: 'consolidate_httpx_round3',
           [AUTO_SCAN_STEPS.HTTPX_ROUND3]: 'consolidate_httpx_round3',
           [AUTO_SCAN_STEPS.NUCLEI_SCREENSHOT]: 'nuclei_screenshot',
-          [AUTO_SCAN_STEPS.METADATA]: 'metadata'
+          [AUTO_SCAN_STEPS.METADATA]: 'metadata',
+          [AUTO_SCAN_STEPS.NUCLEI]: 'nuclei'
         };
         
         const stepName = steps[i].name;
         const configKey = stepConfigMapping[stepName];
         
-        // Only update UI state if the step is enabled or it's a system step
         if (!configKey || stepName === AUTO_SCAN_STEPS.IDLE || stepName === AUTO_SCAN_STEPS.COMPLETED || config[configKey] !== false) {
           setAutoScanCurrentStep(stepName);
           await updateAutoScanState(activeTarget.id, stepName, false, false, config);
         }
         
-        // Check if cancelled before starting the step
         const stateResponse = await fetch(
           `/api/api/auto-scan-state/${activeTarget.id}`
         );

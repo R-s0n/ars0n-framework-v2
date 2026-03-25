@@ -98,6 +98,7 @@ func createTables() {
 			consolidate_httpx_round3 BOOLEAN DEFAULT TRUE,
 			nuclei_screenshot BOOLEAN DEFAULT TRUE,
 			metadata BOOLEAN DEFAULT TRUE,
+			nuclei BOOLEAN DEFAULT TRUE,
 			max_consolidated_subdomains INTEGER DEFAULT 2500,
 			max_live_web_servers INTEGER DEFAULT 500,
 			created_at TIMESTAMP DEFAULT NOW(),
@@ -1141,6 +1142,22 @@ func createTables() {
 			templates TEXT[] NOT NULL DEFAULT '{cves,vulnerabilities,exposures,technologies,misconfiguration,takeovers,network,dns,headless}',
 			severities TEXT[] DEFAULT '{critical,high,medium,low,info}',
 			uploaded_templates JSONB DEFAULT '[]',
+			created_at TIMESTAMP DEFAULT NOW(),
+			UNIQUE(scope_target_id)
+		);`,
+
+		`ALTER TABLE nuclei_configs ADD COLUMN IF NOT EXISTS target_mode VARCHAR(50) DEFAULT 'attack_surface';`,
+		`ALTER TABLE nuclei_configs ADD COLUMN IF NOT EXISTS template_ids TEXT[] DEFAULT '{}';`,
+		`ALTER TABLE nuclei_configs ADD COLUMN IF NOT EXISTS exclude_ids TEXT[] DEFAULT '{}';`,
+		`ALTER TABLE nuclei_configs ADD COLUMN IF NOT EXISTS exclude_tags TEXT[] DEFAULT '{}';`,
+		`ALTER TABLE nuclei_configs ADD COLUMN IF NOT EXISTS advanced_config JSONB DEFAULT '{}';`,
+
+		`ALTER TABLE auto_scan_config ADD COLUMN IF NOT EXISTS nuclei BOOLEAN DEFAULT TRUE;`,
+
+		`CREATE TABLE IF NOT EXISTS httpx_configs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			config JSONB NOT NULL DEFAULT '{}',
 			created_at TIMESTAMP DEFAULT NOW(),
 			UNIQUE(scope_target_id)
 		);`,

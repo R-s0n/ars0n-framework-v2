@@ -80,7 +80,13 @@ const getAutoScanSteps = (
   // Other functions
   handleConsolidate,
   config,
-  autoScanSessionId
+  autoScanSessionId,
+  // Nuclei scan state
+  setIsWildcardNucleiScanning,
+  setWildcardNucleiScans,
+  setMostRecentWildcardNucleiScan,
+  setMostRecentWildcardNucleiScanStatus,
+  httpxScanConfig
 ) => {
   const steps = [
     { name: AUTO_SCAN_STEPS.AMASS, action: async () => {
@@ -108,7 +114,7 @@ const getAutoScanSteps = (
         );
         
         // Wait for scan completion
-        const completedScan = await waitForScanCompletion(
+        await waitForScanCompletion(
           'amass',
           activeTarget.id,
           setIsScanning,
@@ -356,7 +362,7 @@ const getAutoScanSteps = (
         );
         
         // Wait for scan completion
-        const completedScan = await waitForScanCompletion(
+        await waitForScanCompletion(
           'gau',
           activeTarget.id,
           setIsGauScanning,
@@ -414,7 +420,7 @@ const getAutoScanSteps = (
         );
         
         // Wait for scan completion
-        const completedScan = await waitForScanCompletion(
+        await waitForScanCompletion(
           'ctl',
           activeTarget.id,
           setIsCTLScanning,
@@ -472,7 +478,7 @@ const getAutoScanSteps = (
         );
         
         // Wait for scan completion
-        const completedScan = await waitForScanCompletion(
+        await waitForScanCompletion(
           'subfinder',
           activeTarget.id,
           setIsSubfinderScanning,
@@ -576,9 +582,7 @@ const getAutoScanSteps = (
           );
           
           if (scansResponse.ok) {
-            const scans = await scansResponse.json();
-            // Update UI with consolidation results if there's state for it
-            // (You may need to add state variables for this if they don't exist)
+            await scansResponse.json();
           }
         } catch (error) {
           console.error("Error fetching updated data after consolidation:", error);
@@ -602,7 +606,6 @@ const getAutoScanSteps = (
       await updateAutoScanState(activeTarget.id, AUTO_SCAN_STEPS.HTTPX);
       
       try {
-        // Start the scan
         await initiateHttpxScan(
           activeTarget,
           null,
@@ -610,10 +613,10 @@ const getAutoScanSteps = (
           setHttpxScans,
           setMostRecentHttpxScanStatus,
           setMostRecentHttpxScan,
-          autoScanSessionId
+          autoScanSessionId,
+          httpxScanConfig
         );
         
-        // Wait for scan completion - explicitly pass setMostRecentHttpxScan
         await waitForScanCompletion(
           'httpx',
           activeTarget.id,
@@ -622,10 +625,8 @@ const getAutoScanSteps = (
           setMostRecentHttpxScan
         );
         
-        // Add a short buffer before fetching results
         await new Promise(resolve => setTimeout(resolve, 1000));
         
-        // Use the fetchHttpxScans function - this is what happens on page refresh
         const scanDetails = await fetchHttpxScans(
           activeTarget, 
           setHttpxScans, 
@@ -711,7 +712,7 @@ const getAutoScanSteps = (
         );
         
         // Wait for scan completion
-        const completedScan = await waitForScanCompletion(
+        await waitForScanCompletion(
           'shuffledns',
           activeTarget.id,
           setIsShuffleDNSScanning,
@@ -893,8 +894,7 @@ const getAutoScanSteps = (
           );
           
           if (scansResponse.ok) {
-            const scans = await scansResponse.json();
-            // Update UI with consolidation results if there's state for it
+            await scansResponse.json();
           }
         } catch (error) {
           console.error("Error fetching updated data after consolidation (Round 2):", error);
@@ -918,7 +918,6 @@ const getAutoScanSteps = (
       await updateAutoScanState(activeTarget.id, AUTO_SCAN_STEPS.HTTPX_ROUND2);
       
       try {
-        // Start the scan
         await initiateHttpxScan(
           activeTarget,
           null,
@@ -926,7 +925,8 @@ const getAutoScanSteps = (
           setHttpxScans,
           setMostRecentHttpxScanStatus,
           setMostRecentHttpxScan,
-          autoScanSessionId
+          autoScanSessionId,
+          httpxScanConfig
         );
         
         // Wait for scan completion - pass setMostRecentHttpxScan so it gets updated
@@ -1010,7 +1010,7 @@ const getAutoScanSteps = (
         );
         
         // Wait for scan completion
-        const completedScan = await waitForScanCompletion(
+        await waitForScanCompletion(
           'gospider',
           activeTarget.id,
           setIsGoSpiderScanning,
@@ -1068,7 +1068,7 @@ const getAutoScanSteps = (
         );
         
         // Wait for scan completion
-        const completedScan = await waitForScanCompletion(
+        await waitForScanCompletion(
           'subdomainizer',
           activeTarget.id,
           setIsSubdomainizerScanning,
@@ -1166,8 +1166,7 @@ const getAutoScanSteps = (
           );
           
           if (scansResponse.ok) {
-            const scans = await scansResponse.json();
-            // Update UI with consolidation results if there's state for it
+            await scansResponse.json();
           }
         } catch (error) {
           console.error("Error fetching updated data after consolidation (Round 3):", error);
@@ -1191,7 +1190,6 @@ const getAutoScanSteps = (
       await updateAutoScanState(activeTarget.id, AUTO_SCAN_STEPS.HTTPX_ROUND3);
       
       try {
-        // Start the scan
         await initiateHttpxScan(
           activeTarget,
           null,
@@ -1199,7 +1197,8 @@ const getAutoScanSteps = (
           setHttpxScans,
           setMostRecentHttpxScanStatus,
           setMostRecentHttpxScan,
-          autoScanSessionId
+          autoScanSessionId,
+          httpxScanConfig
         );
         
         // Wait for scan completion - pass setMostRecentHttpxScan so it gets updated
@@ -1283,7 +1282,7 @@ const getAutoScanSteps = (
         );
         
         // Wait for scan completion
-        const completedScan = await waitForScanCompletion(
+        await waitForScanCompletion(
           'nuclei-screenshot',
           activeTarget.id,
           setIsNucleiScreenshotScanning,
@@ -1341,7 +1340,7 @@ const getAutoScanSteps = (
         );
         
         // Wait for scan completion
-        const completedScan = await waitForScanCompletion(
+        await waitForScanCompletion(
           'metadata',
           activeTarget.id,
           setIsMetaDataScanning,
@@ -1377,9 +1376,7 @@ const getAutoScanSteps = (
                 );
                 
                 if (metadataResponse.ok) {
-                  const metadataData = await metadataResponse.json();
-                  // We don't need to set additional metadata state here
-                  // The scan object itself is already updated through setMostRecentMetaDataScan
+                  await metadataResponse.json();
                 }
               } catch (metadataError) {
                 console.error("Error fetching metadata results:", metadataError);
@@ -1391,6 +1388,164 @@ const getAutoScanSteps = (
         console.log('[AutoScan] Step: metadata completed.');
       } catch (error) {
         console.error('[AutoScan] Step: metadata ERROR:', error);
+      }
+    }},
+    { name: AUTO_SCAN_STEPS.NUCLEI, action: async () => {
+      if (config && config.nuclei === false) {
+        console.log('[AutoScan] Step: nuclei is DISABLED in config. Skipping.');
+        return;
+      }
+      console.log('[AutoScan] Step: nuclei is ENABLED. Running.');
+      setAutoScanCurrentStep(AUTO_SCAN_STEPS.NUCLEI);
+      await updateAutoScanState(activeTarget.id, AUTO_SCAN_STEPS.NUCLEI);
+
+      try {
+        if (setIsWildcardNucleiScanning) setIsWildcardNucleiScanning(true);
+
+        debugTrace("Fetching live web server targets for Nuclei auto scan...");
+        const targetsResponse = await fetch(
+          `/api/scopetarget/${activeTarget.id}/wildcard-nuclei-targets`
+        );
+
+        if (!targetsResponse.ok) {
+          throw new Error(`Failed to fetch wildcard nuclei targets: ${targetsResponse.status}`);
+        }
+
+        const targetsData = await targetsResponse.json();
+        const targetsList = (targetsData && Array.isArray(targetsData.targets)) ? targetsData.targets : (Array.isArray(targetsData) ? targetsData : []);
+        const targets = targetsList.map(t => t.url || t.asset_identifier).filter(Boolean);
+
+        if (targets.length === 0) {
+          debugTrace("No live web server targets found for Nuclei scan, skipping.");
+          if (setIsWildcardNucleiScanning) setIsWildcardNucleiScanning(false);
+          console.log('[AutoScan] Step: nuclei completed (no targets).');
+          return;
+        }
+
+        debugTrace(`Found ${targets.length} live web server targets for Nuclei scan.`);
+
+        let nucleiConfig = null;
+        try {
+          const existingConfigResponse = await fetch(`/api/nuclei-config/${activeTarget.id}`);
+          if (existingConfigResponse.ok) {
+            nucleiConfig = await existingConfigResponse.json();
+          }
+        } catch (e) {
+          debugTrace("Could not load existing Nuclei config, using defaults.");
+        }
+
+        const hasTemplates = nucleiConfig && (
+          (nucleiConfig.templates && nucleiConfig.templates.length > 0) ||
+          (nucleiConfig.template_ids && nucleiConfig.template_ids.length > 0)
+        );
+
+        const finalConfig = {
+          targets: targets,
+          templates: hasTemplates ? (nucleiConfig.templates || []) : ['cves', 'vulnerabilities', 'exposures', 'technologies', 'misconfiguration', 'takeovers', 'network', 'dns', 'headless'],
+          severities: (nucleiConfig && nucleiConfig.severities && nucleiConfig.severities.length > 0) ? nucleiConfig.severities : ['critical', 'high', 'medium', 'low', 'info'],
+          target_mode: 'httpx',
+          template_ids: hasTemplates ? (nucleiConfig.template_ids || []) : [],
+          exclude_ids: (nucleiConfig && nucleiConfig.exclude_ids) || [],
+          exclude_tags: (nucleiConfig && nucleiConfig.exclude_tags) || [],
+          advanced_config: (nucleiConfig && nucleiConfig.advanced_config) || {},
+          uploaded_templates: (nucleiConfig && nucleiConfig.uploaded_templates) || []
+        };
+
+        debugTrace("Saving Nuclei config for auto scan...");
+        const saveConfigResponse = await fetch(
+          `/api/nuclei-config/${activeTarget.id}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(finalConfig)
+          }
+        );
+
+        if (!saveConfigResponse.ok) {
+          throw new Error(`Failed to save Nuclei config: ${saveConfigResponse.status}`);
+        }
+
+        debugTrace("Starting Nuclei scan...");
+        const startResponse = await fetch(
+          `/api/scopetarget/${activeTarget.id}/scans/nuclei/start`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+          }
+        );
+
+        if (!startResponse.ok) {
+          throw new Error(`Failed to start Nuclei scan: ${startResponse.status}`);
+        }
+
+        const startData = await startResponse.json();
+        debugTrace(`Nuclei scan started with scan_id: ${startData.scan_id}`);
+
+        debugTrace("Waiting for Nuclei scan to complete...");
+        let isComplete = false;
+        let attempts = 0;
+        const maxAttempts = 720;
+
+        while (!isComplete && attempts < maxAttempts) {
+          attempts++;
+          await new Promise(resolve => setTimeout(resolve, 10000));
+
+          try {
+            const statusResponse = await fetch(
+              `/api/scopetarget/${activeTarget.id}/scans/nuclei`
+            );
+
+            if (!statusResponse.ok) {
+              debugTrace(`Failed to fetch Nuclei scan status: ${statusResponse.status}`);
+              continue;
+            }
+
+            const scans = await statusResponse.json();
+
+            if (!scans || !Array.isArray(scans) || scans.length === 0) {
+              debugTrace("No Nuclei scans found yet, checking again...");
+              continue;
+            }
+
+            const mostRecentScan = scans[0];
+            debugTrace(`Nuclei scan status: ${mostRecentScan.status} (attempt ${attempts})`);
+
+            if (setMostRecentWildcardNucleiScan) setMostRecentWildcardNucleiScan(mostRecentScan);
+            if (setMostRecentWildcardNucleiScanStatus) setMostRecentWildcardNucleiScanStatus(mostRecentScan.status);
+            if (setWildcardNucleiScans) setWildcardNucleiScans(scans);
+
+            if (mostRecentScan.status === 'completed' || mostRecentScan.status === 'success' ||
+                mostRecentScan.status === 'failed' || mostRecentScan.status === 'error') {
+              isComplete = true;
+              debugTrace(`Nuclei scan finished with status: ${mostRecentScan.status}`);
+            }
+          } catch (pollError) {
+            debugTrace(`Error polling Nuclei scan status: ${pollError.message}`);
+          }
+        }
+
+        if (!isComplete) {
+          debugTrace("Nuclei scan timed out after 2 hours, moving to next step.");
+        }
+
+        if (setIsWildcardNucleiScanning) setIsWildcardNucleiScanning(false);
+
+        const finalResponse = await fetch(
+          `/api/scopetarget/${activeTarget.id}/scans/nuclei`
+        );
+        if (finalResponse.ok) {
+          const finalScans = await finalResponse.json();
+          if (setWildcardNucleiScans) setWildcardNucleiScans(finalScans || []);
+          if (Array.isArray(finalScans) && finalScans.length > 0) {
+            if (setMostRecentWildcardNucleiScan) setMostRecentWildcardNucleiScan(finalScans[0]);
+            if (setMostRecentWildcardNucleiScanStatus) setMostRecentWildcardNucleiScanStatus(finalScans[0].status);
+          }
+        }
+
+        console.log('[AutoScan] Step: nuclei completed.');
+      } catch (error) {
+        console.error('[AutoScan] Step: nuclei ERROR:', error);
+        if (setIsWildcardNucleiScanning) setIsWildcardNucleiScanning(false);
       }
     }}
   ];

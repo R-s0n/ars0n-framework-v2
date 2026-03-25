@@ -330,7 +330,8 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
         'consolidate_round3': 'consolidate_httpx_round3',
         'httpx_round3': 'consolidate_httpx_round3',
         'nuclei-screenshot': 'nuclei_screenshot',
-        'metadata': 'metadata'
+        'metadata': 'metadata',
+        'nuclei': 'nuclei'
       };
       
       const configKey = stepConfigMapping[stepKey];
@@ -341,7 +342,6 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
     
     if (!stepKey) return 'Processing';
     
-    // Replace underscores with spaces and capitalize words
     return stepKey
       .split('_')
       .map(word => word.charAt(0).toUpperCase() + word.slice(1))
@@ -370,7 +370,7 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
       'consolidate_round2', 'httpx_round2',
       'gospider', 'subdomainizer',
       'consolidate_round3', 'httpx_round3',
-      'nuclei-screenshot', 'metadata', 'completed'
+      'nuclei-screenshot', 'metadata', 'nuclei', 'completed'
     ];
     
     // Map steps to their config keys
@@ -392,10 +392,10 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
       'consolidate_round3': 'consolidate_httpx_round3',
       'httpx_round3': 'consolidate_httpx_round3',
       'nuclei-screenshot': 'nuclei_screenshot',
-      'metadata': 'metadata'
+      'metadata': 'metadata',
+      'nuclei': 'nuclei'
     };
     
-    // Get the position of the current step in the full sequence
     const currentStepIndex = fullStepSequence.indexOf(autoScanCurrentStep);
     if (currentStepIndex === -1) return 0; // Step not found in sequence
     

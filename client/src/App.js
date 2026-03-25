@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import AddScopeTargetModal from './modals/addScopeTargetModal.js';
 import SelectActiveScopeTargetModal from './modals/selectActiveScopeTargetModal.js';
 import { DNSRecordsModal, SubdomainsModal, CloudDomainsModal, InfrastructureMapModal } from './modals/amassModals.js';
@@ -125,6 +125,7 @@ import monitorShodanCompanyScanStatus from './utils/monitorShodanCompanyScanStat
 import initiateShodanCompanyScan from './utils/initiateShodanCompanyScan';
 import AddWildcardTargetsModal from './modals/AddWildcardTargetsModal.js';
 import ExploreAttackSurfaceModal from './modals/ExploreAttackSurfaceModal.js';
+import WildfireModal from './modals/WildfireModal.js';
 import initiateInvestigateScan from './utils/initiateInvestigateScan';
 import monitorInvestigateScanStatus from './utils/monitorInvestigateScanStatus';
 import TrimRootDomainsModal from './modals/TrimRootDomainsModal.js';
@@ -527,6 +528,17 @@ function App() {
   const [isAutoScanPaused, setIsAutoScanPaused] = useState(false);
   const [isAutoScanPausing, setIsAutoScanPausing] = useState(false);
   const [isAutoScanCancelling, setIsAutoScanCancelling] = useState(false);
+
+  const [showWildfireModal, setShowWildfireModal] = useState(false);
+  const [isWildfireRunning, setIsWildfireRunning] = useState(false);
+  const [, setWildfireCancelled] = useState(false);
+  const [wildfireProgress, setWildfireProgress] = useState(null);
+  const wildfireCancelledRef = useRef(false);
+  const activeTargetRef = useRef(null);
+  const httpxScanConfigRef = useRef(null);
+  activeTargetRef.current = activeTarget;
+  httpxScanConfigRef.current = httpxScanConfig;
+
   const [ctlCompanyScans, setCTLCompanyScans] = useState([]);
   const [mostRecentCTLCompanyScanStatus, setMostRecentCTLCompanyScanStatus] = useState(null);
   const [mostRecentCTLCompanyScan, setMostRecentCTLCompanyScan] = useState(null);
@@ -650,6 +662,16 @@ function App() {
   const [showNucleiResultsModal, setShowNucleiResultsModal] = useState(false);
   const [showNucleiHistoryModal, setShowNucleiHistoryModal] = useState(false);
   const [activeNucleiScan, setActiveNucleiScan] = useState(null);
+
+  const [showWildcardNucleiConfigModal, setShowWildcardNucleiConfigModal] = useState(false);
+  const [wildcardNucleiScans, setWildcardNucleiScans] = useState([]);
+  const [mostRecentWildcardNucleiScan, setMostRecentWildcardNucleiScan] = useState(null);
+  const [mostRecentWildcardNucleiScanStatus, setMostRecentWildcardNucleiScanStatus] = useState(null);
+  const [isWildcardNucleiScanning, setIsWildcardNucleiScanning] = useState(false);
+  const [wildcardNucleiConfig, setWildcardNucleiConfig] = useState(null);
+  const [showWildcardNucleiResultsModal, setShowWildcardNucleiResultsModal] = useState(false);
+  const [showWildcardNucleiHistoryModal, setShowWildcardNucleiHistoryModal] = useState(false);
+  const [activeWildcardNucleiScan, setActiveWildcardNucleiScan] = useState(null);
 
   // Katana Company state variables
   const [katanaCompanyScans, setKatanaCompanyScans] = useState([]);
@@ -1330,6 +1352,9 @@ function App() {
       fetchReverseWhoisDomains();
       fetchIPPortScans(activeTarget, setIPPortScans, setMostRecentIPPortScan, setMostRecentIPPortScanStatus);
       fetchNucleiScans(activeTarget, setNucleiScans, setMostRecentNucleiScan, setMostRecentNucleiScanStatus, setActiveNucleiScan);
+      if (activeTarget.type === 'Wildcard') {
+        fetchNucleiScans(activeTarget, setWildcardNucleiScans, setMostRecentWildcardNucleiScan, setMostRecentWildcardNucleiScanStatus, setActiveWildcardNucleiScan);
+      }
     }
   }, [activeTarget]);
 
@@ -1686,8 +1711,14 @@ function App() {
         setMostRecentNucleiScreenshotScanStatus,
           setMostRecentMetaDataScanStatus,
         setMostRecentShuffleDNSCustomScanStatus,
-        // Other functions
-        handleConsolidate
+        handleConsolidate,
+        undefined,
+        undefined,
+        setIsWildcardNucleiScanning,
+        setWildcardNucleiScans,
+        setMostRecentWildcardNucleiScan,
+        setMostRecentWildcardNucleiScanStatus,
+        httpxScanConfig
       ),
       consolidatedSubdomains,
       mostRecentHttpxScan,
@@ -2212,19 +2243,22 @@ function App() {
   const handleCloseAmassIntelHistoryModal = () => setShowAmassIntelHistoryModal(false);
 
   const startAutoScan = async () => {
-    console.log('[AutoScan] Starting Auto Scan. Fetching config from backend...');
-    
-    // Reset all scan-related states to avoid state persistence between scans
+    const currentTarget = activeTargetRef.current;
+    const currentHttpxConfig = httpxScanConfigRef.current;
+
+    if (!currentTarget) {
+      console.error('[AutoScan] No active target');
+      return;
+    }
+
+    console.log(`[AutoScan] Starting Auto Scan for target: ${currentTarget.scope_target}`);
+
     setAutoScanCurrentStep(AUTO_SCAN_STEPS.IDLE);
     setIsAutoScanning(false);
     setIsAutoScanPaused(false);
     setIsAutoScanPausing(false);
     setIsAutoScanCancelling(false);
-    
-    // Only reset consolidation state, not the actual subdomains
     setIsConsolidating(false);
-    
-    // Reset individual scan states
     setIsScanning(false);
     setIsSublist3rScanning(false);
     setIsAssetfinderScanning(false);
@@ -2238,8 +2272,8 @@ function App() {
     setIsSubdomainizerScanning(false);
     setIsNucleiScreenshotScanning(false);
     setIsMetaDataScanning(false);
-    
-    // Add a small delay to ensure state is fully reset
+    setIsWildcardNucleiScanning(false);
+
     await new Promise(resolve => setTimeout(resolve, 100));
 
     try {
@@ -2251,14 +2285,13 @@ function App() {
       }
       const config = await response.json();
       console.log('[AutoScan] Config received from backend:', config);
-      // Create session
       const sessionResp = await fetch(
         `/api/api/auto-scan/session/start`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            scope_target_id: activeTarget.id,
+            scope_target_id: currentTarget.id,
             config_snapshot: config
           })
         }
@@ -2267,17 +2300,16 @@ function App() {
       const sessionData = await sessionResp.json();
       console.error(sessionData)
       setAutoScanSessionId(sessionData.session_id);
-      
-      // Now set isAutoScanning to true after all resets and config fetching
+
       setIsAutoScanning(true);
-      
+
       startAutoScanUtil(
-        activeTarget,
+        currentTarget,
         setIsAutoScanning,
         setAutoScanCurrentStep,
         setAutoScanTargetId,
         () => getAutoScanSteps(
-          activeTarget,
+          currentTarget,
           setAutoScanCurrentStep,
           setIsScanning,
           setIsSublist3rScanning,
@@ -2338,14 +2370,158 @@ function App() {
           setMostRecentShuffleDNSCustomScanStatus,
           handleConsolidate,
           config,
-          sessionData.session_id // pass session id
+          sessionData.session_id,
+          setIsWildcardNucleiScanning,
+          setWildcardNucleiScans,
+          setMostRecentWildcardNucleiScan,
+          setMostRecentWildcardNucleiScanStatus,
+          currentHttpxConfig
         ),
-        consolidatedSubdomains, // pass consolidated subdomains
-        mostRecentHttpxScan, // pass most recent httpx scan
-        sessionData.session_id // pass session id
+        consolidatedSubdomains,
+        mostRecentHttpxScan,
+        sessionData.session_id
       );
     } catch (error) {
       console.error('[AutoScan] Error fetching config or starting scan:', error);
+    }
+  };
+
+  const waitForAutoScanCompletion = async (targetId) => {
+    let phase = 'waiting_for_idle';
+    let pollCount = 0;
+
+    return new Promise((resolve) => {
+      const checkState = async () => {
+        if (wildfireCancelledRef.current) {
+          resolve('cancelled');
+          return;
+        }
+        pollCount++;
+        try {
+          const response = await fetch(`/api/api/auto-scan-state/${targetId}`);
+          if (response.ok) {
+            const state = await response.json();
+
+            if (state.is_cancelled) {
+              resolve('cancelled');
+              return;
+            }
+
+            const step = state.current_step;
+            console.log(`[Wildfire] Poll #${pollCount} for ${targetId}: step=${step}, phase=${phase}`);
+
+            if (phase === 'waiting_for_idle') {
+              if (step === 'idle') {
+                phase = 'waiting_for_start';
+                console.log(`[Wildfire] Scan reset to idle for ${targetId}, waiting for first step...`);
+              } else if (step && step !== 'completed') {
+                phase = 'waiting_for_complete';
+                console.log(`[Wildfire] Scan already running for ${targetId}, step: ${step}`);
+              } else if (step === 'completed' && pollCount > 12) {
+                console.log(`[Wildfire] Scan for ${targetId} appears already completed (timeout fallback)`);
+                resolve('completed');
+                return;
+              }
+            } else if (phase === 'waiting_for_start') {
+              if (step && step !== 'idle' && step !== 'completed') {
+                phase = 'waiting_for_complete';
+                console.log(`[Wildfire] Scan started for ${targetId}, step: ${step}`);
+              } else if (step === 'completed') {
+                console.log(`[Wildfire] Scan for ${targetId} completed (fast finish after idle)`);
+                resolve('completed');
+                return;
+              }
+            } else if (phase === 'waiting_for_complete') {
+              if (step === 'completed') {
+                console.log(`[Wildfire] Scan completed for ${targetId}`);
+                resolve('completed');
+                return;
+              }
+            }
+          }
+        } catch (err) {
+          console.error('[Wildfire] Error checking auto scan state:', err);
+        }
+        setTimeout(checkState, 3000);
+      };
+      setTimeout(checkState, 2000);
+    });
+  };
+
+  const startWildfire = async (targets) => {
+    setIsWildfireRunning(true);
+    setWildfireCancelled(false);
+    wildfireCancelledRef.current = false;
+    setShowWildfireModal(true);
+
+    setWildfireProgress({
+      targets,
+      totalTargets: targets.length,
+      currentIndex: 0,
+      currentTarget: targets[0]
+    });
+
+    for (let i = 0; i < targets.length; i++) {
+      if (wildfireCancelledRef.current) {
+        console.log('[Wildfire] Cancelled by user.');
+        break;
+      }
+
+      const target = targets[i];
+      console.log(`[Wildfire] Starting target ${i + 1}/${targets.length}: ${target.scope_target}`);
+
+      setWildfireProgress({
+        targets,
+        totalTargets: targets.length,
+        currentIndex: i,
+        currentTarget: target
+      });
+
+      await handleActiveSelect(target);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      if (wildfireCancelledRef.current) break;
+
+      await startAutoScan();
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      if (wildfireCancelledRef.current) break;
+
+      const result = await waitForAutoScanCompletion(target.id);
+      console.log(`[Wildfire] Target ${target.scope_target} finished with result: ${result}`);
+
+      if (result === 'cancelled' && wildfireCancelledRef.current) break;
+
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
+    setWildfireProgress(prev => prev ? {
+      ...prev,
+      currentIndex: prev.totalTargets
+    } : null);
+
+    setIsWildfireRunning(false);
+    console.log('[Wildfire] All targets completed.');
+  };
+
+  const cancelWildfire = async () => {
+    wildfireCancelledRef.current = true;
+    setWildfireCancelled(true);
+
+    if (activeTarget && isAutoScanning) {
+      try {
+        await fetch(`/api/api/auto-scan-state/${activeTarget.id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            current_step: autoScanCurrentStep,
+            is_paused: false,
+            is_cancelled: true
+          })
+        });
+      } catch (err) {
+        console.error('[Wildfire] Error cancelling current auto scan:', err);
+      }
     }
   };
 
@@ -2575,13 +2751,58 @@ function App() {
   const loadNucleiConfig = async () => {
     if (!activeTarget?.id) return;
 
+    const ALL_TEMPLATES = ['cves', 'vulnerabilities', 'exposures', 'technologies', 'misconfiguration', 'takeovers', 'network', 'dns', 'headless'];
+    const ALL_SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'];
+
     try {
       const response = await fetch(
         `/api/nuclei-config/${activeTarget.id}`
       );
-      
+
       if (response.ok) {
         const config = await response.json();
+
+        if (!config.templates || config.templates.length === 0) {
+          config.templates = ALL_TEMPLATES;
+        }
+        if (!config.severities || config.severities.length === 0) {
+          config.severities = ALL_SEVERITIES;
+        }
+
+        if (!config.targets || config.targets.length === 0) {
+          try {
+            let autoTargets = [];
+            if (activeTarget.type === 'Wildcard') {
+              const targetsResp = await fetch(`/api/scopetarget/${activeTarget.id}/wildcard-nuclei-targets`);
+              if (targetsResp.ok) {
+                const data = await targetsResp.json();
+                autoTargets = (data.targets || []).filter(Boolean);
+              }
+            } else {
+              const assetsResp = await fetch(`/api/attack-surface-assets/${activeTarget.id}`);
+              if (assetsResp.ok) {
+                const data = await assetsResp.json();
+                if (data.assets && Array.isArray(data.assets)) {
+                  autoTargets = data.assets.map(a => a.id).filter(Boolean);
+                }
+              }
+            }
+
+            if (autoTargets.length > 0) {
+              config.targets = autoTargets;
+              config.target_mode = activeTarget.type === 'Wildcard' ? 'httpx_targets' : 'attack_surface';
+
+              await fetch(`/api/nuclei-config/${activeTarget.id}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config),
+              });
+            }
+          } catch (targetErr) {
+            console.error('Error auto-populating Nuclei targets:', targetErr);
+          }
+        }
+
         setNucleiConfig(config);
       }
     } catch (error) {
@@ -2596,13 +2817,10 @@ function App() {
   };
 
   const isNucleiScanDisabled = () => {
-    return !nucleiConfig || 
-           !nucleiConfig.targets || 
-           !Array.isArray(nucleiConfig.targets) || 
-           nucleiConfig.targets.length === 0 || 
-           !nucleiConfig.templates || 
-           !Array.isArray(nucleiConfig.templates) || 
-           nucleiConfig.templates.length === 0;
+    if (!nucleiConfig || !nucleiConfig.targets || !Array.isArray(nucleiConfig.targets) || nucleiConfig.targets.length === 0) return true;
+    const hasCategories = nucleiConfig.templates && Array.isArray(nucleiConfig.templates) && nucleiConfig.templates.length > 0;
+    const hasIndividualTemplates = nucleiConfig.template_ids && Array.isArray(nucleiConfig.template_ids) && nucleiConfig.template_ids.length > 0;
+    return !hasCategories && !hasIndividualTemplates;
   };
 
   const getNucleiSelectedTargetsCount = () => {
@@ -2611,8 +2829,10 @@ function App() {
   };
 
   const getNucleiSelectedTemplatesCount = () => {
-    if (!nucleiConfig?.templates || !Array.isArray(nucleiConfig.templates)) return 0;
-    return nucleiConfig.templates.length;
+    let count = 0;
+    if (nucleiConfig?.templates && Array.isArray(nucleiConfig.templates)) count += nucleiConfig.templates.length;
+    if (nucleiConfig?.template_ids && Array.isArray(nucleiConfig.template_ids)) count += nucleiConfig.template_ids.length;
+    return count;
   };
 
   const getNucleiEstimatedScanTime = () => {
@@ -2690,6 +2910,136 @@ function App() {
 
   const handleOpenNucleiHistoryModal = () => setShowNucleiHistoryModal(true);
   const handleCloseNucleiHistoryModal = () => setShowNucleiHistoryModal(false);
+
+  const handleCloseWildcardNucleiConfigModal = () => setShowWildcardNucleiConfigModal(false);
+  const handleOpenWildcardNucleiConfigModal = () => setShowWildcardNucleiConfigModal(true);
+
+  const loadWildcardNucleiConfig = async () => {
+    if (!activeTarget?.id) return;
+
+    const ALL_TEMPLATES = ['cves', 'vulnerabilities', 'exposures', 'technologies', 'misconfiguration', 'takeovers', 'network', 'dns', 'headless'];
+    const ALL_SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'];
+
+    try {
+      const response = await fetch(`/api/nuclei-config/${activeTarget.id}`);
+      if (response.ok) {
+        const config = await response.json();
+        let needsSave = false;
+
+        if (!config.templates || config.templates.length === 0) {
+          config.templates = ALL_TEMPLATES;
+          needsSave = true;
+        }
+        if (!config.severities || config.severities.length === 0) {
+          config.severities = ALL_SEVERITIES;
+          needsSave = true;
+        }
+
+        if (!config.targets || config.targets.length === 0) {
+          try {
+            const targetsResponse = await fetch(`/api/scopetarget/${activeTarget.id}/wildcard-nuclei-targets`);
+            if (targetsResponse.ok) {
+              const targetsData = await targetsResponse.json();
+              const httpxTargets = (targetsData.targets || []).filter(Boolean);
+              if (httpxTargets.length > 0) {
+                config.targets = httpxTargets;
+                config.target_mode = 'httpx_targets';
+                needsSave = true;
+              }
+            }
+          } catch (targetErr) {
+            console.error('Error auto-populating Nuclei targets:', targetErr);
+          }
+        }
+
+        if (needsSave && config.targets && config.targets.length > 0) {
+          await fetch(`/api/nuclei-config/${activeTarget.id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config),
+          });
+        }
+
+        setWildcardNucleiConfig(config);
+      }
+    } catch (error) {
+      console.error('Error loading Wildcard Nuclei config:', error);
+    }
+  };
+
+  const handleWildcardNucleiConfigSave = async (config) => {
+    setWildcardNucleiConfig(config);
+    setShowWildcardNucleiConfigModal(false);
+  };
+
+  const isWildcardNucleiScanDisabled = () => {
+    return !wildcardNucleiConfig ||
+           !wildcardNucleiConfig.targets ||
+           !Array.isArray(wildcardNucleiConfig.targets) ||
+           wildcardNucleiConfig.targets.length === 0 ||
+           ((!wildcardNucleiConfig.templates || !Array.isArray(wildcardNucleiConfig.templates) || wildcardNucleiConfig.templates.length === 0) &&
+            (!wildcardNucleiConfig.template_ids || !Array.isArray(wildcardNucleiConfig.template_ids) || wildcardNucleiConfig.template_ids.length === 0));
+  };
+
+  const getWildcardNucleiSelectedTargetsCount = () => {
+    if (!wildcardNucleiConfig?.targets || !Array.isArray(wildcardNucleiConfig.targets)) return 0;
+    return wildcardNucleiConfig.targets.length;
+  };
+
+  const getWildcardNucleiSelectedTemplatesCount = () => {
+    let count = 0;
+    if (wildcardNucleiConfig?.templates && Array.isArray(wildcardNucleiConfig.templates)) count += wildcardNucleiConfig.templates.length;
+    if (wildcardNucleiConfig?.template_ids && Array.isArray(wildcardNucleiConfig.template_ids)) count += wildcardNucleiConfig.template_ids.length;
+    return count;
+  };
+
+  const getWildcardNucleiTotalFindings = () => {
+    if (!mostRecentWildcardNucleiScan?.result) return 0;
+    try {
+      let findings = [];
+      if (typeof mostRecentWildcardNucleiScan.result === 'string') {
+        findings = JSON.parse(mostRecentWildcardNucleiScan.result);
+      } else if (Array.isArray(mostRecentWildcardNucleiScan.result)) {
+        findings = mostRecentWildcardNucleiScan.result;
+      }
+      return Array.isArray(findings) ? findings.length : 0;
+    } catch (error) { return 0; }
+  };
+
+  const getWildcardNucleiImpactfulFindings = () => {
+    if (!mostRecentWildcardNucleiScan?.result) return 0;
+    try {
+      let findings = [];
+      if (typeof mostRecentWildcardNucleiScan.result === 'string') {
+        findings = JSON.parse(mostRecentWildcardNucleiScan.result);
+      } else if (Array.isArray(mostRecentWildcardNucleiScan.result)) {
+        findings = mostRecentWildcardNucleiScan.result;
+      }
+      if (!Array.isArray(findings)) return 0;
+      return findings.filter(f => {
+        const sev = f.info?.severity?.toLowerCase();
+        return sev && sev !== 'info' && sev !== 'informational';
+      }).length;
+    } catch (error) { return 0; }
+  };
+
+  const handleOpenWildcardNucleiResultsModal = () => setShowWildcardNucleiResultsModal(true);
+  const handleCloseWildcardNucleiResultsModal = () => setShowWildcardNucleiResultsModal(false);
+
+  const handleOpenWildcardNucleiHistoryModal = () => setShowWildcardNucleiHistoryModal(true);
+  const handleCloseWildcardNucleiHistoryModal = () => setShowWildcardNucleiHistoryModal(false);
+
+  const startWildcardNucleiScan = () => {
+    initiateNucleiScan(
+      activeTarget,
+      monitorNucleiScanStatus,
+      setIsWildcardNucleiScanning,
+      setWildcardNucleiScans,
+      setMostRecentWildcardNucleiScanStatus,
+      setMostRecentWildcardNucleiScan,
+      setActiveWildcardNucleiScan
+    );
+  };
 
   const handleCloseKatanaCompanyResultsModal = () => setShowKatanaCompanyResultsModal(false);
   const handleOpenKatanaCompanyResultsModal = () => setShowKatanaCompanyResultsModal(true);
@@ -3043,7 +3393,35 @@ function App() {
   const handleOpenUniqueSubdomainsModal = () => setShowUniqueSubdomainsModal(true);
   const handleOpenConfigureHttpxModal = () => setShowConfigureHttpxModal(true);
   const handleCloseConfigureHttpxModal = () => setShowConfigureHttpxModal(false);
-  const handleSaveHttpxConfig = (config) => setHttpxScanConfig(config);
+  const handleSaveHttpxConfig = async (config) => {
+    setHttpxScanConfig(config);
+    if (activeTarget?.id) {
+      try {
+        await fetch(`/api/httpx-config/${activeTarget.id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(config),
+        });
+      } catch (err) {
+        console.error('Error saving HTTPX config to server:', err);
+      }
+    }
+  };
+
+  const loadHttpxConfig = async () => {
+    if (!activeTarget?.id) return;
+    try {
+      const response = await fetch(`/api/httpx-config/${activeTarget.id}`);
+      if (response.ok) {
+        const config = await response.json();
+        if (config && Object.keys(config).length > 0) {
+          setHttpxScanConfig(config);
+        }
+      }
+    } catch (err) {
+      console.error('Error loading HTTPX config:', err);
+    }
+  };
 
   const handleOpenCeWLResultsModal = () => setShowCeWLResultsModal(true);
   const handleCloseCeWLResultsModal = () => setShowCeWLResultsModal(false);
@@ -4152,10 +4530,13 @@ function App() {
     }
   }, [activeTarget]);
 
-  // Nuclei scans useEffect
   useEffect(() => {
     if (activeTarget) {
       loadNucleiConfig();
+      loadHttpxConfig();
+      if (activeTarget.type === 'Wildcard') {
+        loadWildcardNucleiConfig();
+      }
     }
   }, [activeTarget]);
 
@@ -5097,6 +5478,8 @@ function App() {
         onToolsClick={handleOpenToolsModal}
         onExportClick={handleOpenExportModal}
         onImportClick={handleOpenImportModal}
+        onWildfireClick={() => setShowWildfireModal(true)}
+        isWildfireRunning={isWildfireRunning}
       />
 
       <ToastContainer 
@@ -5157,6 +5540,16 @@ function App() {
         activeTarget={activeTarget}
         handleActiveSelect={handleActiveSelect}
         handleDelete={handleDelete}
+      />
+
+      <WildfireModal
+        show={showWildfireModal}
+        handleClose={() => setShowWildfireModal(false)}
+        scopeTargets={scopeTargets}
+        isWildfireRunning={isWildfireRunning}
+        wildfireProgress={wildfireProgress}
+        onStartWildfire={startWildfire}
+        onCancelWildfire={cancelWildfire}
       />
 
       <SettingsModal
@@ -7257,6 +7650,62 @@ function App() {
                     </Card>
                   </Col>
                 </Row>
+
+                <h4 className="text-secondary mb-3 fs-5">Nuclei Scanning</h4>
+                <HelpMeLearn section="wildcardNucleiScanning" />
+                <Row className="mb-4">
+                  <Col>
+                  <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger fs-4 mb-3">
+                          <a href="https://github.com/projectdiscovery/nuclei" className="text-danger text-decoration-none">
+                            Nuclei Scanning
+                          </a>
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic mb-4">
+                          Scan your live web servers for vulnerabilities using Nuclei templates. Configure individual templates, categories, and advanced settings for targeted security testing.
+                        </Card.Text>
+                        <div className="text-danger mb-4">
+                          <div className="row row-cols-4">
+                            <div className="col">
+                              <h3 className="mb-0">{getWildcardNucleiSelectedTargetsCount()}</h3>
+                              <small className="text-white-50">Selected<br/>Targets</small>
+                            </div>
+                            <div className="col">
+                              <h3 className="mb-0">{getWildcardNucleiSelectedTemplatesCount()}</h3>
+                              <small className="text-white-50">Selected<br/>Templates</small>
+                            </div>
+                            <div className="col">
+                              <h3 className="mb-0">{getWildcardNucleiTotalFindings()}</h3>
+                              <small className="text-white-50">Total<br/>Findings</small>
+                            </div>
+                            <div className="col">
+                              <h3 className="mb-0">{getWildcardNucleiImpactfulFindings()}</h3>
+                              <small className="text-white-50">Impactful<br/>Findings</small>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="d-flex justify-content-between mt-auto gap-2">
+                          <Button variant="outline-danger" className="flex-fill" onClick={handleOpenWildcardNucleiHistoryModal}>History</Button>
+                          <Button variant="outline-danger" className="flex-fill" onClick={handleOpenWildcardNucleiConfigModal}>Configure</Button>
+                          <Button 
+                            variant="outline-danger" 
+                            className="flex-fill"
+                            disabled={isWildcardNucleiScanDisabled() || isWildcardNucleiScanning}
+                            onClick={startWildcardNucleiScan}
+                          >
+                            {isWildcardNucleiScanning ? (
+                              <Spinner animation="border" size="sm" />
+                            ) : (
+                              'Scan'
+                            )}
+                          </Button>
+                          <Button variant="outline-danger" className="flex-fill" onClick={handleOpenWildcardNucleiResultsModal}>Results</Button>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
               </div>
             )}
             {activeTarget.type === 'URL' && (
@@ -8170,6 +8619,15 @@ function App() {
         handleClose={handleCloseNucleiConfigModal}
         activeTarget={activeTarget}
         onSaveConfig={handleNucleiConfigSave}
+        mode="company"
+      />
+
+      <NucleiConfigModal
+        show={showWildcardNucleiConfigModal}
+        handleClose={handleCloseWildcardNucleiConfigModal}
+        activeTarget={activeTarget}
+        onSaveConfig={handleWildcardNucleiConfigSave}
+        mode="wildcard"
       />
 
       <KatanaCompanyConfigModal
@@ -8363,6 +8821,22 @@ function App() {
         show={showNucleiHistoryModal}
         handleClose={handleCloseNucleiHistoryModal}
         scans={nucleiScans}
+      />
+
+      <NucleiResultsModal
+        show={showWildcardNucleiResultsModal}
+        handleClose={handleCloseWildcardNucleiResultsModal}
+        scan={activeWildcardNucleiScan}
+        scans={wildcardNucleiScans}
+        activeNucleiScan={activeWildcardNucleiScan}
+        setActiveNucleiScan={setActiveWildcardNucleiScan}
+        setShowToast={setShowToast}
+      />
+
+      <NucleiHistoryModal
+        show={showWildcardNucleiHistoryModal}
+        handleClose={handleCloseWildcardNucleiHistoryModal}
+        scans={wildcardNucleiScans}
       />
     </Container>
   );

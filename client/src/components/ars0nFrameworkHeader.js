@@ -1,6 +1,6 @@
 import { Row, Col, Button } from 'react-bootstrap';
 
-function Ars0nFrameworkHeader({ onSettingsClick, onExportClick, onImportClick, onToolsClick }) {
+function Ars0nFrameworkHeader({ onSettingsClick, onExportClick, onImportClick, onToolsClick, onWildfireClick, isWildfireRunning }) {
   return (
     <Row className="align-items-center mb-3">
       <Col xs="auto">
@@ -54,6 +54,14 @@ function Ars0nFrameworkHeader({ onSettingsClick, onExportClick, onImportClick, o
           title="Tools & Utilities"
         >
           <i className="bi bi-tools" style={{ fontSize: '1.5rem' }}></i>
+        </Button>
+        <Button 
+          variant="link" 
+          className={`p-1 ${isWildfireRunning ? 'text-danger' : 'text-white'}`}
+          onClick={onWildfireClick}
+          title="Wildfire Scan"
+        >
+          <i className="bi bi-fire" style={{ fontSize: '1.5rem' }}></i>
         </Button>
         <Button 
           variant="link" 
