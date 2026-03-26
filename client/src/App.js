@@ -446,6 +446,7 @@ function App() {
   const [isAssetfinderScanning, setIsAssetfinderScanning] = useState(false);
   const [showAssetfinderResultsModal, setShowAssetfinderResultsModal] = useState(false);
   const [showCTLResultsModal, setShowCTLResultsModal] = useState(false);
+  const [showCTLApiErrorModal, setShowCTLApiErrorModal] = useState(false);
   const [ctlScans, setCTLScans] = useState([]);
   const [isCTLScanning, setIsCTLScanning] = useState(false);
   const [mostRecentCTLScan, setMostRecentCTLScan] = useState(null);
@@ -1718,7 +1719,8 @@ function App() {
         setWildcardNucleiScans,
         setMostRecentWildcardNucleiScan,
         setMostRecentWildcardNucleiScanStatus,
-        httpxScanConfig
+        httpxScanConfig,
+        setActiveWildcardNucleiScan
       ),
       consolidatedSubdomains,
       mostRecentHttpxScan,
@@ -2025,6 +2027,14 @@ function App() {
     setShuffleDNSCustomScans([]);
     setMostRecentShuffleDNSCustomScan(null);
     setMostRecentShuffleDNSCustomScanStatus(null);
+    setNucleiScans([]);
+    setMostRecentNucleiScan(null);
+    setMostRecentNucleiScanStatus(null);
+    setActiveNucleiScan(null);
+    setWildcardNucleiScans([]);
+    setMostRecentWildcardNucleiScan(null);
+    setMostRecentWildcardNucleiScanStatus(null);
+    setActiveWildcardNucleiScan(null);
     setAutoScanSessions([]);
     setAutoScanSessionId(null);
     setAutoScanCurrentStep(AUTO_SCAN_STEPS.IDLE);
@@ -2375,7 +2385,8 @@ function App() {
           setWildcardNucleiScans,
           setMostRecentWildcardNucleiScan,
           setMostRecentWildcardNucleiScanStatus,
-          currentHttpxConfig
+          currentHttpxConfig,
+          setActiveWildcardNucleiScan
         ),
         consolidatedSubdomains,
         mostRecentHttpxScan,
@@ -3223,11 +3234,7 @@ function App() {
             console.log('[fetchNucleiScans] Most recent scan:', mostRecentScan);
             setMostRecentNucleiScan(mostRecentScan);
             setMostRecentNucleiScanStatus(mostRecentScan.status);
-            
-            // Set the most recent scan as active if no active scan is currently set
-            if (!activeNucleiScan) {
-              setActiveNucleiScan(mostRecentScan);
-            }
+            setActiveNucleiScan(mostRecentScan);
           } else {
             console.log('[fetchNucleiScans] No nuclei scans found');
             setMostRecentNucleiScan(null);
@@ -3276,13 +3283,14 @@ function App() {
   const handleOpenReconResultsModal = () => setShowReconResultsModal(true);
 
   const handleConsolidate = async () => {
-    if (!activeTarget) return;
+    const target = activeTargetRef.current;
+    if (!target) return;
     
     setIsConsolidating(true);
     try {
-      const result = await consolidateSubdomains(activeTarget);
+      const result = await consolidateSubdomains(target);
       if (result) {
-        await fetchConsolidatedSubdomains(activeTarget, setConsolidatedSubdomains, setConsolidatedCount);
+        await fetchConsolidatedSubdomains(target, setConsolidatedSubdomains, setConsolidatedCount);
       }
     } catch (error) {
       console.error('Error during consolidation:', error);
@@ -5550,6 +5558,8 @@ function App() {
         wildfireProgress={wildfireProgress}
         onStartWildfire={startWildfire}
         onCancelWildfire={cancelWildfire}
+        setShowToast={setShowToast}
+        autoScanCurrentStep={autoScanCurrentStep}
       />
 
       <SettingsModal
@@ -5731,6 +5741,47 @@ function App() {
         handleCloseCTLResultsModal={handleCloseCTLResultsModal}
         ctlResults={mostRecentCTLScan}
       />
+
+      <Modal show={showCTLApiErrorModal} onHide={() => setShowCTLApiErrorModal(false)} centered>
+        <Modal.Header closeButton className="bg-dark border-secondary">
+          <Modal.Title className="d-flex align-items-center gap-2">
+            <i className="bi bi-exclamation-triangle-fill" style={{ color: '#ff9800' }} />
+            <span className="text-white">CTL Scan — API Issue</span>
+          </Modal.Title>
+        </Modal.Header>
+        <Modal.Body className="bg-dark text-white">
+          <p>
+            The CTL (Certificate Transparency Log) scan works by making an HTTP request to{' '}
+            <a href="https://crt.sh" target="_blank" rel="noopener noreferrer" className="text-danger">crt.sh</a>,
+            a public API that indexes SSL/TLS certificates from Certificate Transparency logs.
+          </p>
+          <p>
+            The scan failed because the crt.sh API returned an error
+            {(() => {
+              const errScan = mostRecentCTLScan?.status === 'error' ? mostRecentCTLScan
+                : mostRecentCTLCompanyScan?.status === 'error' ? mostRecentCTLCompanyScan : null;
+              if (errScan?.stderr) {
+                const match = errScan.stderr.match(/status code[:\s]*(\d+)/i);
+                if (match) return <> (<code>HTTP {match[1]}</code>)</>;
+              }
+              return null;
+            })()}.
+            This typically happens when:
+          </p>
+          <ul>
+            <li><strong>Rate limiting (429)</strong> — Too many requests have been made to crt.sh in a short period.</li>
+            <li><strong>Server overload (503)</strong> — The crt.sh service is temporarily overwhelmed by traffic.</li>
+            <li><strong>Timeout</strong> — The API took too long to respond for a large domain.</li>
+          </ul>
+          <p className="mb-0">
+            This is not a bug in the framework. Simply <strong>wait a few minutes and try the scan again</strong>.
+            The crt.sh API is a free community resource and occasionally struggles under heavy load.
+          </p>
+        </Modal.Body>
+        <Modal.Footer className="bg-dark border-secondary">
+          <Button variant="outline-danger" onClick={() => setShowCTLApiErrorModal(false)}>Got it</Button>
+        </Modal.Footer>
+      </Modal>
 
       <CTLCompanyResultsModal
         showCTLCompanyResultsModal={showCTLCompanyResultsModal}
@@ -6087,7 +6138,9 @@ function App() {
                       onResults: handleOpenCTLCompanyResultsModal,
                       onHistory: handleOpenCTLCompanyHistoryModal,
                       resultCount: mostRecentCTLCompanyScan && mostRecentCTLCompanyScan.result ? 
-                        mostRecentCTLCompanyScan.result.split('\n').filter(line => line.trim()).length : 0
+                        mostRecentCTLCompanyScan.result.split('\n').filter(line => line.trim()).length : 0,
+                      apiError: mostRecentCTLCompanyScanStatus === 'error',
+                      onApiError: () => setShowCTLApiErrorModal(true)
                     },
                     { 
                       name: 'Reverse Whois', 
@@ -6105,10 +6158,18 @@ function App() {
                     <Col key={index}>
                       <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
                         <Card.Body className="d-flex flex-column">
-                          <Card.Title className="text-danger mb-3">
+                          <Card.Title className="text-danger mb-3 d-flex align-items-center justify-content-center gap-2">
                             <a href={tool.link} className="text-danger text-decoration-none">
                               {tool.name}
                             </a>
+                            {tool.apiError && (
+                              <i
+                                className="bi bi-exclamation-triangle-fill"
+                                style={{ color: '#ff9800', cursor: 'pointer', fontSize: '1.1rem' }}
+                                title="API error — click for details"
+                                onClick={(e) => { e.stopPropagation(); tool.onApiError(); }}
+                              />
+                            )}
                           </Card.Title>
                           <Card.Text className="text-white small fst-italic">
                             {tool.description}
@@ -6940,7 +7001,9 @@ function App() {
                       onScan: startCTLScan,
                       onResults: handleOpenCTLResultsModal,
                       resultCount: mostRecentCTLScan && mostRecentCTLScan.result ? 
-                        mostRecentCTLScan.result.split('\n').filter(line => line.trim()).length : 0
+                        mostRecentCTLScan.result.split('\n').filter(line => line.trim()).length : 0,
+                      apiError: mostRecentCTLScanStatus === 'error',
+                      onApiError: () => setShowCTLApiErrorModal(true)
                     },
                     { name: 'Subfinder', 
                       link: 'https://github.com/projectdiscovery/subfinder',
@@ -6956,10 +7019,18 @@ function App() {
                     <Col key={index}>
                       <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
                         <Card.Body className="d-flex flex-column">
-                          <Card.Title className="text-danger mb-3">
+                          <Card.Title className="text-danger mb-3 d-flex align-items-center justify-content-center gap-2">
                             <a href={tool.link} className="text-danger text-decoration-none">
                               {tool.name}
                             </a>
+                            {tool.apiError && (
+                              <i
+                                className="bi bi-exclamation-triangle-fill"
+                                style={{ color: '#ff9800', cursor: 'pointer', fontSize: '1.1rem' }}
+                                title="API error — click for details"
+                                onClick={(e) => { e.stopPropagation(); tool.onApiError(); }}
+                              />
+                            )}
                           </Card.Title>
                           <Card.Text className="text-white small fst-italic">
                             {tool.name === 'GAU' ? 'Get All URLs - Fetch known URLs from AlienVault\'s Open Threat Exchange, the Wayback Machine, and Common Crawl.' : 'A subdomain enumeration tool that uses OSINT techniques.'}

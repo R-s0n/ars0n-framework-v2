@@ -1340,7 +1340,7 @@ const NucleiConfigModal = ({
             <Button 
               variant="danger" 
               onClick={handleSaveConfig}
-              disabled={saving || selectedTargets.size === 0 || !hasAnyTemplateOrCategory()}
+              disabled={saving || !hasAnyTemplateOrCategory()}
             >
               {saving ? (
                 <><Spinner animation="border" size="sm" className="me-2" />Saving...</>

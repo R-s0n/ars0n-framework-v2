@@ -86,7 +86,8 @@ const getAutoScanSteps = (
   setWildcardNucleiScans,
   setMostRecentWildcardNucleiScan,
   setMostRecentWildcardNucleiScanStatus,
-  httpxScanConfig
+  httpxScanConfig,
+  setActiveWildcardNucleiScan
 ) => {
   const steps = [
     { name: AUTO_SCAN_STEPS.AMASS, action: async () => {
@@ -1518,6 +1519,9 @@ const getAutoScanSteps = (
                 mostRecentScan.status === 'failed' || mostRecentScan.status === 'error') {
               isComplete = true;
               debugTrace(`Nuclei scan finished with status: ${mostRecentScan.status}`);
+              if (mostRecentScan.status === 'success' || mostRecentScan.status === 'completed') {
+                if (setActiveWildcardNucleiScan) setActiveWildcardNucleiScan(mostRecentScan);
+              }
             }
           } catch (pollError) {
             debugTrace(`Error polling Nuclei scan status: ${pollError.message}`);
@@ -1539,6 +1543,7 @@ const getAutoScanSteps = (
           if (Array.isArray(finalScans) && finalScans.length > 0) {
             if (setMostRecentWildcardNucleiScan) setMostRecentWildcardNucleiScan(finalScans[0]);
             if (setMostRecentWildcardNucleiScanStatus) setMostRecentWildcardNucleiScanStatus(finalScans[0].status);
+            if (setActiveWildcardNucleiScan) setActiveWildcardNucleiScan(finalScans[0]);
           }
         }
 

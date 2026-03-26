@@ -1,6 +1,56 @@
-import { Modal, Button, Form, Table, Badge, InputGroup, ButtonGroup } from 'react-bootstrap';
-import { useState, useMemo } from 'react';
+import { Modal, Button, Form, Table, Badge, InputGroup, ButtonGroup, Spinner } from 'react-bootstrap';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { FaSearch, FaTrash, FaCheckCircle, FaTimes, FaExclamationTriangle } from 'react-icons/fa';
+
+async function fetchStatsForTarget(targetId) {
+  const s = { subdomains: 0, webServers: 0, nucleiTotal: 0, nucleiImpactful: 0 };
+  try {
+    const [subRes, httpxRes, nucleiRes] = await Promise.all([
+      fetch(`/api/consolidated-subdomains/${targetId}`).catch(() => null),
+      fetch(`/api/scopetarget/${targetId}/scans/httpx`).catch(() => null),
+      fetch(`/api/scopetarget/${targetId}/scans/nuclei`).catch(() => null),
+    ]);
+
+    if (subRes?.ok) {
+      const data = await subRes.json();
+      s.subdomains = data.count || 0;
+    }
+
+    if (httpxRes?.ok) {
+      const data = await httpxRes.json();
+      if (data.scans && data.scans.length > 0) {
+        const latest = data.scans.reduce((a, b) =>
+          new Date(b.created_at) > new Date(a.created_at) ? b : a
+        );
+        if (latest.result) {
+          s.webServers = latest.result.split('\n').filter(l => l.trim()).length;
+        }
+      }
+    }
+
+    if (nucleiRes?.ok) {
+      const scans = await nucleiRes.json();
+      if (Array.isArray(scans)) {
+        const successScans = scans.filter(sc => sc.status === 'success' && sc.result);
+        if (successScans.length > 0) {
+          const latest = successScans.reduce((a, b) =>
+            new Date(b.created_at) > new Date(a.created_at) ? b : a
+          );
+          try {
+            const findings = JSON.parse(latest.result);
+            if (Array.isArray(findings)) {
+              s.nucleiTotal = findings.length;
+              s.nucleiImpactful = findings.filter(f =>
+                f.info?.severity && ['critical', 'high', 'medium'].includes(f.info.severity.toLowerCase())
+              ).length;
+            }
+          } catch {}
+        }
+      }
+    }
+  } catch {}
+  return s;
+}
 
 function SelectActiveScopeTargetModal({
   showActiveModal,
@@ -17,6 +67,27 @@ function SelectActiveScopeTargetModal({
   const [filterType, setFilterType] = useState('all');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [targetsToDelete, setTargetsToDelete] = useState([]);
+  const [targetStats, setTargetStats] = useState({});
+  const [loadingStats, setLoadingStats] = useState(false);
+
+  const fetchTargetStats = useCallback(async () => {
+    if (!scopeTargets || scopeTargets.length === 0) return;
+    setLoadingStats(true);
+    const stats = {};
+
+    await Promise.all(scopeTargets.map(async (target) => {
+      stats[target.id] = await fetchStatsForTarget(target.id);
+    }));
+
+    setTargetStats(stats);
+    setLoadingStats(false);
+  }, [scopeTargets]);
+
+  useEffect(() => {
+    if (showActiveModal) {
+      fetchTargetStats();
+    }
+  }, [showActiveModal, fetchTargetStats]);
 
   const handleSort = (column) => {
     if (sortColumn === column) {
@@ -52,9 +123,9 @@ function SelectActiveScopeTargetModal({
       } else if (sortColumn === 'type') {
         aVal = a.type;
         bVal = b.type;
-      } else if (sortColumn === 'mode') {
-        aVal = a.mode || '';
-        bVal = b.mode || '';
+      } else if (['subdomains', 'webServers', 'nucleiTotal', 'nucleiImpactful'].includes(sortColumn)) {
+        aVal = targetStats[a.id]?.[sortColumn] || 0;
+        bVal = targetStats[b.id]?.[sortColumn] || 0;
       }
       
       if (aVal < bVal) return sortDirection === 'asc' ? -1 : 1;
@@ -63,7 +134,7 @@ function SelectActiveScopeTargetModal({
     });
 
     return filtered;
-  }, [scopeTargets, searchTerm, filterType, sortColumn, sortDirection]);
+  }, [scopeTargets, searchTerm, filterType, sortColumn, sortDirection, targetStats]);
 
   const toggleTargetSelection = (targetId) => {
     setSelectedTargets(prev => {
@@ -105,17 +176,6 @@ function SelectActiveScopeTargetModal({
   const cancelDelete = () => {
     setShowDeleteConfirm(false);
     setTargetsToDelete([]);
-  };
-
-  const handleSelectAndClose = () => {
-    if (selectedTargets.size === 1) {
-      const targetId = Array.from(selectedTargets)[0];
-      const target = scopeTargets.find(t => t.id === targetId);
-      if (target) {
-        handleActiveSelect(target);
-      }
-    }
-    handleActiveModalClose();
   };
 
   const handleRowClick = (target) => {
@@ -242,75 +302,102 @@ function SelectActiveScopeTargetModal({
           <Table striped bordered hover variant="dark" size="sm">
             <thead style={{ position: 'sticky', top: 0, backgroundColor: '#212529', zIndex: 1 }}>
               <tr>
-                <th style={{ width: '50px' }}>
+                <th style={{ width: '40px' }}>
                   <Form.Check
                     type="checkbox"
                     checked={selectedTargets.size === filteredAndSortedTargets.length && filteredAndSortedTargets.length > 0}
                     onChange={toggleAllTargets}
                   />
                 </th>
-                <th style={{ width: '60px' }}>Active</th>
-                <th style={{ width: '120px', cursor: 'pointer' }} onClick={() => handleSort('type')}>
+                <th style={{ width: '50px' }}>Active</th>
+                <th style={{ width: '100px', cursor: 'pointer' }} onClick={() => handleSort('type')}>
                   Type {renderSortIcon('type')}
                 </th>
                 <th style={{ cursor: 'pointer' }} onClick={() => handleSort('scope_target')}>
                   Scope Target {renderSortIcon('scope_target')}
                 </th>
-                <th style={{ width: '100px', cursor: 'pointer' }} onClick={() => handleSort('mode')}>
-                  Mode {renderSortIcon('mode')}
+                <th style={{ width: '80px', cursor: 'pointer', textAlign: 'center' }} onClick={() => handleSort('subdomains')}>
+                  Subs {renderSortIcon('subdomains')}
+                </th>
+                <th style={{ width: '80px', cursor: 'pointer', textAlign: 'center' }} onClick={() => handleSort('webServers')}>
+                  Live {renderSortIcon('webServers')}
+                </th>
+                <th style={{ width: '80px', cursor: 'pointer', textAlign: 'center' }} onClick={() => handleSort('nucleiTotal')}>
+                  Nuclei {renderSortIcon('nucleiTotal')}
+                </th>
+                <th style={{ width: '90px', cursor: 'pointer', textAlign: 'center' }} onClick={() => handleSort('nucleiImpactful')}>
+                  Impact {renderSortIcon('nucleiImpactful')}
                 </th>
               </tr>
             </thead>
             <tbody>
               {filteredAndSortedTargets.length === 0 ? (
                 <tr>
-                  <td colSpan="5" className="text-center text-muted py-4">
+                  <td colSpan="8" className="text-center text-muted py-4">
                     {searchTerm || filterType !== 'all' ? 'No scope targets match your filters' : 'No scope targets available'}
                   </td>
                 </tr>
               ) : (
-                filteredAndSortedTargets.map((target) => (
-                  <tr 
-                    key={target.id}
-                    style={{ cursor: 'pointer' }}
-                    className={activeTarget?.id === target.id ? 'table-danger' : ''}
-                  >
-                    <td onClick={(e) => e.stopPropagation()}>
-                      <Form.Check
-                        type="checkbox"
-                        checked={selectedTargets.has(target.id)}
-                        onChange={() => toggleTargetSelection(target.id)}
-                      />
-                    </td>
-                    <td className="text-center" onClick={() => handleRowClick(target)}>
-                      {activeTarget?.id === target.id && (
-                        <Badge bg="danger">
-                          <FaCheckCircle />
-                        </Badge>
-                      )}
-                    </td>
-                    <td onClick={() => handleRowClick(target)}>
-                      <div className="d-flex align-items-center">
-                        {getTypeIcon(target.type) && (
-                          <img 
-                            src={getTypeIcon(target.type)} 
-                            alt={target.type} 
-                            style={{ width: '20px', height: '20px', marginRight: '8px' }}
-                          />
+                filteredAndSortedTargets.map((target) => {
+                  const stats = targetStats[target.id];
+                  return (
+                    <tr 
+                      key={target.id}
+                      style={{ cursor: 'pointer' }}
+                      className={activeTarget?.id === target.id ? 'table-danger' : ''}
+                    >
+                      <td onClick={(e) => e.stopPropagation()}>
+                        <Form.Check
+                          type="checkbox"
+                          checked={selectedTargets.has(target.id)}
+                          onChange={() => toggleTargetSelection(target.id)}
+                        />
+                      </td>
+                      <td className="text-center" onClick={() => handleRowClick(target)}>
+                        {activeTarget?.id === target.id && (
+                          <Badge bg="danger">
+                            <FaCheckCircle />
+                          </Badge>
                         )}
-                        <span>{target.type}</span>
-                      </div>
-                    </td>
-                    <td className="font-monospace small" onClick={() => handleRowClick(target)}>
-                      {target.scope_target}
-                    </td>
-                    <td onClick={() => handleRowClick(target)}>
-                      <Badge bg={target.mode === 'Active' ? 'success' : 'secondary'}>
-                        {target.mode || 'Passive'}
-                      </Badge>
-                    </td>
-                  </tr>
-                ))
+                      </td>
+                      <td onClick={() => handleRowClick(target)}>
+                        <div className="d-flex align-items-center">
+                          {getTypeIcon(target.type) && (
+                            <img 
+                              src={getTypeIcon(target.type)} 
+                              alt={target.type} 
+                              style={{ width: '20px', height: '20px', marginRight: '8px' }}
+                            />
+                          )}
+                          <span>{target.type}</span>
+                        </div>
+                      </td>
+                      <td className="font-monospace small" onClick={() => handleRowClick(target)}>
+                        {target.scope_target}
+                      </td>
+                      <td className="text-center" onClick={() => handleRowClick(target)}>
+                        {loadingStats ? <Spinner animation="border" size="sm" variant="secondary" /> :
+                          <span className={stats?.subdomains > 0 ? 'text-white' : 'text-muted'}>{stats?.subdomains || 0}</span>
+                        }
+                      </td>
+                      <td className="text-center" onClick={() => handleRowClick(target)}>
+                        {loadingStats ? <Spinner animation="border" size="sm" variant="secondary" /> :
+                          <span className={stats?.webServers > 0 ? 'text-info' : 'text-muted'}>{stats?.webServers || 0}</span>
+                        }
+                      </td>
+                      <td className="text-center" onClick={() => handleRowClick(target)}>
+                        {loadingStats ? <Spinner animation="border" size="sm" variant="secondary" /> :
+                          <span className={stats?.nucleiTotal > 0 ? 'text-warning' : 'text-muted'}>{stats?.nucleiTotal || 0}</span>
+                        }
+                      </td>
+                      <td className="text-center" onClick={() => handleRowClick(target)}>
+                        {loadingStats ? <Spinner animation="border" size="sm" variant="secondary" /> :
+                          <span className={stats?.nucleiImpactful > 0 ? 'text-danger fw-bold' : 'text-muted'}>{stats?.nucleiImpactful || 0}</span>
+                        }
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </Table>
