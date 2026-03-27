@@ -49,11 +49,21 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
     endpoint: ''
   });
 
+  const [mcpConfig, setMcpConfig] = useState({
+    enabled: true,
+    port: 3001,
+    max_results: 50,
+    result_truncation_length: 3000,
+  });
+  const [mcpStatus, setMcpStatus] = useState(null);
+  const [mcpStatusLoading, setMcpStatusLoading] = useState(false);
+
   useEffect(() => {
     if (show) {
       fetchSettings();
       fetchApiKeys();
       fetchAiApiKeys();
+      fetchMcpConfig();
       setSaveSuccess(false);
     }
   }, [show]);
@@ -216,6 +226,55 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
     } finally {
       setAiApiKeyLoading(false);
     }
+  };
+
+  const fetchMcpConfig = async () => {
+    try {
+      const response = await fetch('/api/mcp-config');
+      if (response.ok) {
+        const data = await response.json();
+        setMcpConfig(data);
+      }
+    } catch (error) {
+      console.error('Error fetching MCP config:', error);
+    }
+  };
+
+  const saveMcpConfig = async () => {
+    try {
+      const response = await fetch('/api/mcp-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(mcpConfig),
+      });
+      if (!response.ok) throw new Error('Failed to save MCP config');
+      const data = await response.json();
+      setMcpConfig(data);
+    } catch (error) {
+      console.error('Error saving MCP config:', error);
+    }
+  };
+
+  const checkMcpStatus = async () => {
+    setMcpStatusLoading(true);
+    try {
+      const port = mcpConfig.port || 3001;
+      const response = await fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(3000) });
+      if (response.ok) {
+        const data = await response.json();
+        setMcpStatus({ online: true, tools: data.tools });
+      } else {
+        setMcpStatus({ online: false });
+      }
+    } catch {
+      setMcpStatus({ online: false });
+    } finally {
+      setMcpStatusLoading(false);
+    }
+  };
+
+  const handleMcpChange = (field, value) => {
+    setMcpConfig(prev => ({ ...prev, [field]: value }));
   };
 
   const getKeyFieldsForTool = (toolName) => {
@@ -656,7 +715,7 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
                     </Nav.Link>
                   </Nav.Item>
                   <Nav.Item>
-                    <Nav.Link 
+                    <Nav.Link
                       eventKey="ai-api-keys"
                       className={`text-danger ${activeTab === 'ai-api-keys' ? 'active' : ''}`}
                       style={{
@@ -664,6 +723,17 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
                       }}
                     >
                       AI API Keys
+                    </Nav.Link>
+                  </Nav.Item>
+                  <Nav.Item>
+                    <Nav.Link
+                      eventKey="mcp-server"
+                      className={`text-danger ${activeTab === 'mcp-server' ? 'active' : ''}`}
+                      style={{
+                        ...(activeTab === 'mcp-server' ? styles.navLinkActive : styles.navLink),
+                      }}
+                    >
+                      MCP Server
                     </Nav.Link>
                   </Nav.Item>
                 </Nav>
@@ -1199,6 +1269,137 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
                           ))}
                         </div>
                       )}
+                    </div>
+                  </Tab.Pane>
+                  <Tab.Pane eventKey="mcp-server">
+                    <h5 className="text-danger mb-3">MCP Server Configuration</h5>
+                    <p className="text-white-50 small mb-4">
+                      Configure the Model Context Protocol (MCP) server that allows Claude Code to query your scan data directly.
+                    </p>
+
+                    <Accordion className="mb-4">
+                      <Accordion.Item eventKey="0">
+                        <Accordion.Header>About MCP Server Integration</Accordion.Header>
+                        <Accordion.Body>
+                          <p className="text-white-50 small">
+                            The MCP server exposes your Ars0n Framework scan data to Claude Code via the Model Context Protocol.
+                            Once connected, you can ask Claude Code natural language questions about your reconnaissance data:
+                          </p>
+                          <ul className="text-white-50 small">
+                            <li><strong>"What subdomains did we find for *.example.com?"</strong></li>
+                            <li><strong>"Show me all high-severity Nuclei findings"</strong></li>
+                            <li><strong>"Which targets have interesting technologies like Jenkins or Swagger?"</strong></li>
+                            <li><strong>"List all URLs with SSL issues"</strong></li>
+                          </ul>
+                          <p className="text-white-50 small mt-3">
+                            <strong>Setup:</strong> Run this command in your terminal to register the MCP server with Claude Code:
+                          </p>
+                          <pre className="text-white-50 small" style={{ backgroundColor: '#1a1a2e', padding: '10px', borderRadius: '4px', overflowX: 'auto' }}>
+{`claude mcp add --transport sse ars0n http://localhost:${mcpConfig.port || 3001}/sse`}
+                          </pre>
+                          <p className="text-white-50 small mt-2">
+                            Then restart Claude Code. Verify with <code>claude mcp list</code> or <code>/mcp</code> inside a session.
+                          </p>
+                          <p className="text-white-50 small mt-2">
+                            <strong>Note:</strong> The MCP server is read-only. It can query scan data but cannot trigger scans or modify any data.
+                          </p>
+                        </Accordion.Body>
+                      </Accordion.Item>
+                    </Accordion>
+
+                    <div className="mb-4">
+                      <div className="d-flex align-items-center mb-3">
+                        <h6 className="text-white mb-0 me-3">Server Status</h6>
+                        <Button
+                          variant="outline-danger"
+                          size="sm"
+                          onClick={checkMcpStatus}
+                          disabled={mcpStatusLoading}
+                        >
+                          {mcpStatusLoading ? 'Checking...' : 'Check Status'}
+                        </Button>
+                        {mcpStatus && (
+                          <span className={`ms-3 small ${mcpStatus.online ? 'text-success' : 'text-warning'}`}>
+                            {mcpStatus.online ? `Online (${mcpStatus.tools} tools available)` : 'Offline - make sure the container is running'}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <Row>
+                      <Col md={6}>
+                        <Form.Group className="mb-3">
+                          <Form.Label className="text-white">Server Enabled</Form.Label>
+                          <Form.Check
+                            type="switch"
+                            checked={mcpConfig.enabled}
+                            onChange={(e) => handleMcpChange('enabled', e.target.checked)}
+                            label={mcpConfig.enabled ? 'Enabled' : 'Disabled'}
+                            className="text-white-50"
+                          />
+                          <Form.Text className="text-white-50">
+                            Enable or disable the MCP server
+                          </Form.Text>
+                        </Form.Group>
+
+                        <Form.Group className="mb-3">
+                          <Form.Label className="text-white">Port</Form.Label>
+                          <Form.Control
+                            type="number"
+                            value={mcpConfig.port || 3001}
+                            onChange={(e) => handleMcpChange('port', parseInt(e.target.value) || 3001)}
+                            className="custom-input"
+                            min="1024"
+                            max="65535"
+                          />
+                          <Form.Text className="text-white-50">
+                            Port the MCP server listens on (default: 3001)
+                          </Form.Text>
+                        </Form.Group>
+                      </Col>
+
+                      <Col md={6}>
+                        <Form.Group className="mb-3">
+                          <Form.Label className="text-white">Max Results Per Query</Form.Label>
+                          <Form.Control
+                            type="number"
+                            value={mcpConfig.max_results || 50}
+                            onChange={(e) => handleMcpChange('max_results', parseInt(e.target.value) || 50)}
+                            className="custom-input"
+                            min="10"
+                            max="500"
+                          />
+                          <Form.Text className="text-white-50">
+                            Maximum number of results returned per tool call (default: 50). Lower values preserve Claude's context window.
+                          </Form.Text>
+                        </Form.Group>
+
+                        <Form.Group className="mb-3">
+                          <Form.Label className="text-white">Result Truncation Length</Form.Label>
+                          <Form.Control
+                            type="number"
+                            value={mcpConfig.result_truncation_length || 3000}
+                            onChange={(e) => handleMcpChange('result_truncation_length', parseInt(e.target.value) || 3000)}
+                            className="custom-input"
+                            min="500"
+                            max="10000"
+                            step="500"
+                          />
+                          <Form.Text className="text-white-50">
+                            Max character length for raw scan result text (default: 3000). Prevents large outputs from overwhelming the context window.
+                          </Form.Text>
+                        </Form.Group>
+                      </Col>
+                    </Row>
+
+                    <div className="mt-3">
+                      <Button
+                        variant="outline-danger"
+                        size="sm"
+                        onClick={saveMcpConfig}
+                      >
+                        Save MCP Settings
+                      </Button>
                     </div>
                   </Tab.Pane>
                 </Tab.Content>

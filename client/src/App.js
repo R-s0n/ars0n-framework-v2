@@ -125,7 +125,7 @@ import monitorShodanCompanyScanStatus from './utils/monitorShodanCompanyScanStat
 import initiateShodanCompanyScan from './utils/initiateShodanCompanyScan';
 import AddWildcardTargetsModal from './modals/AddWildcardTargetsModal.js';
 import ExploreAttackSurfaceModal from './modals/ExploreAttackSurfaceModal.js';
-import WildfireModal from './modals/WildfireModal.js';
+import GlobalScansModal from './modals/GlobalScansModal.js';
 import initiateInvestigateScan from './utils/initiateInvestigateScan';
 import monitorInvestigateScanStatus from './utils/monitorInvestigateScanStatus';
 import TrimRootDomainsModal from './modals/TrimRootDomainsModal.js';
@@ -530,11 +530,16 @@ function App() {
   const [isAutoScanPausing, setIsAutoScanPausing] = useState(false);
   const [isAutoScanCancelling, setIsAutoScanCancelling] = useState(false);
 
-  const [showWildfireModal, setShowWildfireModal] = useState(false);
+  const [showGlobalScansModal, setShowGlobalScansModal] = useState(false);
   const [isWildfireRunning, setIsWildfireRunning] = useState(false);
   const [, setWildfireCancelled] = useState(false);
   const [wildfireProgress, setWildfireProgress] = useState(null);
   const wildfireCancelledRef = useRef(false);
+
+  // Slowburn state
+  const [isSlowburnRunning, setIsSlowburnRunning] = useState(false);
+  const [slowburnProgress, setSlowburnProgress] = useState(null);
+  const slowburnCancelledRef = useRef(false);
   const activeTargetRef = useRef(null);
   const httpxScanConfigRef = useRef(null);
   activeTargetRef.current = activeTarget;
@@ -2463,7 +2468,7 @@ function App() {
     setIsWildfireRunning(true);
     setWildfireCancelled(false);
     wildfireCancelledRef.current = false;
-    setShowWildfireModal(true);
+    setShowGlobalScansModal(true);
 
     setWildfireProgress({
       targets,
@@ -2532,6 +2537,313 @@ function App() {
         });
       } catch (err) {
         console.error('[Wildfire] Error cancelling current auto scan:', err);
+      }
+    }
+  };
+
+  const addSlowburnLog = (progressSetter, message, type = 'info') => {
+    const time = new Date().toLocaleTimeString();
+    progressSetter(prev => prev ? {
+      ...prev,
+      log: [...(prev.log || []), { time, message, type }]
+    } : null);
+  };
+
+  const startSlowburn = async (config) => {
+    const { apiKey, bountyOnly } = config;
+    setIsSlowburnRunning(true);
+    slowburnCancelledRef.current = false;
+    setShowGlobalScansModal(true);
+
+    setSlowburnProgress({
+      programsScanned: 0,
+      targetsScanned: 0,
+      currentProgram: null,
+      currentTarget: null,
+      scannedTargets: [],
+      lastCompletedTarget: null,
+      log: []
+    });
+
+    addSlowburnLog(setSlowburnProgress, 'Slowburn scan started', 'info');
+
+    let programsScanned = 0;
+    let targetsScanned = 0;
+    const scannedTargets = [];
+
+    while (!slowburnCancelledRef.current) {
+      try {
+        // Fetch a random program
+        addSlowburnLog(setSlowburnProgress, 'Fetching random program from HackerOne...', 'info');
+
+        const randomPage = Math.floor(Math.random() * 50) + 1;
+        const programsRes = await fetch(`/api/hackerone/programs?page[size]=100&page[number]=${randomPage}`, {
+          headers: { 'X-HackerOne-API-Key': apiKey }
+        });
+
+        if (!programsRes.ok) {
+          addSlowburnLog(setSlowburnProgress, `Failed to fetch programs (page ${randomPage}), retrying...`, 'error');
+          await new Promise(r => setTimeout(r, 5000));
+          continue;
+        }
+
+        const programsData = await programsRes.json();
+        const programs = programsData.data || [];
+
+        if (programs.length === 0) {
+          addSlowburnLog(setSlowburnProgress, `No programs found on page ${randomPage}, trying another page...`, 'info');
+          continue;
+        }
+
+        // Pick a random program from the page
+        const randomProgram = programs[Math.floor(Math.random() * programs.length)];
+        const handle = randomProgram.attributes?.handle || randomProgram.id;
+
+        // Check bounty filter
+        if (bountyOnly) {
+          const offersBounty = randomProgram.attributes?.offers_bounties;
+          if (!offersBounty) {
+            addSlowburnLog(setSlowburnProgress, `Skipping ${handle} (no bounty)`, 'info');
+            continue;
+          }
+        }
+
+        addSlowburnLog(setSlowburnProgress, `Selected program: ${handle}`, 'info');
+        setSlowburnProgress(prev => prev ? { ...prev, currentProgram: handle } : null);
+
+        if (slowburnCancelledRef.current) break;
+
+        // Fetch program details with structured scopes
+        const programRes = await fetch(`/api/hackerone/program?handle=${encodeURIComponent(handle)}`, {
+          headers: { 'X-HackerOne-API-Key': apiKey }
+        });
+
+        if (!programRes.ok) {
+          addSlowburnLog(setSlowburnProgress, `Failed to fetch program details for ${handle}`, 'error');
+          continue;
+        }
+
+        const programData = await programRes.json();
+        const included = programData.included || [];
+
+        // Find wildcard scope targets
+        const wildcardScopes = included.filter(item => {
+          if (item.type !== 'structured-scope') return false;
+          const attrs = item.attributes || {};
+          if (attrs.eligible_for_submission !== true) return false;
+          const assetType = (attrs.asset_type || '').toLowerCase();
+          const identifier = attrs.asset_identifier || '';
+          return (assetType === 'url' || assetType === 'domain' || assetType === 'wildcard') &&
+                 identifier.startsWith('*.');
+        });
+
+        if (wildcardScopes.length === 0) {
+          addSlowburnLog(setSlowburnProgress, `No wildcard targets found for ${handle}, moving on...`, 'info');
+          continue;
+        }
+
+        addSlowburnLog(setSlowburnProgress, `Found ${wildcardScopes.length} wildcard target(s) for ${handle}`, 'success');
+        programsScanned++;
+        setSlowburnProgress(prev => prev ? { ...prev, programsScanned } : null);
+
+        // Scan each wildcard target
+        for (const scope of wildcardScopes) {
+          if (slowburnCancelledRef.current) break;
+
+          const domain = scope.attributes.asset_identifier;
+          addSlowburnLog(setSlowburnProgress, `Adding and scanning ${domain}...`, 'info');
+          setSlowburnProgress(prev => prev ? { ...prev, currentTarget: domain } : null);
+
+          // Add the wildcard target to the framework
+          try {
+            const addRes = await fetch('/api/scopetarget/add', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                type: 'Wildcard',
+                mode: 'Passive',
+                scope_target: domain,
+                active: false,
+              }),
+            });
+
+            if (!addRes.ok) {
+              // Target might already exist, try to find it
+              addSlowburnLog(setSlowburnProgress, `Target ${domain} may already exist, looking up...`, 'info');
+            } else {
+              addSlowburnLog(setSlowburnProgress, `Added ${domain} as Wildcard target`, 'success');
+            }
+
+            // Refresh scope targets and find the one we just added
+            await fetchScopeTargets();
+            await new Promise(r => setTimeout(r, 1000));
+
+            // Find the target we just added (refetch latest)
+            const readRes = await fetch('/api/scopetarget/read');
+            const allTargets = readRes.ok ? await readRes.json() : [];
+            const matchedTarget = allTargets.find(t => t.scope_target === domain && t.type === 'Wildcard');
+
+            if (!matchedTarget) {
+              addSlowburnLog(setSlowburnProgress, `Could not find target ${domain} after adding, skipping...`, 'error');
+              continue;
+            }
+
+            if (slowburnCancelledRef.current) break;
+
+            // Select this target as active
+            await handleActiveSelect(matchedTarget);
+            await new Promise(r => setTimeout(r, 2000));
+
+            if (slowburnCancelledRef.current) break;
+
+            // Start auto scan
+            addSlowburnLog(setSlowburnProgress, `Starting Auto Scan for ${domain}...`, 'info');
+            await startAutoScan();
+            await new Promise(r => setTimeout(r, 3000));
+
+            if (slowburnCancelledRef.current) break;
+
+            // Wait for completion (reuse wildfire's wait function)
+            const result = await waitForSlowburnScanCompletion(matchedTarget.id);
+            addSlowburnLog(setSlowburnProgress, `${domain} finished: ${result}`, result === 'completed' ? 'success' : 'info');
+
+            // Fetch stats for completed target
+            const statsRes = await Promise.all([
+              fetch(`/api/consolidated-subdomains/${matchedTarget.id}`).catch(() => null),
+              fetch(`/api/scopetarget/${matchedTarget.id}/scans/httpx`).catch(() => null),
+              fetch(`/api/scopetarget/${matchedTarget.id}/scans/nuclei`).catch(() => null),
+            ]);
+
+            let subdomains = 0, webServers = 0, nucleiTotal = 0;
+            if (statsRes[0]?.ok) {
+              const d = await statsRes[0].json();
+              subdomains = d.count || 0;
+            }
+            if (statsRes[1]?.ok) {
+              const d = await statsRes[1].json();
+              if (d.scans?.length > 0) {
+                const latest = d.scans.reduce((a, b) => new Date(b.created_at) > new Date(a.created_at) ? b : a);
+                webServers = latest.result ? latest.result.split('\n').filter(l => l.trim()).length : 0;
+              }
+            }
+            if (statsRes[2]?.ok) {
+              const scans = await statsRes[2].json();
+              if (Array.isArray(scans)) {
+                const successScans = scans.filter(sc => sc.status === 'success' && sc.result);
+                if (successScans.length > 0) {
+                  const latest = successScans.reduce((a, b) => new Date(b.created_at) > new Date(a.created_at) ? b : a);
+                  try {
+                    const findings = JSON.parse(latest.result);
+                    nucleiTotal = Array.isArray(findings) ? findings.length : 0;
+                  } catch {}
+                }
+              }
+            }
+
+            targetsScanned++;
+            const targetEntry = { program: handle, target: domain, subdomains, webServers, nucleiTotal };
+            scannedTargets.push(targetEntry);
+
+            setSlowburnProgress(prev => prev ? {
+              ...prev,
+              targetsScanned,
+              scannedTargets: [...scannedTargets],
+              lastCompletedTarget: domain,
+              currentTarget: null
+            } : null);
+
+            await new Promise(r => setTimeout(r, 2000));
+
+          } catch (err) {
+            addSlowburnLog(setSlowburnProgress, `Error scanning ${domain}: ${err.message}`, 'error');
+            console.error('[Slowburn] Error scanning target:', err);
+          }
+        }
+
+      } catch (err) {
+        addSlowburnLog(setSlowburnProgress, `Unexpected error: ${err.message}`, 'error');
+        console.error('[Slowburn] Unexpected error:', err);
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    }
+
+    addSlowburnLog(setSlowburnProgress, 'Slowburn scan stopped', 'info');
+    setIsSlowburnRunning(false);
+    console.log('[Slowburn] Scan stopped.');
+  };
+
+  const waitForSlowburnScanCompletion = async (targetId) => {
+    let phase = 'waiting_for_idle';
+    let pollCount = 0;
+
+    return new Promise((resolve) => {
+      const checkState = async () => {
+        if (slowburnCancelledRef.current) {
+          resolve('cancelled');
+          return;
+        }
+        pollCount++;
+        try {
+          const response = await fetch(`/api/api/auto-scan-state/${targetId}`);
+          if (response.ok) {
+            const state = await response.json();
+
+            if (state.is_cancelled) {
+              resolve('cancelled');
+              return;
+            }
+
+            const step = state.current_step;
+
+            if (phase === 'waiting_for_idle') {
+              if (step === 'idle') {
+                phase = 'waiting_for_start';
+              } else if (step && step !== 'completed') {
+                phase = 'waiting_for_complete';
+              } else if (step === 'completed' && pollCount > 12) {
+                resolve('completed');
+                return;
+              }
+            } else if (phase === 'waiting_for_start') {
+              if (step && step !== 'idle' && step !== 'completed') {
+                phase = 'waiting_for_complete';
+              } else if (step === 'completed') {
+                resolve('completed');
+                return;
+              }
+            } else if (phase === 'waiting_for_complete') {
+              if (step === 'completed') {
+                resolve('completed');
+                return;
+              }
+            }
+          }
+        } catch (err) {
+          console.error('[Slowburn] Error checking auto scan state:', err);
+        }
+        setTimeout(checkState, 3000);
+      };
+      setTimeout(checkState, 2000);
+    });
+  };
+
+  const cancelSlowburn = async () => {
+    slowburnCancelledRef.current = true;
+    addSlowburnLog(setSlowburnProgress, 'Cancelling Slowburn scan...', 'info');
+
+    if (activeTarget && isAutoScanning) {
+      try {
+        await fetch(`/api/api/auto-scan-state/${activeTarget.id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            current_step: autoScanCurrentStep,
+            is_paused: false,
+            is_cancelled: true
+          })
+        });
+      } catch (err) {
+        console.error('[Slowburn] Error cancelling current auto scan:', err);
       }
     }
   };
@@ -5486,8 +5798,8 @@ function App() {
         onToolsClick={handleOpenToolsModal}
         onExportClick={handleOpenExportModal}
         onImportClick={handleOpenImportModal}
-        onWildfireClick={() => setShowWildfireModal(true)}
-        isWildfireRunning={isWildfireRunning}
+        onGlobalScansClick={() => setShowGlobalScansModal(true)}
+        isGlobalScanRunning={isWildfireRunning || isSlowburnRunning}
       />
 
       <ToastContainer 
@@ -5550,16 +5862,22 @@ function App() {
         handleDelete={handleDelete}
       />
 
-      <WildfireModal
-        show={showWildfireModal}
-        handleClose={() => setShowWildfireModal(false)}
+      <GlobalScansModal
+        show={showGlobalScansModal}
+        handleClose={() => setShowGlobalScansModal(false)}
         scopeTargets={scopeTargets}
         isWildfireRunning={isWildfireRunning}
         wildfireProgress={wildfireProgress}
         onStartWildfire={startWildfire}
         onCancelWildfire={cancelWildfire}
+        isSlowburnRunning={isSlowburnRunning}
+        slowburnProgress={slowburnProgress}
+        onStartSlowburn={startSlowburn}
+        onCancelSlowburn={cancelSlowburn}
         setShowToast={setShowToast}
         autoScanCurrentStep={autoScanCurrentStep}
+        consolidatedCount={consolidatedCount}
+        mostRecentHttpxScan={mostRecentHttpxScan}
       />
 
       <SettingsModal

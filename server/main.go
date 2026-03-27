@@ -195,6 +195,10 @@ func main() {
 	r.HandleFunc("/api/hackerone/program", utils.GetHackerOneProgram).Methods("GET", "OPTIONS")
 	r.HandleFunc("/api/hackerone/programs", utils.ListHackerOnePrograms).Methods("GET", "OPTIONS")
 
+	// MCP Server config routes
+	r.HandleFunc("/api/mcp-config", getMcpConfig).Methods("GET", "OPTIONS")
+	r.HandleFunc("/api/mcp-config", updateMcpConfig).Methods("POST", "OPTIONS")
+
 	// AI API Keys routes
 	r.HandleFunc("/api/ai-api-keys", getAiAPIKeys).Methods("GET", "OPTIONS")
 	r.HandleFunc("/api/ai-api-keys", createAiAPIKey).Methods("POST", "OPTIONS")
@@ -601,6 +605,84 @@ func getStringSetting(settings map[string]interface{}, key string, defaultValue 
 		}
 	}
 	return defaultValue
+}
+
+// getMcpConfig retrieves the MCP server configuration
+func getMcpConfig(w http.ResponseWriter, r *http.Request) {
+	var config map[string]interface{} = make(map[string]interface{})
+
+	row := dbPool.QueryRow(context.Background(), `
+		SELECT enabled, port, max_results, result_truncation_length
+		FROM mcp_server_config
+		LIMIT 1
+	`)
+
+	var enabled bool
+	var port, maxResults, resultTruncationLength int
+
+	err := row.Scan(&enabled, &port, &maxResults, &resultTruncationLength)
+
+	if err != nil {
+		log.Printf("Error fetching MCP config: %v", err)
+		config = map[string]interface{}{
+			"enabled":                   true,
+			"port":                      3001,
+			"max_results":               50,
+			"result_truncation_length":  3000,
+		}
+	} else {
+		config = map[string]interface{}{
+			"enabled":                   enabled,
+			"port":                      port,
+			"max_results":               maxResults,
+			"result_truncation_length":  resultTruncationLength,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(config)
+}
+
+// updateMcpConfig updates the MCP server configuration
+func updateMcpConfig(w http.ResponseWriter, r *http.Request) {
+	var config map[string]interface{}
+	err := json.NewDecoder(r.Body).Decode(&config)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[MCP Config] POST: %+v", config)
+
+	enabled := true
+	if val, ok := config["enabled"]; ok {
+		if bVal, ok := val.(bool); ok {
+			enabled = bVal
+		}
+	}
+
+	_, err = dbPool.Exec(context.Background(), `
+		UPDATE mcp_server_config SET
+			enabled = $1,
+			port = $2,
+			max_results = $3,
+			result_truncation_length = $4,
+			updated_at = NOW()
+		WHERE id = (SELECT id FROM mcp_server_config LIMIT 1)
+	`,
+		enabled,
+		getIntSetting(config, "port", 3001),
+		getIntSetting(config, "max_results", 50),
+		getIntSetting(config, "result_truncation_length", 3000),
+	)
+
+	if err != nil {
+		log.Printf("Error updating MCP config: %v", err)
+		http.Error(w, "Failed to update MCP config", http.StatusInternalServerError)
+		return
+	}
+
+	getMcpConfig(w, r)
 }
 
 // getAutoScanState retrieves the current auto scan state for a target

@@ -61,6 +61,20 @@ func createTables() {
 		SELECT gen_random_uuid()
 		WHERE NOT EXISTS (SELECT 1 FROM user_settings LIMIT 1);`,
 
+		`CREATE TABLE IF NOT EXISTS mcp_server_config (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			enabled BOOLEAN DEFAULT TRUE,
+			port INTEGER DEFAULT 3001,
+			max_results INTEGER DEFAULT 50,
+			result_truncation_length INTEGER DEFAULT 3000,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		`INSERT INTO mcp_server_config (id)
+		SELECT gen_random_uuid()
+		WHERE NOT EXISTS (SELECT 1 FROM mcp_server_config LIMIT 1);`,
+
 		`CREATE TABLE IF NOT EXISTS api_keys (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			tool_name VARCHAR(100) NOT NULL,

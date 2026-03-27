@@ -81,6 +81,21 @@ services:
     networks:
       - ars0n-network
 
+  mcp-server:
+    container_name: ars0n-framework-v2-mcp-server-1
+    build: ./docker/mcp-server
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/ars0n
+      MCP_PORT: "3001"
+    restart: unless-stopped
+    networks:
+      - ars0n-network
+
   assetfinder:
     container_name: ars0n-framework-v2-assetfinder-1
     build: ./docker/assetfinder

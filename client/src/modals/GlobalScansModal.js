@@ -163,7 +163,7 @@ function computeAutoScanProgress(currentStep, config) {
   return Math.min(progress, 95);
 }
 
-function WildfireModal({
+function GlobalScansModal({
   show,
   handleClose,
   scopeTargets,
@@ -171,15 +171,21 @@ function WildfireModal({
   wildfireProgress,
   onStartWildfire,
   onCancelWildfire,
+  isSlowburnRunning,
+  slowburnProgress,
+  onStartSlowburn,
+  onCancelSlowburn,
   setShowToast,
-  autoScanCurrentStep
+  autoScanCurrentStep,
+  consolidatedCount,
+  mostRecentHttpxScan
 }) {
   const [selectedTargets, setSelectedTargets] = useState({});
   const [targetStats, setTargetStats] = useState({});
   const [loadingStats, setLoadingStats] = useState(false);
   const prevCurrentIndexRef = useRef(-1);
   const wasRunningRef = useRef(false);
-  const [activeTab, setActiveTab] = useState('scan');
+  const [activeTab, setActiveTab] = useState('wildfire');
   const [autoScanConfig, setAutoScanConfig] = useState(null);
 
   // Results tab state
@@ -192,6 +198,13 @@ function WildfireModal({
   const [currentPage, setCurrentPage] = useState(1);
   const findingsListRef = useRef(null);
   const FINDINGS_PER_PAGE = 50;
+
+  // Slowburn state
+  const [slowburnApiKey, setSlowburnApiKey] = useState('');
+  const [slowburnApiKeyValid, setSlowburnApiKeyValid] = useState(false);
+  const [slowburnApiKeyTesting, setSlowburnApiKeyTesting] = useState(false);
+  const [slowburnBountyOnly, setSlowburnBountyOnly] = useState(true);
+  const [slowburnLog, setSlowburnLog] = useState([]);
 
   const wildcardTargets = (scopeTargets || []).filter(t => t.type === 'Wildcard');
 
@@ -234,6 +247,27 @@ function WildfireModal({
         .catch(() => {});
     }
   }, [show]);
+
+  const testSlowburnApiKey = async () => {
+    if (!slowburnApiKey) return;
+    setSlowburnApiKeyTesting(true);
+    try {
+      const res = await fetch('/api/hackerone/test-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: slowburnApiKey })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSlowburnApiKeyValid(data.success === true);
+      } else {
+        setSlowburnApiKeyValid(false);
+      }
+    } catch {
+      setSlowburnApiKeyValid(false);
+    }
+    setSlowburnApiKeyTesting(false);
+  };
 
   useEffect(() => {
     if (show && !isWildfireRunning) {
@@ -861,7 +895,7 @@ function WildfireModal({
     );
   };
 
-  const renderScanTab = () => {
+  const renderWildfireTab = () => {
     if (isWildfireRunning && wildfireProgress) {
       const stepPercent = computeAutoScanProgress(autoScanCurrentStep, autoScanConfig);
       const stepLabel = formatStepName(autoScanCurrentStep, autoScanConfig);
@@ -899,9 +933,19 @@ function WildfireModal({
                   )}
                 </span>
               </div>
-              <span className="text-white small">
-                {stepPercent}%
-              </span>
+              <div className="d-flex align-items-center gap-3">
+                <span className="text-white-50 small">
+                  Subdomains: <span className="text-white">{consolidatedCount ?? 0}</span>
+                  <span className="text-muted"> / {autoScanConfig?.maxConsolidatedSubdomains ?? 2500}</span>
+                </span>
+                <span className="text-white-50 small">
+                  Live Web Servers: <span className="text-white">{mostRecentHttpxScan?.result?.String ? mostRecentHttpxScan.result.String.split('\n').filter(l => l.trim()).length : 0}</span>
+                  <span className="text-muted"> / {autoScanConfig?.maxLiveWebServers ?? 500}</span>
+                </span>
+                <span className="text-white small">
+                  {stepPercent}%
+                </span>
+              </div>
             </div>
             <ProgressBar
               now={stepPercent}
@@ -975,7 +1019,7 @@ function WildfireModal({
     return (
       <div className="p-3">
         <p className="text-white-50 mb-3">
-          Wildfire will run Auto Scan on each selected Wildcard target sequentially using the current Auto Scan configuration.
+          Wildfire Scan will run Auto Scan on each selected Wildcard target sequentially using the current Auto Scan configuration.
         </p>
 
         {wildcardTargets.length === 0 ? (
@@ -1059,6 +1103,221 @@ function WildfireModal({
     );
   };
 
+  // Keep slowburn log in sync with progress
+  useEffect(() => {
+    if (slowburnProgress?.log) {
+      setSlowburnLog(slowburnProgress.log);
+    }
+  }, [slowburnProgress]);
+
+  // When slowburn finishes scanning a target's nuclei results, refresh findings
+  useEffect(() => {
+    if (slowburnProgress?.lastCompletedTarget && activeTab === 'results') {
+      fetchAllNucleiFindings();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slowburnProgress?.lastCompletedTarget]);
+
+  const handleStartSlowburn = () => {
+    if (!slowburnApiKeyValid || !slowburnApiKey) return;
+    onStartSlowburn({
+      apiKey: slowburnApiKey,
+      bountyOnly: slowburnBountyOnly
+    });
+  };
+
+  const renderSlowburnTab = () => {
+    if (isSlowburnRunning && slowburnProgress) {
+      const stepPercent = computeAutoScanProgress(autoScanCurrentStep, autoScanConfig);
+      const stepLabel = formatStepName(autoScanCurrentStep, autoScanConfig);
+      const isStepCompleted = autoScanCurrentStep === 'completed';
+      const isStepIdle = !autoScanCurrentStep || autoScanCurrentStep === 'idle';
+
+      return (
+        <div className="p-3">
+          <div className="mb-3">
+            <div className="d-flex justify-content-between align-items-center mb-2">
+              <span className="text-white">
+                <i className="bi bi-hourglass-split me-2"></i>
+                Slowburn Scan Running
+                {slowburnProgress.currentProgram && (
+                  <span className="text-muted ms-2">
+                    Program: <span className="text-info">{slowburnProgress.currentProgram}</span>
+                  </span>
+                )}
+              </span>
+              <div className="d-flex align-items-center gap-2">
+                <Badge bg="info">
+                  Programs: {slowburnProgress.programsScanned || 0}
+                </Badge>
+                <Badge bg="warning">
+                  Targets: {slowburnProgress.targetsScanned || 0}
+                </Badge>
+              </div>
+            </div>
+          </div>
+
+          {slowburnProgress.currentTarget && (
+            <div className="mb-3 p-3 rounded" style={{ backgroundColor: 'rgba(13, 202, 240, 0.1)', border: '1px solid rgba(13, 202, 240, 0.3)' }}>
+              <div className="d-flex justify-content-between align-items-center mb-2">
+                <div className="d-flex align-items-center">
+                  {!isStepCompleted && !isStepIdle && <Spinner animation="border" size="sm" variant="info" className="me-2" />}
+                  <span className="text-white-50 small me-2">
+                    {isStepCompleted ? (
+                      <><span className="text-success">●</span> Target completed</>
+                    ) : isStepIdle ? (
+                      <><span className="text-secondary">●</span> Starting...</>
+                    ) : (
+                      <><span className="text-info">●</span> Running {stepLabel}</>
+                    )}
+                  </span>
+                </div>
+                <div className="d-flex align-items-center gap-3">
+                  <Badge bg="dark" className="text-info border border-info">
+                    {slowburnProgress.currentTarget}
+                  </Badge>
+                  <span className="text-white-50 small">
+                    Subdomains: <span className="text-white">{consolidatedCount ?? 0}</span>
+                    <span className="text-muted"> / {autoScanConfig?.maxConsolidatedSubdomains ?? 2500}</span>
+                  </span>
+                  <span className="text-white-50 small">
+                    Live: <span className="text-white">{mostRecentHttpxScan?.result?.String ? mostRecentHttpxScan.result.String.split('\n').filter(l => l.trim()).length : 0}</span>
+                    <span className="text-muted"> / {autoScanConfig?.maxLiveWebServers ?? 500}</span>
+                  </span>
+                  <span className="text-white small">{stepPercent}%</span>
+                </div>
+              </div>
+              <ProgressBar
+                now={stepPercent}
+                variant="info"
+                animated={!isStepCompleted && !isStepIdle}
+                className="bg-dark"
+                style={{ height: '8px' }}
+              />
+            </div>
+          )}
+
+          <div className="mb-3">
+            <h6 className="text-light mb-2">
+              <i className="bi bi-journal-text me-2"></i>Activity Log
+            </h6>
+            <div style={{ maxHeight: '350px', overflowY: 'auto', backgroundColor: 'rgba(0,0,0,0.3)', borderRadius: '4px', padding: '10px' }}>
+              {slowburnLog.length === 0 ? (
+                <div className="text-muted text-center py-3">Waiting for activity...</div>
+              ) : (
+                slowburnLog.slice().reverse().map((entry, idx) => (
+                  <div key={idx} className="mb-1 small" style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '4px' }}>
+                    <span className="text-muted me-2">{entry.time}</span>
+                    <span className={
+                      entry.type === 'error' ? 'text-danger' :
+                      entry.type === 'success' ? 'text-success' :
+                      entry.type === 'info' ? 'text-info' :
+                      'text-white-50'
+                    }>{entry.message}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {slowburnProgress.scannedTargets && slowburnProgress.scannedTargets.length > 0 && (
+            <div>
+              <h6 className="text-light mb-2">
+                <i className="bi bi-check2-all me-2"></i>Completed Targets
+              </h6>
+              <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                <Table bordered variant="dark" size="sm">
+                  <thead style={{ position: 'sticky', top: 0, backgroundColor: '#212529', zIndex: 1 }}>
+                    <tr>
+                      <th>Program</th>
+                      <th>Target</th>
+                      <th style={{ width: '70px', textAlign: 'center' }}>Subs</th>
+                      <th style={{ width: '70px', textAlign: 'center' }}>Live</th>
+                      <th style={{ width: '70px', textAlign: 'center' }}>Nuclei</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {slowburnProgress.scannedTargets.map((st, idx) => (
+                      <tr key={idx}>
+                        <td className="small text-info">{st.program}</td>
+                        <td className="font-monospace small text-white">{st.target}</td>
+                        <td className="text-center small">{st.subdomains ?? '-'}</td>
+                        <td className="text-center small">{st.webServers ?? '-'}</td>
+                        <td className="text-center small">{st.nucleiTotal ?? '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <div className="p-3">
+        <p className="text-white-50 mb-3">
+          Slowburn uses the HackerOne API to scan random wildcard targets from random programs. It will continuously pick a random program, find wildcard scope targets, and run Auto Scan on each one until you stop it.
+        </p>
+
+        <div className="mb-4">
+          <h6 className="text-light mb-3">
+            <i className="bi bi-key me-2"></i>HackerOne API Key
+          </h6>
+          <div className="input-group mb-2">
+            <input
+              type="password"
+              className="form-control bg-dark text-light border-secondary"
+              placeholder="username:api_token"
+              value={slowburnApiKey}
+              onChange={(e) => { setSlowburnApiKey(e.target.value); setSlowburnApiKeyValid(false); }}
+              disabled={isSlowburnRunning}
+            />
+            <Button
+              variant="outline-info"
+              onClick={testSlowburnApiKey}
+              disabled={!slowburnApiKey || slowburnApiKeyTesting || isSlowburnRunning}
+            >
+              {slowburnApiKeyTesting ? (
+                <Spinner animation="border" size="sm" />
+              ) : slowburnApiKeyValid ? (
+                <><i className="bi bi-check-circle me-1"></i>Valid</>
+              ) : (
+                'Test Key'
+              )}
+            </Button>
+          </div>
+          <small className="text-muted">
+            Format: <code>username:api_token</code> — Get your API token from HackerOne Settings &gt; API Token
+          </small>
+        </div>
+
+        <div className="mb-4">
+          <h6 className="text-light mb-3">
+            <i className="bi bi-sliders me-2"></i>Scan Options
+          </h6>
+          <Form.Check
+            type="switch"
+            id="slowburn-bounty-only"
+            label={<span className="text-white-50">Only scan programs that pay a bounty</span>}
+            checked={slowburnBountyOnly}
+            onChange={(e) => setSlowburnBountyOnly(e.target.checked)}
+            disabled={isSlowburnRunning}
+            className="mb-2"
+          />
+        </div>
+
+        {!slowburnApiKeyValid && slowburnApiKey && !slowburnApiKeyTesting && (
+          <Alert variant="warning" className="mb-3">
+            <i className="bi bi-exclamation-triangle me-2"></i>
+            Please test and validate your API key before starting the scan.
+          </Alert>
+        )}
+      </div>
+    );
+  };
+
   return (
     <Modal
       show={show}
@@ -1070,15 +1329,22 @@ function WildfireModal({
     >
       <Modal.Header closeButton className="border-secondary">
         <Modal.Title className="text-danger d-flex align-items-center">
-          <i className="bi bi-fire me-2"></i>
-          Wildfire Scan
+          <i className="bi bi-globe me-2"></i>
+          Global Scans
         </Modal.Title>
       </Modal.Header>
       <div className="bg-dark border-bottom border-secondary px-3">
         <Nav variant="tabs" activeKey={activeTab} onSelect={setActiveTab} className="border-0">
           <Nav.Item>
-            <Nav.Link eventKey="scan" className={activeTab === 'scan' ? 'text-danger border-danger' : 'text-white-50'}>
-              <i className="bi bi-fire me-1"></i>Scan
+            <Nav.Link eventKey="wildfire" className={activeTab === 'wildfire' ? 'text-danger border-danger' : 'text-white-50'}>
+              <i className="bi bi-fire me-1"></i>Wildfire Scan
+              {isWildfireRunning && <Spinner animation="border" size="sm" variant="danger" className="ms-2" />}
+            </Nav.Link>
+          </Nav.Item>
+          <Nav.Item>
+            <Nav.Link eventKey="slowburn" className={activeTab === 'slowburn' ? 'text-info border-info' : 'text-white-50'}>
+              <i className="bi bi-hourglass-split me-1"></i>Slowburn
+              {isSlowburnRunning && <Spinner animation="border" size="sm" variant="info" className="ms-2" />}
             </Nav.Link>
           </Nav.Item>
           <Nav.Item>
@@ -1093,10 +1359,10 @@ function WildfireModal({
         </Nav>
       </div>
       <Modal.Body className="bg-dark p-0">
-        {activeTab === 'scan' ? renderScanTab() : renderResultsTab()}
+        {activeTab === 'wildfire' ? renderWildfireTab() : activeTab === 'slowburn' ? renderSlowburnTab() : renderResultsTab()}
       </Modal.Body>
       <Modal.Footer className="border-secondary">
-        {isWildfireRunning && activeTab === 'scan' ? (
+        {isWildfireRunning && activeTab === 'wildfire' ? (
           <>
             <Button variant="outline-secondary" onClick={handleClose}>
               Minimize
@@ -1105,12 +1371,22 @@ function WildfireModal({
               Cancel Wildfire
             </Button>
           </>
+        ) : isSlowburnRunning && activeTab === 'slowburn' ? (
+          <>
+            <Button variant="outline-secondary" onClick={handleClose}>
+              Minimize
+            </Button>
+            <Button variant="outline-info" onClick={onCancelSlowburn}>
+              <i className="bi bi-stop-circle me-1"></i>
+              Stop Slowburn
+            </Button>
+          </>
         ) : (
           <>
             <Button variant="outline-secondary" onClick={handleClose}>
               Close
             </Button>
-            {activeTab === 'scan' && (
+            {activeTab === 'wildfire' && (
               <Button
                 variant="outline-danger"
                 onClick={handleStart}
@@ -1120,6 +1396,16 @@ function WildfireModal({
                 Start Wildfire ({selectedCount} targets)
               </Button>
             )}
+            {activeTab === 'slowburn' && (
+              <Button
+                variant="outline-info"
+                onClick={handleStartSlowburn}
+                disabled={!slowburnApiKeyValid || isSlowburnRunning}
+              >
+                <i className="bi bi-hourglass-split me-1"></i>
+                Start Slowburn
+              </Button>
+            )}
           </>
         )}
       </Modal.Footer>
@@ -1127,4 +1413,4 @@ function WildfireModal({
   );
 }
 
-export default WildfireModal;
+export default GlobalScansModal;
