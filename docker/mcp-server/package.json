@@ -1,7 +1,7 @@
 {
   "name": "ars0n-mcp-server",
   "version": "1.0.0",
-  "description": "MCP server for querying Ars0n Framework scan data",
+  "description": "MCP server for Ars0n Framework - scan execution, workflows, data queries, and bug bounty analysis",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js"

@@ -252,7 +252,7 @@ function GlobalScansModal({
     if (!slowburnApiKey) return;
     setSlowburnApiKeyTesting(true);
     try {
-      const res = await fetch('/api/hackerone/test-key', {
+      const res = await fetch('/api/api/hackerone/test-key', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ api_key: slowburnApiKey })
@@ -915,8 +915,12 @@ function GlobalScansModal({
               now={((wildfireProgress.currentIndex) / wildfireProgress.totalTargets) * 100}
               variant="danger"
               animated
-              className="mb-3"
+              className="mb-2"
             />
+            <small className="text-white-50">
+              <i className="bi bi-info-circle me-1"></i>
+              Targets that hit subdomain or web server limits are automatically skipped.
+            </small>
           </div>
 
           <div className="mb-3 p-3 rounded" style={{ backgroundColor: 'rgba(220, 53, 69, 0.1)', border: '1px solid rgba(220, 53, 69, 0.3)' }}>
@@ -974,7 +978,11 @@ function GlobalScansModal({
                   let statusColor = 'text-secondary';
                   const isCompleted = idx < wildfireProgress.currentIndex;
                   const isCurrent = idx === wildfireProgress.currentIndex;
-                  if (isCompleted) {
+                  const isLimitSkipped = wildfireProgress.limitSkipped?.[t.id];
+                  if (isCompleted && isLimitSkipped) {
+                    statusIcon = 'bi-skip-forward-fill';
+                    statusColor = 'text-warning';
+                  } else if (isCompleted) {
                     statusIcon = 'bi-check-circle-fill';
                     statusColor = 'text-success';
                   } else if (isCurrent) {
@@ -1019,7 +1027,7 @@ function GlobalScansModal({
     return (
       <div className="p-3">
         <p className="text-white-50 mb-3">
-          Wildfire Scan will run Auto Scan on each selected Wildcard target sequentially using the current Auto Scan configuration.
+          Wildfire Scan runs Auto Scan on each selected Wildcard target sequentially. If a target hits the subdomain or web server limit, the scan will automatically skip to the next target so it can run unattended.
         </p>
 
         {wildcardTargets.length === 0 ? (
@@ -1103,10 +1111,23 @@ function GlobalScansModal({
     );
   };
 
-  // Keep slowburn log in sync with progress
+  // Keep slowburn log in sync with progress — append new entries only
+  const prevLogLengthRef = useRef(0);
   useEffect(() => {
-    if (slowburnProgress?.log) {
-      setSlowburnLog(slowburnProgress.log);
+    if (slowburnProgress?.log && slowburnProgress.log.length > 0) {
+      // If the progress log is shorter than what we had, a new scan started — keep previous log and append
+      if (slowburnProgress.log.length < prevLogLengthRef.current) {
+        // New scan started, append its entries to existing log
+        setSlowburnLog(prev => [...prev, ...slowburnProgress.log]);
+        prevLogLengthRef.current = slowburnProgress.log.length;
+      } else {
+        // Same scan, get only new entries
+        const newEntries = slowburnProgress.log.slice(prevLogLengthRef.current);
+        if (newEntries.length > 0) {
+          setSlowburnLog(prev => [...prev, ...newEntries]);
+        }
+        prevLogLengthRef.current = slowburnProgress.log.length;
+      }
     }
   }, [slowburnProgress]);
 
@@ -1155,6 +1176,10 @@ function GlobalScansModal({
                 </Badge>
               </div>
             </div>
+            <small className="text-white-50">
+              <i className="bi bi-info-circle me-1"></i>
+              Targets that hit subdomain or web server limits are automatically skipped.
+            </small>
           </div>
 
           {slowburnProgress.currentTarget && (
@@ -1197,35 +1222,13 @@ function GlobalScansModal({
             </div>
           )}
 
-          <div className="mb-3">
-            <h6 className="text-light mb-2">
-              <i className="bi bi-journal-text me-2"></i>Activity Log
-            </h6>
-            <div style={{ maxHeight: '350px', overflowY: 'auto', backgroundColor: 'rgba(0,0,0,0.3)', borderRadius: '4px', padding: '10px' }}>
-              {slowburnLog.length === 0 ? (
-                <div className="text-muted text-center py-3">Waiting for activity...</div>
-              ) : (
-                slowburnLog.slice().reverse().map((entry, idx) => (
-                  <div key={idx} className="mb-1 small" style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '4px' }}>
-                    <span className="text-muted me-2">{entry.time}</span>
-                    <span className={
-                      entry.type === 'error' ? 'text-danger' :
-                      entry.type === 'success' ? 'text-success' :
-                      entry.type === 'info' ? 'text-info' :
-                      'text-white-50'
-                    }>{entry.message}</span>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-
           {slowburnProgress.scannedTargets && slowburnProgress.scannedTargets.length > 0 && (
-            <div>
+            <div className="mb-3">
               <h6 className="text-light mb-2">
                 <i className="bi bi-check2-all me-2"></i>Completed Targets
+                <Badge bg="secondary" className="ms-2">{slowburnProgress.scannedTargets.length}</Badge>
               </h6>
-              <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+              <div style={{ maxHeight: '250px', overflowY: 'auto' }}>
                 <Table bordered variant="dark" size="sm">
                   <thead style={{ position: 'sticky', top: 0, backgroundColor: '#212529', zIndex: 1 }}>
                     <tr>
@@ -1251,6 +1254,30 @@ function GlobalScansModal({
               </div>
             </div>
           )}
+
+          <div className="mb-3">
+            <h6 className="text-light mb-2">
+              <i className="bi bi-journal-text me-2"></i>Activity Log
+              <Badge bg="secondary" className="ms-2">{slowburnLog.length}</Badge>
+            </h6>
+            <div style={{ maxHeight: '300px', overflowY: 'auto', backgroundColor: 'rgba(0,0,0,0.3)', borderRadius: '4px', padding: '10px' }}>
+              {slowburnLog.length === 0 ? (
+                <div className="text-muted text-center py-3">Waiting for activity...</div>
+              ) : (
+                slowburnLog.slice().reverse().map((entry, idx) => (
+                  <div key={idx} className="mb-1 small" style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '4px' }}>
+                    <span className="text-muted me-2">{entry.time}</span>
+                    <span className={
+                      entry.type === 'error' ? 'text-danger' :
+                      entry.type === 'success' ? 'text-success' :
+                      entry.type === 'info' ? 'text-info' :
+                      'text-white-50'
+                    }>{entry.message}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
       );
     }
@@ -1258,7 +1285,7 @@ function GlobalScansModal({
     return (
       <div className="p-3">
         <p className="text-white-50 mb-3">
-          Slowburn uses the HackerOne API to scan random wildcard targets from random programs. It will continuously pick a random program, find wildcard scope targets, and run Auto Scan on each one until you stop it.
+          Slowburn uses the HackerOne API to scan random wildcard targets from random programs continuously until you stop it. If a target hits the subdomain or web server limit, the scan will automatically skip to the next target so it can run unattended while you're away.
         </p>
 
         <div className="mb-4">
@@ -1329,7 +1356,7 @@ function GlobalScansModal({
     >
       <Modal.Header closeButton className="border-secondary">
         <Modal.Title className="text-danger d-flex align-items-center">
-          <i className="bi bi-globe me-2"></i>
+          <i className="bi bi-fire me-2"></i>
           Global Scans
         </Modal.Title>
       </Modal.Header>

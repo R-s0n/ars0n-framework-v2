@@ -87,11 +87,14 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      api:
+        condition: service_started
     ports:
       - "3001:3001"
     environment:
       DATABASE_URL: postgres://postgres:postgres@db:5432/ars0n
       MCP_PORT: "3001"
+      API_URL: http://api:8443
     restart: unless-stopped
     networks:
       - ars0n-network

@@ -2423,6 +2423,26 @@ function App() {
               return;
             }
 
+            // If scan is paused (limit hit), cancel it and skip to next target
+            if (state.is_paused && phase === 'waiting_for_complete') {
+              console.log(`[Wildfire] Scan for ${targetId} paused due to limits at step ${state.current_step}. Skipping to next target.`);
+              try {
+                await fetch(`/api/api/auto-scan-state/${targetId}`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    current_step: 'completed',
+                    is_paused: false,
+                    is_cancelled: false
+                  })
+                });
+              } catch (err) {
+                console.error('[Wildfire] Error unpausing/completing scan:', err);
+              }
+              resolve('limit_skipped');
+              return;
+            }
+
             const step = state.current_step;
             console.log(`[Wildfire] Poll #${pollCount} for ${targetId}: step=${step}, phase=${phase}`);
 
@@ -2506,6 +2526,13 @@ function App() {
       const result = await waitForAutoScanCompletion(target.id);
       console.log(`[Wildfire] Target ${target.scope_target} finished with result: ${result}`);
 
+      if (result === 'limit_skipped') {
+        setWildfireProgress(prev => prev ? {
+          ...prev,
+          limitSkipped: { ...(prev.limitSkipped || {}), [target.id]: true }
+        } : null);
+      }
+
       if (result === 'cancelled' && wildfireCancelledRef.current) break;
 
       await new Promise(resolve => setTimeout(resolve, 2000));
@@ -2571,13 +2598,17 @@ function App() {
     let targetsScanned = 0;
     const scannedTargets = [];
 
+    // Discover total pages on first fetch
+    let maxPage = 1;
+    let discoveredMaxPage = false;
+
     while (!slowburnCancelledRef.current) {
       try {
         // Fetch a random program
         addSlowburnLog(setSlowburnProgress, 'Fetching random program from HackerOne...', 'info');
 
-        const randomPage = Math.floor(Math.random() * 50) + 1;
-        const programsRes = await fetch(`/api/hackerone/programs?page[size]=100&page[number]=${randomPage}`, {
+        const randomPage = discoveredMaxPage ? Math.floor(Math.random() * maxPage) + 1 : 1;
+        const programsRes = await fetch(`/api/api/hackerone/programs?page[size]=100&page[number]=${randomPage}`, {
           headers: { 'X-HackerOne-API-Key': apiKey }
         });
 
@@ -2590,7 +2621,23 @@ function App() {
         const programsData = await programsRes.json();
         const programs = programsData.data || [];
 
+        // Discover max page from pagination links
+        if (!discoveredMaxPage && programsData.links) {
+          const lastLink = programsData.links.last || '';
+          const pageMatch = lastLink.match(/page%5Bnumber%5D=(\d+)|page\[number\]=(\d+)/);
+          if (pageMatch) {
+            maxPage = parseInt(pageMatch[1] || pageMatch[2], 10);
+          } else if (programs.length > 0) {
+            // Estimate: if first page is full, assume a few pages exist
+            maxPage = programs.length >= 100 ? 5 : 1;
+          }
+          discoveredMaxPage = true;
+          addSlowburnLog(setSlowburnProgress, `Discovered ${maxPage} page(s) of programs`, 'info');
+        }
+
         if (programs.length === 0) {
+          // Reduce max page if we hit an empty page
+          if (randomPage > 1) maxPage = randomPage - 1;
           addSlowburnLog(setSlowburnProgress, `No programs found on page ${randomPage}, trying another page...`, 'info');
           continue;
         }
@@ -2614,7 +2661,7 @@ function App() {
         if (slowburnCancelledRef.current) break;
 
         // Fetch program details with structured scopes
-        const programRes = await fetch(`/api/hackerone/program?handle=${encodeURIComponent(handle)}`, {
+        const programRes = await fetch(`/api/api/hackerone/program?handle=${encodeURIComponent(handle)}`, {
           headers: { 'X-HackerOne-API-Key': apiKey }
         });
 
@@ -2624,16 +2671,17 @@ function App() {
         }
 
         const programData = await programRes.json();
-        const included = programData.included || [];
+        // Scopes are in relationships.structured_scopes.data, not in included
+        const structuredScopes = programData.relationships?.structured_scopes?.data || [];
 
         // Find wildcard scope targets
-        const wildcardScopes = included.filter(item => {
+        const wildcardScopes = structuredScopes.filter(item => {
           if (item.type !== 'structured-scope') return false;
           const attrs = item.attributes || {};
           if (attrs.eligible_for_submission !== true) return false;
-          const assetType = (attrs.asset_type || '').toLowerCase();
+          const assetType = (attrs.asset_type || '').toUpperCase();
           const identifier = attrs.asset_identifier || '';
-          return (assetType === 'url' || assetType === 'domain' || assetType === 'wildcard') &&
+          return (assetType === 'URL' || assetType === 'DOMAIN' || assetType === 'WILDCARD') &&
                  identifier.startsWith('*.');
         });
 
@@ -2703,9 +2751,13 @@ function App() {
 
             if (slowburnCancelledRef.current) break;
 
-            // Wait for completion (reuse wildfire's wait function)
+            // Wait for completion
             const result = await waitForSlowburnScanCompletion(matchedTarget.id);
-            addSlowburnLog(setSlowburnProgress, `${domain} finished: ${result}`, result === 'completed' ? 'success' : 'info');
+            if (result === 'limit_skipped') {
+              addSlowburnLog(setSlowburnProgress, `${domain} — limit reached, skipping to next target`, 'info');
+            } else {
+              addSlowburnLog(setSlowburnProgress, `${domain} finished: ${result}`, result === 'completed' ? 'success' : 'info');
+            }
 
             // Fetch stats for completed target
             const statsRes = await Promise.all([
@@ -2739,6 +2791,8 @@ function App() {
                 }
               }
             }
+
+            addSlowburnLog(setSlowburnProgress, `${domain} results — ${subdomains} subdomains, ${webServers} live servers, ${nucleiTotal} nuclei findings`, 'success');
 
             targetsScanned++;
             const targetEntry = { program: handle, target: domain, subdomains, webServers, nucleiTotal };
@@ -2790,6 +2844,27 @@ function App() {
 
             if (state.is_cancelled) {
               resolve('cancelled');
+              return;
+            }
+
+            // If scan is paused (limit hit), cancel it and skip to next target
+            if (state.is_paused && phase === 'waiting_for_complete') {
+              console.log(`[Slowburn] Scan for ${targetId} paused due to limits at step ${state.current_step}. Skipping to next target.`);
+              addSlowburnLog(setSlowburnProgress, `Subdomain/web server limit reached at ${state.current_step}. Skipping to next target.`, 'info');
+              try {
+                await fetch(`/api/api/auto-scan-state/${targetId}`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    current_step: 'completed',
+                    is_paused: false,
+                    is_cancelled: false
+                  })
+                });
+              } catch (err) {
+                console.error('[Slowburn] Error unpausing/completing scan:', err);
+              }
+              resolve('limit_skipped');
               return;
             }
 

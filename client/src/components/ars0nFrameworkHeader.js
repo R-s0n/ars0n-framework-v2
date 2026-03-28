@@ -61,7 +61,7 @@ function Ars0nFrameworkHeader({ onSettingsClick, onExportClick, onImportClick, o
           onClick={onGlobalScansClick}
           title="Global Scans"
         >
-          <i className="bi bi-globe" style={{ fontSize: '1.5rem' }}></i>
+          <i className="bi bi-fire" style={{ fontSize: '1.5rem' }}></i>
         </Button>
         <Button 
           variant="link" 
