@@ -56,7 +56,7 @@ services:
 
   db:
     container_name: ars0n-framework-v2-db-1
-    image: postgres:latest
+    image: postgres:13
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
