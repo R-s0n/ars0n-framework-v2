@@ -1,0 +1,25 @@
+{
+  "name": "Ars0n Framework v2 Codespace",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "version": "latest",
+      "moby": true
+    }
+  },
+  "postCreateCommand": "docker compose up -d --build",
+  "forwardPorts": [80],
+  "portsAttributes": {
+    "80": {
+      "label": "Ars0n UI",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  }
+}
