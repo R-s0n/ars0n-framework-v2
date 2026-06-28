@@ -1,18 +1,21 @@
 {
-  "name": "Ars0n Framework v2 Codespace",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "name": "Ars0n Framework v2",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
   "features": {
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
       "version": "latest",
-      "moby": true
+      "moby": false,
+      "dockerDashComposeVersion": "v2"
     }
   },
-  "postCreateCommand": "docker compose up -d --build",
+  "onCreateCommand": "docker compose up -d --build 2>&1 | tee /tmp/docker-build.log && echo 'Build complete'",
+  "postStartCommand": "docker compose ps | grep -q 'Up' || docker compose up -d",
   "forwardPorts": [80],
   "portsAttributes": {
     "80": {
-      "label": "Ars0n UI",
-      "onAutoForward": "openBrowser"
+      "label": "Ars0n Framework UI",
+      "onAutoForward": "openBrowser",
+      "visibility": "public"
     }
   },
   "customizations": {
