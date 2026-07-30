@@ -16,16 +16,28 @@ const { addTargetSchema, addTarget, deleteTargetSchema, deleteTarget, activateTa
 const { runScanSchema, runScan, checkScanStatusSchema, checkScanStatus, getScanHistorySchema, getScanHistory, cancelScanSchema, cancelScan } = require('./tools/scans');
 const { runWildcardWorkflowSchema, runWildcardWorkflow, runCompanyWorkflowSchema, runCompanyWorkflow, runUrlWorkflowSchema, runUrlWorkflow, consolidateDataSchema, consolidateData, startAutoScanSchema, startAutoScan, getAutoScanSessionsSchema, getAutoScanSessions } = require('./tools/workflows');
 const { getAttackSurfaceSchema, getAttackSurface, queryCloudAssetsSchema, queryCloudAssets, queryEndpointsSchema, queryEndpoints, queryParametersSchema, queryParameters, getScopeOverviewSchema, getScopeOverview, queryAttackSurfaceAssetsSchema, queryAttackSurfaceAssets } = require('./tools/recon');
-const { findSubdomainTakeoverSchema, findSubdomainTakeover, findExposedPanelsSchema, findExposedPanels, findApiEndpointsSchema, findApiEndpoints, findInterestingResponsesSchema, findInterestingResponses, findSensitiveFilesSchema, findSensitiveFiles, compareScansSchema, compareScans, getScopeStatsSchema, getScopeStats, findUniqueHostsSchema, findUniqueHosts, queryByCidrSchema, queryByCidr, getNucleiTemplatesSchema, getNucleiTemplates, queryByTechStackSchema, queryByTechStack, searchGlobalSchema, searchGlobal } = require('./tools/bugbounty');
+const { findSubdomainTakeoverSchema, findSubdomainTakeover, findExposedPanelsSchema, findExposedPanels, findApiEndpointsSchema, findApiEndpoints, findInterestingResponsesSchema, findInterestingResponses, findSensitiveFilesSchema, findSensitiveFiles, compareScansSchema, compareScans, getScopeStatsSchema, getScopeStats, findUniqueHostsSchema, findUniqueHosts, queryByCidrSchema, queryByCidr, queryByTechStackSchema, queryByTechStack, searchGlobalSchema, searchGlobal } = require('./tools/bugbounty');
+
+const pkg = require('../package.json');
 
 const PORT = parseInt(process.env.MCP_PORT || '3001');
-const TOOL_COUNT = 46;
+// Optional bearer token. When set (env MCP_AUTH_TOKEN), the /sse and /messages endpoints require
+// it; when unset, they stay open (backwards-compatible with existing local setups).
+const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
+// Real registered-tool count, set by createServer() (see the server.tool wrapper below) so /health
+// can't drift from the actual number the way a hardcoded constant did.
+let toolCount = 0;
 
 function createServer() {
   const server = new McpServer({
     name: 'ars0n-framework',
-    version: '2.0.0',
+    version: pkg.version,
   });
+
+  // Count tool registrations without having to touch every server.tool(...) call below.
+  let count = 0;
+  const registerTool = server.tool.bind(server);
+  server.tool = (...args) => { count += 1; return registerTool(...args); };
 
   // ============================================================
   // SCOPE & OVERVIEW (existing)
@@ -295,11 +307,6 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('get_nuclei_templates', 'List available Nuclei vulnerability scanning templates', getNucleiTemplatesSchema.shape, async (params) => {
-    const result = await getNucleiTemplates(params);
-    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-  });
-
   server.tool('query_by_tech_stack', 'Find URLs running specific technology stacks (e.g. find all React+nginx servers, or all PHP+Apache servers)', queryByTechStackSchema.shape, async (params) => {
     const result = await queryByTechStack(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -310,7 +317,19 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
+  toolCount = count;
   return server;
+}
+
+// Returns true when the request is allowed. Auth is only enforced if MCP_AUTH_TOKEN is set; the
+// token may be supplied as `Authorization: Bearer <token>` or as a `?token=` query param (the
+// latter for EventSource/SSE clients that can't send custom headers).
+function authorized(req) {
+  if (!AUTH_TOKEN) return true;
+  const header = req.headers['authorization'] || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const token = bearer || req.query.token || '';
+  return token === AUTH_TOKEN;
 }
 
 async function main() {
@@ -325,9 +344,16 @@ async function main() {
 
   const app = express();
 
+  // Prime toolCount so /health is correct before the first SSE connection creates a server.
+  createServer();
+
   const transports = new Map();
 
   app.get('/sse', async (req, res) => {
+    if (!authorized(req)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
     const server = createServer();
     const transport = new SSEServerTransport('/messages', res);
     transports.set(transport.sessionId, transport);
@@ -340,6 +366,10 @@ async function main() {
   });
 
   app.post('/messages', async (req, res) => {
+    if (!authorized(req)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
     const sessionId = req.query.sessionId;
     const transport = transports.get(sessionId);
     if (!transport) {
@@ -350,14 +380,17 @@ async function main() {
   });
 
   app.get('/health', (_req, res) => {
-    res.json({ status: 'ok', version: '2.0.0', tools: TOOL_COUNT });
+    res.json({ status: 'ok', version: pkg.version, tools: toolCount });
   });
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[MCP] Ars0n Framework MCP server v2.0.0 running on port ${PORT}`);
-    console.log(`[MCP] ${TOOL_COUNT} tools available`);
+    console.log(`[MCP] Ars0n Framework MCP server v${pkg.version} running on port ${PORT}`);
+    console.log(`[MCP] ${toolCount} tools available`);
     console.log(`[MCP] SSE endpoint: http://0.0.0.0:${PORT}/sse`);
     console.log(`[MCP] Health check: http://0.0.0.0:${PORT}/health`);
+    if (!AUTH_TOKEN) {
+      console.warn('[MCP] WARNING: MCP_AUTH_TOKEN is not set — /sse and /messages are unauthenticated');
+    }
   });
 }
 

@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Modal, Button, Tab, Tabs, Table, Badge, Spinner, Alert, Accordion, Form, Row, Col, Pagination, OverlayTrigger, Tooltip } from 'react-bootstrap';
 import { MdCopyAll } from 'react-icons/md';
+import VirtualizedList from '../components/VirtualizedList';
+import useDebounce from '../hooks/useDebounce';
 
 const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNetworkRanges, mostRecentIPPortScan, onPopulateBurp }) => {
   const [activeTab, setActiveTab] = useState('network-ranges');
@@ -27,6 +29,22 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(25);
   const [copySuccess, setCopySuccess] = useState(false);
+  // G1.6: which Metadata-tab rows are expanded. Lifted out of the per-row Bootstrap Accordions
+  // so expansion survives a row scrolling out of and back into the virtualized list (react-window
+  // unmounts off-screen rows). A Set because rows expand independently (multiple can be open).
+  const [expandedMetadataIds, setExpandedMetadataIds] = useState(() => new Set());
+
+  const toggleMetadataExpanded = (id) => {
+    setExpandedMetadataIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
 
   const API_BASE_URL = '/api';
 
@@ -268,7 +286,13 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
     return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];
   };
 
+  // G1.10: debounce the filter inputs (see useDebounce). Typing updates the controlled inputs
+  // immediately; this filter/sort over (up to 10k) servers only re-runs ~250ms after the last
+  // keystroke.
+  const debouncedFilters = useDebounce(filters, 250);
+
   const filteredAndSortedServers = useMemo(() => {
+    const filters = debouncedFilters;
     let filtered = liveWebServers.filter(server => {
       if (filters.url && !server.url?.toLowerCase().includes(filters.url.toLowerCase())) {
         return false;
@@ -347,7 +371,7 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
       if (valueA > valueB) return sortDirection === 'asc' ? 1 : -1;
       return 0;
     });
-  }, [liveWebServers, filters, sortColumn, sortDirection]);
+  }, [liveWebServers, debouncedFilters, sortColumn, sortDirection]);
 
   const totalPages = Math.ceil(filteredAndSortedServers.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
@@ -503,7 +527,7 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
                       </thead>
                       <tbody>
                         {consolidatedNetworkRanges.map((range, index) => (
-                          <tr key={index}>
+                          <tr key={range.id || range.cidr_block || index}>
                             <td>
                               <code className="text-danger">{range.cidr_block}</code>
                             </td>
@@ -590,7 +614,7 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
                   </thead>
                   <tbody>
                     {discoveredIPs.map((ip, index) => (
-                      <tr key={index}>
+                      <tr key={ip.id || ip.ip_address || index}>
                         <td><code className="text-info">{ip.ip_address}</code></td>
                         <td className="text-truncate" style={{ maxWidth: '250px' }} title={ip.hostname}>
                           {ip.hostname ? (
@@ -795,7 +819,7 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
                       </thead>
                       <tbody>
                         {paginatedServers.map((server, index) => (
-                          <tr key={index}>
+                          <tr key={server.id || server.url || index}>
                             <td>
                               <a 
                                 href={server.url} 
@@ -937,7 +961,12 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
                       </span>
                     </div>
 
-                    {metadataResults.map((url, urlIndex) => {
+                    <VirtualizedList
+                      items={metadataResults}
+                      height="65vh"
+                      estimatedItemSize={80}
+                      itemKey={(item, index) => item.id || index}
+                      renderItem={(url, urlIndex) => {
                       const sslIssues = [];
                       if (url.has_deprecated_tls) sslIssues.push('Deprecated TLS');
                       if (url.has_expired_ssl) sslIssues.push('Expired SSL');
@@ -996,10 +1025,15 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
 
                       const findings = Array.isArray(url.findings_json) ? url.findings_json : [];
 
+                      const isMetaExpanded = expandedMetadataIds.has(url.id || urlIndex);
                       return (
-                        <Accordion key={url.id || urlIndex} className="mb-3" data-bs-theme="dark">
-                          <Accordion.Item eventKey="0">
-                            <Accordion.Header>
+                        <div className="mb-3" data-bs-theme="dark">
+                          <div
+                            role="button"
+                            onClick={() => toggleMetadataExpanded(url.id || urlIndex)}
+                            className="d-flex align-items-center bg-dark border border-secondary rounded p-3"
+                            style={{ cursor: 'pointer' }}
+                          >
                               <div className="d-flex justify-content-between align-items-center w-100 me-3">
                                 <div className="d-flex align-items-center">
                                   <Badge 
@@ -1054,8 +1088,10 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
                                   )}
                                 </div>
                               </div>
-                            </Accordion.Header>
-                            <Accordion.Body>
+                            <i className={`bi ${isMetaExpanded ? 'bi-chevron-up' : 'bi-chevron-down'} text-white ms-2`}></i>
+                          </div>
+                          {isMetaExpanded && (
+                            <div className="bg-dark text-white p-3 border-top border-secondary">
                               <div className="mb-4">
                                 <h6 className="text-danger mb-3">Server Information</h6>
                                 <div className="ms-3">
@@ -1355,11 +1391,12 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
                                   </div>
                                 </div>
                               )}
-                            </Accordion.Body>
-                          </Accordion.Item>
-                        </Accordion>
+                            </div>
+                          )}
+                        </div>
                       );
-                    })}
+                      }}
+                    />
                   </div>
                 )}
               </div>

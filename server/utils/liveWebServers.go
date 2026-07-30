@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -1203,6 +1204,136 @@ func MarkOldTargetURLsAsNoLongerLive(scopeTargetID string, liveURLs []string) er
 }
 
 // GetTargetURLsForScopeTarget retrieves all target URLs for a scope target
+// parseTargetURLPagination reads optional ?limit / ?offset query params and returns a SQL
+// suffix (LIMIT/OFFSET on $2/$3) plus the matching positional args. With no/invalid limit it
+// returns an empty suffix and nil args, preserving the original "return all rows" behavior.
+// limit is capped at 1000 (audit §1.3).
+func parseTargetURLPagination(r *http.Request) (string, []interface{}) {
+	limitStr := r.URL.Query().Get("limit")
+	if limitStr == "" {
+		return "", nil
+	}
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		return "", nil
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	offset := 0
+	if o, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && o > 0 {
+		offset = o
+	}
+	return " LIMIT $2 OFFSET $3", []interface{}{limit, offset}
+}
+
+// getLeanTargetURLsForScopeTarget returns target URLs WITHOUT the heavy blob columns
+// (http_response, screenshot, http_response_headers, findings_json, katana_results,
+// ffuf_results, dns_*_records). It substitutes a boolean has_screenshot so the UI can show a
+// thumbnail link and fetch the actual screenshot / full detail per-row on demand (G1.2).
+// This is the list payload for the perf-sensitive screens (audit §1.2). args[0] is the
+// scope_target_id; any further args are the LIMIT/OFFSET values from parseTargetURLPagination.
+func getLeanTargetURLsForScopeTarget(w http.ResponseWriter, pagination string, args []interface{}) {
+	query := `
+		SELECT
+			id,
+			url,
+			scope_target_id,
+			status_code,
+			title,
+			web_server,
+			technologies,
+			content_length,
+			has_deprecated_tls,
+			has_expired_ssl,
+			has_mismatched_ssl,
+			has_revoked_ssl,
+			has_self_signed_ssl,
+			has_untrusted_root_ssl,
+			roi_score,
+			created_at,
+			(screenshot IS NOT NULL AND screenshot != '') AS has_screenshot
+		FROM target_urls
+		WHERE scope_target_id = $1
+		ORDER BY roi_score DESC, created_at DESC` + pagination
+
+	rows, err := dbPool.Query(context.Background(), query, args...)
+	if err != nil {
+		log.Printf("[ERROR] Failed to get lean target URLs: %v", err)
+		http.Error(w, "Failed to get target URLs", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	targetURLs := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var (
+			id                  string
+			url                 string
+			scopeTargetID       string
+			statusCode          sql.NullInt32
+			title               sql.NullString
+			webServer           sql.NullString
+			technologies        []string
+			contentLength       sql.NullInt32
+			hasDeprecatedTLS    bool
+			hasExpiredSSL       bool
+			hasMismatchedSSL    bool
+			hasRevokedSSL       bool
+			hasSelfSignedSSL    bool
+			hasUntrustedRootSSL bool
+			roiScore            float64
+			createdAt           time.Time
+			hasScreenshot       bool
+		)
+		if err := rows.Scan(
+			&id,
+			&url,
+			&scopeTargetID,
+			&statusCode,
+			&title,
+			&webServer,
+			&technologies,
+			&contentLength,
+			&hasDeprecatedTLS,
+			&hasExpiredSSL,
+			&hasMismatchedSSL,
+			&hasRevokedSSL,
+			&hasSelfSignedSSL,
+			&hasUntrustedRootSSL,
+			&roiScore,
+			&createdAt,
+			&hasScreenshot,
+		); err != nil {
+			log.Printf("[ERROR] Failed to scan lean target URL row: %v", err)
+			continue
+		}
+
+		targetURLs = append(targetURLs, map[string]interface{}{
+			"id":                     id,
+			"url":                    url,
+			"scope_target_id":        scopeTargetID,
+			"status_code":            nullIntToInt(statusCode),
+			"title":                  nullStringToString(title),
+			"web_server":             nullStringToString(webServer),
+			"technologies":           technologies,
+			"content_length":         nullIntToInt(contentLength),
+			"has_deprecated_tls":     hasDeprecatedTLS,
+			"has_expired_ssl":        hasExpiredSSL,
+			"has_mismatched_ssl":     hasMismatchedSSL,
+			"has_revoked_ssl":        hasRevokedSSL,
+			"has_self_signed_ssl":    hasSelfSignedSSL,
+			"has_untrusted_root_ssl": hasUntrustedRootSSL,
+			"roi_score":              roiScore,
+			"created_at":             createdAt.Format(time.RFC3339),
+			"has_screenshot":         hasScreenshot,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(targetURLs)
+}
+
 func GetTargetURLsForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	scopeTargetID := vars["id"]
@@ -1211,20 +1342,44 @@ func GetTargetURLsForScopeTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// G1.1: optional lean projection (omit heavy blobs) + pagination. Both default to the
+	// original behavior (full payload, all rows), so existing callers are unaffected.
+	pagination, extraArgs := parseTargetURLPagination(r)
+	args := append([]interface{}{scopeTargetID}, extraArgs...)
+	if r.URL.Query().Get("lean") == "true" {
+		getLeanTargetURLsForScopeTarget(w, pagination, args)
+		return
+	}
+
+	// G1.3/G1.4: callers that don't need the heaviest blobs can opt out of them while keeping
+	// the rest of the analytical fields (katana/ffuf/dns/headers/findings). `?screenshot=false`
+	// drops the base64 screenshot (the ROI + MetaData screens lazy-load it via
+	// GET /target-urls/{id}/screenshot instead); `?response=false` drops the raw HTTP body
+	// (unused by the MetaData screen). Both default to the original full payload. A
+	// has_screenshot boolean is always added so the UI knows whether to request the image.
+	screenshotExpr := "screenshot"
+	if r.URL.Query().Get("screenshot") == "false" {
+		screenshotExpr = "''"
+	}
+	responseExpr := "http_response"
+	if r.URL.Query().Get("response") == "false" {
+		responseExpr = "''"
+	}
+
 	query := `
-		SELECT 
-			id, 
-			url, 
+		SELECT
+			id,
+			url,
 			scope_target_id,
 			status_code,
 			title,
 			web_server,
 			technologies,
-			content_length, 
-			findings_json, 
-			katana_results, 
+			content_length,
+			findings_json,
+			katana_results,
 			ffuf_results,
-			http_response,
+			` + responseExpr + ` AS http_response,
 			http_response_headers,
 			has_deprecated_tls,
 			has_expired_ssl,
@@ -1242,12 +1397,13 @@ func GetTargetURLsForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			dns_srv_records,
 			roi_score,
 			created_at,
-			screenshot
-		FROM target_urls 
-		WHERE scope_target_id = $1 
-		ORDER BY roi_score DESC, created_at DESC`
+			` + screenshotExpr + ` AS screenshot,
+			(screenshot IS NOT NULL AND screenshot != '') AS has_screenshot
+		FROM target_urls
+		WHERE scope_target_id = $1
+		ORDER BY roi_score DESC, created_at DESC` + pagination
 
-	rows, err := dbPool.Query(context.Background(), query, scopeTargetID)
+	rows, err := dbPool.Query(context.Background(), query, args...)
 	if err != nil {
 		log.Printf("[ERROR] Failed to get target URLs: %v", err)
 		http.Error(w, "Failed to get target URLs", http.StatusInternalServerError)
@@ -1288,6 +1444,7 @@ func GetTargetURLsForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			roiScore            float64
 			createdAt           time.Time
 			screenshot          sql.NullString
+			hasScreenshot       bool
 		)
 
 		err := rows.Scan(
@@ -1321,6 +1478,7 @@ func GetTargetURLsForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			&roiScore,
 			&createdAt,
 			&screenshot,
+			&hasScreenshot,
 		)
 		if err != nil {
 			log.Printf("[ERROR] Failed to scan row: %v", err)
@@ -1358,6 +1516,7 @@ func GetTargetURLsForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			"roi_score":              roiScore,
 			"created_at":             createdAt.Format(time.RFC3339),
 			"screenshot":             nullStringToString(screenshot),
+			"has_screenshot":         hasScreenshot,
 		}
 
 		targetURLs = append(targetURLs, targetURL)
@@ -1368,6 +1527,161 @@ func GetTargetURLsForScopeTarget(w http.ResponseWriter, r *http.Request) {
 		targetURLs = make([]map[string]interface{}, 0)
 	}
 	json.NewEncoder(w).Encode(targetURLs)
+}
+
+// GetTargetURLByID returns a single target URL with ALL fields, including the heavy blobs
+// (http_response, screenshot, http_response_headers, findings_json, katana/ffuf, dns_*).
+// The lean list (G1.1) omits these; the UI fetches a row's detail on demand here (audit §1.4).
+func GetTargetURLByID(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+	if id == "" {
+		http.Error(w, "Target URL ID is required", http.StatusBadRequest)
+		return
+	}
+
+	query := `
+		SELECT
+			id, url, scope_target_id, status_code, title, web_server, technologies,
+			content_length, findings_json, katana_results, ffuf_results, http_response,
+			http_response_headers, has_deprecated_tls, has_expired_ssl, has_mismatched_ssl,
+			has_revoked_ssl, has_self_signed_ssl, has_untrusted_root_ssl, dns_a_records,
+			dns_aaaa_records, dns_cname_records, dns_mx_records, dns_txt_records,
+			dns_ns_records, dns_ptr_records, dns_srv_records, roi_score, created_at, screenshot
+		FROM target_urls
+		WHERE id = $1`
+
+	var (
+		urlID               string
+		url                 string
+		scopeTargetID       string
+		statusCode          sql.NullInt32
+		title               sql.NullString
+		webServer           sql.NullString
+		technologies        []string
+		contentLength       sql.NullInt32
+		findingsJSON        sql.NullString
+		katanaResults       sql.NullString
+		ffufResults         sql.NullString
+		httpResponse        sql.NullString
+		httpResponseHeaders sql.NullString
+		hasDeprecatedTLS    bool
+		hasExpiredSSL       bool
+		hasMismatchedSSL    bool
+		hasRevokedSSL       bool
+		hasSelfSignedSSL    bool
+		hasUntrustedRootSSL bool
+		dnsARecords         []string
+		dnsAAAARecords      []string
+		dnsCNAMERecords     []string
+		dnsMXRecords        []string
+		dnsTXTRecords       []string
+		dnsNSRecords        []string
+		dnsPTRRecords       []string
+		dnsSRVRecords       []string
+		roiScore            float64
+		createdAt           time.Time
+		screenshot          sql.NullString
+	)
+
+	err := dbPool.QueryRow(context.Background(), query, id).Scan(
+		&urlID, &url, &scopeTargetID, &statusCode, &title, &webServer, &technologies,
+		&contentLength, &findingsJSON, &katanaResults, &ffufResults, &httpResponse,
+		&httpResponseHeaders, &hasDeprecatedTLS, &hasExpiredSSL, &hasMismatchedSSL,
+		&hasRevokedSSL, &hasSelfSignedSSL, &hasUntrustedRootSSL, &dnsARecords,
+		&dnsAAAARecords, &dnsCNAMERecords, &dnsMXRecords, &dnsTXTRecords,
+		&dnsNSRecords, &dnsPTRRecords, &dnsSRVRecords, &roiScore, &createdAt, &screenshot,
+	)
+	if err == pgx.ErrNoRows {
+		http.Error(w, "Target URL not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("[ERROR] Failed to get target URL %s: %v", id, err)
+		http.Error(w, "Failed to get target URL", http.StatusInternalServerError)
+		return
+	}
+
+	targetURL := map[string]interface{}{
+		"id":                     urlID,
+		"url":                    url,
+		"scope_target_id":        scopeTargetID,
+		"status_code":            nullIntToInt(statusCode),
+		"title":                  nullStringToString(title),
+		"web_server":             nullStringToString(webServer),
+		"technologies":           technologies,
+		"content_length":         nullIntToInt(contentLength),
+		"findings_json":          nullStringToString(findingsJSON),
+		"katana_results":         nullStringToString(katanaResults),
+		"ffuf_results":           nullStringToString(ffufResults),
+		"http_response":          nullStringToString(httpResponse),
+		"http_response_headers":  nullStringToString(httpResponseHeaders),
+		"has_deprecated_tls":     hasDeprecatedTLS,
+		"has_expired_ssl":        hasExpiredSSL,
+		"has_mismatched_ssl":     hasMismatchedSSL,
+		"has_revoked_ssl":        hasRevokedSSL,
+		"has_self_signed_ssl":    hasSelfSignedSSL,
+		"has_untrusted_root_ssl": hasUntrustedRootSSL,
+		"dns_a_records":          dnsARecords,
+		"dns_aaaa_records":       dnsAAAARecords,
+		"dns_cname_records":      dnsCNAMERecords,
+		"dns_mx_records":         dnsMXRecords,
+		"dns_txt_records":        dnsTXTRecords,
+		"dns_ns_records":         dnsNSRecords,
+		"dns_ptr_records":        dnsPTRRecords,
+		"dns_srv_records":        dnsSRVRecords,
+		"roi_score":              roiScore,
+		"created_at":             createdAt.Format(time.RFC3339),
+		"screenshot":             nullStringToString(screenshot),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(targetURL)
+}
+
+// GetTargetURLScreenshot serves a single target URL's screenshot as a binary PNG, decoded
+// from the base64 stored in the DB, so the UI can lazy-load it via <img src=…> instead of
+// shipping every screenshot inline (G1.2 / audit §1.4).
+func GetTargetURLScreenshot(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+	if id == "" {
+		http.Error(w, "Target URL ID is required", http.StatusBadRequest)
+		return
+	}
+
+	var screenshot sql.NullString
+	err := dbPool.QueryRow(context.Background(),
+		`SELECT screenshot FROM target_urls WHERE id = $1`, id).Scan(&screenshot)
+	if err == pgx.ErrNoRows {
+		http.Error(w, "Target URL not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("[ERROR] Failed to get screenshot for target URL %s: %v", id, err)
+		http.Error(w, "Failed to get screenshot", http.StatusInternalServerError)
+		return
+	}
+	if !screenshot.Valid || screenshot.String == "" {
+		http.Error(w, "No screenshot for this target URL", http.StatusNotFound)
+		return
+	}
+
+	// Stored as raw base64; strip a data-URI prefix if one is present.
+	b64 := screenshot.String
+	if idx := strings.Index(b64, "base64,"); idx != -1 {
+		b64 = b64[idx+len("base64,"):]
+	}
+	imgData, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		log.Printf("[ERROR] Failed to decode screenshot for target URL %s: %v", id, err)
+		http.Error(w, "Invalid screenshot data", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.Write(imgData)
 }
 
 // UpdateTargetURLROIScore updates the ROI score for a target URL

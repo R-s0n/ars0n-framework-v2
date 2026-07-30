@@ -1480,6 +1480,9 @@ func createTables() {
 		// Create indexes for performance
 		`CREATE INDEX IF NOT EXISTS target_urls_url_idx ON target_urls (url);`,
 		`CREATE INDEX IF NOT EXISTS target_urls_scope_target_id_idx ON target_urls (scope_target_id);`,
+		// Composite index backing GetTargetURLsForScopeTarget's WHERE + ORDER BY roi_score DESC,
+		// created_at DESC (+ LIMIT/OFFSET pagination) — audit §1.1/G1.1.
+		`CREATE INDEX IF NOT EXISTS target_urls_scope_roi_idx ON target_urls (scope_target_id, roi_score DESC, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_discovered_live_ips_scan_id ON discovered_live_ips(scan_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_live_web_servers_scan_id ON live_web_servers(scan_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_live_web_servers_ip_port ON live_web_servers(ip_address, port);`,

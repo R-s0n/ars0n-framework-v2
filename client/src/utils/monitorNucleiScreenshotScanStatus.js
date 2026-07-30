@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorNucleiScreenshotScanStatus = async (
   activeTarget,
   setNucleiScreenshotScans,
@@ -26,7 +27,7 @@ const monitorNucleiScreenshotScanStatus = async (
 
       if (mostRecentScan.status === 'pending') {
         setIsNucleiScreenshotScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorNucleiScreenshotScanStatus(
             activeTarget,
             setNucleiScreenshotScans,

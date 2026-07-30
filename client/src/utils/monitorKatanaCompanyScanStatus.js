@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorKatanaCompanyScanStatus = async (
   activeTarget,
   setKatanaCompanyScans,
@@ -178,12 +179,12 @@ export const monitorActiveScan = async (
         return scanStatus;
       } else if (scanStatus.status === 'pending' || scanStatus.status === 'running') {
         // Continue polling - no timeout limits for long-running scans
-        setTimeout(poll, 1000);
+        pollTimeout(poll, 1000);
       }
     } catch (error) {
       console.error('Error monitoring Katana Company scan:', error);
       // Retry after error - no timeout limits
-      setTimeout(poll, 2000);
+      pollTimeout(poll, 2000);
     }
   };
   

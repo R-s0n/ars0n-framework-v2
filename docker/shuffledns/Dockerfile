@@ -1,4 +1,7 @@
-FROM golang:1.24-alpine
+FROM golang:1.26-alpine
+
+# Auto-download a newer Go toolchain if a pinned tool requires one
+ENV GOTOOLCHAIN=auto
 
 RUN apk add --no-cache git build-base
 
@@ -11,7 +14,7 @@ RUN git clone https://github.com/blechschmidt/massdns.git && \
     rm -rf massdns
 
 # Install shuffledns
-RUN go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
+RUN go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@v1.2.1
 
 # Create directory for wordlists
 RUN mkdir -p /app/wordlists

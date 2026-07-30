@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorAmassEnumCompanyScanStatus = async (
   scanId, 
   setIsScanning, 
@@ -100,7 +101,7 @@ const monitorAmassEnumCompanyScanStatus = async (
         }
         
         // Continue polling
-        setTimeout(poll, 1000);
+        pollTimeout(poll, 1000);
       }
     } catch (error) {
       console.error('Error monitoring Amass Enum Company scan:', error);
@@ -112,12 +113,12 @@ const monitorAmassEnumCompanyScanStatus = async (
       }
       
       // Retry after error
-      setTimeout(poll, 2000);
+      pollTimeout(poll, 2000);
     }
   };
   
   // Start polling
-  setTimeout(poll, 1000);
+  pollTimeout(poll, 1000);
 };
 
 export default monitorAmassEnumCompanyScanStatus; 

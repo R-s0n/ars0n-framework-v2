@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorCTLCompanyScanStatus = async (
   activeTarget,
   setCTLCompanyScans,
@@ -42,7 +43,7 @@ const monitorCTLCompanyScanStatus = async (
 
       if (mostRecentScan.status === 'pending') {
         setIsCTLCompanyScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorCTLCompanyScanStatus(
             activeTarget,
             setCTLCompanyScans,

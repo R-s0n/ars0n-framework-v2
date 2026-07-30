@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 export { monitorActiveScan } from './initiateParamethScan';
 
 const monitorParamethScanStatus = async (
@@ -27,7 +28,7 @@ const monitorParamethScanStatus = async (
 
       if (mostRecentScan.status === 'running' || mostRecentScan.status === 'pending') {
         setIsParamethScanning(true);
-        setTimeout(
+        pollTimeout(
           () =>
             monitorParamethScanStatus(
               activeTarget,

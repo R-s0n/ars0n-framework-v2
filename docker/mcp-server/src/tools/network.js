@@ -1,6 +1,7 @@
 const { z } = require('zod');
 const { query } = require('../db');
-const { limitResults } = require('../utils/truncate');
+const { limitResults, clampLimit } = require('../utils/truncate');
+const { parseAmassRecord } = require('../utils/dns');
 
 const queryDnsRecordsSchema = z.object({
   scan_id: z.string().uuid().describe('The amass scan UUID'),
@@ -9,7 +10,8 @@ const queryDnsRecordsSchema = z.object({
 });
 
 async function queryDnsRecords(params) {
-  let sql = `SELECT id, record_type, record_name, record_value, created_at
+  // dns_records has a single `record` column (composite arrow-string), not record_name/value.
+  let sql = `SELECT id, record_type, record, created_at
     FROM dns_records WHERE scan_id = $1`;
   const values = [params.scan_id];
   let idx = 2;
@@ -18,10 +20,22 @@ async function queryDnsRecords(params) {
     sql += ` AND record_type = $${idx++}`;
     values.push(params.record_type);
   }
-  sql += ' ORDER BY record_type, record_name';
+  const lim = clampLimit(params.max_results);
+  sql += ` ORDER BY record_type, record LIMIT ${lim + 1}`;
 
   const result = await query(sql, values);
-  return limitResults(result.rows, params.max_results);
+  const parsed = result.rows.map((r) => {
+    const { name, value } = parseAmassRecord(r.record);
+    return {
+      id: r.id,
+      record_type: r.record_type,
+      record_name: name,
+      record_value: value,
+      raw: r.record,
+      created_at: r.created_at,
+    };
+  });
+  return limitResults(parsed, lim);
 }
 
 const queryDiscoveredIpsSchema = z.object({

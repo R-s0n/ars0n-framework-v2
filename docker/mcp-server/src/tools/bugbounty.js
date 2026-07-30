@@ -1,6 +1,7 @@
 const { z } = require('zod');
 const { query } = require('../db');
-const { limitResults, truncateText } = require('../utils/truncate');
+const { limitResults, truncateText, clampLimit } = require('../utils/truncate');
+const { parseAmassRecord } = require('../utils/dns');
 
 // === Find Subdomain Takeover Candidates ===
 const findSubdomainTakeoverSchema = z.object({
@@ -25,22 +26,25 @@ async function findSubdomainTakeover(params) {
     'unbouncepages.com', 'cargo.site', 'statuspage.io',
   ];
 
-  // Query DNS CNAME records
+  // Query DNS CNAME records. dns_records stores a single composite `record` column
+  // ("name (FQDN) --> cname_record --> target (FQDN)"), not record_name/record_value, so we
+  // select `record` and parse it into name/value before matching against takeover services.
   try {
     const cnames = await query(`
-      SELECT dr.record_name, dr.record_value, dr.scan_id
+      SELECT dr.record, dr.scan_id
       FROM dns_records dr
       JOIN amass_scans a ON a.scan_id = dr.scan_id
       WHERE a.scope_target_id = $1 AND dr.record_type = 'CNAME'
       ORDER BY dr.created_at DESC`, [params.target_id]);
 
     for (const cname of cnames.rows) {
-      const value = (cname.record_value || '').toLowerCase();
+      const { name, value } = parseAmassRecord(cname.record);
+      const valueLower = (value || '').toLowerCase();
       for (const service of takeoverServices) {
-        if (value.includes(service)) {
+        if (valueLower.includes(service)) {
           candidates.push({
-            subdomain: cname.record_name,
-            cname_target: cname.record_value,
+            subdomain: name,
+            cname_target: value,
             vulnerable_service: service,
             risk: 'potential_takeover',
             action: 'Verify if the CNAME target is unclaimed/available',
@@ -443,14 +447,16 @@ async function getScopeStats(params) {
   stats.tools = {};
   for (const table of scanTables) {
     try {
+      // NOTE: execution_time is stored as a Go duration STRING (e.g. "26m40.5s"), not a number,
+      // so SQL AVG(execution_time) throws "function avg(text) does not exist" — which was silently
+      // swallowed and left stats.tools empty. We report counts + last_run instead.
       const res = await query(`
         SELECT
           COUNT(*) as total,
           COUNT(CASE WHEN status = 'success' THEN 1 END) as success,
           COUNT(CASE WHEN status = 'running' THEN 1 END) as running,
           COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed,
-          MAX(created_at) as last_run,
-          AVG(CASE WHEN execution_time IS NOT NULL THEN execution_time END) as avg_execution_time
+          MAX(created_at) as last_run
         FROM ${table} WHERE scope_target_id = $1`,
         [params.target_id]
       );
@@ -463,7 +469,6 @@ async function getScopeStats(params) {
           running: parseInt(row.running),
           failed: parseInt(row.failed),
           last_run: row.last_run,
-          avg_execution_time: row.avg_execution_time ? parseFloat(row.avg_execution_time).toFixed(1) : null,
         };
       }
     } catch {}
@@ -555,24 +560,12 @@ async function queryByCidr(params) {
     sql += ` AND organization ILIKE $${idx++}`;
     values.push(`%${params.organization}%`);
   }
-  sql += ' ORDER BY cidr_block ASC';
+  const lim = clampLimit(params.max_results);
+  sql += ` ORDER BY cidr_block ASC LIMIT ${lim + 1}`;
 
   try {
     const result = await query(sql, values);
-    return limitResults(result.rows, params.max_results);
-  } catch (err) {
-    return { error: err.message };
-  }
-}
-
-// === Get Nuclei Templates List ===
-const getNucleiTemplatesSchema = z.object({});
-
-async function getNucleiTemplates() {
-  try {
-    const { apiGet } = require('../api');
-    const result = await apiGet('/nuclei-templates');
-    return result;
+    return limitResults(result.rows, lim);
   } catch (err) {
     return { error: err.message };
   }
@@ -607,9 +600,12 @@ async function queryByTechStack(params) {
     values.push(...techs.map(t => `%${t}%`));
   }
 
+  const lim = clampLimit(params.max_results);
+  sql += ` LIMIT ${lim + 1}`;
+
   try {
     const result = await query(sql, values);
-    return limitResults(result.rows, params.max_results);
+    return limitResults(result.rows, lim);
   } catch (err) {
     return { error: err.message };
   }
@@ -720,7 +716,6 @@ module.exports = {
   getScopeStatsSchema, getScopeStats,
   findUniqueHostsSchema, findUniqueHosts,
   queryByCidrSchema, queryByCidr,
-  getNucleiTemplatesSchema, getNucleiTemplates,
   queryByTechStackSchema, queryByTechStack,
   searchGlobalSchema, searchGlobal,
 };

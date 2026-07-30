@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorCTLScanStatus = async (
   activeTarget,
   setCTLScans,
@@ -38,7 +39,7 @@ const monitorCTLScanStatus = async (
 
       if (mostRecentScan.status === 'pending') {
         setIsCTLScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorCTLScanStatus(
             activeTarget,
             setCTLScans,

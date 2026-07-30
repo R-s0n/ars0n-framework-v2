@@ -1,6 +1,6 @@
 const { z } = require('zod');
 const { query } = require('../db');
-const { limitResults } = require('../utils/truncate');
+const { limitResults, clampLimit } = require('../utils/truncate');
 
 const queryLiveServersSchema = z.object({
   target_id: z.string().uuid().optional().describe('Filter by scope target UUID'),
@@ -12,12 +12,19 @@ const queryLiveServersSchema = z.object({
 });
 
 async function queryLiveServers(params) {
-  let sql = `SELECT id, ip_address, port, protocol, url, status_code, title, server_header,
+  let sql = `SELECT id, scan_id, ip_address, port, protocol, url, status_code, title, server_header,
     content_length, technologies, response_time_ms, screenshot_path, last_checked
     FROM live_web_servers WHERE 1=1`;
   const values = [];
   let idx = 1;
 
+  // live_web_servers has no scope_target_id (only scan_id). To scope by target we go through
+  // ip_port_scans (scan_id -> scope_target_id), mirroring how the Go API counts them
+  // (main.go: JOIN ip_port_scans ips ON lws.scan_id = ips.scan_id WHERE ips.scope_target_id = ...).
+  if (params.target_id) {
+    sql += ` AND scan_id IN (SELECT scan_id FROM ip_port_scans WHERE scope_target_id = $${idx++})`;
+    values.push(params.target_id);
+  }
   if (params.scan_id) {
     sql += ` AND scan_id = $${idx++}`;
     values.push(params.scan_id);
@@ -35,10 +42,11 @@ async function queryLiveServers(params) {
     values.push(`%${params.search}%`);
     idx++;
   }
-  sql += ' ORDER BY last_checked DESC';
+  const lim = clampLimit(params.max_results);
+  sql += ` ORDER BY last_checked DESC LIMIT ${lim + 1}`;
 
   const result = await query(sql, values);
-  return limitResults(result.rows, params.max_results);
+  return limitResults(result.rows, lim);
 }
 
 const queryTargetUrlsSchema = z.object({
@@ -52,9 +60,12 @@ const queryTargetUrlsSchema = z.object({
 });
 
 async function queryTargetUrls(params) {
+  // target_urls stores the screenshot inline as base64 in `screenshot` (there is no
+  // screenshot_path column). Returning a boolean keeps the list lean; the full image is fetched
+  // on demand via the API's GET /api/target-urls/{id}/screenshot.
   let sql = `SELECT id, url, status_code, title, technologies, content_length,
     has_deprecated_tls, has_expired_ssl, has_mismatched_ssl, has_revoked_ssl, has_self_signed_ssl,
-    roi_score, screenshot_path, created_at
+    roi_score, (screenshot IS NOT NULL AND screenshot != '') AS has_screenshot, created_at
     FROM target_urls WHERE scope_target_id = $1`;
   const values = [params.target_id];
   let idx = 2;
@@ -79,10 +90,11 @@ async function queryTargetUrls(params) {
     values.push(`%${params.search}%`);
     idx++;
   }
-  sql += ' ORDER BY roi_score DESC NULLS LAST, created_at DESC';
+  const lim = clampLimit(params.max_results);
+  sql += ` ORDER BY roi_score DESC NULLS LAST, created_at DESC LIMIT ${lim + 1}`;
 
   const result = await query(sql, values);
-  return limitResults(result.rows, params.max_results);
+  return limitResults(result.rows, lim);
 }
 
 module.exports = {

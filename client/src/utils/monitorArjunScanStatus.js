@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 export { monitorActiveScan } from './initiateArjunScan';
 
 const monitorArjunScanStatus = async (
@@ -27,7 +28,7 @@ const monitorArjunScanStatus = async (
 
       if (mostRecentScan.status === 'running' || mostRecentScan.status === 'pending') {
         setIsArjunScanning(true);
-        setTimeout(
+        pollTimeout(
           () =>
             monitorArjunScanStatus(
               activeTarget,

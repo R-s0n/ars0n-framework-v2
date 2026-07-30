@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorGoSpiderScanStatus = async (
   activeTarget,
   setGoSpiderScans,
@@ -35,7 +36,7 @@ const monitorGoSpiderScanStatus = async (
 
       if (mostRecentScan.status === 'pending') {
         setIsGoSpiderScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorGoSpiderScanStatus(
             activeTarget,
             setGoSpiderScans,

@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorWaybackURLsScanStatus = async (
   activeTarget,
   setWaybackURLsScans,
@@ -88,11 +89,11 @@ export const monitorActiveScan = async (
         setIsWaybackURLsScanning(false);
         return scanStatus;
       } else if (scanStatus.status === 'pending' || scanStatus.status === 'running') {
-        setTimeout(poll, 1000);
+        pollTimeout(poll, 1000);
       }
     } catch (error) {
       console.error('Error monitoring WaybackURLs scan:', error);
-      setTimeout(poll, 2000);
+      pollTimeout(poll, 2000);
     }
   };
   

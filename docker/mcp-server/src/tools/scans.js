@@ -1,5 +1,6 @@
 const { z } = require('zod');
 const { apiPost, apiGet } = require('../api');
+const { trimScanRecords } = require('../utils/truncate');
 
 // Mapping of tool names to their API run/status endpoints
 const SCAN_TOOLS = {
@@ -102,8 +103,10 @@ async function checkScanStatus(params) {
 
   const statusPath = tool.status.replace('{scanID}', params.scan_id);
   try {
+    // The status record inlines the full raw tool output; trim it so a status check doesn't
+    // return hundreds of KB. Use get_scan_results for the actual output.
     const result = await apiGet(statusPath);
-    return { tool: params.tool, scan_id: params.scan_id, ...result };
+    return { tool: params.tool, scan_id: params.scan_id, ...trimScanRecords(result) };
   } catch (err) {
     return { error: err.message, tool: params.tool };
   }
@@ -121,8 +124,9 @@ async function getScanHistory(params) {
 
   const scansPath = tool.scans.replace('{id}', params.target_id);
   try {
+    // Trim inline raw output on each historical scan record (can be hundreds of KB per scan).
     const result = await apiGet(scansPath);
-    return { tool: params.tool, target_id: params.target_id, scans: result };
+    return { tool: params.tool, target_id: params.target_id, scans: trimScanRecords(result) };
   } catch (err) {
     return { error: err.message, tool: params.tool };
   }

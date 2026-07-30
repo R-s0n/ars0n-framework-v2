@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorCloudEnumScanStatus = async (
   activeTarget,
   setCloudEnumScans,
@@ -42,7 +43,7 @@ const monitorCloudEnumScanStatus = async (
 
       if (mostRecentScan.status === 'pending') {
         setIsCloudEnumScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorCloudEnumScanStatus(
             activeTarget,
             setCloudEnumScans,

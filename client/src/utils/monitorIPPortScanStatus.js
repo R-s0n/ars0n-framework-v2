@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorIPPortScanStatus = async (scanId, onStatusUpdate, onComplete, onError) => {
   const API_BASE_URL = '/api';
 
@@ -30,11 +31,11 @@ const monitorIPPortScanStatus = async (scanId, onStatusUpdate, onComplete, onErr
         case 'discovering_ips':
         case 'port_scanning':
           // Continue monitoring
-          setTimeout(checkStatus, 3000);
+          pollTimeout(checkStatus, 3000);
           break;
         default:
           console.warn('Unknown scan status:', data.status);
-          setTimeout(checkStatus, 3000);
+          pollTimeout(checkStatus, 3000);
       }
     } catch (error) {
       console.error('Error checking IP/Port scan status:', error);

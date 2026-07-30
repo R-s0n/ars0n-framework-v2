@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorSubfinderScanStatus = async (
   activeTarget,
   setSubfinderScans,
@@ -35,7 +36,7 @@ const monitorSubfinderScanStatus = async (
 
       if (mostRecentScan.status === 'pending') {
         setIsSubfinderScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorSubfinderScanStatus(
             activeTarget,
             setSubfinderScans,

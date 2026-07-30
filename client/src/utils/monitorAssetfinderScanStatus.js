@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorAssetfinderScanStatus = async (
   activeTarget,
   setAssetfinderScans,
@@ -35,7 +36,7 @@ const monitorAssetfinderScanStatus = async (
 
       if (mostRecentScan.status === 'pending') {
         setIsAssetfinderScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorAssetfinderScanStatus(
             activeTarget,
             setAssetfinderScans,

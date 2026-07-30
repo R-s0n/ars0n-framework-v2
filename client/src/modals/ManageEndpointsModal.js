@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Modal, Button, Nav, Badge, Form, InputGroup, Accordion, Spinner, Alert } from 'react-bootstrap';
+import { Modal, Button, Nav, Badge, Form, InputGroup, Spinner, Alert } from 'react-bootstrap';
+import VirtualizedList from '../components/VirtualizedList';
+import useDebounce from '../hooks/useDebounce';
 
 const ManageEndpointsModal = ({ show, onHide, scopeTargetId }) => {
   const [endpoints, setEndpoints] = useState([]);
@@ -9,6 +11,9 @@ const ManageEndpointsModal = ({ show, onHide, scopeTargetId }) => {
   const [activeTab, setActiveTab] = useState('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [investigationResults, setInvestigationResults] = useState([]);
+  // G1.10: debounce the search box so filtering the endpoint list runs after typing pauses, not
+  // on every keystroke. The input stays bound to the immediate `searchTerm` state.
+  const debouncedSearchTerm = useDebounce(searchTerm, 250);
 
   useEffect(() => {
     if (show && scopeTargetId) {
@@ -19,7 +24,7 @@ const ManageEndpointsModal = ({ show, onHide, scopeTargetId }) => {
 
   useEffect(() => {
     applyFilters();
-  }, [endpoints, activeTab, searchTerm]);
+  }, [endpoints, activeTab, debouncedSearchTerm]);
 
   const loadEndpoints = async () => {
     setLoading(true);
@@ -60,8 +65,8 @@ const ManageEndpointsModal = ({ show, onHide, scopeTargetId }) => {
       filtered = filtered.filter(ep => !ep.is_direct);
     }
 
-    if (searchTerm) {
-      const lowerSearch = searchTerm.toLowerCase();
+    if (debouncedSearchTerm) {
+      const lowerSearch = debouncedSearchTerm.toLowerCase();
       filtered = filtered.filter(ep => 
         ep.url.toLowerCase().includes(lowerSearch) ||
         ep.domain.toLowerCase().includes(lowerSearch) ||
@@ -227,15 +232,24 @@ const EndpointAccordion = ({ endpoints, getMethodBadgeColor, getStatusBadgeColor
     return investigationResults.find(result => result.endpoint_id === endpointId);
   };
 
-  return (
-    <Accordion>
-      {endpoints.map((endpoint, idx) => {
-        const investigation = getInvestigationData(endpoint.id);
-        const hasInvestigation = !!investigation;
-        
-        return (
-        <Accordion.Item eventKey={idx.toString()} key={endpoint.id} className="bg-dark border-secondary">
-          <Accordion.Header className="bg-dark">
+  // G1.6: expand state lifted to the parent (was the Bootstrap Accordion's internal state) so a
+  // row stays expanded when it scrolls out of and back into the virtualized window. Single open
+  // at a time, matching the previous <Accordion> behavior.
+  const [expandedId, setExpandedId] = useState(null);
+
+  const renderEndpoint = (endpoint) => {
+    const investigation = getInvestigationData(endpoint.id);
+    const hasInvestigation = !!investigation;
+    const isExpanded = expandedId === endpoint.id;
+
+    return (
+        <div className="bg-dark border border-secondary rounded mb-2">
+          <div
+            role="button"
+            onClick={() => setExpandedId(isExpanded ? null : endpoint.id)}
+            className="d-flex align-items-center p-3"
+            style={{ cursor: 'pointer' }}
+          >
             <div className="d-flex w-100 align-items-center justify-content-between me-3">
               <div style={{ flex: '0 0 80px' }}>
                 <Badge bg={getMethodBadgeColor(endpoint.method)}>
@@ -288,8 +302,10 @@ const EndpointAccordion = ({ endpoints, getMethodBadgeColor, getStatusBadgeColor
                 </Badge>
               </div>
             </div>
-          </Accordion.Header>
-          <Accordion.Body className="bg-dark text-white">
+            <i className={`bi ${isExpanded ? 'bi-chevron-up' : 'bi-chevron-down'} text-white ms-2`}></i>
+          </div>
+          {isExpanded && (
+          <div className="bg-dark text-white p-3 border-top border-secondary">
             <div className="mb-3">
               <strong className="text-danger">Full URL:</strong><br />
               <code className="text-white">{endpoint.url}</code>
@@ -592,11 +608,20 @@ const EndpointAccordion = ({ endpoints, getMethodBadgeColor, getStatusBadgeColor
                 <small>{new Date(endpoint.last_seen).toLocaleString()}</small>
               </div>
             </div>
-          </Accordion.Body>
-        </Accordion.Item>
-        );
-      })}
-    </Accordion>
+          </div>
+          )}
+        </div>
+    );
+  };
+
+  return (
+    <VirtualizedList
+      items={endpoints}
+      height="60vh"
+      estimatedItemSize={64}
+      itemKey={(endpoint) => endpoint.id}
+      renderItem={renderEndpoint}
+    />
   );
 };
 

@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorSubdomainizerScanStatus = async (
   activeTarget,
   setSubdomainizerScans,
@@ -35,7 +36,7 @@ const monitorSubdomainizerScanStatus = async (
 
       if (mostRecentScan.status === 'pending') {
         setIsSubdomainizerScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorSubdomainizerScanStatus(
             activeTarget,
             setSubdomainizerScans,

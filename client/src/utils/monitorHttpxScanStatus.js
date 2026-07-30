@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 import fetchHttpxScans from './fetchHttpxScans';
 
 const monitorHttpxScanStatus = async (
@@ -20,7 +21,7 @@ const monitorHttpxScanStatus = async (
     
     if (scanDetails && scanDetails.status === 'pending') {
       setIsHttpxScanning(true);
-      setTimeout(() => {
+      pollTimeout(() => {
         monitorHttpxScanStatus(
           activeTarget,
           setHttpxScans,

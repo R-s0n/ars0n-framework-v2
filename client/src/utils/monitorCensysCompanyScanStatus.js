@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorCensysCompanyScanStatus = async (
   activeTarget,
   setCensysCompanyScans,
@@ -42,7 +43,7 @@ const monitorCensysCompanyScanStatus = async (
 
       if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running') {
         setIsCensysCompanyScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorCensysCompanyScanStatus(
             activeTarget,
             setCensysCompanyScans,

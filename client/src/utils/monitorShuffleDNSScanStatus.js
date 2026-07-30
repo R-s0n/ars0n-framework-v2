@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorShuffleDNSScanStatus = async (
   activeTarget,
   setShuffleDNSScans,
@@ -35,7 +36,7 @@ const monitorShuffleDNSScanStatus = async (
 
       if (mostRecentScan.status === 'pending') {
         setIsShuffleDNSScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorShuffleDNSScanStatus(
             activeTarget,
             setShuffleDNSScans,

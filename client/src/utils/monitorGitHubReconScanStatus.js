@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorGitHubReconScanStatus = async (
   activeTarget,
   setGitHubReconScans,
@@ -42,7 +43,7 @@ const monitorGitHubReconScanStatus = async (
 
       if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running') {
         setIsGitHubReconScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorGitHubReconScanStatus(
             activeTarget,
             setGitHubReconScans,

@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorShodanCompanyScanStatus = async (
   activeTarget,
   setShodanCompanyScans,
@@ -42,7 +43,7 @@ const monitorShodanCompanyScanStatus = async (
 
       if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running') {
         setIsShodanCompanyScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorShodanCompanyScanStatus(
             activeTarget,
             setShodanCompanyScans,

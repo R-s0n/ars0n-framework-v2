@@ -175,6 +175,16 @@ const getResponseBody = (targetURL) => {
   return '';
 };
 
+// G1.3: resolve a screenshot to a renderable src without shipping base64 inline. Prefers an
+// inline base64 blob if present (back-compat), otherwise points at the on-demand endpoint when
+// the list flagged has_screenshot. The ROI list fetch now drops screenshots, so this is the
+// has_screenshot path in practice.
+const getScreenshotSrc = (targetURL) => {
+  if (targetURL.screenshot) return `data:image/png;base64,${targetURL.screenshot}`;
+  if (targetURL.has_screenshot && targetURL.id) return `/api/api/target-urls/${targetURL.id}/screenshot`;
+  return null;
+};
+
 const getHeaderValue = (headers, name) => {
   if (!headers) return null;
   for (const key of Object.keys(headers)) {
@@ -658,9 +668,10 @@ const TargetSection = memo(({ targetURL, roiScore, breakdown, onDelete, onAddAsS
   const { truncatedResponse, httpHeaders, title, webServer, technologies, katanaCount, ffufCount } = processedData;
 
   const priority = getPriorityLevel(roiScore);
+  const screenshotSrc = getScreenshotSrc(targetURL);
 
   const scanCoverage = [
-    { label: 'Screenshot', available: !!targetURL.screenshot, icon: 'bi-camera' },
+    { label: 'Screenshot', available: !!screenshotSrc, icon: 'bi-camera' },
     { label: 'Tech Scan', available: !!(httpHeaders && Object.keys(httpHeaders).length > 0), icon: 'bi-cpu' },
     { label: 'SSL Scan', available: !!(targetURL.has_deprecated_tls !== undefined), icon: 'bi-shield-check' },
     { label: 'Katana', available: katanaCount > 0, icon: 'bi-diagram-3' },
@@ -822,12 +833,13 @@ const TargetSection = memo(({ targetURL, roiScore, breakdown, onDelete, onAddAsS
         </Col>
 
         <Col md={4} className="d-flex flex-column gap-2">
-          {targetURL.screenshot ? (
+          {screenshotSrc ? (
             <Card className="bg-dark border-danger flex-grow-1">
               <Card.Body className="p-2 d-flex align-items-center justify-content-center">
                 <OverlayTrigger placement="top" overlay={<Tooltip>Click to view full size</Tooltip>}>
                   <img
-                    src={`data:image/png;base64,${targetURL.screenshot}`}
+                    src={screenshotSrc}
+                    loading="lazy"
                     alt="Target Screenshot"
                     className="img-fluid"
                     onClick={() => setShowLightbox(true)}
@@ -1008,7 +1020,7 @@ const TargetSection = memo(({ targetURL, roiScore, breakdown, onDelete, onAddAsS
         </Col>
       </Row>
 
-      {showLightbox && targetURL.screenshot && (
+      {showLightbox && screenshotSrc && (
         <div
           style={{
             position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
@@ -1036,7 +1048,7 @@ const TargetSection = memo(({ targetURL, roiScore, breakdown, onDelete, onAddAsS
               ×
             </button>
             <img
-              src={`data:image/png;base64,${targetURL.screenshot}`}
+              src={screenshotSrc}
               alt="Target Screenshot - Full Size"
               style={{
                 maxWidth: '100%', maxHeight: '95vh', objectFit: 'contain',
@@ -1130,22 +1142,47 @@ const ROIReport = memo(({ show, onHide, targetURLs = [], setTargetURLs, fetchSco
     }
   };
 
-  const sortedTargets = useMemo(() => {
-    if (show && Array.isArray(safeTargetURLs) && safeTargetURLs.length > 0) {
-      return [...safeTargetURLs]
-        .map(target => {
-          const { score, breakdown } = calculateROIScore(target);
-          return { ...target, _score: score, _breakdown: breakdown };
-        })
-        .sort((a, b) => b._score - a._score);
-    }
-    return [];
-  }, [show, safeTargetURLs]);
+  // G1.12: score + sort without freezing the main thread. calculateROIScore runs ~40 regexes per
+  // target; doing all of them synchronously (the old useMemo) blocked the UI for seconds at 10k.
+  // Instead we score in small chunks and yield to the browser between chunks, so the modal and its
+  // spinner stay responsive. Cancelable — a close or a target/data change abandons an in-flight
+  // pass. (A web worker / server-side scoring would take it fully off-thread; deferred to avoid a
+  // risky scoring-logic extraction. The latter also unblocks G1.3's DB roi_score.)
+  const [sortedTargets, setSortedTargets] = useState([]);
 
   useEffect(() => {
-    if (show && Array.isArray(safeTargetURLs) && safeTargetURLs.length > 0) {
-      setIsLoading(false);
+    if (!show || !Array.isArray(safeTargetURLs) || safeTargetURLs.length === 0) {
+      setSortedTargets([]);
+      return undefined;
     }
+
+    let cancelled = false;
+    const scored = [];
+    const CHUNK_SIZE = 200;
+
+    const scoreInChunks = async () => {
+      for (let i = 0; i < safeTargetURLs.length; i += CHUNK_SIZE) {
+        if (cancelled) return;
+        const end = Math.min(i + CHUNK_SIZE, safeTargetURLs.length);
+        for (let j = i; j < end; j++) {
+          const target = safeTargetURLs[j];
+          const { score, breakdown } = calculateROIScore(target);
+          scored.push({ ...target, _score: score, _breakdown: breakdown });
+        }
+        // Let the browser paint between chunks so there's no long blocking task.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      if (cancelled) return;
+      scored.sort((a, b) => b._score - a._score);
+      setSortedTargets(scored);
+      setIsLoading(false);
+    };
+
+    scoreInChunks();
+
+    return () => {
+      cancelled = true;
+    };
   }, [show, safeTargetURLs]);
 
   const totalPages = Math.ceil(sortedTargets.length / itemsPerPage);

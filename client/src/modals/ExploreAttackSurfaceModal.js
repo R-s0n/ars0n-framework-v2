@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Modal, Button, Form, Table, Badge, Row, Col, Alert, Nav, InputGroup, Spinner } from 'react-bootstrap';
+import { Modal, Button, Form, Badge, Row, Col, Alert, Nav, InputGroup, Spinner } from 'react-bootstrap';
 import fetchAttackSurfaceAssets from '../utils/fetchAttackSurfaceAssets';
+import VirtualizedTable from '../components/VirtualizedTable';
+import useDebounce from '../hooks/useDebounce';
 
 const ExploreAttackSurfaceModal = ({ 
   show, 
@@ -15,6 +17,9 @@ const ExploreAttackSurfaceModal = ({
   const [sortDirection, setSortDirection] = useState('asc');
   const [activeTab, setActiveTab] = useState('asn');
   const [filters, setFilters] = useState([{ searchTerm: '', isNegative: false }]);
+  // G1.10: debounce filters so the asset filter/sort only re-runs ~250ms after the last
+  // keystroke; the filter inputs stay bound to the immediate `filters` state.
+  const debouncedFilters = useDebounce(filters, 250);
   const [isPopulatingBurpsuite, setIsPopulatingBurpsuite] = useState(false);
 
   const assetTypes = [
@@ -34,7 +39,7 @@ const ExploreAttackSurfaceModal = ({
 
   useEffect(() => {
     applyFiltersAndSort();
-  }, [attackSurfaceAssets, filters, sortColumn, sortDirection, activeTab]);
+  }, [attackSurfaceAssets, debouncedFilters, sortColumn, sortDirection, activeTab]);
 
   const loadAttackSurfaceAssets = async () => {
     if (!activeTarget) return;
@@ -66,7 +71,7 @@ const ExploreAttackSurfaceModal = ({
 
     filtered = filtered.filter(asset => asset.asset_type === activeTab);
 
-    const activeFilters = filters.filter(filter => filter.searchTerm.trim() !== '');
+    const activeFilters = debouncedFilters.filter(filter => filter.searchTerm.trim() !== '');
     
     if (activeFilters.length > 0) {
       filtered = filtered.filter(asset => {
@@ -1003,34 +1008,19 @@ const ExploreAttackSurfaceModal = ({
                 {renderFiltersForTab()}
               </div>
 
-              <div className="table-responsive" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
-                <Table striped bordered hover variant="dark" responsive>
-                  <thead>
-                    <tr>
-                      {renderTableHeaders().map((header) => (
-                        <th 
-                          key={header.key}
-                          style={{ cursor: header.sortable ? 'pointer' : 'default', userSelect: 'none' }}
-                          onClick={header.sortable ? () => handleSort(header.key) : undefined}
-                        >
-                          {header.label} {header.sortable && renderSortIcon(header.key)}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredAssets.map((asset) => (
-                      <tr key={asset.id}>
-                        {renderTableHeaders().map((header) => (
-                          <td key={header.key}>
-                            {renderTableCell(asset, header.key)}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </Table>
-              </div>
+              {/* G1.6: virtualized so only the rows near the viewport mount — the DOM stays
+                  constant whether there are 10 assets or 10k. Columns are flex-weighted (this is
+                  a flex "table", not a <table>), so widths are even rather than content-sized. */}
+              <VirtualizedTable
+                columns={renderTableHeaders()}
+                rows={filteredAssets}
+                renderCell={renderTableCell}
+                onSort={handleSort}
+                renderSortIcon={renderSortIcon}
+                getRowKey={(asset) => asset.id}
+                height="60vh"
+                className="border border-secondary rounded"
+              />
 
               {filteredAssets.length === 0 && !loading && (
                 <div className="text-center py-4">

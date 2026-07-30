@@ -1,11 +1,22 @@
-import { useState, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { Modal, Button, Badge } from 'react-bootstrap';
 import { MdZoomOutMap, MdCloseFullscreen } from 'react-icons/md';
+import VirtualizedList from '../components/VirtualizedList';
+import useTargetURLs from '../hooks/useTargetURLs';
 
 // Add helper function to handle NullString values
 const getNullStringValue = (field) => {
   if (!field) return null;
   return field.String || null;
+};
+
+// G1.4: resolve a screenshot to a renderable src without shipping base64 inline. Prefers an
+// inline base64 blob if one is present (back-compat with the full payload), otherwise points at
+// the on-demand endpoint when the lean list flagged has_screenshot.
+const getScreenshotSrc = (item) => {
+  if (item.screenshot) return `data:image/png;base64,${item.screenshot}`;
+  if (item.has_screenshot && item.id) return `/api/api/target-urls/${item.id}/screenshot`;
+  return null;
 };
 
 const ScreenshotResultsModal = ({
@@ -14,39 +25,26 @@ const ScreenshotResultsModal = ({
   activeTarget,
   onPopulateBurp
 }) => {
-  const [targetURLs, setTargetURLs] = useState([]);
   const [expandedIndex, setExpandedIndex] = useState(null);
   const [copySuccess, setCopySuccess] = useState(false);
 
-  useEffect(() => {
-    const fetchTargetURLs = async () => {
-      if (!activeTarget) return;
-      
-      try {
-        const response = await fetch(
-          `/api/api/scope-targets/${activeTarget.id}/target-urls`
-        );
-        if (!response.ok) {
-          throw new Error('Failed to fetch target URLs');
-        }
-        const data = await response.json();
-        const safeData = data || [];
-        const sortedData = safeData.sort((a, b) => {
-          if (!a.status_code && !b.status_code) return 0;
-          if (!a.status_code) return 1;
-          if (!b.status_code) return -1;
-          return a.status_code - b.status_code;
-        });
-        setTargetURLs(sortedData);
-      } catch (error) {
-        console.error('Error fetching target URLs:', error);
-      }
-    };
+  // G1.7: react-query loads the lean list (id/url/status/server/tech/title + has_screenshot);
+  // images are lazy-loaded per row. Keyed to the active target with cancel-on-switch + caching.
+  const { data: rawTargetURLs = [] } = useTargetURLs(activeTarget?.id, {
+    projection: 'lean',
+    enabled: showScreenshotResultsModal,
+  });
 
-    if (showScreenshotResultsModal) {
-      fetchTargetURLs();
-    }
-  }, [showScreenshotResultsModal, activeTarget]);
+  const targetURLs = useMemo(
+    () =>
+      [...rawTargetURLs].sort((a, b) => {
+        if (!a.status_code && !b.status_code) return 0;
+        if (!a.status_code) return 1;
+        if (!b.status_code) return -1;
+        return a.status_code - b.status_code;
+      }),
+    [rawTargetURLs]
+  );
 
   const handleExpand = (index) => {
     setExpandedIndex(expandedIndex === index ? null : index);
@@ -107,9 +105,13 @@ const ScreenshotResultsModal = ({
             </Button>
           </div>
         )}
-        <div className="screenshot-list">
-          {targetURLs.map((targetURL, index) => (
-            <div key={index} className="screenshot-item mb-4">
+        <VirtualizedList
+          items={targetURLs}
+          height="65vh"
+          estimatedItemSize={240}
+          itemKey={(item, index) => item.id || index}
+          renderItem={(targetURL, index) => (
+            <div className="screenshot-item pb-4">
               <div className="d-flex flex-column mb-2">
                 <div className="d-flex justify-content-between align-items-center">
                   <h6 className="text-white mb-0 text-break flex-grow-1">
@@ -167,9 +169,9 @@ const ScreenshotResultsModal = ({
                   )}
                 </div>
               </div>
-              {targetURL.screenshot && (
-                <div 
-                  style={{ 
+              {getScreenshotSrc(targetURL) && (
+                <div
+                  style={{
                     height: expandedIndex === index ? '500px' : '150px',
                     overflow: 'hidden',
                     border: '1px solid #333',
@@ -177,11 +179,11 @@ const ScreenshotResultsModal = ({
                     transition: 'height 0.3s ease-in-out'
                   }}
                 >
-                  {console.log('[DEBUG] Screenshot data:', targetURL.screenshot)}
-                  <img 
-                    src={`data:image/png;base64,${targetURL.screenshot}`} 
+                  <img
+                    src={getScreenshotSrc(targetURL)}
+                    loading="lazy"
                     alt={`Screenshot of ${targetURL.url}`}
-                    style={{ 
+                    style={{
                       width: '100%',
                       height: expandedIndex === index ? '500px' : '150px',
                       objectFit: 'contain',
@@ -192,8 +194,8 @@ const ScreenshotResultsModal = ({
                 </div>
               )}
             </div>
-          ))}
-        </div>
+          )}
+        />
       </Modal.Body>
       <Modal.Footer>
         <Button variant="outline-danger" onClick={handleCloseScreenshotResultsModal}>

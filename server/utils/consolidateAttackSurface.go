@@ -3432,6 +3432,64 @@ func fetchAssetRelationships(assetID string) ([]AssetRelationship, error) {
 	return relationships, nil
 }
 
+// fetchAssetRelationshipsBatch fetches relationships for many assets in a single query, avoiding
+// the N+1 of calling fetchAssetRelationships once per asset (G1.13 — was 1 + N queries, i.e.
+// 10k+1 at scale). It returns a map keyed by asset ID; each relationship is attached to BOTH its
+// parent and child asset, mirroring the per-asset query (which matched rows where the asset is
+// parent OR child).
+func fetchAssetRelationshipsBatch(assetIDs []string) (map[string][]AssetRelationship, error) {
+	result := make(map[string][]AssetRelationship)
+	if len(assetIDs) == 0 {
+		return result, nil
+	}
+
+	query := `
+		SELECT
+			id, parent_asset_id, child_asset_id, relationship_type,
+			relationship_data, created_at
+		FROM consolidated_attack_surface_relationships
+		WHERE parent_asset_id = ANY($1::uuid[]) OR child_asset_id = ANY($1::uuid[])
+		ORDER BY relationship_type
+	`
+
+	rows, err := dbPool.Query(context.Background(), query, assetIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Only attach to assets we were asked about (matches the per-asset query's scope).
+	wanted := make(map[string]bool, len(assetIDs))
+	for _, id := range assetIDs {
+		wanted[id] = true
+	}
+
+	for rows.Next() {
+		var rel AssetRelationship
+		var relationshipData []byte
+
+		if err := rows.Scan(
+			&rel.ID, &rel.ParentAssetID, &rel.ChildAssetID, &rel.RelationshipType,
+			&relationshipData, &rel.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+
+		if len(relationshipData) > 0 {
+			json.Unmarshal(relationshipData, &rel.RelationshipData)
+		}
+
+		if wanted[rel.ParentAssetID] {
+			result[rel.ParentAssetID] = append(result[rel.ParentAssetID], rel)
+		}
+		if rel.ChildAssetID != rel.ParentAssetID && wanted[rel.ChildAssetID] {
+			result[rel.ChildAssetID] = append(result[rel.ChildAssetID], rel)
+		}
+	}
+
+	return result, rows.Err()
+}
+
 func GetAttackSurfaceAssets(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	scopeTargetID := vars["scope_target_id"]
@@ -3447,13 +3505,17 @@ func GetAttackSurfaceAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// G1.13: fetch all relationships in ONE batched query instead of one per asset (was 1 + N).
+	assetIDs := make([]string, len(assets))
 	for i := range assets {
-		relationships, err := fetchAssetRelationships(assets[i].ID)
-		if err != nil {
-			log.Printf("Error fetching relationships for asset %s: %v", assets[i].ID, err)
-			continue
+		assetIDs[i] = assets[i].ID
+	}
+	if relationshipsByAsset, err := fetchAssetRelationshipsBatch(assetIDs); err != nil {
+		log.Printf("Error fetching asset relationships in batch: %v", err)
+	} else {
+		for i := range assets {
+			assets[i].Relationships = relationshipsByAsset[assets[i].ID]
 		}
-		assets[i].Relationships = relationships
 	}
 
 	w.Header().Set("Content-Type", "application/json")

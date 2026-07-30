@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorNucleiScanStatus = async (
   scanId,
   setIsNucleiScanning,
@@ -47,13 +48,13 @@ const monitorNucleiScanStatus = async (
 
       // Continue monitoring if scan is still running
       // Check again after 3 seconds (increased from 1 second to reduce server load)
-      setTimeout(checkStatus, 3000);
+      pollTimeout(checkStatus, 3000);
 
     } catch (error) {
       console.error('Error monitoring Nuclei scan status:', error);
       
       // Retry after 5 seconds on error (increased from 2 seconds)
-      setTimeout(checkStatus, 5000);
+      pollTimeout(checkStatus, 5000);
     }
   };
 

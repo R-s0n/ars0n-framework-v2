@@ -164,6 +164,8 @@ func main() {
 	r.HandleFunc("/scopetarget/{id}/scans/investigate", utils.GetInvestigateScansForScopeTarget).Methods("GET", "OPTIONS")
 	r.HandleFunc("/api/target-urls/{id}/roi-score", utils.UpdateTargetURLROIScore).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/api/target-urls/{id}", utils.DeleteTargetURL).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/api/target-urls/{id}/screenshot", utils.GetTargetURLScreenshot).Methods("GET", "OPTIONS")
+	r.HandleFunc("/api/target-urls/{id}", utils.GetTargetURLByID).Methods("GET", "OPTIONS")
 	r.HandleFunc("/user/settings", getUserSettings).Methods("GET", "OPTIONS")
 	r.HandleFunc("/user/settings", updateUserSettings).Methods("POST", "OPTIONS")
 	r.HandleFunc("/api/export-data", utils.HandleExportData).Methods("POST", "OPTIONS")

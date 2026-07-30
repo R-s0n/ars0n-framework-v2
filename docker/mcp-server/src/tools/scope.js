@@ -1,7 +1,7 @@
 const { z } = require('zod');
 const { apiPost, apiGet, apiPut, apiDelete } = require('../api');
 const { query } = require('../db');
-const { limitResults } = require('../utils/truncate');
+const { limitResults, trimScanRecords } = require('../utils/truncate');
 
 // === Add Scope Target ===
 const addTargetSchema = z.object({
@@ -45,8 +45,10 @@ const getTargetScansSchema = z.object({
 });
 
 async function getTargetScans(params) {
+  // Trim the inline raw scan output — this endpoint returns every scan's full result and can be
+  // hundreds of KB, which overflows the model context.
   const result = await apiGet(`/scopetarget/${params.target_id}/scans`);
-  return result;
+  return trimScanRecords(result);
 }
 
 // === Update ROI Score ===

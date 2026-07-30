@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorKatanaURLScanStatus = async (
   activeTarget,
   setKatanaURLScans,
@@ -119,11 +120,11 @@ export const monitorActiveScan = async (
         console.error('Katana URL scan failed:', scanStatus.error);
         return scanStatus;
       } else if (scanStatus.status === 'pending' || scanStatus.status === 'running') {
-        setTimeout(poll, 1000);
+        pollTimeout(poll, 1000);
       }
     } catch (error) {
       console.error('Error monitoring Katana URL scan:', error);
-      setTimeout(poll, 2000);
+      pollTimeout(poll, 2000);
     }
   };
   

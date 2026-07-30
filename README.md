@@ -8,6 +8,7 @@ Ars0n Framework v2
   <a href="#updating">Updating</a> •
   <a href="#getting-started">Getting Started</a> •
   <a href="#workflows">Workflows</a> •
+  <a href="#mcp-server-ai-assistant-integration">MCP Server</a> •
   <a href="#troubleshooting">Troubleshooting</a> •
   <a href="#frequently-asked-questions">FAQs</a> •
   <a href="https://www.youtube.com/@rs0n_live" target=”_blank”>YouTube</a> •
@@ -419,6 +420,65 @@ Each module follows the proven "Discover → Understand → Test → Validate" a
 **Real-World Application:** By using actual targets instead of synthetic labs, students learn to navigate real-world challenges like WAFs, rate limiting, and complex application logic - preparing them for successful bug bounty hunting careers.
 
 **Current Alternative:** While the URL workflow is in development, students can use the Wildcard workflow to discover targets, then apply manual testing techniques learned through external resources.
+
+## MCP Server (AI Assistant Integration)
+
+The framework ships with a **Model Context Protocol (MCP) server** that exposes its data and scan controls to AI assistants (Claude Desktop, Claude Code, Cursor, and other MCP-capable clients). With it connected, you can ask an assistant to run recon workflows, query discovered subdomains/URLs/findings, and triage attack surface in natural language.
+
+### What it exposes
+
+The server registers **50 tools** across five categories:
+
+- **Scope management** — list/add/activate/delete scope targets, update ROI scores
+- **Scan execution** — run any individual tool (amass, subfinder, httpx, nuclei, katana, ffuf, arjun, etc.) and check status
+- **Workflows** — run the full Company / Wildcard / URL workflows or individual phases
+- **Recon data queries** — subdomains, company domains, network ranges, live servers, target URLs, endpoints, parameters, DNS records, technologies, Nuclei findings, attack surface
+- **Bug bounty analysis** — subdomain-takeover candidates, exposed panels, API endpoints, sensitive files, interesting responses, cross-target search, scan diffing
+
+### Connecting
+
+The MCP server **starts automatically** with `docker-compose up` and listens on **port 3001** using the SSE transport:
+
+- SSE endpoint: `http://localhost:3001/sse`
+- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.0.0","tools":50}`
+
+Verify it's up:
+```bash
+curl http://localhost:3001/health
+```
+
+Most clients that support **remote SSE MCP servers** can point directly at the SSE endpoint. For stdio-only clients (e.g. Claude Desktop), bridge to it with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote):
+
+```json
+{
+  "mcpServers": {
+    "ars0n-framework": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:3001/sse"]
+    }
+  }
+}
+```
+
+Claude Code (CLI):
+```bash
+claude mcp add --transport sse ars0n-framework http://localhost:3001/sse
+```
+
+### Authentication (optional but recommended for shared/remote hosts)
+
+By default the MCP server is **unauthenticated** — anyone who can reach port 3001 can run scans and delete targets, so only expose it on trusted networks. To require a token, set `MCP_AUTH_TOKEN` in the `mcp-server` service environment in `docker-compose.yml`:
+
+```yaml
+  mcp-server:
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/ars0n
+      MCP_PORT: "3001"
+      API_URL: http://api:8443
+      MCP_AUTH_TOKEN: "your-secret-token"   # add this
+```
+
+Then supply the token from the client as `Authorization: Bearer your-secret-token` or as a `?token=your-secret-token` query parameter on the SSE URL (e.g. `http://localhost:3001/sse?token=your-secret-token`). The startup logs print a warning whenever no token is set.
 
 ## Remote Access
 

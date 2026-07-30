@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 export const monitorActiveScan = async (
   scanId,
   setIsGoSpiderURLScanning,
@@ -16,7 +17,7 @@ export const monitorActiveScan = async (
     console.log('[GOSPIDER-URL] Scan status:', scanStatus.status);
 
     if (scanStatus.status === 'running' || scanStatus.status === 'pending') {
-      setTimeout(
+      pollTimeout(
         () =>
           monitorActiveScan(
             scanId,
@@ -71,7 +72,7 @@ const monitorGoSpiderURLScanStatus = async (
 
       if (mostRecentScan.status === 'running' || mostRecentScan.status === 'pending') {
         setIsGoSpiderURLScanning(true);
-        setTimeout(
+        pollTimeout(
           () =>
             monitorGoSpiderURLScanStatus(
               activeTarget,

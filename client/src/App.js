@@ -1,4 +1,8 @@
-import { useState, useEffect, useRef, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import useTargetURLs, { targetURLsKey } from './hooks/useTargetURLs.js';
+import { cancelAllScanPolls } from './utils/scanPolling.js';
+import { getHttpxResultsCount, calculateEstimatedScanTime } from './utils/scanMetrics.js';
 import AddScopeTargetModal from './modals/addScopeTargetModal.js';
 import SelectActiveScopeTargetModal from './modals/selectActiveScopeTargetModal.js';
 import { DNSRecordsModal, SubdomainsModal, CloudDomainsModal, InfrastructureMapModal } from './modals/amassModals.js';
@@ -223,164 +227,6 @@ const HelpMeLearn = ({ section }) => (
     <HelpMeLearnLazy section={section} />
   </Suspense>
 );
-
-// Add helper function
-const getHttpxResultsCount = (scan) => {
-  if (!scan?.result?.String) return 0;
-  return scan.result.String.split('\n').filter(line => line.trim()).length;
-};
-
-// Add helper function to get network ranges count for Amass Intel
-const getAmassIntelNetworkRangesCount = (networkRanges) => {
-  return networkRanges.reduce((count, range) => count + 1, 0);
-};
-
-// Add helper function to get network ranges count for Metabigor
-const getMetabigorNetworkRangesCount = (networkRanges) => {
-  return networkRanges.reduce((count, range) => count + 1, 0);
-};
-
-// Calculate estimated IP/Port scan time based on network ranges
-const calculateEstimatedScanTime = (networkRanges) => {
-  // Calculate total IPs from all CIDR blocks
-  const totalIPs = networkRanges.reduce((total, range) => {
-    const cidr = range.cidr_block || range.cidr;
-    const [, prefix] = cidr.split('/');
-    const prefixLength = parseInt(prefix);
-    const ipCount = Math.pow(2, 32 - prefixLength);
-    return total + ipCount;
-  }, 0);
-
-  // Estimate 1000 IPs per minute (conservative estimate for Naabu)
-  const estimatedMinutes = Math.ceil(totalIPs / 1000);
-  const estimatedSeconds = estimatedMinutes * 60;
-
-  // Format the time nicely
-  if (estimatedSeconds < 60) {
-    return `${estimatedSeconds}s`;
-  } else if (estimatedSeconds < 3600) {
-    const minutes = Math.round(estimatedSeconds / 60);
-    return `${minutes}m`;
-  } else if (estimatedSeconds < 86400) {
-    const hours = Math.round(estimatedSeconds / 3600);
-    return `${hours}h`;
-  } else {
-    const days = Math.round(estimatedSeconds / 86400);
-    return `${days}d`;
-  }
-};
-
-
-
-// Add this function before the App component
-const calculateROIScore = (targetURL) => {
-  let score = 50;
-  
-  const sslIssues = [
-    targetURL.has_deprecated_tls,
-    targetURL.has_expired_ssl,
-    targetURL.has_mismatched_ssl,
-    targetURL.has_revoked_ssl,
-    targetURL.has_self_signed_ssl,
-    targetURL.has_untrusted_root_ssl
-  ].filter(Boolean).length;
-  
-  if (sslIssues > 0) {
-    score += sslIssues * 25;
-  }
-  
-  let katanaCount = 0;
-  if (targetURL.katana_results) {
-    if (Array.isArray(targetURL.katana_results)) {
-      katanaCount = targetURL.katana_results.length;
-    } else if (typeof targetURL.katana_results === 'string') {
-      if (targetURL.katana_results.startsWith('[') || targetURL.katana_results.startsWith('{')) {
-        try {
-          const parsed = JSON.parse(targetURL.katana_results);
-          katanaCount = Array.isArray(parsed) ? parsed.length : 1;
-        } catch {
-          katanaCount = targetURL.katana_results.split('\n').filter(line => line.trim()).length;
-        }
-      } else {
-        katanaCount = targetURL.katana_results.split('\n').filter(line => line.trim()).length;
-      }
-    }
-  }
-
-  if (katanaCount > 0) {
-    score += katanaCount;
-  }
-
-  let ffufCount = 0;
-  if (targetURL.ffuf_results) {
-    if (typeof targetURL.ffuf_results === 'object') {
-      ffufCount = targetURL.ffuf_results.endpoints?.length || Object.keys(targetURL.ffuf_results).length || 0;
-    } else if (typeof targetURL.ffuf_results === 'string') {
-      try {
-        const parsed = JSON.parse(targetURL.ffuf_results);
-        ffufCount = parsed.endpoints?.length || Object.keys(parsed).length || 0;
-      } catch {
-        ffufCount = targetURL.ffuf_results.split('\n').filter(line => line.trim()).length;
-      }
-    }
-  }
-  
-  if (ffufCount > 3) {
-    const extraEndpoints = ffufCount - 3;
-    const fuzzPoints = Math.min(15, extraEndpoints * 3);
-    score += fuzzPoints;
-  }
-  
-  const techCount = targetURL.technologies?.length || 0;
-  if (techCount > 0) {
-    score += techCount * 3;
-  }
-  
-  if (targetURL.status_code === 200 && katanaCount > 10) {
-    try {
-      let headers = null;
-      if (typeof targetURL.http_response_headers === 'string' && targetURL.http_response_headers.trim()) {
-        headers = JSON.parse(targetURL.http_response_headers);
-      } else if (typeof targetURL.http_response_headers === 'object') {
-        headers = targetURL.http_response_headers;
-      }
-      
-      if (headers) {
-        const hasCSP = Object.keys(headers).some(header => 
-          header.toLowerCase() === 'content-security-policy'
-        );
-        
-        if (!hasCSP) {
-          score += 10;
-        }
-      }
-    } catch (error) {
-    }
-  }
-  
-  try {
-    let headers = null;
-    if (typeof targetURL.http_response_headers === 'string' && targetURL.http_response_headers.trim()) {
-      headers = JSON.parse(targetURL.http_response_headers);
-    } else if (typeof targetURL.http_response_headers === 'object') {
-      headers = targetURL.http_response_headers;
-    }
-    
-    if (headers) {
-      const hasCachingHeaders = Object.keys(headers).some(header => {
-        const headerLower = header.toLowerCase();
-        return ['cache-control', 'etag', 'expires', 'vary'].includes(headerLower);
-      });
-      
-      if (hasCachingHeaders) {
-        score += 10;
-      }
-    }
-  } catch (error) {
-  }
-  
-  return Math.max(0, Math.round(score));
-};
 
 function App() {
   const [showScanHistoryModal, setShowScanHistoryModal] = useState(false);
@@ -632,6 +478,74 @@ function App() {
   const [isMetaDataScanning, setIsMetaDataScanning] = useState(false);
   const [showMetaDataModal, setShowMetaDataModal] = useState(false);
   const [showConfigureMetaDataModal, setShowConfigureMetaDataModal] = useState(false);
+
+  // G1.7: react-query backs the heavy target-urls reads (Metadata / ROI / Metadata-config). Each
+  // query is enabled only while its modal is open and is keyed to the active target, so switching
+  // targets cancels the in-flight request (no stale overwrites), concurrent callers de-dup, and
+  // reopening is cache-fast. Results are mirrored into the shared `targetURLs` state the modals
+  // already consume, so the modals stay unchanged. Optimistic edits (delete / scan-complete) go
+  // through the wrapped setters below so the cache stays in sync with the mirror.
+  const queryClient = useQueryClient();
+
+  const configureMetaDataQuery = useTargetURLs(activeTarget?.id, {
+    projection: 'lean',
+    enabled: showConfigureMetaDataModal,
+  });
+  const metaDataQuery = useTargetURLs(activeTarget?.id, {
+    projection: 'meta',
+    enabled: showMetaDataModal,
+  });
+  const roiReportQuery = useTargetURLs(activeTarget?.id, {
+    projection: 'no-screenshot',
+    enabled: showROIReport,
+  });
+
+  useEffect(() => {
+    if (showConfigureMetaDataModal && configureMetaDataQuery.data) {
+      setTargetURLs(configureMetaDataQuery.data);
+    }
+  }, [showConfigureMetaDataModal, configureMetaDataQuery.data]);
+
+  useEffect(() => {
+    if (showMetaDataModal && metaDataQuery.data) {
+      setTargetURLs(metaDataQuery.data);
+    }
+  }, [showMetaDataModal, metaDataQuery.data]);
+
+  useEffect(() => {
+    if (showROIReport && roiReportQuery.data) {
+      setTargetURLs(roiReportQuery.data);
+    }
+  }, [showROIReport, roiReportQuery.data]);
+
+  // Wrapped setters for the modals that edit the list optimistically (delete a row, or the
+  // scan-complete refresh): update the shared mirror AND the matching react-query cache entry so
+  // reopening the screen doesn't resurrect a just-deleted row from a stale cache.
+  const setMetaDataTargetURLs = useCallback((value) => {
+    setTargetURLs(value);
+    if (activeTarget?.id) {
+      queryClient.setQueryData(targetURLsKey(activeTarget.id, 'meta'), value);
+    }
+  }, [activeTarget, queryClient]);
+
+  const setRoiTargetURLs = useCallback((value) => {
+    setTargetURLs(value);
+    if (activeTarget?.id) {
+      queryClient.setQueryData(targetURLsKey(activeTarget.id, 'no-screenshot'), value);
+    }
+  }, [activeTarget, queryClient]);
+
+  // G1.9: cancel every scheduled scan poll when the active target changes (or on unmount). React
+  // runs all effect cleanups before any setups in a commit, so this fires before the monitor
+  // effects below restart polling for the new target — the previous target's recursive
+  // setTimeout chains (now routed through the cancelable pollTimeout) stop instead of leaking and
+  // racing. This bounds the live-timer count regardless of how many times the user switches.
+  useEffect(() => {
+    return () => {
+      cancelAllScanPolls();
+    };
+  }, [activeTarget]);
+
   const [metaDataScanConfigs, setMetaDataScanConfigs] = useState({});
   const [companyMetaDataScans, setCompanyMetaDataScans] = useState([]);
   const [mostRecentCompanyMetaDataScanStatus, setMostRecentCompanyMetaDataScanStatus] = useState(null);
@@ -773,22 +687,9 @@ function App() {
   const handleCloseUniqueSubdomainsModal = () => setShowUniqueSubdomainsModal(false);
   const handleCloseMetaDataModal = () => setShowMetaDataModal(false);
   
-  const handleOpenConfigureMetaDataModal = async () => {
+  const handleOpenConfigureMetaDataModal = () => {
+    // G1.7: target-urls are loaded by configureMetaDataQuery (enabled on open), not fetched here.
     setShowConfigureMetaDataModal(true);
-    
-    try {
-      const response = await fetch(
-        `/api/api/scope-targets/${activeTarget.id}/target-urls`
-      );
-      if (!response.ok) {
-        throw new Error('Failed to fetch target URLs');
-      }
-      const data = await response.json();
-      const safeData = data || [];
-      setTargetURLs(safeData);
-    } catch (error) {
-      console.error('Error fetching target URLs:', error);
-    }
   };
   
   const handleCloseConfigureMetaDataModal = () => setShowConfigureMetaDataModal(false);
@@ -1351,9 +1252,8 @@ function App() {
       fetchConsolidatedCompanyDomains(activeTarget, setConsolidatedCompanyDomains, setConsolidatedCompanyDomainsCount);
       fetchConsolidatedNetworkRanges(activeTarget, setConsolidatedNetworkRanges, setConsolidatedNetworkRangesCount);
       fetchAttackSurfaceAssetCounts(activeTarget, setAttackSurfaceASNsCount, setAttackSurfaceNetworkRangesCount, setAttackSurfaceIPAddressesCount, setAttackSurfaceLiveWebServersCount, setAttackSurfaceCloudAssetsCount, setAttackSurfaceFQDNsCount);
-      loadAmassEnumConfig();
-      loadAmassIntelConfig();
-      loadDNSxConfig();
+      // G1.8: AmassEnum/Intel/DNSx config already load via their own dedicated
+      // [activeTarget?.id] effects above; the duplicate calls here were removed (storm cut).
       fetchGoogleDorkingDomains();
       fetchReverseWhoisDomains();
       fetchIPPortScans(activeTarget, setIPPortScans, setMostRecentIPPortScan, setMostRecentIPPortScanStatus);
@@ -3876,18 +3776,8 @@ function App() {
     }
   }, [activeTarget]);
 
-  useEffect(() => {
-    if (activeTarget) {
-      monitorMetabigorCompanyScanStatus(
-        activeTarget,
-        setMetabigorCompanyScans,
-        setMostRecentMetabigorCompanyScan,
-        setIsMetabigorCompanyScanning,
-        setMostRecentMetabigorCompanyScanStatus,
-        setMetabigorNetworkRanges
-      );
-    }
-  }, [activeTarget]);
+  // G1.8: removed a duplicate Metabigor company monitor effect here — it was identical to the
+  // one in the main monitor cluster above and doubled Metabigor polling on every target switch.
 
   const handleCloseScreenshotResultsModal = () => setShowScreenshotResultsModal(false);
   const handleOpenScreenshotResultsModal = () => setShowScreenshotResultsModal(true);
@@ -4002,40 +3892,16 @@ function App() {
     }
   }, [activeTarget]);
 
-  const handleOpenMetaDataModal = async () => {
+  const handleOpenMetaDataModal = () => {
+    // G1.7: target-urls are loaded by metaDataQuery (projection 'meta' — no screenshot/body),
+    // enabled on open. Cancel-on-switch + caching are handled by react-query.
     setShowMetaDataModal(true);
-    
-    try {
-      const response = await fetch(
-        `/api/api/scope-targets/${activeTarget.id}/target-urls`
-      );
-      if (!response.ok) {
-        throw new Error('Failed to fetch target URLs');
-      }
-      const data = await response.json();
-      const safeData = data || [];
-      setTargetURLs(safeData);
-    } catch (error) {
-      console.error('Error fetching target URLs:', error);
-    }
   };
 
-  const handleOpenROIReport = async () => {
+  const handleOpenROIReport = () => {
+    // G1.7: target-urls are loaded by roiReportQuery (projection 'no-screenshot' — keeps the
+    // HTTP body for client-side scoring, drops base64 screenshots), enabled on open.
     setShowROIReport(true);
-    
-    try {
-      const response = await fetch(
-        `/api/api/scope-targets/${activeTarget.id}/target-urls`
-      );
-      if (!response.ok) {
-        throw new Error('Failed to fetch target URLs');
-      }
-      const data = await response.json();
-      const safeData = data || [];
-      setTargetURLs(safeData);
-    } catch (error) {
-      console.error('Error loading ROI report:', error);
-    }
   };
 
   const handleCloseROIReport = () => {
@@ -5663,200 +5529,9 @@ function App() {
     }
   };
 
-  // Add Cloud Enum scans useEffect
-  useEffect(() => {
-    // Immediately reset counts when target changes to prevent showing stale data
-    setAmassEnumScannedDomainsCount(0);
-    setAmassEnumCompanyCloudDomains([]);
-    setMostRecentAmassEnumCompanyScan(null);
-    setMostRecentAmassEnumCompanyScanStatus(null);
-    
-    if (activeTarget && !isAmassEnumCompanyScanning) { // Only fetch when not actively scanning
-      const fetchAmassEnumCompanyScans = async () => {
-        try {
-          const response = await fetch(
-            `/api/scopetarget/${activeTarget.id}/scans/amass-enum-company`
-          );
-          if (!response.ok) {
-            throw new Error('Failed to fetch Amass Enum Company scans');
-          }
-          const scans = await response.json();
-          if (Array.isArray(scans)) {
-            setAmassEnumCompanyScans(scans);
-            if (scans.length > 0) {
-              const mostRecentScan = scans.reduce((latest, scan) => {
-                const scanDate = new Date(scan.created_at);
-                return scanDate > new Date(latest.created_at) ? scan : latest;
-              }, scans[0]);
-              setMostRecentAmassEnumCompanyScan(mostRecentScan);
-              setMostRecentAmassEnumCompanyScanStatus(mostRecentScan.status);
-              
-              // Fetch raw results to get actual scanned domains count
-              if (mostRecentScan.scan_id) {
-                const rawResultsResponse = await fetch(
-                  `/api/amass-enum-company/${mostRecentScan.scan_id}/raw-results`
-                );
-                if (rawResultsResponse.ok) {
-                  const rawResults = await rawResultsResponse.json();
-                  // Count unique domains from raw results, not total number of results
-                  const uniqueDomains = rawResults ? [...new Set(rawResults.map(result => result.domain))].length : 0;
-                  setAmassEnumScannedDomainsCount(uniqueDomains);
-                } else {
-                  setAmassEnumScannedDomainsCount(0);
-                }
-
-                // Fetch cloud domains for the main card display
-                const cloudDomainsResponse = await fetch(
-                  `/api/amass-enum-company/${mostRecentScan.scan_id}/cloud-domains`
-                );
-                if (cloudDomainsResponse.ok) {
-                  const cloudDomains = await cloudDomainsResponse.json();
-                  setAmassEnumCompanyCloudDomains(cloudDomains || []);
-                } else {
-                  setAmassEnumCompanyCloudDomains([]);
-                }
-              }
-            }
-          }
-        } catch (error) {
-          console.error('[AMASS-ENUM-COMPANY] Error fetching scans:', error);
-          setAmassEnumScannedDomainsCount(0);
-          setAmassEnumCompanyCloudDomains([]);
-        }
-      };
-      fetchAmassEnumCompanyScans();
-    }
-  }, [activeTarget, isAmassEnumCompanyScanning]); // Add isAmassEnumCompanyScanning dependency
-
-  // Add Cloud Enum scans useEffect
-  useEffect(() => {
-    // Immediately reset counts when target changes to prevent showing stale data
-    setAmassEnumScannedDomainsCount(0);
-    setAmassEnumCompanyCloudDomains([]);
-    setMostRecentAmassEnumCompanyScan(null);
-    setMostRecentAmassEnumCompanyScanStatus(null);
-    
-    if (activeTarget && !isAmassEnumCompanyScanning) { // Only fetch when not actively scanning
-      const fetchAmassEnumCompanyScans = async () => {
-        try {
-          const response = await fetch(
-            `/api/scopetarget/${activeTarget.id}/scans/amass-enum-company`
-          );
-          if (!response.ok) {
-            throw new Error('Failed to fetch Amass Enum Company scans');
-          }
-          const scans = await response.json();
-          if (Array.isArray(scans)) {
-            setAmassEnumCompanyScans(scans);
-            if (scans.length > 0) {
-              const mostRecentScan = scans.reduce((latest, scan) => {
-                const scanDate = new Date(scan.created_at);
-                return scanDate > new Date(latest.created_at) ? scan : latest;
-              }, scans[0]);
-              setMostRecentAmassEnumCompanyScan(mostRecentScan);
-              setMostRecentAmassEnumCompanyScanStatus(mostRecentScan.status);
-              
-              // Fetch raw results to get actual scanned domains count
-              if (mostRecentScan.scan_id) {
-                const rawResultsResponse = await fetch(
-                  `/api/amass-enum-company/${mostRecentScan.scan_id}/raw-results`
-                );
-                if (rawResultsResponse.ok) {
-                  const rawResults = await rawResultsResponse.json();
-                  // Count unique domains from raw results, not total number of results
-                  const uniqueDomains = rawResults ? [...new Set(rawResults.map(result => result.domain))].length : 0;
-                  setAmassEnumScannedDomainsCount(uniqueDomains);
-                } else {
-                  setAmassEnumScannedDomainsCount(0);
-                }
-
-                // Fetch cloud domains for the main card display
-                const cloudDomainsResponse = await fetch(
-                  `/api/amass-enum-company/${mostRecentScan.scan_id}/cloud-domains`
-                );
-                if (cloudDomainsResponse.ok) {
-                  const cloudDomains = await cloudDomainsResponse.json();
-                  setAmassEnumCompanyCloudDomains(cloudDomains || []);
-                } else {
-                  setAmassEnumCompanyCloudDomains([]);
-                }
-              }
-            }
-          }
-        } catch (error) {
-          console.error('[AMASS-ENUM-COMPANY] Error fetching scans:', error);
-          setAmassEnumScannedDomainsCount(0);
-          setAmassEnumCompanyCloudDomains([]);
-        }
-      };
-      fetchAmassEnumCompanyScans();
-    }
-  }, [activeTarget, isAmassEnumCompanyScanning]); // Add isAmassEnumCompanyScanning dependency
-
-  // Add Cloud Enum scans useEffect
-  useEffect(() => {
-    // Immediately reset counts when target changes to prevent showing stale data
-    setAmassEnumScannedDomainsCount(0);
-    setAmassEnumCompanyCloudDomains([]);
-    setMostRecentAmassEnumCompanyScan(null);
-    setMostRecentAmassEnumCompanyScanStatus(null);
-    
-    if (activeTarget && !isAmassEnumCompanyScanning) { // Only fetch when not actively scanning
-      const fetchAmassEnumCompanyScans = async () => {
-        try {
-          const response = await fetch(
-            `/api/scopetarget/${activeTarget.id}/scans/amass-enum-company`
-          );
-          if (!response.ok) {
-            throw new Error('Failed to fetch Amass Enum Company scans');
-          }
-          const scans = await response.json();
-          if (Array.isArray(scans)) {
-            setAmassEnumCompanyScans(scans);
-            if (scans.length > 0) {
-              const mostRecentScan = scans.reduce((latest, scan) => {
-                const scanDate = new Date(scan.created_at);
-                return scanDate > new Date(latest.created_at) ? scan : latest;
-              }, scans[0]);
-              setMostRecentAmassEnumCompanyScan(mostRecentScan);
-              setMostRecentAmassEnumCompanyScanStatus(mostRecentScan.status);
-              
-              // Fetch raw results to get actual scanned domains count
-              if (mostRecentScan.scan_id) {
-                const rawResultsResponse = await fetch(
-                  `/api/amass-enum-company/${mostRecentScan.scan_id}/raw-results`
-                );
-                if (rawResultsResponse.ok) {
-                  const rawResults = await rawResultsResponse.json();
-                  // Count unique domains from raw results, not total number of results
-                  const uniqueDomains = rawResults ? [...new Set(rawResults.map(result => result.domain))].length : 0;
-                  setAmassEnumScannedDomainsCount(uniqueDomains);
-                } else {
-                  setAmassEnumScannedDomainsCount(0);
-                }
-
-                // Fetch cloud domains for the main card display
-                const cloudDomainsResponse = await fetch(
-                  `/api/amass-enum-company/${mostRecentScan.scan_id}/cloud-domains`
-                );
-                if (cloudDomainsResponse.ok) {
-                  const cloudDomains = await cloudDomainsResponse.json();
-                  setAmassEnumCompanyCloudDomains(cloudDomains || []);
-                } else {
-                  setAmassEnumCompanyCloudDomains([]);
-                }
-              }
-            }
-          }
-        } catch (error) {
-          console.error('[AMASS-ENUM-COMPANY] Error fetching scans:', error);
-          setAmassEnumScannedDomainsCount(0);
-          setAmassEnumCompanyCloudDomains([]);
-        }
-      };
-      fetchAmassEnumCompanyScans();
-    }
-  }, [activeTarget, isAmassEnumCompanyScanning]); // Add isAmassEnumCompanyScanning dependency
+  // G1.8: three identical duplicate Amass-Enum-Company scan effects were removed here (they
+  // were exact copies of the canonical "Amass Enum Company scans useEffect" above and fired the
+  // same ~3 network calls each on every target switch). The canonical one remains.
 
   return (
     <Container data-bs-theme="dark" className="App" style={{ padding: '20px' }}>
@@ -8692,7 +8367,7 @@ function App() {
           handleCloseMetaDataModal={handleCloseMetaDataModal}
           metaDataResults={mostRecentMetaDataScan}
           targetURLs={targetURLs}
-          setTargetURLs={setTargetURLs}
+          setTargetURLs={setMetaDataTargetURLs}
           fetchScopeTargets={fetchScopeTargets}
           onPopulateBurp={handleOpenToolsModalWithUrls}
         />
@@ -8711,7 +8386,7 @@ function App() {
           show={showROIReport}
           onHide={handleCloseROIReport}
           targetURLs={targetURLs}
-          setTargetURLs={setTargetURLs}
+          setTargetURLs={setRoiTargetURLs}
           fetchScopeTargets={fetchScopeTargets}
         />
       </Suspense>

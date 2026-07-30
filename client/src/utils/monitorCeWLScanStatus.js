@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorCeWLScanStatus = async (
   activeTarget,
   setCeWLScans,
@@ -35,7 +36,7 @@ const monitorCeWLScanStatus = async (
 
       if (mostRecentScan.status === 'pending') {
         setIsCeWLScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorCeWLScanStatus(
             activeTarget,
             setCeWLScans,

@@ -1,5 +1,15 @@
 import { Modal, Badge, Accordion, Form, Row, Col, Button, OverlayTrigger, Tooltip, Pagination, Spinner } from 'react-bootstrap';
 import { useEffect, useState, useMemo, memo } from 'react';
+import useDebounce from '../hooks/useDebounce';
+
+// G1.4: resolve a screenshot to a renderable src without shipping base64 inline. Prefers an
+// inline base64 blob if present (back-compat with the full payload), otherwise points at the
+// on-demand endpoint when the list flagged has_screenshot.
+const getScreenshotSrc = (item) => {
+  if (item.screenshot) return `data:image/png;base64,${item.screenshot}`;
+  if (item.has_screenshot && item.id) return `/api/api/target-urls/${item.id}/screenshot`;
+  return null;
+};
 
 const MetaDataModal = memo(({
   showMetaDataModal,
@@ -272,7 +282,13 @@ const MetaDataModal = memo(({
       <i className="bi bi-arrow-down text-primary ms-1"></i>;
   };
 
+  // G1.10: debounce the filter inputs so typing stays responsive — the expensive filter/sort
+  // over (up to 10k) target URLs only runs ~250ms after the last keystroke. The inputs stay
+  // bound to the immediate `filters` state below; only this derivation uses the debounced copy.
+  const debouncedFilters = useDebounce(filters, 250);
+
   const filteredAndSortedUrls = useMemo(() => {
+    const filters = debouncedFilters;
     const urls = Array.isArray(targetURLs) ? targetURLs : [];
     
     let filtered = urls.filter(url => {
@@ -366,7 +382,7 @@ const MetaDataModal = memo(({
       if (valueA > valueB) return sortDirection === 'asc' ? 1 : -1;
       return 0;
     });
-  }, [targetURLs, filters, sortColumn, sortDirection]);
+  }, [targetURLs, debouncedFilters, sortColumn, sortDirection]);
 
   const totalPages = Math.ceil(filteredAndSortedUrls.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
@@ -697,12 +713,13 @@ const MetaDataModal = memo(({
                           >
                             {url.status_code}
                           </Badge>
-                          {url.screenshot && (
-                            <img 
-                              src={`data:image/png;base64,${url.screenshot}`}
+                          {getScreenshotSrc(url) && (
+                            <img
+                              src={getScreenshotSrc(url)}
+                              loading="lazy"
                               alt="Thumbnail"
                               className="me-2"
-                              style={{ 
+                              style={{
                                 width: '40px',
                                 height: '40px',
                                 objectFit: 'cover',
@@ -831,18 +848,19 @@ const MetaDataModal = memo(({
                           </a>
                         </div>
                       </div>
-                      {url.screenshot && (
+                      {getScreenshotSrc(url) && (
                         <div className="mb-4 pb-3 border-bottom">
                           <h6 className="text-danger mb-2">Screenshot</h6>
                           <OverlayTrigger
                             placement="top"
                             overlay={<Tooltip>Click to view full size</Tooltip>}
                           >
-                            <img 
-                              src={`data:image/png;base64,${url.screenshot}`}
+                            <img
+                              src={getScreenshotSrc(url)}
+                              loading="lazy"
                               alt="Page Screenshot"
-                              onClick={() => setLightboxImage(url.screenshot)}
-                              style={{ 
+                              onClick={() => setLightboxImage(getScreenshotSrc(url))}
+                              style={{
                                 maxWidth: '100%',
                                 height: 'auto',
                                 maxHeight: '300px',
@@ -1212,10 +1230,10 @@ const MetaDataModal = memo(({
             >
               ×
             </button>
-            <img 
-              src={`data:image/png;base64,${lightboxImage}`}
+            <img
+              src={lightboxImage}
               alt="Screenshot - Full Size"
-              style={{ 
+              style={{
                 maxWidth: '100%',
                 maxHeight: '95vh',
                 objectFit: 'contain',

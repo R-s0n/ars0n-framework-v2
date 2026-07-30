@@ -1,7 +1,7 @@
 const { z } = require('zod');
 const { apiPost, apiGet } = require('../api');
 const { query } = require('../db');
-const { limitResults } = require('../utils/truncate');
+const { limitResults, clampLimit } = require('../utils/truncate');
 
 // === Run Wildcard Workflow ===
 const runWildcardWorkflowSchema = z.object({
@@ -244,11 +244,13 @@ const getAutoScanSessionsSchema = z.object({
 
 async function getAutoScanSessions(params) {
   try {
-    const sql = `SELECT id, scope_target_id, scan_type, status, current_phase,
-      started_at, completed_at, total_findings, error
-      FROM auto_scan_sessions ORDER BY started_at DESC LIMIT $1`;
-    const result = await query(sql, [params.max_results || 10]);
-    return limitResults(result.rows, params.max_results);
+    // Actual auto_scan_sessions columns (there is no scan_type/current_phase/total_findings/error).
+    const lim = clampLimit(params.max_results, 10);
+    const sql = `SELECT id, scope_target_id, status, started_at, ended_at, steps_run,
+      error_message, final_consolidated_subdomains, final_live_web_servers
+      FROM auto_scan_sessions ORDER BY started_at DESC LIMIT ${lim + 1}`;
+    const result = await query(sql, []);
+    return limitResults(result.rows, lim);
   } catch {
     // Fallback to API
     try {

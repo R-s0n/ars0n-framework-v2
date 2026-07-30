@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorInvestigateScanStatus = async (
   activeTarget,
   setInvestigateScans,
@@ -35,7 +36,7 @@ const monitorInvestigateScanStatus = async (
       
       if (mostRecent.status === 'pending' || mostRecent.status === 'running') {
         setIsInvestigateScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorInvestigateScanStatus(
             activeTarget,
             setInvestigateScans,

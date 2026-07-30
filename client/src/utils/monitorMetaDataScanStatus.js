@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorMetaDataScanStatus = async (
   activeTarget,
   setMetaDataScans,
@@ -33,7 +34,7 @@ const monitorMetaDataScanStatus = async (
       } else if (mostRecentScan.cancel_requested && (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running')) {
         console.log('[DEBUG monitorMetaDataScanStatus] Cancellation in progress, showing cancelling state...');
         setMostRecentMetaDataScanStatus('cancelling');
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorMetaDataScanStatus(
             activeTarget,
             setMetaDataScans,
@@ -44,7 +45,7 @@ const monitorMetaDataScanStatus = async (
         }, 2000);
       } else if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running') {
         setMostRecentMetaDataScanStatus(mostRecentScan.status);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorMetaDataScanStatus(
             activeTarget,
             setMetaDataScans,
@@ -57,10 +58,11 @@ const monitorMetaDataScanStatus = async (
         console.log('[DEBUG monitorMetaDataScanStatus] Unexpected status:', mostRecentScan.status);
         setMostRecentMetaDataScanStatus(mostRecentScan.status);
         setIsMetaDataScanning(false);
-        // Fetch updated target URLs when scan completes
+        // Fetch updated target URLs when scan completes. This feeds the Metadata modal, which
+        // never reads the raw HTTP body and lazy-loads screenshots, so drop both blobs (G1.4).
         try {
           const urlsResponse = await fetch(
-            `/api/api/scope-targets/${activeTarget.id}/target-urls`
+            `/api/api/scope-targets/${activeTarget.id}/target-urls?screenshot=false&response=false`
           );
           if (!urlsResponse.ok) {
             throw new Error('Failed to fetch target URLs');
@@ -106,7 +108,7 @@ const monitorCompanyMetaDataScanStatus = async (
       setMostRecentCompanyMetaDataScanStatus(mostRecentScan.status);
 
       if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running') {
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorCompanyMetaDataScanStatus(
             activeTarget,
             ipPortScanId,

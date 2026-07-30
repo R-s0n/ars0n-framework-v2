@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 export { monitorActiveScan } from './initiateX8Scan';
 
 const monitorX8ScanStatus = async (
@@ -27,7 +28,7 @@ const monitorX8ScanStatus = async (
 
       if (mostRecentScan.status === 'running' || mostRecentScan.status === 'pending') {
         setIsX8Scanning(true);
-        setTimeout(
+        pollTimeout(
           () =>
             monitorX8ScanStatus(
               activeTarget,

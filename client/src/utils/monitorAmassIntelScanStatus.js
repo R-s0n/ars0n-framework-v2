@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorAmassIntelScanStatus = async (
   activeTarget,
   setAmassIntelScans,
@@ -46,7 +47,7 @@ const monitorAmassIntelScanStatus = async (
 
       if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running') {
         setIsAmassIntelScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorAmassIntelScanStatus(
             activeTarget,
             setAmassIntelScans,

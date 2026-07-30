@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorSublist3rScanStatus = async (
   activeTarget,
   setSublist3rScans,
@@ -35,7 +36,7 @@ const monitorSublist3rScanStatus = async (
 
       if (mostRecentScan.status === 'pending') {
         setIsSublist3rScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorSublist3rScanStatus(
             activeTarget,
             setSublist3rScans,

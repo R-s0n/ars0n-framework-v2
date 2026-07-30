@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorGauScanStatus = async (
   activeTarget,
   setGauScans,
@@ -30,7 +31,7 @@ const monitorGauScanStatus = async (
 
       if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'processing') {
         setIsGauScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorGauScanStatus(
             activeTarget,
             setGauScans,

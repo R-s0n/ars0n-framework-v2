@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorSecurityTrailsCompanyScanStatus = async (
   activeTarget,
   setSecurityTrailsCompanyScans,
@@ -42,7 +43,7 @@ const monitorSecurityTrailsCompanyScanStatus = async (
 
       if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running') {
         setIsSecurityTrailsCompanyScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorSecurityTrailsCompanyScanStatus(
             activeTarget,
             setSecurityTrailsCompanyScans,

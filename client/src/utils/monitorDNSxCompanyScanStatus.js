@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorDNSxCompanyScanStatus = async (
   scanId, 
   setIsScanning, 
@@ -56,7 +57,7 @@ const monitorDNSxCompanyScanStatus = async (
         }
         
         // Continue polling if still running
-        setTimeout(poll, 2000);
+        pollTimeout(poll, 2000);
       } else {
         console.error('Failed to fetch DNSx Company scan status');
         setIsScanning(false);

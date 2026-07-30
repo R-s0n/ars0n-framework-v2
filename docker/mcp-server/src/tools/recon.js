@@ -1,7 +1,7 @@
 const { z } = require('zod');
 const { query } = require('../db');
 const { apiGet } = require('../api');
-const { limitResults, truncateText } = require('../utils/truncate');
+const { limitResults, truncateText, clampLimit } = require('../utils/truncate');
 
 // === Get Attack Surface Overview ===
 const getAttackSurfaceSchema = z.object({
@@ -112,7 +112,9 @@ const queryCloudAssetsSchema = z.object({
 async function queryCloudAssets(params) {
   try {
     const result = await apiGet(`/katana-company/target/${params.target_id}/cloud-assets`);
-    let assets = Array.isArray(result) ? result : (result.assets || []);
+    // Guard null: the API returns null when there are no cloud assets, which used to crash on
+    // result.assets ("Cannot read properties of null").
+    let assets = Array.isArray(result) ? result : ((result && result.assets) || []);
 
     if (params.provider && params.provider !== 'all') {
       const providerPatterns = {
@@ -145,7 +147,7 @@ async function queryEndpoints(params) {
   try {
     // Try consolidated endpoints first
     const consolidated = await apiGet(`/consolidated-endpoints/${params.target_id}`);
-    let endpoints = Array.isArray(consolidated) ? consolidated : (consolidated.endpoints || []);
+    let endpoints = Array.isArray(consolidated) ? consolidated : ((consolidated && consolidated.endpoints) || []);
 
     if (params.pattern) {
       const likePattern = params.pattern.replace(/\*/g, '').toLowerCase();
@@ -284,15 +286,17 @@ async function queryAttackSurfaceAssets(params) {
     const res = await apiGet(`/attack-surface-assets/${params.target_id}`);
     return res;
   } catch (err) {
-    // Fallback to direct DB query
+    // Fallback to direct DB query. The table is consolidated_attack_surface_assets and the
+    // identifier column is asset_identifier (there is no asset_value/source/metadata column).
     try {
+      const lim = clampLimit(params.max_results);
       const result = await query(
-        `SELECT id, asset_type, asset_value, source, metadata, created_at
-         FROM attack_surface_assets WHERE scope_target_id = $1
-         ORDER BY created_at DESC LIMIT $2`,
-        [params.target_id, params.max_results || 50]
+        `SELECT id, asset_type, asset_subtype, asset_identifier, url, domain, ip_address, status_code, created_at
+         FROM consolidated_attack_surface_assets WHERE scope_target_id = $1
+         ORDER BY created_at DESC LIMIT ${lim + 1}`,
+        [params.target_id]
       );
-      return limitResults(result.rows, params.max_results);
+      return limitResults(result.rows, lim);
     } catch {
       return { error: err.message };
     }

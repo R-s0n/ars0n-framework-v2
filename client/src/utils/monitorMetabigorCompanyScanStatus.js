@@ -1,3 +1,4 @@
+import { pollTimeout } from './scanPolling';
 const monitorMetabigorCompanyScanStatus = async (
   activeTarget,
   setMetabigorCompanyScans,
@@ -64,7 +65,7 @@ const monitorMetabigorCompanyScanStatus = async (
 
       if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running') {
         setIsMetabigorCompanyScanning(true);
-        setTimeout(() => {
+        pollTimeout(() => {
           monitorMetabigorCompanyScanStatus(
             activeTarget,
             setMetabigorCompanyScans,
