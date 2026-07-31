@@ -201,8 +201,8 @@ function ExportModal({ show, handleClose }) {
     },
     {
       id: 'sublist3r',
-      label: 'Sublist3r',
-      description: 'Subdomain enumeration using search engines and public APIs.'
+      label: 'Passive OSINT',
+      description: 'Subdomain enumeration from free passive OSINT sources (RapidDNS, URLScan.io, OTX, HackerTarget).'
     },
     {
       id: 'assetfinder',

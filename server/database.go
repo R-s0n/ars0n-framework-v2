@@ -1607,6 +1607,46 @@ func createTables() {
 		`CREATE INDEX IF NOT EXISTS idx_parameter_enumeration_results_scan_id ON parameter_enumeration_results(scan_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_parameter_enumeration_results_scope_target ON parameter_enumeration_results(scope_target_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_parameter_enumeration_results_endpoint ON parameter_enumeration_results(endpoint_url);`,
+
+		`CREATE TABLE IF NOT EXISTS auth_flows (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			category VARCHAR(50) NOT NULL CHECK (category IN ('register','login','mfa_otp','reset')),
+			name TEXT NOT NULL,
+			description TEXT DEFAULT '',
+			auth_type VARCHAR(50) DEFAULT '',
+			base_url TEXT DEFAULT '',
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+		`CREATE TABLE IF NOT EXISTS auth_flow_steps (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			auth_flow_id UUID NOT NULL REFERENCES auth_flows(id) ON DELETE CASCADE,
+			step_order INTEGER NOT NULL,
+			name TEXT DEFAULT '',
+			raw_request TEXT NOT NULL,
+			response_status INTEGER,
+			response_headers JSONB,
+			response_body TEXT,
+			response_time_ms FLOAT,
+			error TEXT DEFAULT '',
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_auth_flows_scope_target ON auth_flows(scope_target_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_auth_flow_steps_flow ON auth_flow_steps(auth_flow_id);`,
+
+		`CREATE TABLE IF NOT EXISTS authz_client_identifiers (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			endpoint_url TEXT NOT NULL,
+			method VARCHAR(10) DEFAULT 'GET',
+			value TEXT NOT NULL,
+			source VARCHAR(20) DEFAULT 'request',
+			label TEXT DEFAULT '',
+			created_at TIMESTAMP DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_authz_client_identifiers_target ON authz_client_identifiers(scope_target_id);`,
 	}
 
 	for _, query := range queries {
@@ -1645,6 +1685,22 @@ func createTables() {
 		log.Printf("[WARN] Failed to delete pending scans: %v", err)
 	} else {
 		log.Println("[INFO] Deleted any scans with status 'pending'")
+	}
+
+	// Metadata scans are cancelled cooperatively: CancelMetaDataScan only sets cancel_requested=true
+	// and the running goroutine flips the status to 'cancelled' at its next checkpoint. If the API
+	// restarts mid-scan, that goroutine dies and the row is stranded in 'running' (rendered as a
+	// permanent "Cancelling" in the UI). On startup there is no goroutine left to finish them, so
+	// resolve any such orphaned scans to a terminal 'cancelled' state here.
+	cancelStuckMetaDataScansQuery := `
+		UPDATE metadata_scans
+		SET status = 'cancelled',
+			error = 'Scan was interrupted by a server restart and automatically cancelled on startup.'
+		WHERE status = 'running';`
+	if tag, err := dbPool.Exec(context.Background(), cancelStuckMetaDataScansQuery); err != nil {
+		log.Printf("[WARN] Failed to cancel stuck metadata scans on startup: %v", err)
+	} else if n := tag.RowsAffected(); n > 0 {
+		log.Printf("[INFO] Cancelled %d stuck metadata scan(s) left in 'running' after a restart", n)
 	}
 
 	log.Println("[INFO] Database schema created successfully")

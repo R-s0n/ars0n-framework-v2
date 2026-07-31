@@ -385,12 +385,12 @@ export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResul
         <Modal.Title className="text-danger">Live Web Servers</Modal.Title>
       </Modal.Header>
       <Modal.Body>
-        {filteredAndSortedResults.length > 0 && (
+        {parsedResults.length > 0 && (
           <>
             <div className="d-flex gap-2 mb-3">
-              <Button 
-                variant="outline-info" 
-                size="sm" 
+              <Button
+                variant="outline-info"
+                size="sm"
                 onClick={handleCopyAllUrls}
               >
                 {copySuccess ? 'Copied!' : 'Copy All URLs'}
@@ -407,7 +407,7 @@ export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResul
             <div className="mb-4">
             <Row className="mb-3">
               <Col md={4}>
-                <Form.Label>Filter by URL</Form.Label>
+                <Form.Label className="text-white">Filter by URL</Form.Label>
                 <Form.Control
                   type="text"
                   placeholder="Search URL..."
@@ -416,7 +416,7 @@ export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResul
                 />
               </Col>
               <Col md={2}>
-                <Form.Label>Status Code</Form.Label>
+                <Form.Label className="text-white">Status Code</Form.Label>
                 <Form.Select
                   value={filters.statusCode}
                   onChange={(e) => handleFilterChange('statusCode', e.target.value)}
@@ -430,7 +430,7 @@ export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResul
                 </Form.Select>
               </Col>
               <Col md={3}>
-                <Form.Label>Filter by Title</Form.Label>
+                <Form.Label className="text-white">Filter by Title</Form.Label>
                 <Form.Control
                   type="text"
                   placeholder="Search title..."
@@ -439,7 +439,7 @@ export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResul
                 />
               </Col>
               <Col md={3}>
-                <Form.Label>Web Server</Form.Label>
+                <Form.Label className="text-white">Web Server</Form.Label>
                 <Form.Control
                   type="text"
                   placeholder="Search web server..."
@@ -450,7 +450,7 @@ export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResul
             </Row>
             <Row className="mb-3">
               <Col md={4}>
-                <Form.Label>Technologies</Form.Label>
+                <Form.Label className="text-white">Technologies</Form.Label>
                 <Form.Control
                   type="text"
                   placeholder="Search technologies..."
@@ -459,7 +459,7 @@ export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResul
                 />
               </Col>
               <Col md={3}>
-                <Form.Label>Content Length</Form.Label>
+                <Form.Label className="text-white">Content Length</Form.Label>
                 <Form.Select
                   value={filters.contentLength}
                   onChange={(e) => handleFilterChange('contentLength', e.target.value)}
@@ -516,19 +516,21 @@ export const HttpxResultsModal = ({ showHttpxResultsModal, handleCloseHttpxResul
                 </Button>
               </div>
             </div>
-            <div className="mb-2 d-flex justify-content-between align-items-center">
-              <small className="text-muted">
-                Showing {startIndex + 1}-{Math.min(endIndex, filteredAndSortedResults.length)} of {filteredAndSortedResults.length} filtered results
-                {filteredAndSortedResults.length !== parsedResults.length && 
-                  ` (${parsedResults.length} total)`
-                }
-              </small>
-              {totalPages > 1 && (
+            {filteredAndSortedResults.length > 0 && (
+              <div className="mb-2 d-flex justify-content-between align-items-center">
                 <small className="text-muted">
-                  Page {currentPage} of {totalPages}
+                  Showing {startIndex + 1}-{Math.min(endIndex, filteredAndSortedResults.length)} of {filteredAndSortedResults.length} filtered results
+                  {filteredAndSortedResults.length !== parsedResults.length &&
+                    ` (${parsedResults.length} total)`
+                  }
                 </small>
-              )}
-            </div>
+                {totalPages > 1 && (
+                  <small className="text-muted">
+                    Page {currentPage} of {totalPages}
+                  </small>
+                )}
+              </div>
+            )}
           </div>
           </>
         )}

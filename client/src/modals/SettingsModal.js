@@ -773,7 +773,7 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
             {renderSlider('httpx', 'HTTPX', 50, 500, 10, toolDescriptions.httpx)}
             {renderSlider('subfinder', 'Subfinder', 1, 100, 1, toolDescriptions.subfinder)}
             {renderSlider('gau', 'GAU', 1, 50, 1, toolDescriptions.gau)}
-            {renderSlider('sublist3r', 'Sublist3r', 1, 50, 1, toolDescriptions.sublist3r)}
+            {renderSlider('sublist3r', 'Passive OSINT', 1, 50, 1, toolDescriptions.sublist3r)}
             {renderSlider('ctl', 'CTL', 1, 50, 1, toolDescriptions.ctl)}
             {renderSlider('shuffledns', 'ShuffleDNS', 1000, 20000, 1000, toolDescriptions.shuffledns)}
             {renderSlider('cewl', 'CeWL', 1, 50, 1, toolDescriptions.cewl)}
@@ -837,9 +837,9 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
                               <span className="fst-italic">Works at the DNS protocol level, not HTTP</span>
                             </li>
                             <li>
-                              <strong>Sublist3r:</strong> Passive subdomain enumeration
+                              <strong>Passive OSINT:</strong> Passive subdomain enumeration
                               <br/>
-                              <span className="fst-italic">Uses search engine APIs rather than direct HTTP requests</span>
+                              <span className="fst-italic">Unions free public sources (RapidDNS, URLScan.io, OTX, HackerTarget) — no API keys</span>
                             </li>
                             <li>
                               <strong>Subdomainizer:</strong> Parses JavaScript files locally after downloading

@@ -3839,7 +3839,7 @@ export const lessons = {
   },
 
   subdomainScrapingTools: {
-    title: "Passive Discovery Tools: Gau, Sublist3r, Assetfinder, and CTL Integration",
+    title: "Passive Discovery Tools: Gau, Passive OSINT, Assetfinder, and CTL Integration",
     overview: "Understanding the unique capabilities and optimal integration of passive subdomain discovery tools enables comprehensive coverage of different discovery vectors and data sources for maximum subdomain intelligence gathering.",
     sections: [
 
@@ -3874,32 +3874,32 @@ export const lessons = {
         ]
       },
       {
-        title: "Sublist3r: Search Engine Intelligence Aggregation",
+        title: "Passive OSINT: Multi-Source Aggregation",
         icon: "fa-search",
         content: [
-          "Sublist3r leverages multiple search engines and public data sources to discover subdomains through systematic search query automation, finding subdomains mentioned in indexed content, documentation, and public websites across diverse search platforms.",
-          "The tool integrates with major search engines including Google, Bing, Yahoo, Baidu, and specialized search platforms to maximize coverage of publicly indexed content that might reference organizational subdomains or infrastructure.",
-          "Sublist3r's search engine approach often discovers subdomains that are mentioned in documentation, job postings, conference presentations, and other public content that references organizational infrastructure but might not be directly accessible through DNS enumeration.",
-          "The platform includes intelligent query optimization and rate limiting to effectively query search engines while avoiding triggering anti-automation measures or search engine blocking that could limit discovery effectiveness."
+          "Passive OSINT aggregates subdomains from multiple free, public reconnaissance sources in a single pass, unioning their results so a subdomain indexed by any one source is captured. It fills the role the classic Sublist3r tool once played, but without the fragile search-engine scraping that modern bot-detection and CAPTCHAs have rendered unreliable.",
+          "The tool queries free, key-less data sources that each observe the internet differently: RapidDNS and HackerTarget expose large passive-DNS datasets of previously observed hostname-to-IP mappings, URLScan.io indexes hostnames seen while scanning submitted URLs, and AlienVault OTX contributes passive-DNS records from its threat-intelligence community.",
+          "Because each source is queried independently and best-effort, a single source being rate-limited or temporarily unavailable does not fail the scan — the remaining sources still contribute, and the union is deduplicated and validated so every result is a genuine subdomain of the target.",
+          "This passive approach never sends traffic to the target's own infrastructure; it only reads what third parties have already recorded, making it a quiet, low-risk first step that surfaces forgotten development, staging, and legacy hosts other observers have catalogued over time."
         ],
         keyPoints: [
-          "Multi-search engine integration for comprehensive coverage",
-          "Discovery of subdomains mentioned in public content",
-          "Intelligent query optimization and rate limiting",
-          "Integration with specialized search platforms"
+          "Unions several free, no-API-key passive sources in one pass",
+          "Passive DNS (RapidDNS, HackerTarget, OTX) plus URL indexing (URLScan.io)",
+          "Best-effort per source: one failing source doesn't fail the scan",
+          "Sends no traffic to the target — reads only third-party records"
         ],
         examples: [
           {
-            code: "sublist3r -d example.com -o results.txt",
-            description: "Basic search engine subdomain discovery with output"
+            code: "curl 'https://rapiddns.io/subdomain/example.com?full=1'",
+            description: "RapidDNS passive-DNS dataset (HTML table of hostnames)"
           },
           {
-            code: "sublist3r -d example.com -b -t 10",
-            description: "Multi-threaded discovery with brute-force enhancement"
+            code: "curl 'https://urlscan.io/api/v1/search/?q=domain:example.com'",
+            description: "URLScan.io indexed hostnames for the domain (JSON)"
           },
           {
-            code: "sublist3r -d example.com -e google,bing,yahoo",
-            description: "Specific search engine selection for targeted discovery"
+            code: "curl 'https://api.hackertarget.com/hostsearch/?q=example.com'",
+            description: "HackerTarget hostsearch (subdomain,ip per line; free daily quota)"
           }
         ]
       },
@@ -3916,7 +3916,7 @@ export const lessons = {
     ],
     practicalTips: [
       "Leverage Gau's historical intelligence to discover legacy infrastructure and development environments that might still be accessible but no longer actively maintained",
-      "Use Sublist3r to understand how the organization presents its infrastructure publicly and identify potential internal references in public content and documentation",
+      "Use Passive OSINT to union several free public sources at once (RapidDNS, URLScan.io, OTX, HackerTarget), surfacing hosts other observers have catalogued without touching the target's own infrastructure",
       "Employ Assetfinder for rapid DNS-based discovery when speed and efficiency are priorities while maintaining comprehensive coverage of DNS-resolvable organizational assets",
       "Utilize CTL analysis to discover subdomains with issued certificates, including internal environments that organizations secure but don't publicly advertise",
       "Execute tools in parallel to maximize efficiency while ensuring comprehensive coverage across different discovery vectors and data source categories",
@@ -3930,9 +3930,9 @@ export const lessons = {
         description: "GetAllUrls tool documentation and historical data analysis techniques"
       },
       {
-        title: "Sublist3r Documentation",
-        url: "https://github.com/aboul3la/Sublist3r",
-        description: "Sublist3r tool documentation and search engine optimization techniques"
+        title: "Passive Subdomain Sources Guide",
+        url: "https://sidxparab.gitbook.io/subdomain-enumeration-guide/passive-enumeration/passive-sources",
+        description: "Overview of the free, no-API-key passive sources this scan aggregates (RapidDNS, URLScan.io, OTX, HackerTarget, and more)"
       },
       {
         title: "Certificate Transparency Research",
@@ -3955,7 +3955,7 @@ export const lessons = {
         title: "Parallel Tool Execution Strategy",
         icon: "fa-tasks",
         content: [
-          "Parallel execution of multiple discovery tools maximizes efficiency and ensures comprehensive coverage by running Httpx, Gau, Sublist3r, Assetfinder, and CTL simultaneously rather than sequentially, reducing total discovery time while maintaining systematic coverage.",
+          "Parallel execution of multiple discovery tools maximizes efficiency and ensures comprehensive coverage by running Httpx, Gau, Passive OSINT, Assetfinder, and CTL simultaneously rather than sequentially, reducing total discovery time while maintaining systematic coverage.",
           "Resource management during parallel execution includes intelligent throttling, memory management, and network bandwidth optimization to ensure that multiple tools can run effectively without overwhelming local infrastructure or triggering target defensive measures.",
           "Tool coordination ensures that different discovery tools complement rather than compete with each other by focusing each tool on its strengths while avoiding unnecessary duplication of effort or resource conflicts.",
           "Progress monitoring across multiple parallel tools provides visibility into discovery effectiveness, resource utilization, and completion status to enable effective management of complex multi-tool discovery operations."
@@ -4886,7 +4886,7 @@ export const lessons = {
         icon: "fa-crossroads",
         content: [
           "The first consolidation round sits at the pivotal transition point between passive subdomain discovery and active validation, representing the moment where distributed intelligence gathering transforms into unified target identification for systematic security assessment.",
-          "This phase consolidates results from Amass enumeration and all passive scraping tools (Gau, Sublist3r, Assetfinder, CTL) into a single, authoritative dataset that eliminates redundancy while preserving valuable discovery metadata and source attribution.",
+          "This phase consolidates results from Amass enumeration and all passive scraping tools (Gau, Passive OSINT, Assetfinder, CTL) into a single, authoritative dataset that eliminates redundancy while preserving valuable discovery metadata and source attribution.",
           "The strategic importance lies in establishing a verified baseline of live web servers before proceeding to more aggressive discovery techniques, ensuring that subsequent phases build upon a solid foundation of confirmed organizational assets.",
           "This consolidation phase serves as quality control for the reconnaissance process, validating that discovered subdomains actually represent accessible organizational infrastructure rather than false positives or abandoned resources."
         ]
@@ -4895,7 +4895,7 @@ export const lessons = {
         title: "Passive Discovery Integration Framework",
         icon: "fa-puzzle-piece",
         content: [
-          "Multi-source integration combines subdomain discoveries from Amass (comprehensive enumeration), Gau (historical intelligence), Sublist3r (search engine results), Assetfinder (DNS resolution), and CTL (certificate transparency) into a unified intelligence framework.",
+          "Multi-source integration combines subdomain discoveries from Amass (comprehensive enumeration), Gau (historical intelligence), Passive OSINT (multi-source passive aggregation), Assetfinder (DNS resolution), and CTL (certificate transparency) into a unified intelligence framework.",
           "Source attribution preservation maintains detailed records of discovery methods for each subdomain, enabling analysis of tool effectiveness and providing confidence indicators based on the diversity and reliability of discovery sources.",
           "Discovery confidence assessment uses the number of sources that discovered each subdomain as a primary indicator of legitimacy and organizational ownership, helping prioritize targets for subsequent validation and analysis.",
           "Metadata correlation combines information from different discovery sources to build comprehensive profiles of discovered assets including historical activity, certificate status, and public references that inform targeting decisions."
@@ -4924,7 +4924,7 @@ export const lessons = {
         title: "Multi-Source Discovery Integration",
         icon: "fa-sitemap",
         content: [
-          "Source combination methodology systematically merges subdomain discoveries from Amass comprehensive enumeration, Gau historical intelligence, Sublist3r search engine results, Assetfinder DNS resolution, and CTL certificate transparency into a unified dataset.",
+          "Source combination methodology systematically merges subdomain discoveries from Amass comprehensive enumeration, Gau historical intelligence, Passive OSINT multi-source aggregation, Assetfinder DNS resolution, and CTL certificate transparency into a unified dataset.",
           "Attribution preservation maintains detailed records of which tools discovered each subdomain, enabling analysis of discovery method effectiveness and providing confidence indicators based on source diversity and reliability for subsequent prioritization decisions."
         ]
       }
@@ -5074,7 +5074,7 @@ export const lessons = {
         title: "Multi-Methodology Discovery Integration",
         icon: "fa-layer-group",
         content: [
-          "Three-pillar integration systematically combines passive reconnaissance results (Amass, Gau, Sublist3r, Assetfinder, CTL), active enumeration findings (Subfinder, ShuffleDNS, CeWL, GoSpider), and application analysis discoveries (JavaScript content extraction, dynamic reference analysis).",
+          "Three-pillar integration systematically combines passive reconnaissance results (Amass, Gau, Passive OSINT, Assetfinder, CTL), active enumeration findings (Subfinder, ShuffleDNS, CeWL, GoSpider), and application analysis discoveries (JavaScript content extraction, dynamic reference analysis).",
           "Complementary methodology synthesis leverages the unique strengths of each discovery approach: passive methods for external intelligence, active techniques for hidden asset discovery, and application analysis for embedded infrastructure references."
         ]
       }

@@ -210,6 +210,8 @@ import { SecurityControlsModal } from './modals/SecurityControlsModal';
 import { ThreatModelModal } from './modals/ThreatModelModal';
 import { FFUFConfigModal } from './modals/FFUFConfigModal';
 import ManualCrawlResultsModal from './modals/ManualCrawlResultsModal';
+import AuthFlowModal from './modals/AuthFlowModal';
+import ClientIdentityModal from './modals/ClientIdentityModal';
 import ExtensionInstallModal from './modals/ExtensionInstallModal';
 import ManageEndpointsModal from './modals/ManageEndpointsModal';
 
@@ -690,6 +692,14 @@ function App() {
   const [mechanismsForThreatModel, setMechanismsForThreatModel] = useState([]);
   const [notableObjectsForThreatModel, setNotableObjectsForThreatModel] = useState([]);
   const [securityControlsForThreatModel, setSecurityControlsForThreatModel] = useState([]);
+  const [threatModelCounts, setThreatModelCounts] = useState({ questions: 0, mechanisms: 0, notableObjects: 0, securityControls: 0 });
+  const [injectionAttackVectorCounts, setInjectionAttackVectorCounts] = useState({ client_side: 0, server_side: 0, database: 0, other: 0 });
+  const [showAuthFlowModal, setShowAuthFlowModal] = useState(false);
+  const [authFlowCategory, setAuthFlowCategory] = useState('login');
+  const [showClientIdentityModal, setShowClientIdentityModal] = useState(false);
+  const [headerCookieCounts, setHeaderCookieCounts] = useState({ hidden_headers: 0, hidden_cookies: 0, client_side: 0, server_side: 0 });
+  const [authzCounts, setAuthzCounts] = useState({ idor: 0, acv: 0 });
+  const [authFlowCounts, setAuthFlowCounts] = useState({ register: 0, login: 0, mfa_otp: 0, reset: 0 });
   
   const handleCloseSubdomainsModal = () => setShowSubdomainsModal(false);
   const handleCloseCloudDomainsModal = () => setShowCloudDomainsModal(false);
@@ -2269,7 +2279,7 @@ function App() {
           setMostRecentAssetfinderScan,
           setMostRecentGauScan,
           setMostRecentCTLScan,
-          setMostRecentSublist3rScan,
+          setMostRecentSubfinderScan,
           setMostRecentHttpxScan,
           setMostRecentShuffleDNSScan,
           setMostRecentCeWLScan,
@@ -5122,13 +5132,13 @@ function App() {
     }
   }, [activeTarget]);
   const handleOpenApplicationQuestionsModal = () => setShowApplicationQuestionsModal(true);
-  const handleCloseApplicationQuestionsModal = () => setShowApplicationQuestionsModal(false);
+  const handleCloseApplicationQuestionsModal = () => { setShowApplicationQuestionsModal(false); fetchThreatModelCounts(); };
   const handleOpenMechanismsModal = () => setShowMechanismsModal(true);
-  const handleCloseMechanismsModal = () => setShowMechanismsModal(false);
+  const handleCloseMechanismsModal = () => { setShowMechanismsModal(false); fetchThreatModelCounts(); };
   const handleOpenNotableObjectsModal = () => setShowNotableObjectsModal(true);
-  const handleCloseNotableObjectsModal = () => setShowNotableObjectsModal(false);
+  const handleCloseNotableObjectsModal = () => { setShowNotableObjectsModal(false); fetchThreatModelCounts(); };
   const handleOpenSecurityControlsModal = () => setShowSecurityControlsModal(true);
-  const handleCloseSecurityControlsModal = () => setShowSecurityControlsModal(false);
+  const handleCloseSecurityControlsModal = () => { setShowSecurityControlsModal(false); fetchThreatModelCounts(); };
   const handleOpenThreatModelModal = async () => {
     setShowThreatModelModal(true);
     if (activeTarget) {
@@ -5173,6 +5183,127 @@ function App() {
     }
   };
   const handleCloseThreatModelModal = () => setShowThreatModelModal(false);
+  const handleOpenPossibleAttacksModal = (category) => {
+    // Placeholder — the Possible Attacks modal for each STRIDE category will be built here soon.
+    console.log('[ThreatModel] Possible Attacks requested for category:', (category && category.label) || category);
+  };
+  // Attack Vectors section — placeholders; the consolidation/investigation/modals will be built soon.
+  const handleConsolidateAttackVectors = () => {
+    console.log('[AttackVectors] Consolidate requested');
+  };
+  const handleInvestigateAttackVectors = () => {
+    console.log('[AttackVectors] Investigate requested');
+  };
+  const handleAddAttackVectorManually = () => {
+    console.log('[AttackVectors] Add Manually requested');
+  };
+  const handleOpenUniqueAttackVectorsModal = () => {
+    console.log('[AttackVectors] Unique Attack Vectors requested');
+  };
+  const handleOpenAuthFlowModal = (categoryKey) => {
+    setAuthFlowCategory(categoryKey);
+    setShowAuthFlowModal(true);
+  };
+  const handleCloseAuthFlowModal = () => setShowAuthFlowModal(false);
+  const handleOpenClientIdentityModal = () => setShowClientIdentityModal(true);
+  const handleCloseClientIdentityModal = () => { setShowClientIdentityModal(false); fetchAuthzCounts(); };
+  // Possible IDOR Targets = saved client identifiers; Possible ACV Targets is a placeholder until the
+  // access-control (Policy/Role/Discretionary) work lands.
+  const fetchAuthzCounts = async (targetId) => {
+    const id = targetId || (activeTarget && activeTarget.id);
+    if (!id) { setAuthzCounts({ idor: 0, acv: 0 }); return; }
+    try {
+      const res = await fetch(`/api/authz/client-identifiers/${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setAuthzCounts({ idor: Array.isArray(data) ? data.length : 0, acv: 0 });
+      }
+    } catch (error) { console.error('Error fetching authorization counts:', error); }
+  };
+  const handleOpenAccessControlModal = (aclType) => {
+    // Placeholder — Policy/Role/Discretionary access-control modeling modals will be built here soon.
+    console.log('[Authorization] Access control requested:', aclType);
+  };
+  const handleHeaderCookieAction = (action) => {
+    // Placeholder — Header/Cookie Enumeration (fuzzing, investigate, results) will be built here soon.
+    console.log('[Header/Cookie Enumeration] action:', action);
+  };
+  // Per-category count of documented auth flows for the active target, shown on the Authentication card.
+  const fetchAuthFlowCounts = async (targetId) => {
+    const id = targetId || (activeTarget && activeTarget.id);
+    if (!id) {
+      setAuthFlowCounts({ register: 0, login: 0, mfa_otp: 0, reset: 0 });
+      return;
+    }
+    try {
+      const res = await fetch(`/api/auth-flows/${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        const counts = { register: 0, login: 0, mfa_otp: 0, reset: 0 };
+        if (Array.isArray(data)) {
+          data.forEach((f) => { if (counts[f.category] !== undefined) counts[f.category] += 1; });
+        }
+        setAuthFlowCounts(counts);
+      }
+    } catch (error) { console.error('Error fetching auth flow counts:', error); }
+  };
+  // Count how many threat-model items have actually been filled out for the active target, so the
+  // STRIDE card can surface real progress instead of a static legend.
+  const fetchThreatModelCounts = async (targetId) => {
+    const id = targetId || (activeTarget && activeTarget.id);
+    if (!id) {
+      setThreatModelCounts({ questions: 0, mechanisms: 0, notableObjects: 0, securityControls: 0 });
+      return;
+    }
+    const counts = { questions: 0, mechanisms: 0, notableObjects: 0, securityControls: 0 };
+    try {
+      const res = await fetch(`/api/application-questions/${id}/answers`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) counts.questions = new Set(data.map((a) => a.question)).size;
+      }
+    } catch (error) { console.error('Error fetching application questions count:', error); }
+    try {
+      const res = await fetch(`/api/mechanisms/${id}/examples`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) counts.mechanisms = new Set(data.map((m) => m.mechanism)).size;
+      }
+    } catch (error) { console.error('Error fetching mechanisms count:', error); }
+    try {
+      const res = await fetch(`/api/notable-objects/${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) counts.notableObjects = data.length;
+      }
+    } catch (error) { console.error('Error fetching notable objects count:', error); }
+    try {
+      const res = await fetch(`/api/security-controls/${id}/notes`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) counts.securityControls = new Set(data.map((c) => c.control_name)).size;
+      }
+    } catch (error) { console.error('Error fetching security controls count:', error); }
+    setThreatModelCounts(counts);
+  };
+  useEffect(() => {
+    fetchThreatModelCounts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTarget]);
+  // Placeholder — reset the injection attack-vector counts per target until the backend consolidation
+  // that produces attack vectors exists; then fetch and set the real counts here.
+  useEffect(() => {
+    setInjectionAttackVectorCounts({ client_side: 0, server_side: 0, database: 0, other: 0 });
+  }, [activeTarget]);
+  useEffect(() => {
+    setHeaderCookieCounts({ hidden_headers: 0, hidden_cookies: 0, client_side: 0, server_side: 0 });
+    fetchAuthzCounts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTarget]);
+  useEffect(() => {
+    fetchAuthFlowCounts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTarget]);
   const handleOpenFFUFConfigModal = () => setShowFFUFConfigModal(true);
   const handleCloseFFUFConfigModal = () => setShowFFUFConfigModal(false);
 
@@ -7046,8 +7177,8 @@ function App() {
                 <HelpMeLearn section="subdomainScraping" />
                 <Row className="row-cols-5 g-3 mb-4">
                   {[
-                    { name: 'Sublist3r', 
-                      link: 'https://github.com/huntergregal/Sublist3r',
+                    { name: 'Passive OSINT',
+                      link: 'https://sidxparab.gitbook.io/subdomain-enumeration-guide/passive-enumeration/passive-sources',
                       isActive: true,
                       status: mostRecentSublist3rScanStatus,
                       isScanning: isSublist3rScanning,
@@ -7134,7 +7265,7 @@ function App() {
                             )}
                           </Card.Title>
                           <Card.Text className="text-white small fst-italic">
-                            {tool.name === 'GAU' ? 'Get All URLs - Fetch known URLs from AlienVault\'s Open Threat Exchange, the Wayback Machine, and Common Crawl.' : 'A subdomain enumeration tool that uses OSINT techniques.'}
+                            {tool.name === 'GAU' ? 'Get All URLs - Fetch known URLs from AlienVault\'s Open Threat Exchange, the Wayback Machine, and Common Crawl.' : tool.name === 'Passive OSINT' ? 'Unions subdomains from multiple free, key-less passive OSINT sources.' : 'A subdomain enumeration tool that uses OSINT techniques.'}
                           </Card.Text>
                           <div className="mt-auto">
                             <Card.Text className="text-white small mb-3">
@@ -8265,7 +8396,7 @@ function App() {
                     {
                       name: 'Arjun',
                       link: 'https://github.com/s0md3v/Arjun',
-                      description: 'Python suite that brute-forces common HTTP parameters on a given URL. Uses a ~25,890-word default dictionary and can try GET/POST/JSON/XML parameters. Very fast (∼10 seconds, ~50–60 requests per target) thanks to optimized diffing.',
+                      description: 'Brute-forces hidden HTTP parameters (GET/POST/JSON/XML) using a large built-in wordlist. Fast and accurate.',
                       isActive: activeTarget,
                       isScanning: isArjunScanning,
                       status: mostRecentArjunScanStatus,
@@ -8278,7 +8409,7 @@ function App() {
                     {
                       name: 'parameth',
                       link: 'https://github.com/maK-/parameth',
-                      description: 'Python script for brute-forcing GET/POST parameters by monitoring response changes. Sends requests with candidate param names and flags those that alter response size/content. Configurable (threading, ignore codes/sizes, variance offset).',
+                      description: 'Brute-forces GET/POST parameters by detecting changes in the response. Configurable filters and threading.',
                       isActive: activeTarget,
                       isScanning: isParamethScanning,
                       status: mostRecentParamethScanStatus,
@@ -8291,7 +8422,7 @@ function App() {
                     {
                       name: 'x8',
                       link: 'https://github.com/Sh1Yo/x8',
-                      description: 'Rust-based hidden parameter fuzzing suite. Injects parameters (via query, body or headers) and uses line-by-line page comparisons and response checks to verify valid parameters. Very high accuracy (detects non-random values like admin=true), highly configurable templates, and extremely fast.',
+                      description: 'Rust parameter fuzzer that injects params via query, body, or headers and confirms hits by comparing responses. Fast and accurate.',
                       isActive: activeTarget,
                       isScanning: isX8Scanning,
                       status: mostRecentX8ScanStatus,
@@ -8356,6 +8487,230 @@ function App() {
                   ))}
                 </Row>
 
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Header/Cookie Enumeration</h4>
+                <Row className="mb-4">
+                  <Col md={12}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          Header/Cookie Enumeration
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Discover hidden headers and cookies the application processes — fuzz for unlinked headers and cookies that change the response, then investigate the results.
+                        </Card.Text>
+                        <Row className="g-3 justify-content-center mt-1 mb-2">
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{headerCookieCounts.hidden_headers}</div>
+                            <div className="text-white small pb-4">Hidden Headers</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{headerCookieCounts.hidden_cookies}</div>
+                            <div className="text-white small pb-4">Hidden Cookies</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{headerCookieCounts.client_side}</div>
+                            <div className="text-white small pb-4">Client-Side Impact</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{headerCookieCounts.server_side}</div>
+                            <div className="text-white small pb-4">Server-Side Impact</div>
+                          </Col>
+                        </Row>
+                        <div className="mt-auto">
+                          <Row className="g-2">
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={() => handleHeaderCookieAction('header_fuzzing')}>
+                                Header Fuzzing
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={() => handleHeaderCookieAction('cookie_fuzzing')}>
+                                Cookie Fuzzing
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={() => handleHeaderCookieAction('investigate')}>
+                                Investigate
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={() => handleHeaderCookieAction('results')}>
+                                Results
+                              </Button>
+                            </Col>
+                          </Row>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
+
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Injection Attack Vectors</h4>
+                <Row className="mb-4">
+                  <Col md={12}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          Injection Attack Vectors
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Consolidate discovered endpoints and parameters into distinct injection attack vectors, investigate them, and visualize the results.
+                        </Card.Text>
+                        <Row className="g-3 justify-content-center mt-1 mb-2">
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{injectionAttackVectorCounts.client_side}</div>
+                            <div className="text-white small pb-4">Client-Side Attack Vectors</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{injectionAttackVectorCounts.server_side}</div>
+                            <div className="text-white small pb-4">Server-Side Attack Vectors</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{injectionAttackVectorCounts.database}</div>
+                            <div className="text-white small pb-4">Database Attack Vectors</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{injectionAttackVectorCounts.other}</div>
+                            <div className="text-white small pb-4">Other Injection Attack Vectors</div>
+                          </Col>
+                        </Row>
+                        <div className="mt-auto">
+                          <Row className="g-2">
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={handleConsolidateAttackVectors}>
+                                Consolidate
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={handleInvestigateAttackVectors}>
+                                Investigate
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={handleAddAttackVectorManually}>
+                                Add Manually
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={handleOpenUniqueAttackVectorsModal}>
+                                Unique Attack Vectors
+                              </Button>
+                            </Col>
+                          </Row>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
+
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Authentication</h4>
+                <Row className="mb-4">
+                  <Col md={12}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          Authentication
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Document and replay the HTTP request/response flows for each authentication action. Capture steps manually (the app sends each request and records the response) or let AI populate them via the MCP server.
+                        </Card.Text>
+                        <Row className="g-3 justify-content-center mt-1 mb-2">
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{authFlowCounts.register}</div>
+                            <div className="text-white small pb-4">Register Flows</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{authFlowCounts.login}</div>
+                            <div className="text-white small pb-4">Login Flows</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{authFlowCounts.mfa_otp}</div>
+                            <div className="text-white small pb-4">MFA/OTP Flows</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{authFlowCounts.reset}</div>
+                            <div className="text-white small pb-4">Reset Flows</div>
+                          </Col>
+                        </Row>
+                        <div className="mt-auto">
+                          <Row className="g-2">
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAuthFlowModal('register')}>
+                                Register Auth Flows
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAuthFlowModal('login')}>
+                                Login Auth Flows
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAuthFlowModal('mfa_otp')}>
+                                MFA/OTP Auth Flows
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAuthFlowModal('reset')}>
+                                Reset Auth Flows
+                              </Button>
+                            </Col>
+                          </Row>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
+
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Authorization</h4>
+                <Row className="mb-4">
+                  <Col md={12}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          Authorization
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Build context for testing Insecure Direct Object References (IDOR) and access-control violations — identify the unique identifiers a client uses to reach data, and model the target's access-control schemes.
+                        </Card.Text>
+                        <Row className="g-3 justify-content-center mt-1 mb-2">
+                          <Col xs={6} md={4}>
+                            <div className="fs-3 fw-bold text-danger">{authzCounts.idor}</div>
+                            <div className="text-white small pb-4">Possible IDOR Targets</div>
+                          </Col>
+                          <Col xs={6} md={4}>
+                            <div className="fs-3 fw-bold text-danger">{authzCounts.acv}</div>
+                            <div className="text-white small pb-4">Possible ACV Targets</div>
+                          </Col>
+                        </Row>
+                        <div className="mt-auto">
+                          <Row className="g-2">
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={handleOpenClientIdentityModal}>
+                                Client Identity
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAccessControlModal('policy')}>
+                                Policy-Based Access Controls
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAccessControlModal('role')}>
+                                Role-Based Access Controls
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAccessControlModal('discretionary')}>
+                                Discretionary Access Controls
+                              </Button>
+                            </Col>
+                          </Row>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
+
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Threat Modeling</h4>
                 <HelpMeLearn section="threatModeling" />
                 <Row className="mb-4">
@@ -8366,28 +8721,26 @@ function App() {
                           STRIDE Threat Model
                         </Card.Title>
                         <Card.Text className="text-white small fst-italic">
-                          Perform comprehensive threat modeling using the STRIDE methodology to identify security threats across six categories:
-                          <div style={{ columnCount: 2, columnGap: '20px', marginTop: '15px', marginBottom: '15px', textAlign: 'center' }}>
-                            <div style={{ marginBottom: '8px' }}>
-                              <strong>(S)poofing</strong> - Impersonation of users, systems, or data
-                            </div>
-                            <div style={{ marginBottom: '8px' }}>
-                              <strong>(T)ampering</strong> - Malicious modification of data or code
-                            </div>
-                            <div style={{ marginBottom: '8px' }}>
-                              <strong>(R)epudiation</strong> - Denial of actions without proper logging
-                            </div>
-                            <div style={{ marginBottom: '8px' }}>
-                              <strong>(I)nformation Disclosure</strong> - Exposure of sensitive information
-                            </div>
-                            <div style={{ marginBottom: '8px' }}>
-                              <strong>(D)enial of Service</strong> - Preventing legitimate access
-                            </div>
-                            <div style={{ marginBottom: '8px' }}>
-                              <strong>(E)levation of Privilege</strong> - Gaining unauthorized elevated permissions
-                            </div>
-                          </div>
+                          Perform comprehensive threat modeling using the STRIDE methodology to identify security threats across six categories. The counts below reflect the threat-model details filled out for this target so far.
                         </Card.Text>
+                        <Row className="g-3 justify-content-center mt-1 mb-2">
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{threatModelCounts.questions}</div>
+                            <div className="text-white small pb-4">High-Level Questions</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{threatModelCounts.mechanisms}</div>
+                            <div className="text-white small pb-4">Mechanisms</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{threatModelCounts.notableObjects}</div>
+                            <div className="text-white small pb-4">Notable Objects</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{threatModelCounts.securityControls}</div>
+                            <div className="text-white small pb-4">Security Controls</div>
+                          </Col>
+                        </Row>
                         <div className="mt-auto">
                           <Row className="g-2">
                             <Col>
@@ -8441,6 +8794,44 @@ function App() {
                     </Card>
                   </Col>
                 </Row>
+
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Threat Model Results</h4>
+                {[
+                  { key: 'spoofing', label: '(S)poofing', desc: 'Impersonation of users, systems, or data' },
+                  { key: 'tampering', label: '(T)ampering', desc: 'Malicious modification of data or code' },
+                  { key: 'repudiation', label: '(R)epudiation', desc: 'Denial of actions without proper logging' },
+                  { key: 'information_disclosure', label: '(I)nformation Disclosure', desc: 'Exposure of sensitive information' },
+                  { key: 'denial_of_service', label: '(D)enial of Service', desc: 'Preventing legitimate access' },
+                  { key: 'elevation_of_privilege', label: '(E)levation of Privilege', desc: 'Gaining unauthorized elevated permissions' }
+                ].map((cat) => (
+                  <Row className="mb-4" key={cat.key}>
+                    <Col md={12}>
+                      <Card className="shadow-sm">
+                        <Card.Body>
+                          <div className="d-flex justify-content-between align-items-start mb-1">
+                            <Card.Title className="text-danger mb-0">
+                              {cat.label}
+                            </Card.Title>
+                            <Button
+                              variant="outline-danger"
+                              size="sm"
+                              onClick={() => handleOpenPossibleAttacksModal(cat)}
+                            >
+                              Possible Attacks
+                            </Button>
+                          </div>
+                          <Card.Text className="text-white-50 small fst-italic mb-3">
+                            {cat.desc}
+                          </Card.Text>
+                          {/* Placeholder — populated dynamically as Threat Model items are added for this STRIDE category */}
+                          <div className="text-center text-white-50 py-4">
+                            There are currently no Threat Model results for this section.
+                          </div>
+                        </Card.Body>
+                      </Card>
+                    </Col>
+                  </Row>
+                ))}
               </div>
             )}
           </div>
@@ -8994,6 +9385,20 @@ function App() {
         mechanisms={mechanismsForThreatModel}
         notableObjects={notableObjectsForThreatModel}
         securityControls={securityControlsForThreatModel}
+      />
+
+      <AuthFlowModal
+        show={showAuthFlowModal}
+        handleClose={handleCloseAuthFlowModal}
+        category={authFlowCategory}
+        activeTarget={activeTarget}
+        onFlowsChange={fetchAuthFlowCounts}
+      />
+
+      <ClientIdentityModal
+        show={showClientIdentityModal}
+        handleClose={handleCloseClientIdentityModal}
+        activeTarget={activeTarget}
       />
 
       <ManualCrawlResultsModal

@@ -503,11 +503,11 @@ const MetaDataModal = memo(({
             </Button>
           </div>
         )}
-        {filteredAndSortedUrls.length > 0 && (
+        {(Array.isArray(targetURLs) ? targetURLs.length : 0) > 0 && (
           <div className="mb-4">
             <Row className="mb-3">
               <Col md={6}>
-                <Form.Label>Filter by URL</Form.Label>
+                <Form.Label className="text-white">Filter by URL</Form.Label>
                 <Form.Control
                   type="text"
                   placeholder="Search URL..."
@@ -516,7 +516,7 @@ const MetaDataModal = memo(({
                 />
               </Col>
               <Col md={3}>
-                <Form.Label>Status Code</Form.Label>
+                <Form.Label className="text-white">Status Code</Form.Label>
                 <Form.Select
                   value={filters.statusCode}
                   onChange={(e) => handleFilterChange('statusCode', e.target.value)}
@@ -530,7 +530,7 @@ const MetaDataModal = memo(({
                 </Form.Select>
               </Col>
               <Col md={3}>
-                <Form.Label>SSL Issues</Form.Label>
+                <Form.Label className="text-white">SSL Issues</Form.Label>
                 <Form.Select
                   value={filters.sslIssues}
                   onChange={(e) => handleFilterChange('sslIssues', e.target.value)}
@@ -549,7 +549,7 @@ const MetaDataModal = memo(({
             </Row>
             <Row className="mb-3">
               <Col md={4}>
-                <Form.Label>Web Server</Form.Label>
+                <Form.Label className="text-white">Web Server</Form.Label>
                 <Form.Control
                   type="text"
                   placeholder="Search web server..."
@@ -558,7 +558,7 @@ const MetaDataModal = memo(({
                 />
               </Col>
               <Col md={4}>
-                <Form.Label>Technologies</Form.Label>
+                <Form.Label className="text-white">Technologies</Form.Label>
                 <Form.Control
                   type="text"
                   placeholder="Search technologies..."
@@ -567,7 +567,7 @@ const MetaDataModal = memo(({
                 />
               </Col>
               <Col md={2}>
-                <Form.Label>Content Length</Form.Label>
+                <Form.Label className="text-white">Content Length</Form.Label>
                 <Form.Select
                   value={filters.contentLength}
                   onChange={(e) => handleFilterChange('contentLength', e.target.value)}
@@ -645,19 +645,21 @@ const MetaDataModal = memo(({
                 </Button>
               </div>
             </div>
-            <div className="mb-2 d-flex justify-content-between align-items-center">
-              <small className="text-muted">
-                Showing {startIndex + 1}-{Math.min(endIndex, filteredAndSortedUrls.length)} of {filteredAndSortedUrls.length} filtered results
-                {filteredAndSortedUrls.length !== (Array.isArray(targetURLs) ? targetURLs.length : 0) && 
-                  ` (${Array.isArray(targetURLs) ? targetURLs.length : 0} total)`
-                }
-              </small>
-              {totalPages > 1 && (
+            {filteredAndSortedUrls.length > 0 && (
+              <div className="mb-2 d-flex justify-content-between align-items-center">
                 <small className="text-muted">
-                  Page {currentPage} of {totalPages}
+                  Showing {startIndex + 1}-{Math.min(endIndex, filteredAndSortedUrls.length)} of {filteredAndSortedUrls.length} filtered results
+                  {filteredAndSortedUrls.length !== (Array.isArray(targetURLs) ? targetURLs.length : 0) &&
+                    ` (${Array.isArray(targetURLs) ? targetURLs.length : 0} total)`
+                  }
                 </small>
-              )}
-            </div>
+                {totalPages > 1 && (
+                  <small className="text-muted">
+                    Page {currentPage} of {totalPages}
+                  </small>
+                )}
+              </div>
+            )}
           </div>
         )}
         <div className="mb-4">

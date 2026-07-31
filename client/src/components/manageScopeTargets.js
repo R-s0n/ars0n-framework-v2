@@ -347,7 +347,7 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
       .map(word => word.charAt(0).toUpperCase() + word.slice(1))
       .join(' ')
       .replace('Httpx', 'HTTPX')
-      .replace('Sublist3r', 'Sublist3r')
+      .replace('Sublist3r', 'Passive OSINT')
       .replace('Subdomainizer', 'Subdomainizer')
       .replace('Cewl', 'CeWL')
       .replace('Ctl', 'CTL')

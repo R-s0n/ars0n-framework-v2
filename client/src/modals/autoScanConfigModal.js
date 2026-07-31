@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 function AutoScanConfigModal({ show, handleClose, config, onSave, loading: externalLoading }) {
   const tools = [
     { id: 'amass', name: 'Amass' },
-    { id: 'sublist3r', name: 'Sublist3r' },
+    { id: 'sublist3r', name: 'Passive OSINT' },
     { id: 'assetfinder', name: 'Assetfinder' },
     { id: 'gau', name: 'GAU' },
     { id: 'ctl', name: 'CTL' },

@@ -653,7 +653,7 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
               </div>
             ) : (
               <>
-                {filteredAndSortedServers.length > 0 && (
+                {liveWebServers.length > 0 && (
                   <div className="mb-4">
                     <Row className="mb-3">
                       <Col md={4}>
@@ -777,19 +777,21 @@ const LiveWebServersResultsModal = ({ show, onHide, activeTarget, consolidatedNe
                         </Button>
                       </div>
                     </div>
-                    <div className="mb-2 d-flex justify-content-between align-items-center">
-                      <small className="text-muted">
-                        Showing {startIndex + 1}-{Math.min(endIndex, filteredAndSortedServers.length)} of {filteredAndSortedServers.length} filtered results
-                        {filteredAndSortedServers.length !== liveWebServers.length && 
-                          ` (${liveWebServers.length} total)`
-                        }
-                      </small>
-                      {totalPages > 1 && (
+                    {filteredAndSortedServers.length > 0 && (
+                      <div className="mb-2 d-flex justify-content-between align-items-center">
                         <small className="text-muted">
-                          Page {currentPage} of {totalPages}
+                          Showing {startIndex + 1}-{Math.min(endIndex, filteredAndSortedServers.length)} of {filteredAndSortedServers.length} filtered results
+                          {filteredAndSortedServers.length !== liveWebServers.length &&
+                            ` (${liveWebServers.length} total)`
+                          }
                         </small>
-                      )}
-                    </div>
+                        {totalPages > 1 && (
+                          <small className="text-muted">
+                            Page {currentPage} of {totalPages}
+                          </small>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
                 <div className="table-responsive">

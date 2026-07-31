@@ -238,7 +238,7 @@ const HelpMeLearn = ({ section }) => {
           lessonKey: "subdomainScrapingTools",
           answers: [
             "Gau (GetAllUrls) discovers URLs and endpoints from web archives, providing historical subdomain information and revealing URL patterns that might indicate additional subdomains or services not currently active but historically significant.",
-            "Sublist3r leverages multiple search engines and public data sources to discover subdomains through search result analysis, finding subdomains mentioned in indexed content, documentation, and public websites.",
+            "Passive OSINT aggregates multiple free, key-less public sources (RapidDNS, URLScan.io, AlienVault OTX, HackerTarget) to discover subdomains that other observers have already recorded, without scraping search engines or sending any traffic to the target.",
             "Assetfinder specializes in fast DNS-based subdomain enumeration using multiple resolvers and data sources, providing rapid discovery of DNS-resolvable subdomains with minimal infrastructure impact.",
             "Certificate Transparency Log (CTL) searches reveal subdomains that have been issued SSL certificates, including internal or non-public subdomains that organizations secure with certificates but don't publicly advertise."
           ]
@@ -247,7 +247,7 @@ const HelpMeLearn = ({ section }) => {
           question: "How do I systematically utilize subdomain scraping tools and prepare for consolidation?",
           lessonKey: "subdomainScrapingWorkflow",
           answers: [
-            "Start with parallel execution of multiple tools to maximize discovery coverage: run Gau for historical URL discovery, Sublist3r for search engine intelligence, Assetfinder for DNS enumeration, and CTL for certificate analysis simultaneously.",
+            "Start with parallel execution of multiple tools to maximize discovery coverage: run Gau for historical URL discovery, Passive OSINT for multi-source passive aggregation, Assetfinder for DNS enumeration, and CTL for certificate analysis simultaneously.",
             "After completing tool execution, analyze results in their respective modals to understand what each tool discovered and identify patterns or unique findings that might warrant additional investigation or reveal organizational infrastructure characteristics.",
             "Document discovery sources and context for each subdomain to help with validation and prioritization decisions during subsequent consolidation and live web server discovery phases.",
             "This systematic discovery workflow prepares comprehensive subdomain lists from multiple passive sources that will be consolidated and validated for live web services in the next phase of the methodology."
@@ -263,7 +263,7 @@ const HelpMeLearn = ({ section }) => {
           lessonKey: "consolidationRound1Methodology",
           answers: [
             "We're at the First Consolidation and Live Web Server Discovery phase, which represents the critical transition from raw subdomain discovery to verified, accessible targets after completing passive subdomain scraping with multiple tools.",
-            "This round consolidates all subdomains discovered through Amass enumeration and passive scraping tools (Gau, Sublist3r, Assetfinder, CTL) into a single deduplicated list, eliminating redundancy while preserving valuable discovery metadata.",
+            "This round consolidates all subdomains discovered through Amass enumeration and passive scraping tools (Gau, Passive OSINT, Assetfinder, CTL) into a single deduplicated list, eliminating redundancy while preserving valuable discovery metadata.",
             "The live web server discovery component uses Httpx to systematically probe all consolidated subdomains to identify which ones actually host active web services, transforming raw subdomain lists into actionable testing targets.",
             "This phase is critical because it establishes the baseline of confirmed live web servers before proceeding to more aggressive discovery techniques, ensuring that subsequent brute-force testing builds upon a solid foundation of verified assets."
           ]
@@ -272,7 +272,7 @@ const HelpMeLearn = ({ section }) => {
           question: "How does the consolidation process systematically organize and deduplicate discoveries?",
           lessonKey: "consolidationRound1Process",
           answers: [
-            "The consolidation process combines subdomain discoveries from all passive sources (Amass, Gau, Sublist3r, Assetfinder, CTL) into a unified dataset while maintaining source attribution to understand which discovery methods were most effective for the target organization.",
+            "The consolidation process combines subdomain discoveries from all passive sources (Amass, Gau, Passive OSINT, Assetfinder, CTL) into a unified dataset while maintaining source attribution to understand which discovery methods were most effective for the target organization.",
             "Intelligent deduplication removes exact duplicates and normalizes subdomain formats while preserving discovery context and confidence indicators that help prioritize targets based on the reliability and frequency of discovery across multiple sources.",
             "Source correlation analysis identifies subdomains discovered by multiple tools, which typically indicates higher confidence in organizational ownership and legitimacy, helping focus subsequent analysis on the most reliable discovered assets.",
             "The systematic approach ensures that no discovered subdomains are lost during consolidation while organizing the results in a format that enables effective analysis and prioritization for live web server discovery."

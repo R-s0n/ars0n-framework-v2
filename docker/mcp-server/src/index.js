@@ -17,6 +17,8 @@ const { runScanSchema, runScan, checkScanStatusSchema, checkScanStatus, getScanH
 const { runWildcardWorkflowSchema, runWildcardWorkflow, runCompanyWorkflowSchema, runCompanyWorkflow, runUrlWorkflowSchema, runUrlWorkflow, consolidateDataSchema, consolidateData, startAutoScanSchema, startAutoScan, getAutoScanSessionsSchema, getAutoScanSessions } = require('./tools/workflows');
 const { getAttackSurfaceSchema, getAttackSurface, queryCloudAssetsSchema, queryCloudAssets, queryEndpointsSchema, queryEndpoints, queryParametersSchema, queryParameters, getScopeOverviewSchema, getScopeOverview, queryAttackSurfaceAssetsSchema, queryAttackSurfaceAssets } = require('./tools/recon');
 const { findSubdomainTakeoverSchema, findSubdomainTakeover, findExposedPanelsSchema, findExposedPanels, findApiEndpointsSchema, findApiEndpoints, findInterestingResponsesSchema, findInterestingResponses, findSensitiveFilesSchema, findSensitiveFiles, compareScansSchema, compareScans, getScopeStatsSchema, getScopeStats, findUniqueHostsSchema, findUniqueHosts, queryByCidrSchema, queryByCidr, queryByTechStackSchema, queryByTechStack, searchGlobalSchema, searchGlobal } = require('./tools/bugbounty');
+const { getSettingsSchema, getSettings, updateSettingsSchema, updateSettings, setApiKeySchema, setApiKey, deleteApiKeySchema, deleteApiKey, setAiApiKeySchema, setAiApiKey, deleteAiApiKeySchema, deleteAiApiKey } = require('./tools/settings');
+const { listAuthFlowsSchema, listAuthFlows, createAuthFlowSchema, createAuthFlow, updateAuthFlowSchema, updateAuthFlow, deleteAuthFlowSchema, deleteAuthFlow, getAuthFlowStepsSchema, getAuthFlowSteps, addAuthFlowStepSchema, addAuthFlowStep, updateAuthFlowStepSchema, updateAuthFlowStep, deleteAuthFlowStepSchema, deleteAuthFlowStep, replayAuthFlowStepSchema, replayAuthFlowStep, replayAuthFlowSchema, replayAuthFlow } = require('./tools/authflows');
 
 const pkg = require('../package.json');
 
@@ -314,6 +316,93 @@ function createServer() {
 
   server.tool('search_global', 'Search across ALL scope targets for a term - searches subdomains, URLs, company domains, network ranges, and Nuclei findings', searchGlobalSchema.shape, async (params) => {
     const result = await searchGlobal(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // ============================================================
+  // SETTINGS (new) — parity with the web UI Settings modal. The MCP Server section is read-only
+  // (returned by get_settings, but there is no tool to modify it).
+  // ============================================================
+  server.tool('get_settings', 'Read all framework settings: per-tool rate limits, custom HTTP (user-agent/header), Burp Suite config, recon API keys (masked), AI provider API keys (masked), and the read-only MCP server config.', getSettingsSchema.shape, async (params) => {
+    const result = await getSettings(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('update_settings', 'Update framework settings — per-tool rate limits, custom user-agent/header, and Burp Suite proxy/API config. Only pass the fields you want to change; the rest are preserved. Does NOT modify the MCP Server section.', updateSettingsSchema.shape, async (params) => {
+    const result = await updateSettings(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('set_api_key', 'Add or update a recon-tool API key (e.g. SecurityTrails, Shodan, GitHub, Censys). Idempotent by (tool_name, api_key_name). Use app_id/app_secret for providers like Censys.', setApiKeySchema.shape, async (params) => {
+    const result = await setApiKey(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('delete_api_key', 'Delete a recon-tool API key by id, or by tool_name + api_key_name.', deleteApiKeySchema.shape, async (params) => {
+    const result = await deleteApiKey(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('set_ai_api_key', 'Add or update an AI provider API key (e.g. OpenAI, Anthropic, Google, Azure OpenAI). Idempotent by (provider, api_key_name). Use endpoint for Azure OpenAI.', setAiApiKeySchema.shape, async (params) => {
+    const result = await setAiApiKey(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('delete_ai_api_key', 'Delete an AI provider API key by id, or by provider + api_key_name.', deleteAiApiKeySchema.shape, async (params) => {
+    const result = await deleteAiApiKey(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // ============================================================
+  // AUTH FLOWS (document & replay register/login/mfa_otp/reset HTTP flows)
+  // ============================================================
+  server.tool('list_auth_flows', 'List a scope target\'s documented authentication flows (register/login/mfa_otp/reset), with step counts. Optionally filter by category.', listAuthFlowsSchema.shape, async (params) => {
+    const result = await listAuthFlows(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('create_auth_flow', 'Create an auth flow for a target in a category (register/login/mfa_otp/reset), optionally tagging the auth mechanism (auth_type) and a base_url the steps replay against.', createAuthFlowSchema.shape, async (params) => {
+    const result = await createAuthFlow(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('update_auth_flow', 'Update an auth flow\'s name, description, auth_type, base_url, or category. Only pass fields to change.', updateAuthFlowSchema.shape, async (params) => {
+    const result = await updateAuthFlow(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('delete_auth_flow', 'Delete an auth flow and all of its steps.', deleteAuthFlowSchema.shape, async (params) => {
+    const result = await deleteAuthFlow(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_auth_flow_steps', 'List the ordered steps of an auth flow, including the raw request and the recorded response (status, headers, truncated body) for each.', getAuthFlowStepsSchema.shape, async (params) => {
+    const result = await getAuthFlowSteps(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('add_auth_flow_step', 'Add a step to an auth flow by supplying a full raw HTTP request; by default the app SENDS it to the target and records the live response (cookies/session carry over from earlier steps). This is the primary way for AI to build a flow.', addAuthFlowStepSchema.shape, async (params) => {
+    const result = await addAuthFlowStep(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('update_auth_flow_step', 'Update a step\'s raw request, name, or order. Does not re-send it (use replay_auth_flow_step).', updateAuthFlowStepSchema.shape, async (params) => {
+    const result = await updateAuthFlowStep(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('delete_auth_flow_step', 'Delete a step from an auth flow.', deleteAuthFlowStepSchema.shape, async (params) => {
+    const result = await deleteAuthFlowStep(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('replay_auth_flow_step', 'Re-send a single step to the target and re-record its response, seeding cookies from earlier steps.', replayAuthFlowStepSchema.shape, async (params) => {
+    const result = await replayAuthFlowStep(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('replay_auth_flow', 'Run an entire auth flow end-to-end in order using one shared cookie jar (session carries across steps), re-recording every step\'s response.', replayAuthFlowSchema.shape, async (params) => {
+    const result = await replayAuthFlow(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 

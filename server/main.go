@@ -373,6 +373,23 @@ func main() {
 	r.HandleFunc("/security-controls/notes/{note_id}", utils.UpdateSecurityControlNote).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/security-controls/notes/{note_id}", utils.DeleteSecurityControlNote).Methods("DELETE", "OPTIONS")
 
+	// Auth Flows — document & replay register/login/mfa_otp/reset HTTP request/response flows.
+	r.HandleFunc("/auth-flows/{scope_target_id}", utils.GetAuthFlows).Methods("GET", "OPTIONS")
+	r.HandleFunc("/auth-flows/{scope_target_id}", utils.CreateAuthFlow).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth-flows/flow/{flow_id}", utils.UpdateAuthFlow).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/auth-flows/flow/{flow_id}", utils.DeleteAuthFlow).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/auth-flows/flow/{flow_id}/steps", utils.GetAuthFlowSteps).Methods("GET", "OPTIONS")
+	r.HandleFunc("/auth-flows/flow/{flow_id}/steps", utils.AddAuthFlowStep).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth-flows/flow/{flow_id}/replay", utils.ReplayAuthFlow).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth-flows/steps/{step_id}", utils.UpdateAuthFlowStep).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/auth-flows/steps/{step_id}", utils.DeleteAuthFlowStep).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/auth-flows/steps/{step_id}/replay", utils.ReplayAuthFlowStep).Methods("POST", "OPTIONS")
+
+	// Authorization > Client Identity — unique identifiers (IDOR targets) pulled from endpoint requests.
+	r.HandleFunc("/authz/client-identifiers/{scope_target_id}", utils.GetClientIdentifiers).Methods("GET", "OPTIONS")
+	r.HandleFunc("/authz/client-identifiers/{scope_target_id}", utils.CreateClientIdentifier).Methods("POST", "OPTIONS")
+	r.HandleFunc("/authz/client-identifiers/id/{id}", utils.DeleteClientIdentifier).Methods("DELETE", "OPTIONS")
+
 	r.HandleFunc("/threat-model/{scope_target_id}", utils.GetThreatModel).Methods("GET", "OPTIONS")
 	r.HandleFunc("/threat-model/{scope_target_id}", utils.CreateThreatModel).Methods("POST", "OPTIONS")
 	r.HandleFunc("/threat-model/{threat_id}", utils.UpdateThreatModel).Methods("PUT", "OPTIONS")

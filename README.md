@@ -427,13 +427,14 @@ The framework ships with a **Model Context Protocol (MCP) server** that exposes 
 
 ### What it exposes
 
-The server registers **50 tools** across five categories:
+The server registers **55 tools** across six categories:
 
 - **Scope management** — list/add/activate/delete scope targets, update ROI scores
 - **Scan execution** — run any individual tool (amass, subfinder, httpx, nuclei, katana, ffuf, arjun, etc.) and check status
 - **Workflows** — run the full Company / Wildcard / URL workflows or individual phases
 - **Recon data queries** — subdomains, company domains, network ranges, live servers, target URLs, endpoints, parameters, DNS records, technologies, Nuclei findings, attack surface
 - **Bug bounty analysis** — subdomain-takeover candidates, exposed panels, API endpoints, sensitive files, interesting responses, cross-target search, scan diffing
+- **Settings** — read all settings and modify rate limits, custom HTTP (user-agent/header), Burp Suite config, recon API keys, and AI provider API keys (`get_settings`, `update_settings`, `set_api_key`/`delete_api_key`, `set_ai_api_key`/`delete_ai_api_key`). The MCP Server section itself is read-only via MCP.
 
 ### Connecting
 

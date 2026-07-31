@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os/exec"
@@ -155,104 +156,243 @@ func RunSublist3rScan(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"scan_id": scanID})
 }
 
+// ExecuteAndParseSublist3rScan — the original Sublist3r tool is obsolete (its search-engine
+// scrapers are all blocked, DNSdumpster/Virustotal are broken), so this scan no longer shells out
+// to sublist3r.py. It has been repurposed into a native "Passive OSINT" aggregator that unions
+// subdomains from working, key-free passive sources (RapidDNS, URLScan.io, OTX AlienVault passive
+// DNS, HackerTarget hostsearch). Certificate Transparency is deliberately NOT queried here because
+// the CTL scan already covers crt.sh + certspotter. Each source is best-effort: one failing (e.g. a
+// rate-limit) doesn't fail the scan as long as another returns data.
 func ExecuteAndParseSublist3rScan(scanID, domain string) {
-	log.Printf("[INFO] Starting Sublist3r scan for domain %s (scan ID: %s)", domain, scanID)
-	log.Printf("[DEBUG] Initializing scan variables and preparing command")
+	log.Printf("[PASSIVE-OSINT] Starting passive subdomain enumeration for %s (scan ID: %s)", domain, scanID)
 	startTime := time.Now()
 
-	log.Printf("[DEBUG] Constructing docker command for Sublist3r")
-	cmd := exec.Command(
-		"docker", "exec",
-		"ars0n-framework-v2-sublist3r-1",
-		"python", "/app/sublist3r.py",
-		"-d", domain,
-		"-v",
-		"-t", "50",
-		"-o", "/dev/stdout",
-	)
+	sources := []struct {
+		name  string
+		fetch func(string) ([]string, error)
+	}{
+		{"rapiddns", fetchSubdomainsFromRapidDNS},
+		{"urlscan", fetchSubdomainsFromURLScan},
+		{"otx", fetchSubdomainsFromOTX},
+		{"hackertarget", fetchSubdomainsFromHackerTarget},
+	}
 
-	log.Printf("[DEBUG] Docker command constructed: %s", cmd.String())
-	log.Printf("[DEBUG] Setting up stdout and stderr buffers")
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	log.Printf("[INFO] Executing Sublist3r command at %s", time.Now().Format(time.RFC3339))
-	log.Printf("[DEBUG] Command working directory: %s", cmd.Dir)
-	log.Printf("[DEBUG] Command environment variables: %v", cmd.Env)
-
-	err := cmd.Run()
-	execTime := time.Since(startTime).String()
-	log.Printf("[INFO] Command execution completed in %s", execTime)
-
-	if err != nil {
-		log.Printf("[ERROR] Sublist3r scan failed with error: %v", err)
-		log.Printf("[ERROR] Error type: %T", err)
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			log.Printf("[ERROR] Exit code: %d", exitErr.ExitCode())
+	unique := make(map[string]bool)
+	var usedSources []string
+	var errs []string
+	for _, s := range sources {
+		subs, err := s.fetch(domain)
+		if err != nil {
+			log.Printf("[PASSIVE-OSINT] source %s failed for %s: %v", s.name, domain, err)
+			errs = append(errs, fmt.Sprintf("%s: %v", s.name, err))
+			continue
 		}
-		log.Printf("[ERROR] Stderr output length: %d bytes", stderr.Len())
-		log.Printf("[ERROR] Stderr output content: %s", stderr.String())
-		log.Printf("[ERROR] Stdout output length: %d bytes", stdout.Len())
-		log.Printf("[DEBUG] Updating scan status to error state")
-		UpdateSublist3rScanStatus(scanID, "error", "", stderr.String(), cmd.String(), execTime)
+		for _, sub := range subs {
+			unique[sub] = true
+		}
+		usedSources = append(usedSources, fmt.Sprintf("%s(%d)", s.name, len(subs)))
+	}
+
+	command := "passive sources: rapiddns, urlscan, otx, hackertarget"
+	if len(unique) == 0 {
+		msg := "No subdomains found from any passive source."
+		if len(errs) > 0 {
+			msg += " (" + strings.Join(errs, "; ") + ")"
+		}
+		log.Printf("[PASSIVE-OSINT] %s", msg)
+		UpdateSublist3rScanStatus(scanID, "error", "", msg, command, time.Since(startTime).String())
 		return
 	}
 
-	log.Printf("[INFO] Sublist3r scan completed successfully in %s", execTime)
-	log.Printf("[DEBUG] Processing scan output")
+	out := make([]string, 0, len(unique))
+	for s := range unique {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	result := strings.Join(out, "\n")
 
-	// Process the output
-	lines := strings.Split(stdout.String(), "\n")
-	log.Printf("[INFO] Processing %d lines of output", len(lines))
+	log.Printf("[PASSIVE-OSINT] Found %d unique subdomains for %s via %s", len(out), domain, strings.Join(usedSources, ", "))
+	UpdateSublist3rScanStatus(scanID, "success", result, strings.Join(errs, "; "), command+" -> "+strings.Join(usedSources, ", "), time.Since(startTime).String())
+}
 
-	// Use a map to handle deduplication
-	uniqueSubdomains := make(map[string]bool)
-	for _, line := range lines {
-		// Clean the line by removing ANSI color codes and other control characters
-		cleanLine := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`).ReplaceAllString(line, "")
-		cleanLine = strings.TrimSpace(cleanLine)
+// rapidDNSSubRegex matches host labels; the domain suffix is appended (quoted) per call.
+// fetchSubdomainsFromRapidDNS scrapes RapidDNS's free subdomain page (no API key). The response is
+// an HTML table of "<subdomain></td><td><ip>"; we regex out every hostname ending in the target
+// domain and let filterCTSubdomains validate/dedupe.
+func fetchSubdomainsFromRapidDNS(domain string) ([]string, error) {
+	requestURL := fmt.Sprintf("https://rapiddns.io/subdomain/%s?full=1", url.QueryEscape(domain))
+	log.Printf("[PASSIVE-OSINT] [DEBUG] Requesting RapidDNS: %s", requestURL)
+	client := &http.Client{Timeout: 30 * time.Second}
 
-		// Skip empty lines, banner lines, and status messages
-		if cleanLine == "" ||
-			strings.Contains(cleanLine, "Sublist3r") ||
-			strings.Contains(cleanLine, "==") ||
-			strings.Contains(cleanLine, "Total Unique Subdomains Found:") ||
-			strings.HasPrefix(cleanLine, "[-]") ||
-			strings.HasPrefix(cleanLine, "[!]") ||
-			strings.HasPrefix(cleanLine, "[~]") ||
-			strings.HasPrefix(cleanLine, "[+]") {
-			continue
-		}
+	req, err := http.NewRequest("GET", requestURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-		// Remove "SSL Certificates: " prefix if present
-		cleanLine = strings.TrimPrefix(cleanLine, "SSL Certificates: ")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 
-		// If the line is a valid subdomain of our target domain, add it to our map
-		if strings.HasSuffix(cleanLine, domain) {
-			uniqueSubdomains[cleanLine] = true
-		}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("rapiddns returned status %d", resp.StatusCode)
 	}
 
-	// Convert map keys to slice
-	var finalSubdomains []string
-	for subdomain := range uniqueSubdomains {
-		finalSubdomains = append(finalSubdomains, subdomain)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
 	}
 
-	// Sort the results for consistency
-	sort.Strings(finalSubdomains)
+	re := regexp.MustCompile(`([A-Za-z0-9_-]+\.)+` + regexp.QuoteMeta(domain))
+	names := re.FindAllString(string(bodyBytes), -1)
+	filtered := filterCTSubdomains(names, domain)
+	if len(filtered) == 0 {
+		return nil, fmt.Errorf("rapiddns: no subdomains parsed from response")
+	}
+	return filtered, nil
+}
 
-	// Join the results with newlines
-	result := strings.Join(finalSubdomains, "\n")
-	log.Printf("[DEBUG] Final result string length: %d bytes", len(result))
+// fetchSubdomainsFromURLScan queries urlscan.io's free search API (no API key for search) and pulls
+// hostnames out of the indexed page/task domains for the target.
+func fetchSubdomainsFromURLScan(domain string) ([]string, error) {
+	requestURL := fmt.Sprintf("https://urlscan.io/api/v1/search/?q=domain:%s&size=100", url.QueryEscape(domain))
+	log.Printf("[PASSIVE-OSINT] [DEBUG] Requesting URLScan: %s", requestURL)
+	client := &http.Client{Timeout: 30 * time.Second}
 
-	log.Printf("[INFO] Updating scan status in database for scan ID: %s", scanID)
-	UpdateSublist3rScanStatus(scanID, "success", result, stderr.String(), cmd.String(), execTime)
+	req, err := http.NewRequest("GET", requestURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "ars0n-framework-v2")
+	req.Header.Set("Accept", "application/json")
 
-	log.Printf("[INFO] Sublist3r scan completed successfully for domain %s (scan ID: %s)", domain, scanID)
-	log.Printf("[INFO] Total execution time including processing: %s", time.Since(startTime))
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("urlscan returned status %d", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var data struct {
+		Results []struct {
+			Page struct {
+				Domain string `json:"domain"`
+			} `json:"page"`
+			Task struct {
+				Domain string `json:"domain"`
+			} `json:"task"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(bodyBytes, &data); err != nil {
+		return nil, fmt.Errorf("failed to decode urlscan response: %v", err)
+	}
+
+	var names []string
+	for _, r := range data.Results {
+		if r.Page.Domain != "" {
+			names = append(names, r.Page.Domain)
+		}
+		if r.Task.Domain != "" {
+			names = append(names, r.Task.Domain)
+		}
+	}
+	return filterCTSubdomains(names, domain), nil
+}
+
+// fetchSubdomainsFromHackerTarget queries HackerTarget's free hostsearch API (subdomain,ip lines).
+func fetchSubdomainsFromHackerTarget(domain string) ([]string, error) {
+	requestURL := fmt.Sprintf("https://api.hackertarget.com/hostsearch/?q=%s", url.QueryEscape(domain))
+	log.Printf("[PASSIVE-OSINT] [DEBUG] Requesting HackerTarget: %s", requestURL)
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	req, err := http.NewRequest("GET", requestURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "ars0n-framework-v2")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("hackertarget returned status %d", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	body := string(bodyBytes)
+	// HackerTarget returns plain text: "subdomain,ip" per line, or an error/rate-limit message.
+	if strings.Contains(body, "API count exceeded") || strings.Contains(body, "error check your search") {
+		return nil, fmt.Errorf("hackertarget: %s", strings.TrimSpace(body))
+	}
+
+	var names []string
+	for _, line := range strings.Split(body, "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), ",", 2)
+		if len(parts) >= 1 && parts[0] != "" {
+			names = append(names, parts[0])
+		}
+	}
+	return filterCTSubdomains(names, domain), nil
+}
+
+// fetchSubdomainsFromOTX queries AlienVault OTX passive DNS (free, but aggressively rate-limited).
+func fetchSubdomainsFromOTX(domain string) ([]string, error) {
+	requestURL := fmt.Sprintf("https://otx.alienvault.com/api/v1/indicators/domain/%s/passive_dns", url.QueryEscape(domain))
+	log.Printf("[PASSIVE-OSINT] [DEBUG] Requesting OTX: %s", requestURL)
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	req, err := http.NewRequest("GET", requestURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "ars0n-framework-v2")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("otx returned status %d", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var data struct {
+		PassiveDNS []struct {
+			Hostname string `json:"hostname"`
+		} `json:"passive_dns"`
+	}
+	if err := json.Unmarshal(bodyBytes, &data); err != nil {
+		return nil, fmt.Errorf("failed to decode otx response: %v", err)
+	}
+
+	var names []string
+	for _, r := range data.PassiveDNS {
+		names = append(names, r.Hostname)
+	}
+	return filterCTSubdomains(names, domain), nil
 }
 
 func UpdateSublist3rScanStatus(scanID, status, result, stderr, command, execTime string) {
@@ -994,57 +1134,143 @@ func ExecuteAndParseCTLScan(scanID, domain string) {
 	log.Printf("[INFO] Starting CTL scan execution for domain %s (scan ID: %s)", domain, scanID)
 	startTime := time.Now()
 
-	// Make HTTP request to crt.sh
-	url := fmt.Sprintf("https://crt.sh/?q=%%.%s&output=json", domain)
-	client := &http.Client{Timeout: 30 * time.Second}
-
-	resp, err := client.Get(url)
+	subdomains, source, err := fetchCTLSubdomains(domain)
 	if err != nil {
-		log.Printf("[ERROR] Failed to make request to crt.sh: %v", err)
-		UpdateCTLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to make request to crt.sh: %v", err), "", time.Since(startTime).String())
+		log.Printf("[CTL] [ERROR] All CT sources failed for %s: %v", domain, err)
+		UpdateCTLScanStatus(scanID, "error", "", err.Error(), "", time.Since(startTime).String())
 		return
+	}
+
+	result := strings.Join(subdomains, "\n")
+	log.Printf("[CTL] [INFO] Found %d subdomains for %s via %s", len(subdomains), domain, source)
+	UpdateCTLScanStatus(scanID, "success", result, "", source, time.Since(startTime).String())
+	log.Printf("[INFO] CTL scan completed and results stored successfully for domain %s", domain)
+}
+
+// fetchCTLSubdomains queries Certificate Transparency logs for subdomains of domain. It prefers
+// crt.sh (the most complete aggregator) but falls back to certspotter when crt.sh is unavailable —
+// crt.sh is chronically overloaded and frequently returns 502/timeouts.
+func fetchCTLSubdomains(domain string) (subdomains []string, source string, err error) {
+	subs, crtErr := fetchCTLFromCrtSh(domain)
+	if crtErr == nil {
+		return subs, fmt.Sprintf("GET https://crt.sh/?q=%%.%s&output=json", domain), nil
+	}
+	log.Printf("[CTL] [WARN] crt.sh failed for %s (%v) — falling back to certspotter", domain, crtErr)
+
+	subs, csErr := fetchCTLFromCertspotter(domain)
+	if csErr == nil {
+		return subs, fmt.Sprintf("GET https://api.certspotter.com/v1/issuances?domain=%s (crt.sh fallback)", domain), nil
+	}
+	return nil, "", fmt.Errorf("both Certificate Transparency sources failed. crt.sh: %v. certspotter fallback: %v", crtErr, csErr)
+}
+
+// filterCTSubdomains lowercases, strips wildcard prefixes, and keeps only names that are the domain
+// itself or a subdomain of it, returning a sorted, deduplicated slice.
+func filterCTSubdomains(names []string, domain string) []string {
+	unique := make(map[string]bool)
+	for _, name := range names {
+		sub := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(name), "*."))
+		if sub != "" && (sub == domain || strings.HasSuffix(sub, "."+domain)) {
+			unique[sub] = true
+		}
+	}
+	out := make([]string, 0, len(unique))
+	for s := range unique {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func fetchCTLFromCrtSh(domain string) ([]string, error) {
+	// crt.sh blocks/deprioritizes Go's default User-Agent, so present as a browser. Cap at 45s so
+	// we don't wait forever before falling back — crt.sh is frequently overloaded.
+	requestURL := fmt.Sprintf("https://crt.sh/?q=%%.%s&output=json", domain)
+	log.Printf("[CTL] [DEBUG] Requesting crt.sh URL: %s", requestURL)
+	client := &http.Client{Timeout: 45 * time.Second}
+
+	req, err := http.NewRequest("GET", requestURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Connection", "keep-alive")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[ERROR] crt.sh returned non-200 status code: %d", resp.StatusCode)
-		UpdateCTLScanStatus(scanID, "error", "", fmt.Sprintf("crt.sh returned status code: %d", resp.StatusCode), "", time.Since(startTime).String())
-		return
+		return nil, fmt.Errorf("crt.sh returned status %d", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if bs := string(bodyBytes); strings.Contains(bs, "Sorry, something went wrong") ||
+		strings.Contains(bs, "searches that would produce many results may never succeed") {
+		return nil, fmt.Errorf("crt.sh returned an error page (too many results or overloaded)")
 	}
 
 	var results []struct {
 		NameValue string `json:"name_value"`
 	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
-		log.Printf("[ERROR] Failed to decode crt.sh response: %v", err)
-		UpdateCTLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to decode crt.sh response: %v", err), "", time.Since(startTime).String())
-		return
+	if err := json.Unmarshal(bodyBytes, &results); err != nil {
+		return nil, fmt.Errorf("failed to decode crt.sh response: %v", err)
 	}
 
-	// Process and deduplicate results
-	uniqueSubdomains := make(map[string]bool)
-	for _, result := range results {
-		// Convert to lowercase and remove wildcard prefix
-		subdomain := strings.ToLower(strings.TrimPrefix(result.NameValue, "*."))
-		if strings.HasSuffix(subdomain, domain) {
-			uniqueSubdomains[subdomain] = true
-		}
+	// crt.sh packs multiple SAN entries into name_value separated by newlines.
+	var names []string
+	for _, r := range results {
+		names = append(names, strings.Split(r.NameValue, "\n")...)
+	}
+	return filterCTSubdomains(names, domain), nil
+}
+
+func fetchCTLFromCertspotter(domain string) ([]string, error) {
+	requestURL := fmt.Sprintf("https://api.certspotter.com/v1/issuances?domain=%s&include_subdomains=true&expand=dns_names", domain)
+	log.Printf("[CTL] [DEBUG] Requesting certspotter URL: %s", requestURL)
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	req, err := http.NewRequest("GET", requestURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "ars0n-framework-v2")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("certspotter returned status %d", resp.StatusCode)
 	}
 
-	// Convert map to sorted slice
-	var subdomains []string
-	for subdomain := range uniqueSubdomains {
-		subdomains = append(subdomains, subdomain)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
 	}
-	sort.Strings(subdomains)
 
-	// Join results with newlines
-	result := strings.Join(subdomains, "\n")
-	log.Printf("[DEBUG] Final processed result length: %d bytes", len(result))
+	var results []struct {
+		DNSNames []string `json:"dns_names"`
+	}
+	if err := json.Unmarshal(bodyBytes, &results); err != nil {
+		return nil, fmt.Errorf("failed to decode certspotter response: %v", err)
+	}
 
-	UpdateCTLScanStatus(scanID, "success", result, "", fmt.Sprintf("GET %s", url), time.Since(startTime).String())
-	log.Printf("[INFO] CTL scan completed and results stored successfully for domain %s", domain)
+	var names []string
+	for _, r := range results {
+		names = append(names, r.DNSNames...)
+	}
+	return filterCTSubdomains(names, domain), nil
 }
 
 func UpdateCTLScanStatus(scanID, status, result, stderr, command, execTime string) {
