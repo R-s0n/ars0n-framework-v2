@@ -6,12 +6,18 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
+
+// parameth flags interesting params with ANSI-colored lines like "GET(DIFF): <param> | <n>",
+// "GET(status): <param> | ...", "GET(size): <param> | ...", plus POST equivalents.
+var paramethANSIRegexp = regexp.MustCompile("\x1b\\[[0-9;]*m")
+var paramethHitRegexp = regexp.MustCompile(`(?:GET|POST)\((?:DIFF|status|size)\):\s*(\S+)\s*\|`)
 
 type ParamethConfig struct {
 	Method        string              `json:"method"`
@@ -170,29 +176,23 @@ func ExecuteParamethScan(scanID, scopeTargetID string) {
 	processedEndpoints := 0
 
 	for _, endpoint := range endpoints {
+		// parameth flags: -u URL, -t threads, -diff difference, -p params-wordlist, -x ignore-codes,
+		// -H header. It has NO --method (it tests GET+POST itself) and NO --placeholder.
 		args := []string{
 			"-u", endpoint,
 			"-t", fmt.Sprintf("%d", config.Threads),
 		}
 
-		if config.Method != "" && config.Method != "GET" {
-			args = append(args, "-m", config.Method)
-		}
-
 		if config.Diff > 0 {
-			args = append(args, "--diff", fmt.Sprintf("%d", config.Diff))
-		}
-
-		if config.Placeholder != "" {
-			args = append(args, "--placeholder", config.Placeholder)
+			args = append(args, "-diff", fmt.Sprintf("%d", config.Diff))
 		}
 
 		if config.Wordlist != "" {
-			args = append(args, "-w", config.Wordlist)
+			args = append(args, "-p", config.Wordlist)
 		}
 
 		if config.IgnoreCodes != "" {
-			args = append(args, "--ignore-codes", config.IgnoreCodes)
+			args = append(args, "-x", config.IgnoreCodes)
 		}
 
 		if len(config.Headers) > 0 {
@@ -210,24 +210,25 @@ func ExecuteParamethScan(scanID, scopeTargetID string) {
 		allOutput.WriteString("\n")
 
 		if err == nil {
-			outputLines := strings.Split(string(output), "\n")
-			for _, line := range outputLines {
-				line = strings.TrimSpace(line)
-				if strings.Contains(line, "Found parameter:") || strings.Contains(line, "[+]") {
-					parts := strings.Fields(line)
-					for _, part := range parts {
-						if !strings.HasPrefix(part, "[") && !strings.HasPrefix(part, "Found") && !strings.HasPrefix(part, "parameter:") && len(part) > 0 {
-							insertParamQuery := `
-								INSERT INTO parameter_enumeration_results 
-								(scan_id, scan_type, scope_target_id, endpoint_url, parameter_name, parameter_type, confidence)
-								VALUES ($1, 'parameth', $2, $3, $4, 'query', 'medium')
-							`
-							dbPool.Exec(context.Background(), insertParamQuery, scanID, scopeTargetID, endpoint, part)
-							parametersFound++
-							break
-						}
-					}
+			clean := paramethANSIRegexp.ReplaceAllString(string(output), "")
+			seen := map[string]bool{}
+			for _, line := range strings.Split(clean, "\n") {
+				m := paramethHitRegexp.FindStringSubmatch(line)
+				if m == nil {
+					continue
 				}
+				paramName := strings.TrimSpace(m[1])
+				if paramName == "" || seen[paramName] {
+					continue
+				}
+				seen[paramName] = true
+				insertParamQuery := `
+					INSERT INTO parameter_enumeration_results
+					(scan_id, scan_type, scope_target_id, endpoint_url, parameter_name, parameter_type, confidence)
+					VALUES ($1, 'parameth', $2, $3, $4, 'query', 'medium')
+				`
+				dbPool.Exec(context.Background(), insertParamQuery, scanID, scopeTargetID, endpoint, paramName)
+				parametersFound++
 			}
 		}
 

@@ -18,6 +18,175 @@ const HelpMeLearn = ({ section }) => {
   };
 
   const sections = {
+    urlManualCrawling: {
+      title: "Help Me Learn!",
+      items: [
+        {
+          question: "What stage of the methodology are we at, and why do we start URL testing by crawling the app manually?",
+          lessonKey: "urlManualCrawlingMethodology",
+          answers: [
+            "We've moved from the recon phases (finding domains, subdomains, and live web servers) into the URL phase, where we focus on a single chosen application and map everything it does before testing it for bugs. Manual crawling is the very first step: you use the application the way a real user would, by hand.",
+            "The goal is to build a model — in your head and in your notes — of how the app works: its pages, features, user roles, and the requests the browser sends behind the scenes. Automated tools are powerful but they don't understand business logic; you do. Time spent here is what separates hunters who find high-impact bugs from those who only find what a scanner reports.",
+            "Practically, you browse the target through an intercepting proxy (like Caido or Burp Suite) so every request and response is captured. This 'walk-through' fills your proxy history, seeds the automated crawlers with real (and authenticated) traffic, and reveals features that spidering tools would never reach on their own — multi-step flows, anything behind a login, and JavaScript-driven actions."
+          ]
+        },
+        {
+          question: "How do I use an intercepting proxy (Caido or Burp Suite) to explore and capture the application?",
+          lessonKey: "urlManualCrawlingProxy",
+          answers: [
+            "An intercepting proxy sits between your browser and the target. Your browser is configured to send traffic through the proxy (e.g., 127.0.0.1:8080), and the proxy records every request/response pair. Because HTTPS is encrypted, you install the proxy's CA certificate in your browser once so it can read and log the traffic.",
+            "With the proxy running, simply use the app: sign up, log in, change settings, upload a file, run a search, make a test purchase, open every menu. Each action generates requests that land in the proxy's HTTP history and sitemap — the exact API calls, parameters, headers, cookies, and tokens the application relies on.",
+            "As you go, send interesting requests to the Replay/Repeater tool so you can modify and resend them without clicking through the UI again. Note the authentication material (session cookies, Bearer tokens); you'll reuse it so your automated scans run as a logged-in user, which dramatically expands the reachable attack surface.",
+            "The Ars0n Framework complements this: it can install a browser extension and capture your manual crawl, feeding those real requests and discovered endpoints into the rest of the URL workflow — so the automated tools build on top of your human exploration instead of starting blind."
+          ]
+        },
+        {
+          question: "What should I look for and document while manually crawling, as a complete beginner?",
+          lessonKey: "urlManualCrawlingMapping",
+          answers: [
+            "Map the features and roles first: what can an anonymous visitor do, a normal user, and an admin? Note anywhere the app makes a trust decision (who can see, do, or change what). Broken access control and IDOR — among the most common and valuable bugs — hide exactly at these boundaries.",
+            "Catalog the objects the app manipulates: user IDs, order numbers, document IDs, account numbers, API keys. Anywhere you see a number or ID in a URL or request body, ask 'what happens if I change it to someone else's?' Write these down; they become your test cases.",
+            "Watch the proxy history for the 'plumbing': API base paths (like /api/v1/…), authentication flows (login, password reset, OAuth redirects), file uploads, and any request that reflects your input back into the page. These are the mechanisms you'll later attack with the automated tools and manual payloads.",
+            "Keep short notes as you go — a running list of interesting endpoints, parameters, and 'that felt weird' moments. This document is the bridge from recon to actual hunting; every later step (endpoint discovery, brute forcing, parameter enumeration, threat modeling) builds on the understanding you capture here."
+          ]
+        }
+      ]
+    },
+    urlDiscovery: {
+      title: "Help Me Learn!",
+      items: [
+        {
+          question: "What stage of the methodology are we at, and what are we trying to accomplish with URL and endpoint discovery?",
+          lessonKey: "urlDiscoveryMethodology",
+          answers: [
+            "We're in the URL/Endpoint Discovery phase — expanding the map of the single target application from the handful of pages you clicked through into the full set of URLs, API routes, and resources the app exposes. Manual crawling gave you depth; this step gives you breadth.",
+            "The objective is a comprehensive list of endpoints to test. Every URL, parameter, and API route is a potential place for a bug. Modern apps hide most of their surface in JavaScript, in old archived pages, and in routes that aren't linked from the homepage — so we combine several tools that each find endpoints a different way.",
+            "There are two complementary techniques here: active crawling (a tool loads the app and follows links/JavaScript, like Katana and GoSpider) and passive discovery (a tool asks public archives what URLs have ever been seen for this domain, like Waybackurls and GAU). Together they surface far more than either alone, including forgotten and deprecated endpoints that are often the least protected."
+          ]
+        },
+        {
+          question: "How do Katana, LinkFinder, Waybackurls, GAU, and GoSpider each discover endpoints differently?",
+          lessonKey: "urlDiscoveryTools",
+          answers: [
+            "Katana is a fast, modern crawler (from ProjectDiscovery) that loads pages, parses HTML and JavaScript, and can even drive a headless browser to follow dynamically-generated links. It's your primary active crawler for discovering the app's current, live structure.",
+            "GoSpider is another active crawler that's good at pulling URLs out of a page's links, forms, robots.txt, sitemaps, and inline JavaScript — a useful second opinion alongside Katana because different crawlers catch different things.",
+            "Waybackurls and GAU (GetAllUrls) are passive: they query public archives (the Wayback Machine, Common Crawl, URLScan, and others) for every URL ever recorded for the domain. This is how you find old, deprecated, and forgotten endpoints — including ones developers took out of the UI but never actually removed from the server.",
+            "LinkFinder specializes in JavaScript: it parses the app's JS files and extracts the endpoints, API paths, and routes referenced inside them. Because single-page apps define most of their API surface in JavaScript, LinkFinder often reveals API endpoints that no crawler would reach by clicking around."
+          ]
+        },
+        {
+          question: "How do I run these tools together and turn the raw results into a useful list of targets?",
+          lessonKey: "urlDiscoveryWorkflow",
+          answers: [
+            "Run the active and passive tools together so their results complement each other: crawlers (Katana, GoSpider) map the live app, archive tools (Waybackurls, GAU) recover history, and LinkFinder mines the JavaScript. The framework runs each and stores the endpoints it finds against your target.",
+            "Raw output is always noisy and full of duplicates — the same URL with different query values, static assets (.png, .css, .woff), and out-of-scope third-party URLs. Consolidation and filtering (the next step in this workflow) deduplicate and normalize everything into a clean, unique endpoint list you can actually work through.",
+            "Once consolidated, read the list looking for the interesting stuff: API routes (/api/, /graphql, /v1/), admin and internal paths, anything that takes parameters, file-handling endpoints, and old versioned routes. These are the endpoints you'll feed into brute forcing, parameter enumeration, and manual testing.",
+            "Think of this phase as building your worklist. You're not testing for bugs yet — you're making sure that when you do, you test the whole application, not just the parts that happen to be linked from the front page."
+          ]
+        }
+      ]
+    },
+    urlEndpointBruteForcing: {
+      title: "Help Me Learn!",
+      items: [
+        {
+          question: "What stage of the methodology are we at, and why do we brute-force for hidden endpoints?",
+          lessonKey: "urlBruteForcingMethodology",
+          answers: [
+            "We're in the Endpoint Brute Forcing phase. Crawling and archive mining found the endpoints the app links to or has been seen using; brute forcing finds the ones nobody links to at all — by taking a wordlist of common paths and filenames and asking the server, one by one, 'does /admin exist? does /backup.zip exist? does /api/internal exist?'",
+            "This matters because the most sensitive things are often the least advertised: admin panels, backup files, config files, staging endpoints, debug interfaces, and forgotten API routes. If the server responds to /.git/config or /backup.sql, you've found something no crawler ever would have.",
+            "Brute forcing is active and noisy — you're sending many requests to the target — so it's the phase where you most need to be deliberate: respect the program's rules, avoid hammering the target, and be aware of WAFs and rate limits (which is exactly why the WAF Probe runs first)."
+          ]
+        },
+        {
+          question: "How do WAF Probe and FFUF work together in this step?",
+          lessonKey: "urlBruteForcingTools",
+          answers: [
+            "FFUF (Fuzz Faster U Fool) is the brute-forcer: it takes a wordlist and a target URL with a FUZZ keyword (e.g., https://target/FUZZ), sends a request for every word, and shows you which paths return interesting responses. It's extremely fast and highly configurable — threads, rate limits, matchers, and filters.",
+            "The danger is that fast, aggressive fuzzing against a protected target gets you blocked: a WAF returns 403 to everything, or a rate limiter throttles you, and your results become useless (or your IP gets banned). Tuning FFUF blind is guesswork.",
+            "That's what WAF Probe solves. It probes the target first to detect whether a WAF is present (and which vendor), how the target rate-limits, and what a blocked response looks like — then recommends a safe FFUF configuration (request rate, delay, threads, response filters) and lets you apply it with one click. Run WAF Probe, apply its recommendations, then run FFUF tuned to the target.",
+            "In short: WAF Probe is reconnaissance for your fuzzing, and FFUF is the fuzzing. Using them in that order means you fuzz effectively without tripping defenses — the difference between clean results and a banned IP."
+          ]
+        },
+        {
+          question: "How do I choose wordlists, tune FFUF, and interpret results responsibly?",
+          lessonKey: "urlBruteForcingWorkflow",
+          answers: [
+            "Wordlist choice is everything. Start with a general content-discovery list (like SecLists' common.txt or the raft lists), then get specific: if the app is PHP, add .php extensions; if you found an /api, fuzz it with API-specific wordlists. A targeted wordlist finds more with fewer requests than a giant generic one.",
+            "Tune FFUF to the target: set the request rate and delay based on the WAF Probe's recommendation, pick a sensible thread count, and use matchers/filters so you see signal, not noise. The key skill is filtering out the 'baseline' response — if every missing page returns a 200 with a 1,024-byte 'not found' template, filter that size so real hits stand out.",
+            "Interpret results by looking at status codes and response sizes together. 200 is an obvious hit; 401/403 can mean 'this exists but you're not authorized' (still a lead — maybe it's bypassable); 301/302 redirects reveal structure; and anomalous sizes flag pages that behave differently. Every interesting hit becomes a new endpoint to test manually.",
+            "Above all, hunt responsibly: stay in scope, keep request rates reasonable, prefer smaller targeted wordlists over brute-forcing the entire internet's worth of paths, and stop if you're clearly being blocked rather than escalating. Good hunters are welcome back; ones who knock over targets are not."
+          ]
+        }
+      ]
+    },
+    urlTargetEndpoints: {
+      title: "Help Me Learn!",
+      items: [
+        {
+          question: "What is this consolidated endpoint inventory, and why is it the center of the URL workflow?",
+          lessonKey: "urlTargetEndpointsMethodology",
+          answers: [
+            "This is your unified attack-surface inventory for the target application: every endpoint discovered by crawling, archive mining, JavaScript analysis, and brute forcing, deduplicated and gathered in one place. It's the single source of truth you'll work from for the rest of the engagement.",
+            "It matters because scattered results are useless results. Five tools each producing their own output means you lose track of what's been found, what's been tested, and what's important. Consolidating into one reviewable list is what turns raw discovery into an actionable testing plan.",
+            "Think of it as the bridge between 'finding the app's surface' and 'actually hunting for bugs.' Everything upstream (discovery, brute forcing) feeds into this inventory; everything downstream (parameter enumeration, manual testing, threat modeling) draws targets out of it."
+          ]
+        },
+        {
+          question: "How do I read and understand the endpoint attack surface in front of me?",
+          lessonKey: "urlTargetEndpointsAnalysis",
+          answers: [
+            "Group the endpoints into functional buckets so a big list becomes comprehensible: authentication (login, logout, reset, oauth), account/profile management, the core business features (whatever the app is actually for), file handling (upload/download/export), search and filtering, and API/admin/internal routes. Structure reveals where the interesting behavior lives.",
+            "Pay attention to the shape of each endpoint: which HTTP methods it accepts (GET vs POST/PUT/DELETE — write methods change state and are higher-risk), whether it takes parameters, whether it returns data or performs an action, and what status codes it gives. These properties tell you what kind of testing each endpoint invites.",
+            "Look for the standouts: routes that reference object IDs (IDOR candidates), endpoints that take a URL or filename as input (SSRF, path traversal, open redirect), anything that reflects your input, old API versions, and admin/debug paths. The inventory is where these patterns become visible across the whole app at once."
+          ]
+        },
+        {
+          question: "How do I decide which endpoints to test first?",
+          lessonKey: "urlTargetEndpointsPrioritization",
+          answers: [
+            "Prioritize by potential impact. Endpoints that touch money, personal data, authentication, or admin functionality are worth testing before a static marketing page. If a bug there would matter, it's higher priority. Ask 'what's the worst thing that could go wrong at this endpoint?' and start where the answer is worst.",
+            "Prioritize by likelihood too. Endpoints with parameters, write methods, object IDs, file handling, or clear trust boundaries are more likely to hold a bug than a parameterless static route. High-impact and high-likelihood endpoints are where you spend your time first.",
+            "Cross-reference with your manual-crawl notes and threat model. The endpoint that looked interesting while you were clicking around, the object IDs you wrote down, the mechanism you flagged — those observations, combined with the full inventory here, tell you exactly where to point parameter enumeration and manual testing.",
+            "Finally, use the inventory to track progress. As you test endpoints, note what you've covered and what you've found. On a large app you won't test everything, so a deliberate, prioritized pass over the inventory is how you make sure your limited time goes to the highest-value targets."
+          ]
+        }
+      ]
+    },
+    urlParameterEnumeration: {
+      title: "Help Me Learn!",
+      items: [
+        {
+          question: "What stage of the methodology are we at, and why do hidden parameters matter so much?",
+          lessonKey: "urlParameterMethodology",
+          answers: [
+            "We're in the Parameter Enumeration phase. We have a list of endpoints; now we discover the hidden input parameters each one secretly accepts. Applications frequently support parameters that aren't shown in any form, link, or documentation — the backend still reads them, it just doesn't advertise them.",
+            "Hidden parameters matter because a parameter the developer forgot to secure — or didn't expect anyone to find — is exactly where bugs live. A hidden debug=true that enables verbose errors, an admin=1 that unlocks privileged behavior, an internal id or redirect parameter that isn't validated because 'nobody knows it's there' — these are classic high-impact findings.",
+            "Every parameter is an input, and every input is a potential injection or logic-flaw point. Finding parameters the developer didn't mean to expose dramatically widens the attack surface of each endpoint — a single URL with three hidden parameters is really four things to test, not one."
+          ]
+        },
+        {
+          question: "How do Arjun, parameth, and x8 discover hidden parameters differently?",
+          lessonKey: "urlParameterTools",
+          answers: [
+            "All three work by the same core idea: send the endpoint many candidate parameter names from a wordlist and watch for a change in the response. If adding ?debug=xyz changes the response — different length, different status, reflected value, different behavior — that parameter is probably real and processed by the backend.",
+            "Arjun is a fast, accurate Python tool that's smart about this diffing: it sends parameters in chunks, establishes a stable baseline, and reports the names that genuinely affect the response. It handles GET, POST, JSON, and XML bodies and is a great default choice.",
+            "x8 is a high-accuracy Rust tool that excels at precise response comparison and can inject parameters into the query string, body, or headers. It's particularly good at cutting through noise on responses that change slightly on their own, and it verifies its findings to reduce false positives.",
+            "parameth is an older tool that brute-forces GET/POST parameters by monitoring response size and content changes. Running more than one tool is worthwhile because they use different wordlists and diffing strategies, so each can surface parameters the others miss."
+          ]
+        },
+        {
+          question: "How do I turn a discovered parameter into an actual vulnerability?",
+          lessonKey: "urlParameterExploitation",
+          answers: [
+            "A discovered parameter is a lead, not a bug. Once you know an endpoint accepts, say, a hidden user_id or file or url parameter, you test it like any other input — but now you're testing an input the developer probably never hardened, which raises your odds considerably.",
+            "Match the parameter to a vulnerability class by what it looks like it does. A parameter naming an object (id, user, account, order) invites IDOR — try other users' values. One taking a URL (url, redirect, next, callback) invites SSRF and open redirect. One taking a file or path invites path traversal. One that reflects into the page invites XSS. One in a database-driven feature invites SQL/NoSQL injection.",
+            "Also test for behavior-changing parameters, not just injection: debug, test, admin, is_admin, role, preview, and similar names can unlock hidden functionality, verbose errors, or privileged views when set to true/1. These 'magic parameters' are pure logic bugs and often high impact.",
+            "Feed confirmed parameters back into your proxy and test them manually and deliberately. Parameter discovery's job is to hand you inputs the application didn't want you to know about; your job is to try each one against the vulnerability class it suggests."
+          ]
+        }
+      ]
+    },
     amass: {
       title: "Help Me Learn!",
       items: [

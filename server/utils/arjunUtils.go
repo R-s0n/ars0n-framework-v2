@@ -196,7 +196,7 @@ func ExecuteArjunScan(scanID, scopeTargetID string) {
 	}
 
 	if config.Timeout > 0 {
-		args = append(args, "--timeout", fmt.Sprintf("%d", config.Timeout))
+		args = append(args, "-T", fmt.Sprintf("%d", config.Timeout))
 	}
 
 	if config.ChunkSize > 0 {
@@ -211,11 +211,16 @@ func ExecuteArjunScan(scanID, scopeTargetID string) {
 		args = append(args, "--passive")
 	}
 
+	// Arjun takes headers via a single --headers flag, newline-separated (not repeated -H).
 	if len(config.Headers) > 0 {
+		var headerLines []string
 		for _, header := range config.Headers {
 			for key, value := range header {
-				args = append(args, "-H", fmt.Sprintf("%s: %s", key, value))
+				headerLines = append(headerLines, fmt.Sprintf("%s: %s", key, value))
 			}
+		}
+		if len(headerLines) > 0 {
+			args = append(args, "--headers", strings.Join(headerLines, "\n"))
 		}
 	}
 

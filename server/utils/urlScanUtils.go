@@ -1850,14 +1850,33 @@ func ExecuteAndParseFFUFURLScan(scanID, targetURL, scopeTargetID string) {
 	stopOn403 := false
 	stopOnErrors := false
 
+	// Additional tuning fields (populated from the saved config; empty/zero = flag omitted). These
+	// are what the WAF Probe "Apply All" writes so its recommendations actually reach ffuf.
+	rateLimit := 0
+	delay := ""
+	cookies := ""
+	var headers []map[string]string
+	filterStatusCodes := ""
+	filterSize := ""
+	filterLines := ""
+	filterWords := ""
+
 	if err == nil {
 		var config struct {
-			WordlistID       string `json:"wordlistId"`
-			Threads          int    `json:"threads"`
-			MatchStatusCodes string `json:"matchStatusCodes"`
-			StopOnAll        bool   `json:"stopOnAll"`
-			StopOn403        bool   `json:"stopOn403"`
-			StopOnErrors     bool   `json:"stopOnErrors"`
+			WordlistID        string              `json:"wordlistId"`
+			Threads           int                 `json:"threads"`
+			MatchStatusCodes  string              `json:"matchStatusCodes"`
+			StopOnAll         bool                `json:"stopOnAll"`
+			StopOn403         bool                `json:"stopOn403"`
+			StopOnErrors      bool                `json:"stopOnErrors"`
+			RateLimit         int                 `json:"rateLimit"`
+			Delay             string              `json:"delay"`
+			Cookies           string              `json:"cookies"`
+			Headers           []map[string]string `json:"headers"`
+			FilterStatusCodes string              `json:"filterStatusCodes"`
+			FilterSize        string              `json:"filterSize"`
+			FilterLines       string              `json:"filterLines"`
+			FilterWords       string              `json:"filterWords"`
 		}
 		if err := json.Unmarshal(configJSON, &config); err == nil {
 			if config.Threads > 0 {
@@ -1869,6 +1888,14 @@ func ExecuteAndParseFFUFURLScan(scanID, targetURL, scopeTargetID string) {
 			stopOnAll = config.StopOnAll
 			stopOn403 = config.StopOn403
 			stopOnErrors = config.StopOnErrors
+			rateLimit = config.RateLimit
+			delay = config.Delay
+			cookies = config.Cookies
+			headers = config.Headers
+			filterStatusCodes = config.FilterStatusCodes
+			filterSize = config.FilterSize
+			filterLines = config.FilterLines
+			filterWords = config.FilterWords
 			if config.WordlistID != "" {
 				if strings.HasPrefix(config.WordlistID, "builtin-") {
 					switch config.WordlistID {
@@ -1939,6 +1966,34 @@ func ExecuteAndParseFFUFURLScan(scanID, targetURL, scopeTargetID string) {
 		"-r",
 		"-t", threads,
 		"-timeout", "30",
+	}
+
+	// WAF-tuning flags — only added when set in the config (so no-config scans are unchanged).
+	if rateLimit > 0 {
+		dockerCmd = append(dockerCmd, "-rate", fmt.Sprintf("%d", rateLimit))
+	}
+	if delay != "" {
+		dockerCmd = append(dockerCmd, "-p", delay)
+	}
+	if cookies != "" {
+		dockerCmd = append(dockerCmd, "-b", cookies)
+	}
+	for _, h := range headers {
+		if name := h["name"]; name != "" {
+			dockerCmd = append(dockerCmd, "-H", fmt.Sprintf("%s: %s", name, h["value"]))
+		}
+	}
+	if filterStatusCodes != "" {
+		dockerCmd = append(dockerCmd, "-fc", filterStatusCodes)
+	}
+	if filterSize != "" {
+		dockerCmd = append(dockerCmd, "-fs", filterSize)
+	}
+	if filterLines != "" {
+		dockerCmd = append(dockerCmd, "-fl", filterLines)
+	}
+	if filterWords != "" {
+		dockerCmd = append(dockerCmd, "-fw", filterWords)
 	}
 
 	if stopOnAll {

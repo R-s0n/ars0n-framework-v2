@@ -185,25 +185,17 @@ func ExecuteX8Scan(scanID, scopeTargetID string) {
 	outputFile := fmt.Sprintf("/tmp/x8_output_%s.txt", scanID)
 	defer os.Remove(outputFile)
 
+	// x8 4.3.1 flags. `-u` accepts a file of URLs. `-O json` gives parseable output.
 	args := []string{
 		"-u", urlsFile,
 		"-o", outputFile,
+		"-O", "json",
 		"--workers", fmt.Sprintf("%d", config.Concurrency),
-		"--learn-requests-count", fmt.Sprintf("%d", config.LearnRequests),
-		"--verify-requests-count", fmt.Sprintf("%d", config.VerifyRequests),
-		"--value-size", fmt.Sprintf("%d", config.ValueSize),
+		"--learn-requests", fmt.Sprintf("%d", config.LearnRequests),
 	}
 
 	if config.Method != "" && config.Method != "GET" {
 		args = append(args, "--method", config.Method)
-	}
-
-	if config.BodyType != "" {
-		args = append(args, "--body-type", config.BodyType)
-	}
-
-	if config.MaxDepth > 0 {
-		args = append(args, "--max-depth", fmt.Sprintf("%d", config.MaxDepth))
 	}
 
 	if config.Delay > 0 {
@@ -226,14 +218,19 @@ func ExecuteX8Scan(scanID, scopeTargetID string) {
 		args = append(args, "--check-binary")
 	}
 
+	if config.VerifyRequests > 0 {
+		args = append(args, "--verify")
+	}
+
 	if config.DisableColors {
 		args = append(args, "--disable-colors")
 	}
 
+	// Headers go through -H (repeatable). NOTE: x8's --headers is a discovery *mode*, not header input.
 	if len(config.Headers) > 0 {
 		for _, header := range config.Headers {
 			for key, value := range header {
-				args = append(args, "--headers", fmt.Sprintf("%s: %s", key, value))
+				args = append(args, "-H", fmt.Sprintf("%s: %s", key, value))
 			}
 		}
 	}
@@ -246,39 +243,45 @@ func ExecuteX8Scan(scanID, scopeTargetID string) {
 	executionTime := time.Since(startTime).String()
 
 	parametersFound := 0
-	if _, err := os.Stat(outputFile); err == nil {
+	if _, statErr := os.Stat(outputFile); statErr == nil {
 		outputData, _ := os.ReadFile(outputFile)
 		if len(outputData) > 0 {
-			lines := strings.Split(string(outputData), "\n")
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if strings.Contains(line, "parameter") || strings.Contains(line, "[+]") {
-					parts := strings.Fields(line)
-					for i, part := range parts {
-						if (strings.Contains(part, "param") || strings.Contains(part, "parameter")) && i+1 < len(parts) {
-							paramName := parts[i+1]
-							paramName = strings.Trim(paramName, "[]():,")
-							
-							if len(paramName) > 0 && paramName != "parameter" && paramName != "found" {
-								var endpointURL string
-								for j := i - 1; j >= 0; j-- {
-									if strings.HasPrefix(parts[j], "http") {
-										endpointURL = parts[j]
-										break
-									}
-								}
-								if endpointURL == "" && len(endpoints) > 0 {
-									endpointURL = endpoints[0]
-								}
-
-								insertParamQuery := `
-									INSERT INTO parameter_enumeration_results 
-									(scan_id, scan_type, scope_target_id, endpoint_url, parameter_name, parameter_type, confidence)
-									VALUES ($1, 'x8', $2, $3, $4, 'query', 'high')
-								`
-								dbPool.Exec(context.Background(), insertParamQuery, scanID, scopeTargetID, endpointURL, paramName)
-								parametersFound++
+			// x8 -O json writes an array: [{"url":..,"method":..,"found_params":[..]}]. Each
+			// found_params entry is either a string ("name") or an object with a "name" field.
+			var x8Results []struct {
+				URL         string        `json:"url"`
+				Method      string        `json:"method"`
+				FoundParams []interface{} `json:"found_params"`
+			}
+			if jsonErr := json.Unmarshal(outputData, &x8Results); jsonErr == nil {
+				for _, res := range x8Results {
+					endpointURL := res.URL
+					if endpointURL == "" && len(endpoints) > 0 {
+						endpointURL = endpoints[0]
+					}
+					for _, p := range res.FoundParams {
+						paramName := ""
+						switch v := p.(type) {
+						case string:
+							paramName = v
+						case map[string]interface{}:
+							if n, ok := v["name"].(string); ok {
+								paramName = n
 							}
+						}
+						// x8 may report "name=value"; keep just the name.
+						if idx := strings.IndexAny(paramName, "=:"); idx > 0 {
+							paramName = paramName[:idx]
+						}
+						paramName = strings.TrimSpace(paramName)
+						if paramName != "" {
+							insertParamQuery := `
+								INSERT INTO parameter_enumeration_results
+								(scan_id, scan_type, scope_target_id, endpoint_url, parameter_name, parameter_type, confidence)
+								VALUES ($1, 'x8', $2, $3, $4, 'query', 'high')
+							`
+							dbPool.Exec(context.Background(), insertParamQuery, scanID, scopeTargetID, endpointURL, paramName)
+							parametersFound++
 						}
 					}
 				}

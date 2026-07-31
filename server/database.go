@@ -620,6 +620,21 @@ func createTables() {
 			scope_target_id UUID REFERENCES scope_targets(id) ON DELETE CASCADE
 		);`,
 
+		`CREATE TABLE IF NOT EXISTS waf_probe_scans (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scan_id UUID NOT NULL UNIQUE,
+			url TEXT NOT NULL,
+			status VARCHAR(50) NOT NULL,
+			result TEXT,
+			error TEXT,
+			stdout TEXT,
+			stderr TEXT,
+			command TEXT,
+			execution_time TEXT,
+			created_at TIMESTAMP DEFAULT NOW(),
+			scope_target_id UUID REFERENCES scope_targets(id) ON DELETE CASCADE
+		);`,
+
 		`CREATE TABLE IF NOT EXISTS ffuf_configs (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,

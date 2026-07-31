@@ -321,6 +321,11 @@ func main() {
 	r.HandleFunc("/ffuf-url/status/{scan_id}", utils.GetFFUFURLScanStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/scopetarget/{id}/scans/ffuf-url", utils.GetFFUFURLScansForScopeTarget).Methods("GET", "OPTIONS")
 
+	r.HandleFunc("/waf-probe/run", utils.RunWAFProbeScan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/waf-probe/status/{scan_id}", utils.GetWAFProbeScanStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/scopetarget/{id}/scans/waf-probe", utils.GetWAFProbeScansForScopeTarget).Methods("GET", "OPTIONS")
+	r.HandleFunc("/waf-probe/apply/{scope_target_id}", utils.ApplyWAFProbeRecommendations).Methods("POST", "OPTIONS")
+
 	r.HandleFunc("/ffuf-config/{scope_target_id}", utils.SaveFFUFConfig).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ffuf-config/{scope_target_id}", utils.GetFFUFConfig).Methods("GET", "OPTIONS")
 	r.HandleFunc("/ffuf-wordlists/upload", utils.UploadFFUFWordlist).Methods("POST", "OPTIONS")

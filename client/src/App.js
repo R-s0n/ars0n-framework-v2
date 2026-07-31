@@ -188,6 +188,9 @@ import { WaybackURLsResultsModal } from './modals/WaybackURLsResultsModal';
 import { GAUURLResultsModal } from './modals/GAUURLResultsModal';
 import { GoSpiderURLResultsModal } from './modals/GoSpiderURLResultsModal';
 import { FFUFURLResultsModal } from './modals/FFUFURLResultsModal';
+import initiateWAFProbeScan from './utils/initiateWAFProbeScan';
+import monitorWAFProbeScanStatus from './utils/monitorWAFProbeScanStatus';
+import { WAFProbeResultsModal } from './modals/WAFProbeResultsModal';
 import initiateArjunScan from './utils/initiateArjunScan';
 import monitorArjunScanStatus from './utils/monitorArjunScanStatus';
 import initiateParamethScan from './utils/initiateParamethScan';
@@ -635,7 +638,12 @@ function App() {
   const [mostRecentFFUFURLScanStatus, setMostRecentFFUFURLScanStatus] = useState(null);
   const [mostRecentFFUFURLScan, setMostRecentFFUFURLScan] = useState(null);
   const [isFFUFURLScanning, setIsFFUFURLScanning] = useState(false);
-  
+
+  const [wafProbeScans, setWAFProbeScans] = useState([]);
+  const [mostRecentWAFProbeScanStatus, setMostRecentWAFProbeScanStatus] = useState(null);
+  const [mostRecentWAFProbeScan, setMostRecentWAFProbeScan] = useState(null);
+  const [isWAFProbeScanning, setIsWAFProbeScanning] = useState(false);
+
   const [arjunScans, setArjunScans] = useState([]);
   const [mostRecentArjunScanStatus, setMostRecentArjunScanStatus] = useState(null);
   const [mostRecentArjunScan, setMostRecentArjunScan] = useState(null);
@@ -657,7 +665,8 @@ function App() {
   const [showGAUURLResultsModal, setShowGAUURLResultsModal] = useState(false);
   const [showGoSpiderURLResultsModal, setShowGoSpiderURLResultsModal] = useState(false);
   const [showFFUFURLResultsModal, setShowFFUFURLResultsModal] = useState(false);
-  
+  const [showWAFProbeResultsModal, setShowWAFProbeResultsModal] = useState(false);
+
   const [showArjunConfigModal, setShowArjunConfigModal] = useState(false);
   const [showArjunResultsModal, setShowArjunResultsModal] = useState(false);
   const [showParamethConfigModal, setShowParamethConfigModal] = useState(false);
@@ -4743,6 +4752,18 @@ function App() {
     }
   }, [activeTarget]);
 
+  useEffect(() => {
+    if (activeTarget && activeTarget.type === 'URL') {
+      monitorWAFProbeScanStatus(
+        activeTarget,
+        setWAFProbeScans,
+        setMostRecentWAFProbeScan,
+        setIsWAFProbeScanning,
+        setMostRecentWAFProbeScanStatus
+      );
+    }
+  }, [activeTarget]);
+
   // Katana Company scans useEffect
   useEffect(() => {
     if (activeTarget) {
@@ -4906,6 +4927,16 @@ function App() {
     );
   };
 
+  const startWAFProbeScan = () => {
+    initiateWAFProbeScan(
+      activeTarget,
+      setIsWAFProbeScanning,
+      setWAFProbeScans,
+      setMostRecentWAFProbeScan,
+      setMostRecentWAFProbeScanStatus
+    );
+  };
+
   const startArjunScan = () => {
     initiateArjunScan(
       activeTarget,
@@ -4963,6 +4994,8 @@ function App() {
   const handleCloseGoSpiderURLResultsModal = () => setShowGoSpiderURLResultsModal(false);
   const handleOpenFFUFURLResultsModal = () => setShowFFUFURLResultsModal(true);
   const handleCloseFFUFURLResultsModal = () => setShowFFUFURLResultsModal(false);
+  const handleOpenWAFProbeResultsModal = () => setShowWAFProbeResultsModal(true);
+  const handleCloseWAFProbeResultsModal = () => setShowWAFProbeResultsModal(false);
   const handleOpenManualCrawlResultsModal = async () => {
     setShowManualCrawlResultsModal(true);
     if (activeTarget) {
@@ -7851,6 +7884,7 @@ function App() {
               <div className="mb-4">
                 <h3 className="text-danger mb-3">URL</h3>
                 <h4 className="text-secondary mb-3 fs-5">Manual Crawling</h4>
+                <HelpMeLearn section="urlManualCrawling" />
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
@@ -7923,6 +7957,7 @@ function App() {
                   </Col>
                 </Row>
                 <h4 className="text-secondary mb-3 fs-5 mt-4">URL Discovery & Endpoint Enumeration</h4>
+                <HelpMeLearn section="urlDiscovery" />
                 <Row className="mb-4">
                   {[
                     {
@@ -8053,8 +8088,59 @@ function App() {
                 </Row>
 
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Endpoint Brute Forcing</h4>
+                <HelpMeLearn section="urlEndpointBruteForcing" />
                 <Row className="mb-4">
-                  <Col md={12}>
+                  <Col md={6}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">WAF Probe</Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Probe the target for a WAF, rate limiting, and block behavior, then get a recommended FFUF configuration you can apply with one click.
+                        </Card.Text>
+                        <div className="mt-auto">
+                          <Card.Text className="text-white small mb-3">
+                            {isWAFProbeScanning ? 'Probing…' : (mostRecentWAFProbeScan?.result ? (() => {
+                              try {
+                                const p = typeof mostRecentWAFProbeScan.result === 'string'
+                                  ? JSON.parse(mostRecentWAFProbeScan.result)
+                                  : mostRecentWAFProbeScan.result;
+                                const waf = p.waf?.detected ? (p.waf.vendors?.[0] || 'WAF detected') : 'No WAF';
+                                const rate = p.rate_limit?.limited ? `${p.rate_limit.safe_rps} req/s` : 'no rate limit';
+                                return `${waf} · ${rate}`;
+                              } catch (e) {
+                                return 'Results ready';
+                              }
+                            })() : 'Not yet run')}
+                          </Card.Text>
+                          <div className="d-flex justify-content-center gap-2">
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={startWAFProbeScan}
+                              disabled={!activeTarget || isWAFProbeScanning}
+                            >
+                              <div className="btn-content">
+                                {isWAFProbeScanning ? (
+                                  <Spinner animation="border" size="sm" />
+                                ) : (
+                                  'Scan'
+                                )}
+                              </div>
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleOpenWAFProbeResultsModal}
+                              disabled={!mostRecentWAFProbeScan || mostRecentWAFProbeScanStatus !== 'success'}
+                            >
+                              Results
+                            </Button>
+                          </div>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                  <Col md={6}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
                       <Card.Body className="d-flex flex-column">
                         <Card.Title className="text-danger mb-3">
@@ -8117,6 +8203,7 @@ function App() {
                 </Row>
 
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Target URL Endpoints</h4>
+                <HelpMeLearn section="urlTargetEndpoints" />
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
@@ -8172,9 +8259,7 @@ function App() {
                 </Row>
 
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Parameter Enumeration</h4>
-                <Alert variant="warning" className="mb-3">
-                  This section is still under development.
-                </Alert>
+                <HelpMeLearn section="urlParameterEnumeration" />
                 <Row className="mb-4">
                   {[
                     {
@@ -8237,7 +8322,7 @@ function App() {
                                 variant="outline-danger"
                                 className="flex-fill"
                                 onClick={tool.onScan}
-                                disabled
+                                disabled={!tool.isActive || tool.isScanning}
                               >
                                 <div className="btn-content">
                                   {tool.isScanning ? (
@@ -8251,7 +8336,7 @@ function App() {
                                 variant="outline-danger"
                                 className="flex-fill"
                                 onClick={tool.onConfig}
-                                disabled
+                                disabled={!tool.isActive}
                               >
                                 Config
                               </Button>
@@ -8259,7 +8344,7 @@ function App() {
                                 variant="outline-danger"
                                 className="flex-fill"
                                 onClick={tool.onResults}
-                                disabled
+                                disabled={!tool.isActive || tool.status !== 'success'}
                               >
                                 Results
                               </Button>
@@ -8869,6 +8954,13 @@ function App() {
         handleClose={handleCloseFFUFURLResultsModal}
         activeTarget={activeTarget}
         mostRecentFFUFURLScan={mostRecentFFUFURLScan}
+      />
+
+      <WAFProbeResultsModal
+        show={showWAFProbeResultsModal}
+        handleClose={handleCloseWAFProbeResultsModal}
+        activeTarget={activeTarget}
+        mostRecentWAFProbeScan={mostRecentWAFProbeScan}
       />
 
       <ApplicationQuestionsModal

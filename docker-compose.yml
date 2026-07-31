@@ -261,6 +261,16 @@ services:
     networks:
       - ars0n-network
 
+  waf-probe:
+    container_name: ars0n-framework-v2-waf-probe-1
+    build: ./docker/waf-probe
+    depends_on:
+      - api
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
   github-recon:
     container_name: ars0n-framework-v2-github-recon-1
     build: ./docker/github-recon
