@@ -102,6 +102,7 @@ My hope is that this modular framework will act as a canvas to help share what I
 
 This framework consists of 20+ Docker containers along w/ a Docker Compose Manifest to automate the process of deploying these containers.
 
+- [Darkmoon](https://github.com/ASCIT31/Dark-Moon) - Open source (GPL-3.0) autonomous AI penetration testing platform covering web, API, Active Directory and Kubernetes, with proof of exploitation.
 1. Download the Zip File for the <a href="https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.7/ars0n-framework-v2-beta-0.0.7.zip">latest release</a>
 2. Unzip the files
 3. Navigate to the directory with the `docker-compose.yml` file
