@@ -1,5 +1,14 @@
 import { pollTimeout } from './scanPolling';
 
+// The probe has four terminal states, not two. `partial` and `aborted` both carry a real result
+// (the probe checkpoints after every phase and flushes on SIGTERM), so treating them as failures
+// would throw away findings the operator already paid for in requests.
+const TERMINAL = ['success', 'partial', 'aborted', 'error'];
+const RUNNING = ['pending', 'running'];
+
+export const isTerminalProbeStatus = (status) => TERMINAL.includes(status);
+export const isRunningProbeStatus = (status) => RUNNING.includes(status);
+
 const monitorWAFProbeScanStatus = async (
   activeTarget,
   setWAFProbeScans,
@@ -34,11 +43,7 @@ const monitorWAFProbeScanStatus = async (
       setMostRecentWAFProbeScan(mostRecentScan);
       setMostRecentWAFProbeScanStatus(mostRecentScan.status);
 
-      if (mostRecentScan.status === 'pending' || mostRecentScan.status === 'running') {
-        setIsWAFProbeScanning(true);
-      } else {
-        setIsWAFProbeScanning(false);
-      }
+      setIsWAFProbeScanning(isRunningProbeStatus(mostRecentScan.status));
     } else {
       setMostRecentWAFProbeScan(null);
       setMostRecentWAFProbeScanStatus(null);
@@ -84,8 +89,11 @@ export const monitorActiveScan = async (
         });
       }
 
-      if (scanStatus.status === 'success') {
+      if (isTerminalProbeStatus(scanStatus.status)) {
         setIsWAFProbeScanning(false);
+        if (scanStatus.status === 'error') {
+          console.error('[WAF-PROBE] Probe run failed:', scanStatus.error);
+        }
         if (activeTarget && setWAFProbeScans) {
           try {
             const refreshResponse = await fetch(
@@ -107,12 +115,13 @@ export const monitorActiveScan = async (
           }
         }
         return scanStatus;
-      } else if (scanStatus.status === 'failed' || scanStatus.status === 'error') {
-        setIsWAFProbeScanning(false);
-        console.error('WAF probe scan failed:', scanStatus.error);
-        return scanStatus;
-      } else if (scanStatus.status === 'pending' || scanStatus.status === 'running') {
+      } else if (isRunningProbeStatus(scanStatus.status)) {
         pollTimeout(poll, 1000);
+      } else {
+        // An unrecognised status is not a reason to poll forever against a scan that will never
+        // change; v1 did exactly that and left the card spinning until a reload.
+        console.warn('[WAF-PROBE] Unrecognised scan status, stopping poll:', scanStatus.status);
+        setIsWAFProbeScanning(false);
       }
     } catch (error) {
       console.error('Error monitoring WAF probe scan:', error);

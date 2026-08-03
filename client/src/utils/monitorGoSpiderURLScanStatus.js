@@ -87,6 +87,10 @@ const monitorGoSpiderURLScanStatus = async (
         setIsGoSpiderURLScanning(false);
       }
     } else {
+      // No GoSpider scan for this target: clear the stale scan so the card count resets to 0 when
+      // switching to a target that has not been crawled yet (otherwise it shows the prior target's count).
+      setMostRecentGoSpiderURLScan(null);
+      setMostRecentGoSpiderURLScanStatus(null);
       setIsGoSpiderURLScanning(false);
     }
   } catch (error) {

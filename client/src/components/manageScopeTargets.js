@@ -495,6 +495,15 @@ const ManageScopeTargets = memo(function ManageScopeTargets({
                 <Card.Text className="d-flex justify-content-between text-danger">
                   <span style={{ fontSize: '22px' }}>
                     <strong>{activeTarget.scope_target}</strong>
+                    {activeTarget.type === 'URL' && (
+                      <i
+                        role="button"
+                        className="bi bi-box-arrow-up-right text-danger ms-2"
+                        title="Open URL in a new tab"
+                        style={{ cursor: 'pointer', fontSize: '18px' }}
+                        onClick={() => window.open(activeTarget.scope_target, '_blank', 'noopener,noreferrer')}
+                      />
+                    )}
                   </span>
                   <span>
                     <img src={getTypeIcon(activeTarget.type)} alt={activeTarget.type} style={{ width: '30px' }} />

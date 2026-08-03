@@ -298,25 +298,25 @@ func main() {
 	r.HandleFunc("/katana-url/run", utils.RunKatanaURLScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/katana-url/status/{scan_id}", utils.GetKatanaURLScanStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/scopetarget/{id}/scans/katana-url", utils.GetKatanaURLScansForScopeTarget).Methods("GET", "OPTIONS")
-	
+
 	r.HandleFunc("/linkfinder-url/run", utils.RunLinkFinderURLScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/linkfinder-url/status/{scan_id}", utils.GetLinkFinderURLScanStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/scopetarget/{id}/scans/linkfinder-url", utils.GetLinkFinderURLScansForScopeTarget).Methods("GET", "OPTIONS")
-	
+
 	r.HandleFunc("/waybackurls/run", utils.RunWaybackURLsScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/waybackurls/status/{scan_id}", utils.GetWaybackURLsScanStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/scopetarget/{id}/scans/waybackurls", utils.GetWaybackURLsScansForScopeTarget).Methods("GET", "OPTIONS")
-	
+
 	r.HandleFunc("/gau-url/run", utils.RunGAUURLScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/gau-url/status/{scan_id}", utils.GetGAUURLScanStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/scopetarget/{id}/scans/gau-url", utils.GetGAUURLScansForScopeTarget).Methods("GET", "OPTIONS")
-	
+
 	r.HandleFunc("/gospider-url/run", utils.RunGoSpiderURLScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/gospider-url/status/{scan_id}", utils.GetGoSpiderURLScanStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/scopetarget/{id}/scans/gospider-url", utils.GetGoSpiderURLScansForScopeTarget).Methods("GET", "OPTIONS")
-	
+
 	r.HandleFunc("/discovered-endpoints/{scan_id}", utils.GetDiscoveredEndpoints).Methods("GET", "OPTIONS")
-	
+
 	r.HandleFunc("/ffuf-url/run", utils.RunFFUFURLScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ffuf-url/status/{scan_id}", utils.GetFFUFURLScanStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/scopetarget/{id}/scans/ffuf-url", utils.GetFFUFURLScansForScopeTarget).Methods("GET", "OPTIONS")
@@ -324,7 +324,16 @@ func main() {
 	r.HandleFunc("/waf-probe/run", utils.RunWAFProbeScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/waf-probe/status/{scan_id}", utils.GetWAFProbeScanStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/scopetarget/{id}/scans/waf-probe", utils.GetWAFProbeScansForScopeTarget).Methods("GET", "OPTIONS")
-	r.HandleFunc("/waf-probe/apply/{scope_target_id}", utils.ApplyWAFProbeRecommendations).Methods("POST", "OPTIONS")
+	// Static paths must be registered before the {scope_target_id} pattern or they are shadowed.
+	r.HandleFunc("/waf-probe/config-schema", utils.GetWAFProbeSchema).Methods("GET", "OPTIONS")
+	r.HandleFunc("/waf-probe/trip-ledger", utils.GetWAFProbeTripLedger).Methods("GET", "OPTIONS")
+	r.HandleFunc("/waf-probe/config/{scope_target_id}", utils.GetWAFProbeConfig).Methods("GET", "OPTIONS")
+	r.HandleFunc("/waf-probe/config/{scope_target_id}", utils.SaveWAFProbeConfig).Methods("POST", "OPTIONS")
+	r.HandleFunc("/waf-probe/dry-run/{scope_target_id}", utils.DryRunWAFProbe).Methods("POST", "OPTIONS")
+	r.HandleFunc("/waf-probe/abort/{scan_id}", utils.AbortWAFProbeScan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/waf-probe/apply-journal/{scope_target_id}", utils.GetWAFProbeApplyJournal).Methods("GET", "OPTIONS")
+	r.HandleFunc("/waf-probe/revert/{journal_id}", utils.RevertWAFProbeApply).Methods("POST", "OPTIONS")
+	r.HandleFunc("/waf-probe/apply/{scope_target_id}/{scan_id}", utils.ApplyWAFProbeRecommendations).Methods("POST", "OPTIONS")
 
 	r.HandleFunc("/ffuf-config/{scope_target_id}", utils.SaveFFUFConfig).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ffuf-config/{scope_target_id}", utils.GetFFUFConfig).Methods("GET", "OPTIONS")
@@ -338,6 +347,15 @@ func main() {
 	r.HandleFunc("/arjun/results/{scan_id}", utils.GetArjunScanResults).Methods("GET", "OPTIONS")
 	r.HandleFunc("/arjun-config/{scope_target_id}", utils.SaveArjunConfig).Methods("POST", "OPTIONS")
 	r.HandleFunc("/arjun-config/{scope_target_id}", utils.GetArjunConfig).Methods("GET", "OPTIONS")
+
+	// URL-workflow crawler configs. These are what let the Target Behaviour Probe's measured rate
+	// actually reach katana and gospider, which previously ran on hardcoded flags.
+	r.HandleFunc("/katana-url-config/{scope_target_id}", utils.SaveKatanaURLConfig).Methods("POST", "OPTIONS")
+	r.HandleFunc("/katana-url-config/{scope_target_id}", utils.GetKatanaURLConfig).Methods("GET", "OPTIONS")
+	r.HandleFunc("/gospider-url-config/{scope_target_id}", utils.SaveGoSpiderURLConfig).Methods("POST", "OPTIONS")
+	r.HandleFunc("/gospider-url-config/{scope_target_id}", utils.GetGoSpiderURLConfig).Methods("GET", "OPTIONS")
+	r.HandleFunc("/linkfinder-url-config/{scope_target_id}", utils.SaveLinkFinderURLConfig).Methods("POST", "OPTIONS")
+	r.HandleFunc("/linkfinder-url-config/{scope_target_id}", utils.GetLinkFinderURLConfig).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/parameth/run", utils.RunParamethScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/parameth/status/{scan_id}", utils.GetParamethScanStatus).Methods("GET", "OPTIONS")
@@ -384,11 +402,13 @@ func main() {
 	r.HandleFunc("/auth-flows/steps/{step_id}", utils.UpdateAuthFlowStep).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/auth-flows/steps/{step_id}", utils.DeleteAuthFlowStep).Methods("DELETE", "OPTIONS")
 	r.HandleFunc("/auth-flows/steps/{step_id}/replay", utils.ReplayAuthFlowStep).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth-flows/{scope_target_id}/from-captures", utils.CreateAuthFlowFromCaptures).Methods("POST", "OPTIONS")
 
 	// Authorization > Client Identity — unique identifiers (IDOR targets) pulled from endpoint requests.
 	r.HandleFunc("/authz/client-identifiers/{scope_target_id}", utils.GetClientIdentifiers).Methods("GET", "OPTIONS")
 	r.HandleFunc("/authz/client-identifiers/{scope_target_id}", utils.CreateClientIdentifier).Methods("POST", "OPTIONS")
 	r.HandleFunc("/authz/client-identifiers/id/{id}", utils.DeleteClientIdentifier).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/authz/client-identifiers/{scope_target_id}/auto-detect", utils.AutoDetectClientIdentifiers).Methods("POST", "OPTIONS")
 
 	r.HandleFunc("/threat-model/{scope_target_id}", utils.GetThreatModel).Methods("GET", "OPTIONS")
 	r.HandleFunc("/threat-model/{scope_target_id}", utils.CreateThreatModel).Methods("POST", "OPTIONS")
@@ -398,10 +418,14 @@ func main() {
 	r.HandleFunc("/health", utils.HealthCheck).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/start", utils.StartManualCrawl).Methods("POST", "OPTIONS")
 	r.HandleFunc("/manual-crawl/capture", utils.CaptureManualCrawlRequest).Methods("POST", "OPTIONS")
+	r.HandleFunc("/manual-crawl/capture/batch", utils.CaptureManualCrawlBatch).Methods("POST", "OPTIONS")
+	r.HandleFunc("/manual-crawl/heartbeat", utils.HeartbeatManualCrawl).Methods("POST", "OPTIONS")
 	r.HandleFunc("/manual-crawl/stop", utils.StopManualCrawl).Methods("POST", "OPTIONS")
 	r.HandleFunc("/manual-crawl/cleanup", utils.CleanupStaleSessions).Methods("POST", "OPTIONS")
 	r.HandleFunc("/manual-crawl/sessions/all", utils.GetAllManualCrawlSessions).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/sessions/{scope_target_id}", utils.GetManualCrawlSessions).Methods("GET", "OPTIONS")
+	r.HandleFunc("/manual-crawl/captures/target/{scope_target_id}/auth-candidates", utils.GetAuthFlowCandidates).Methods("GET", "OPTIONS")
+	r.HandleFunc("/manual-crawl/captures/target/{scope_target_id}", utils.GetManualCrawlCapturesForTarget).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/captures/{session_id}", utils.GetManualCrawlCaptures).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/endpoints/{scope_target_id}", utils.GetManualCrawlEndpoints).Methods("GET", "OPTIONS")
 
@@ -649,17 +673,17 @@ func getMcpConfig(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("Error fetching MCP config: %v", err)
 		config = map[string]interface{}{
-			"enabled":                   true,
-			"port":                      3001,
-			"max_results":               50,
-			"result_truncation_length":  3000,
+			"enabled":                  true,
+			"port":                     3001,
+			"max_results":              50,
+			"result_truncation_length": 3000,
 		}
 	} else {
 		config = map[string]interface{}{
-			"enabled":                   enabled,
-			"port":                      port,
-			"max_results":               maxResults,
-			"result_truncation_length":  resultTruncationLength,
+			"enabled":                  enabled,
+			"port":                     port,
+			"max_results":              maxResults,
+			"result_truncation_length": resultTruncationLength,
 		}
 	}
 
@@ -2637,7 +2661,7 @@ func populateBurpsuite(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"status": "success",
+		"status":  "success",
 		"message": fmt.Sprintf("Successfully populated Burpsuite with %d URLs", len(requestBody.URLs)),
 	})
 }
@@ -3613,9 +3637,9 @@ func saveNucleiConfig(w http.ResponseWriter, r *http.Request) {
 		Targets           []string               `json:"targets"`
 		Templates         []string               `json:"templates"`
 		Severities        []string               `json:"severities"`
-		UploadedTemplates []interface{}           `json:"uploaded_templates"`
-		CreatedAt         string                  `json:"created_at"`
-		TargetMode        string                  `json:"target_mode"`
+		UploadedTemplates []interface{}          `json:"uploaded_templates"`
+		CreatedAt         string                 `json:"created_at"`
+		TargetMode        string                 `json:"target_mode"`
 		TemplateIDs       []string               `json:"template_ids"`
 		ExcludeIDs        []string               `json:"exclude_ids"`
 		ExcludeTags       []string               `json:"exclude_tags"`
@@ -3757,7 +3781,6 @@ func getNucleiScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 
 		scans = append(scans, scan)
 	}
-
 
 	json.NewEncoder(w).Encode(scans)
 }

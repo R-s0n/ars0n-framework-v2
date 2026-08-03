@@ -635,6 +635,75 @@ func createTables() {
 			scope_target_id UUID REFERENCES scope_targets(id) ON DELETE CASCADE
 		);`,
 
+		// Target Behaviour Probe v2. Config is per scope target, mirroring the ffuf_configs pattern.
+		`CREATE TABLE IF NOT EXISTS waf_probe_configs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
+			config JSONB NOT NULL,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+
+		// The exact config a run used, so a result is self-describing and two scans are comparable.
+		// Without this, a stored result cannot be interpreted once the saved config has moved on.
+		`ALTER TABLE waf_probe_scans ADD COLUMN IF NOT EXISTS config JSONB;`,
+		`ALTER TABLE waf_probe_scans ADD COLUMN IF NOT EXISTS schema_version INT DEFAULT 1;`,
+		`ALTER TABLE waf_probe_scans ADD COLUMN IF NOT EXISTS posture VARCHAR(32);`,
+		`ALTER TABLE waf_probe_scans ADD COLUMN IF NOT EXISTS requests_sent INT DEFAULT 0;`,
+		`ALTER TABLE waf_probe_scans ADD COLUMN IF NOT EXISTS trips_used INT DEFAULT 0;`,
+
+		// Per-field apply journal. Makes apply reversible and, more importantly, answerable: an
+		// operator who later finds threads=8 in the FFUF config can see that the probe set it, when,
+		// from which scan, and with what confidence, instead of "fixing" it back to 40.
+		`CREATE TABLE IF NOT EXISTS waf_probe_apply_journal (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			scan_id UUID NOT NULL,
+			tool TEXT NOT NULL,
+			field TEXT NOT NULL,
+			-- Which store the value actually landed in. A tool's own config table and the shared
+			-- probe_tool_tuning table both receive writes, and revert has to put the value back
+			-- where it came from rather than guess from the tool name.
+			store TEXT NOT NULL DEFAULT 'tool_config',
+			before_value JSONB,
+			after_value JSONB,
+			finding_id TEXT,
+			confidence TEXT,
+			bundle TEXT,
+			applied_at TIMESTAMP DEFAULT NOW(),
+			reverted_at TIMESTAMP
+		);`,
+		`ALTER TABLE waf_probe_apply_journal
+			ADD COLUMN IF NOT EXISTS store TEXT NOT NULL DEFAULT 'tool_config';`,
+		`CREATE INDEX IF NOT EXISTS idx_waf_probe_apply_journal_target
+			ON waf_probe_apply_journal(scope_target_id, tool, field);`,
+
+		// Deliberate blocks cost reputation against the egress IP across every target, not just
+		// this one, and the cost outlives the run. Accounting for it per IP over 24h is the only
+		// way the trip budget means anything.
+		`CREATE TABLE IF NOT EXISTS waf_probe_egress_trips (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			egress_fingerprint TEXT NOT NULL,
+			scan_id UUID NOT NULL,
+			scope_target_id UUID REFERENCES scope_targets(id) ON DELETE SET NULL,
+			trips INT NOT NULL DEFAULT 0,
+			vendor TEXT,
+			occurred_at TIMESTAMP DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_waf_probe_egress_trips
+			ON waf_probe_egress_trips(egress_fingerprint, occurred_at DESC);`,
+
+		// Tuning for tools that have no config table of their own (katana_url, gospider_url,
+		// endpoint replay, and the framework-wide shared token bucket).
+		`CREATE TABLE IF NOT EXISTS probe_tool_tuning (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			tool TEXT NOT NULL,
+			config JSONB NOT NULL,
+			updated_at TIMESTAMP DEFAULT NOW(),
+			UNIQUE(scope_target_id, tool)
+		);`,
+
 		`CREATE TABLE IF NOT EXISTS ffuf_configs (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
@@ -1129,6 +1198,31 @@ func createTables() {
 			updated_at TIMESTAMP DEFAULT NOW()
 		);`,
 
+		// URL-workflow crawler configs. Each holds one jsonb `config` under a unique scope_target_id,
+		// which is the shape the probe's apply path already knows how to merge into and revert, so
+		// a measured rate can reach the tool that has to obey it.
+		`CREATE TABLE IF NOT EXISTS katana_url_configs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
+			config JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+		`CREATE TABLE IF NOT EXISTS gospider_url_configs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
+			config JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+		`CREATE TABLE IF NOT EXISTS linkfinder_url_configs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
+			config JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+
 		`CREATE TABLE IF NOT EXISTS cloud_enum_configs (
 			id SERIAL PRIMARY KEY,
 			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
@@ -1492,6 +1586,55 @@ func createTables() {
 			END IF;
 		END $$;`,
 
+		// Manual crawl liveness + provenance. `last_heartbeat_at` lets the framework tell a session
+		// that is genuinely recording from one whose extension died (MV3 service workers get
+		// terminated), instead of trusting status='active' forever. `tab_id` records where a request
+		// came from now that capture is scoped by host rather than by tab.
+		`ALTER TABLE manual_crawl_sessions ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMP;`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS tab_id INTEGER;`,
+
+		// Extracts the hostname from a stored URL. Used wherever an endpoint's identity depends on
+		// its host, which is anywhere direct and adjacent traffic are counted separately.
+		`CREATE OR REPLACE FUNCTION capture_host(u TEXT) RETURNS TEXT AS $func$
+		   SELECT lower(COALESCE(substring(u from '^[a-zA-Z][a-zA-Z0-9+.-]*://([^/:?#]+)'), ''));
+		 $func$ LANGUAGE SQL IMMUTABLE;`,
+
+		// Direct (the target host itself) vs adjacent (any other in-scope host), matching how every
+		// other URL-workflow tool splits its results. Applications routinely serve their API from a
+		// different host than the one being tested, and those requests are the interesting ones.
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS is_direct BOOLEAN;`,
+		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_is_direct ON manual_crawl_captures(scope_target_id, is_direct);`,
+		// Backfill captures recorded before the column existed by comparing their host to the scope
+		// target's, handling scope targets stored with or without a scheme.
+		`UPDATE manual_crawl_captures c
+		 SET is_direct = (
+		   lower(substring(c.url from '^[a-zA-Z][a-zA-Z0-9+.-]*://([^/:?#]+)')) =
+		   lower(COALESCE(
+		     substring(st.scope_target from '^[a-zA-Z][a-zA-Z0-9+.-]*://([^/:?#]+)'),
+		     st.scope_target
+		   ))
+		 )
+		 FROM scope_targets st
+		 WHERE st.id = c.scope_target_id AND c.is_direct IS NULL;`,
+		// Hosts the extension saw and rejected as out of scope, with hit counts. Reported on the
+		// heartbeat so the framework can explain missing traffic without the user opening the popup.
+		`ALTER TABLE manual_crawl_sessions ADD COLUMN IF NOT EXISTS observed_out_of_scope JSONB DEFAULT '{}'::jsonb;`,
+		`UPDATE manual_crawl_sessions SET last_heartbeat_at = started_at WHERE last_heartbeat_at IS NULL;`,
+
+		// Capture provenance and the richer fields the multi-source extension produces.
+		// `sources` records which of webrequest/hook/debugger contributed, which is how you tell a
+		// metadata-only record from one that carries real bodies.
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS sources TEXT[] DEFAULT '{}';`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS graphql_operation TEXT DEFAULT '';`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS resource_type TEXT DEFAULT '';`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS initiator TEXT DEFAULT '';`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS redirect_chain JSONB DEFAULT '[]'::jsonb;`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS error TEXT DEFAULT '';`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS duration_ms INTEGER DEFAULT 0;`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS request_body_truncated BOOLEAN DEFAULT FALSE;`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS response_body_truncated BOOLEAN DEFAULT FALSE;`,
+		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_graphql ON manual_crawl_captures(graphql_operation) WHERE graphql_operation <> '';`,
+
 		// Create indexes for performance
 		`CREATE INDEX IF NOT EXISTS target_urls_url_idx ON target_urls (url);`,
 		`CREATE INDEX IF NOT EXISTS target_urls_scope_target_id_idx ON target_urls (scope_target_id);`,
@@ -1647,6 +1790,24 @@ func createTables() {
 			created_at TIMESTAMP DEFAULT NOW()
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_authz_client_identifiers_target ON authz_client_identifiers(scope_target_id);`,
+
+		// Auto-detection re-runs over the same traffic, so the same identifier must not be inserted
+		// twice. Duplicates from before this constraint existed are collapsed first, keeping the
+		// earliest row of each group.
+		`DELETE FROM authz_client_identifiers a
+		 USING authz_client_identifiers b
+		 WHERE a.ctid > b.ctid
+		   AND a.scope_target_id = b.scope_target_id
+		   AND a.endpoint_url = b.endpoint_url
+		   AND a.method = b.method
+		   AND a.value = b.value;`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS authz_client_identifiers_unique
+		 ON authz_client_identifiers (scope_target_id, endpoint_url, method, value);`,
+
+		// Consolidated endpoints carry the recorded request body so the raw request rebuilt for
+		// IDOR work and auth-flow import is the real one, not just a request line and headers.
+		`ALTER TABLE consolidated_url_endpoints ADD COLUMN IF NOT EXISTS request_body TEXT DEFAULT '';`,
+		`ALTER TABLE consolidated_url_endpoints ADD COLUMN IF NOT EXISTS content_type TEXT DEFAULT '';`,
 	}
 
 	for _, query := range queries {
@@ -1701,6 +1862,23 @@ func createTables() {
 		log.Printf("[WARN] Failed to cancel stuck metadata scans on startup: %v", err)
 	} else if n := tag.RowsAffected(); n > 0 {
 		log.Printf("[INFO] Cancelled %d stuck metadata scan(s) left in 'running' after a restart", n)
+	}
+
+	// FFUF URL and WAF Probe scans run via a detached `docker exec` goroutine with no persisted PID.
+	// If the API restarts mid-scan, that goroutine dies and the row is stranded in 'pending' or
+	// 'running', leaving the URL-workflow card spinning forever. Resolve any orphaned scans to a
+	// terminal 'error' on startup so the card can recover.
+	resolveStuckURLScansQuery := `
+		UPDATE ffuf_url_scans SET status = 'error',
+			error = 'Scan was interrupted by a server restart and automatically failed on startup.'
+		WHERE status IN ('pending','running');
+		UPDATE waf_probe_scans SET status = 'error',
+			error = 'Probe was interrupted by a server restart and automatically failed on startup.'
+		WHERE status IN ('pending','running');`
+	if _, err := dbPool.Exec(context.Background(), resolveStuckURLScansQuery); err != nil {
+		log.Printf("[WARN] Failed to resolve stuck FFUF/WAF-probe scans on startup: %v", err)
+	} else {
+		log.Println("[INFO] Resolved any stuck FFUF/WAF-probe scans left running after a restart")
 	}
 
 	log.Println("[INFO] Database schema created successfully")

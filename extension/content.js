@@ -1,8 +1,83 @@
+// Isolated-world content script. Three jobs:
+//
+//   1. Relay between the MAIN-world page hook (injected.js) and the service worker. The hook has no
+//      chrome.* access, so every capture it produces comes through here.
+//   2. Hold a long-lived port to the worker and ping it. Port activity resets the MV3 idle timer,
+//      which is what actually keeps the worker (and therefore the capture session) alive while the
+//      user browses.
+//   3. Draw the RECORDING overlay, driven by state pushed from the worker rather than a storage
+//      flag, so it cannot keep claiming to record after the session has died.
+
+const CHANNEL = '__ars0n_capture__';
+const CONTROL = '__ars0n_control__';
+
+const KEEPALIVE_PING_MS = 20000;
+// Chrome force-disconnects a port after five minutes, so reconnect comfortably inside that window.
+const PORT_RECONNECT_MS = 240000;
+
+// Only the top frame holds the keepalive port and draws the overlay. Subframes still relay their
+// captures, but over sendMessage: a page with twenty iframes must not open twenty ports each
+// pinging every twenty seconds.
+const IS_TOP_FRAME = window.top === window;
+
 let recordingIndicator = null;
+let keepalivePort = null;
+let pingTimer = null;
+let reconnectTimer = null;
+let lastConfig = null;
+let lastState = null;
+
+/* ------------------------------------------------------------------ page hook relay */
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window) return;
+  const data = event.data;
+  if (!data || data.__ars0n !== CHANNEL || !data.record) return;
+
+  // Prefer the port (cheap, and it keeps the worker awake); fall back to sendMessage if the port
+  // is momentarily down so a capture is never dropped just because we were reconnecting.
+  if (keepalivePort) {
+    try {
+      keepalivePort.postMessage({ action: 'hookCapture', record: data.record });
+      return;
+    } catch (error) {
+      keepalivePort = null;
+    }
+  }
+
+  try {
+    chrome.runtime.sendMessage({ action: 'hookCapture', record: data.record }).catch(() => {});
+  } catch (error) {
+    /* extension context invalidated */
+  }
+});
+
+function sendConfigToPage(config) {
+  if (!config) return;
+  lastConfig = config;
+  try {
+    window.postMessage({ __ars0n: CONTROL, config }, '*');
+  } catch (error) {
+    /* ignore */
+  }
+}
+
+async function requestConfig() {
+  try {
+    const response = await chrome.runtime.sendMessage({ action: 'getHookConfig' });
+    if (response && response.success) sendConfigToPage(response.config);
+  } catch (error) {
+    /* worker asleep or context invalidated; the port ping will retry */
+  }
+}
+
+/* ------------------------------------------------------------------ indicator */
 
 function createRecordingIndicator() {
   if (recordingIndicator) return;
-  
+  // At document_start the root element may not exist yet; renderState is re-run on DOMContentLoaded.
+  if (!document.documentElement) return;
+
   recordingIndicator = document.createElement('div');
   recordingIndicator.id = 'ars0n-recording-indicator';
   recordingIndicator.innerHTML = `
@@ -40,7 +115,7 @@ function createRecordingIndicator() {
         height: 8px;
         background: #fff;
         border-radius: 50%;
-        animation: pulse 2s ease-in-out infinite;
+        animation: ars0n-pulse 2s ease-in-out infinite;
       "></div>
       <span>RECORDING</span>
       <span style="
@@ -50,106 +125,142 @@ function createRecordingIndicator() {
       " id="ars0n-endpoint-count">0 endpoints</span>
     </div>
     <style>
-      @keyframes pulse {
+      @keyframes ars0n-pulse {
         0%, 100% { opacity: 1; }
         50% { opacity: 0.3; }
       }
     </style>
   `;
-  
-  document.documentElement.appendChild(recordingIndicator);
-  console.log('[ARS0N] Recording indicator added to page');
-}
 
-function updateRecordingStats(stats) {
-  const badge = document.getElementById('ars0n-endpoint-count');
-  if (badge && stats) {
-    const endpointText = stats.endpointCount === 1 ? 'endpoint' : 'endpoints';
-    badge.textContent = `${stats.endpointCount} ${endpointText}`;
-    console.log('[ARS0N] Stats updated on page:', stats);
-  }
+  document.documentElement.appendChild(recordingIndicator);
 }
 
 function removeRecordingIndicator() {
   if (recordingIndicator) {
     recordingIndicator.remove();
     recordingIndicator = null;
-    console.log('[ARS0N] Recording indicator removed from page');
   }
+}
+
+function renderState(state) {
+  lastState = state;
+
+  if (!state || !state.active) {
+    removeRecordingIndicator();
+    if (lastConfig && lastConfig.active) sendConfigToPage({ ...lastConfig, active: false });
+    return;
+  }
+
+  if (!IS_TOP_FRAME) return;
+
+  createRecordingIndicator();
+  const badge = document.getElementById('ars0n-endpoint-count');
+  if (badge && state.stats) {
+    const count = state.stats.endpointCount || 0;
+    const label = count === 1 ? 'endpoint' : 'endpoints';
+    const queued = state.stats.queuedCount ? ` (${state.stats.queuedCount} queued)` : '';
+    badge.textContent = `${count} ${label}${queued}`;
+  }
+}
+
+/* ------------------------------------------------------------------ keepalive port */
+
+function connectKeepalive() {
+  try {
+    keepalivePort = chrome.runtime.connect({ name: 'ars0n-keepalive' });
+  } catch (error) {
+    teardown();
+    return;
+  }
+
+  keepalivePort.onMessage.addListener((message) => {
+    if (!message) return;
+    if (message.action === 'state') renderState(message.state);
+    if (message.action === 'hookConfig') sendConfigToPage(message.config);
+  });
+
+  keepalivePort.onDisconnect.addListener(() => {
+    keepalivePort = null;
+    setTimeout(connectKeepalive, 1000);
+  });
+
+  ping();
+  try {
+    keepalivePort.postMessage({ action: 'needConfig' });
+  } catch (error) {
+    /* will retry on the next ping */
+  }
+}
+
+function ping() {
+  if (!keepalivePort) return;
+  try {
+    keepalivePort.postMessage({ action: 'ping' });
+  } catch (error) {
+    keepalivePort = null;
+  }
+}
+
+function teardown() {
+  clearInterval(pingTimer);
+  clearInterval(reconnectTimer);
+  removeRecordingIndicator();
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log('[ARS0N] Content script received message:', message);
-  
-  if (message.action === 'showRecordingIndicator') {
-    createRecordingIndicator();
-    sendResponse({ success: true });
-  } else if (message.action === 'updateStats') {
-    updateRecordingStats(message.stats);
-    sendResponse({ success: true });
-  } else if (message.action === 'hideRecordingIndicator') {
-    removeRecordingIndicator();
+  if (!message) return false;
+  if (message.action === 'sessionState') {
+    renderState(message.state);
     sendResponse({ success: true });
   }
-  
-  return true;
+  if (message.action === 'hookConfig') {
+    sendConfigToPage(message.config);
+    sendResponse({ success: true });
+  }
+  return false;
 });
 
-function initializeIndicator() {
-  try {
-    chrome.storage.local.get(['isCapturing', 'captureStats', 'captureTabId'], (result) => {
-      if (chrome.runtime.lastError) {
-        console.log('[ARS0N-CONTENT] Extension context lost during init');
-        return;
-      }
-      
-      console.log('[ARS0N-CONTENT] Checking storage on page load:', result);
-      console.log('[ARS0N-CONTENT] Current tab ID (from window):', window.location.href);
-      
-      if (result.isCapturing) {
-        console.log('[ARS0N-CONTENT] Storage says capturing is active, showing indicator');
-        createRecordingIndicator();
-        updateRecordingStats(result.captureStats);
-      } else {
-        console.log('[ARS0N-CONTENT] Storage says capturing is NOT active');
-        removeRecordingIndicator();
-      }
-    });
-  } catch (error) {
-    console.log('[ARS0N-CONTENT] Extension context invalidated during init');
+function initialize() {
+  // Runs at document_start so the hook is configured before the page issues its first request.
+  void requestConfig();
+
+  if (!IS_TOP_FRAME) {
+    // Subframes only need the hook configured and their captures relayed.
+    chrome.runtime
+      .sendMessage({ action: 'getSessionState' })
+      .then((response) => {
+        if (response && response.success) lastState = response.state;
+      })
+      .catch(() => {});
+    return;
   }
+
+  connectKeepalive();
+
+  // The overlay cannot be drawn before the document root exists, so redraw once it does.
+  document.addEventListener('DOMContentLoaded', () => renderState(lastState));
+
+  pingTimer = setInterval(ping, KEEPALIVE_PING_MS);
+
+  // Proactively cycle the port before Chrome's five-minute cap disconnects it.
+  reconnectTimer = setInterval(() => {
+    if (keepalivePort) {
+      try {
+        keepalivePort.disconnect();
+      } catch (error) {
+        /* already gone */
+      }
+      keepalivePort = null;
+    }
+    connectKeepalive();
+  }, PORT_RECONNECT_MS);
+
+  chrome.runtime
+    .sendMessage({ action: 'getSessionState' })
+    .then((response) => {
+      if (response && response.success) renderState(response.state);
+    })
+    .catch(() => {});
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initializeIndicator);
-} else {
-  initializeIndicator();
-}
-
-setInterval(() => {
-  try {
-    chrome.storage.local.get(['isCapturing', 'captureStats', 'captureTabId'], (result) => {
-      if (chrome.runtime.lastError) {
-        console.log('[ARS0N-CONTENT] Extension context lost, stopping interval');
-        return;
-      }
-      
-      console.log('[ARS0N-CONTENT] Periodic check - isCapturing:', result.isCapturing, 'hasIndicator:', !!recordingIndicator);
-      
-      if (result.isCapturing) {
-        if (!recordingIndicator) {
-          console.log('[ARS0N-CONTENT] Re-creating missing indicator');
-          createRecordingIndicator();
-        }
-        updateRecordingStats(result.captureStats);
-      } else {
-        if (recordingIndicator) {
-          console.log('[ARS0N-CONTENT] Storage says not capturing, removing indicator');
-          removeRecordingIndicator();
-        }
-      }
-    });
-  } catch (error) {
-    console.log('[ARS0N-CONTENT] Extension context invalidated, stopping checks');
-  }
-}, 3000);
+initialize();

@@ -229,7 +229,7 @@ const techListMatchesAny = (technologies, indicators) => {
   return indicators.some(ind => techLower.some(t => t.includes(ind)));
 };
 
-const calculateROIScore = (targetURL) => {
+export const calculateROIScore = (targetURL) => {
   let score = 0;
   const breakdown = [];
 
@@ -591,7 +591,7 @@ const calculateROIScore = (targetURL) => {
   return { score: Math.max(0, Math.round(score)), breakdown };
 };
 
-const getPriorityLevel = (score) => {
+export const getPriorityLevel = (score) => {
   return PRIORITY_LEVELS.find(level => score >= level.threshold) || PRIORITY_LEVELS[PRIORITY_LEVELS.length - 1];
 };
 

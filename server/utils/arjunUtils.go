@@ -131,11 +131,11 @@ func ExecuteArjunScan(scanID, scopeTargetID string) {
 		json.Unmarshal(configJSON, &config)
 	} else {
 		config = ArjunConfig{
-			Method:      "GET",
-			Threads:     5,
-			Timeout:     10,
-			ChunkSize:   500,
-			JSONOutput:  true,
+			Method:     "GET",
+			Threads:    5,
+			Timeout:    10,
+			ChunkSize:  500,
+			JSONOutput: true,
 		}
 	}
 
@@ -301,18 +301,18 @@ func GetArjunScanStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"scan_id":              scanID,
-		"status":               status,
-		"result":               result,
-		"error":                errorMsg,
-		"stdout":               stdout,
-		"stderr":               stderr,
-		"command":              command,
-		"execution_time":       executionTime,
-		"total_endpoints":      totalEndpoints,
-		"processed_endpoints":  processedEndpoints,
-		"parameters_found":     parametersFound,
-		"created_at":           createdAt,
+		"scan_id":             scanID,
+		"status":              status,
+		"result":              result,
+		"error":               errorMsg,
+		"stdout":              stdout,
+		"stderr":              stderr,
+		"command":             command,
+		"execution_time":      executionTime,
+		"total_endpoints":     totalEndpoints,
+		"processed_endpoints": processedEndpoints,
+		"parameters_found":    parametersFound,
+		"created_at":          createdAt,
 	})
 }
 
@@ -334,7 +334,9 @@ func GetArjunScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	// Initialised, not nil: a nil slice marshals to JSON null, and every client that does
+	// scans.length on the response throws before it can check.
+	scans := []map[string]interface{}{}
 	for rows.Next() {
 		var scanID, status, executionTime string
 		var totalEndpoints, processedEndpoints, parametersFound int
@@ -387,12 +389,12 @@ func GetArjunScanResults(w http.ResponseWriter, r *http.Request) {
 		}
 
 		results = append(results, map[string]interface{}{
-			"endpoint_url":    endpointURL,
-			"parameter_name":  paramName,
-			"parameter_type":  paramType,
-			"example_value":   exampleValue,
-			"confidence":      confidence,
-			"created_at":      createdAt,
+			"endpoint_url":   endpointURL,
+			"parameter_name": paramName,
+			"parameter_type": paramType,
+			"example_value":  exampleValue,
+			"confidence":     confidence,
+			"created_at":     createdAt,
 		})
 	}
 

@@ -3,7 +3,9 @@ import { Modal, Row, Col, Button, Spinner, Badge, ListGroup, Form } from 'react-
 
 // ---- helpers -------------------------------------------------------------
 
-// Build a raw HTTP request string from a consolidated endpoint (method + path/query + Host + headers).
+// Build a raw HTTP request from a consolidated endpoint. Endpoints that were recorded by the
+// manual crawl carry real headers and a real body, so the request shown here is the one the
+// application actually sent rather than a bare request line.
 function buildRawRequest(ep) {
   if (!ep) return '';
   let host = ep.domain || '';
@@ -22,6 +24,7 @@ function buildRawRequest(ep) {
     });
   }
   raw += '\n';
+  if (ep.request_body) raw += ep.request_body;
   return raw;
 }
 
@@ -103,6 +106,7 @@ const ClientIdentityModal = ({ show, handleClose, activeTarget }) => {
   const [loadingEndpoints, setLoadingEndpoints] = useState(false);
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState('');
+  const [autoDetectResult, setAutoDetectResult] = useState(null);
 
   const selectedEndpoint = useMemo(
     () => endpoints.find((e) => e.id === selectedEndpointId) || null,
@@ -163,7 +167,7 @@ const ClientIdentityModal = ({ show, handleClose, activeTarget }) => {
       fetchEndpoints();
       fetchIdentifiers();
     }
-    if (!show) { setSelectedEndpointId(null); setFilter(''); }
+    if (!show) { setSelectedEndpointId(null); setFilter(''); setAutoDetectResult(null); }
   }, [show, activeTarget, fetchEndpoints, fetchIdentifiers]);
 
   const addSelection = async (source) => {
@@ -195,6 +199,28 @@ const ClientIdentityModal = ({ show, handleClose, activeTarget }) => {
     try {
       await fetch(`/api/authz/client-identifiers/id/${id}`, { method: 'DELETE' });
       setIdentifiers((prev) => prev.filter((i) => i.id !== id));
+    } finally { setBusy(false); }
+  };
+
+  // Sweeps recorded traffic for values shaped like object references: path segments, query and
+  // body fields whose names identify an object, cookie values, bearer tokens, and JWT claims.
+  // Response bodies count too, since that is where the identifiers belonging to other objects
+  // (the ones you substitute) actually appear.
+  const autoDetect = async () => {
+    if (!activeTarget) return;
+    setBusy(true);
+    setAutoDetectResult(null);
+    try {
+      const res = await fetch(`/api/authz/client-identifiers/${activeTarget.id}/auto-detect`, { method: 'POST' });
+      if (res.ok) {
+        const summary = await res.json();
+        setAutoDetectResult(summary);
+        await fetchIdentifiers();
+      } else {
+        setAutoDetectResult({ error: `Auto-detect failed (${res.status})` });
+      }
+    } catch (e) {
+      setAutoDetectResult({ error: e.message });
     } finally { setBusy(false); }
   };
 
@@ -258,9 +284,14 @@ const ClientIdentityModal = ({ show, handleClose, activeTarget }) => {
                   <div className="d-flex justify-content-between align-items-center mb-1">
                     <span className="text-white-50 small text-uppercase">Raw HTTP Request</span>
                     <span className="d-flex gap-2">
-                      <Button size="sm" variant="outline-secondary" disabled
-                        title="Coming soon: automatically detect unique identifiers in this request">
-                        Auto-detect IDs
+                      <Button
+                        size="sm"
+                        variant="outline-danger"
+                        disabled={busy}
+                        onClick={autoDetect}
+                        title="Scan recorded traffic for values shaped like object references (path segments, id-named fields, cookies, bearer tokens, JWT claims) across every endpoint"
+                      >
+                        {busy ? <Spinner size="sm" animation="border" /> : 'Auto-detect IDs'}
                       </Button>
                       <Button size="sm" variant="danger" disabled={busy} onClick={() => addSelection('request')}>
                         Add selection
@@ -270,6 +301,15 @@ const ClientIdentityModal = ({ show, handleClose, activeTarget }) => {
                   <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
                     Highlight a value (an ID in the path/query, a token, etc.) then click <strong>Add selection</strong>.
                   </div>
+                  {autoDetectResult && (
+                    <div className={`small mt-1 ${autoDetectResult.error ? 'text-warning' : 'text-success'}`}>
+                      {autoDetectResult.error
+                        ? autoDetectResult.error
+                        : autoDetectResult.captures_scanned === 0
+                        ? 'No recorded traffic for this target yet. Record a manual crawl first, then auto-detect.'
+                        : `Scanned ${autoDetectResult.captures_scanned} recorded requests, found ${autoDetectResult.candidates_found} candidates, added ${autoDetectResult.inserted} new.`}
+                    </div>
+                  )}
                   <pre
                     className="bg-black text-white p-2 rounded mt-1"
                     style={{ fontSize: '0.75rem', maxHeight: '300px', overflowY: 'auto', whiteSpace: 'pre-wrap', userSelect: 'text' }}
@@ -286,10 +326,17 @@ const ClientIdentityModal = ({ show, handleClose, activeTarget }) => {
                     <ListGroup variant="flush">
                       {endpointIdentifiers.map((i) => (
                         <ListGroup.Item key={i.id} className="bg-dark text-white d-flex justify-content-between align-items-center py-1">
-                          <span className="text-truncate" style={{ fontFamily: 'monospace', fontSize: '0.75rem' }} title={i.value}>
-                            {i.value}
+                          <span className="text-truncate me-2">
+                            <span className="d-block text-truncate" style={{ fontFamily: 'monospace', fontSize: '0.75rem' }} title={i.value}>
+                              {i.value}
+                            </span>
+                            {/* Where it was found: a path segment, a cookie, a JWT claim, a field in
+                                the response. Knowing this is what tells you how to swap it. */}
+                            {i.label && (
+                              <span className="text-white-50" style={{ fontSize: '0.66rem' }}>{i.label}</span>
+                            )}
                           </span>
-                          <span className="d-flex align-items-center gap-2">
+                          <span className="d-flex align-items-center gap-2 flex-shrink-0">
                             {sourceBadge(i.source)}
                             <i role="button" className="bi bi-trash text-danger" title="Remove"
                               onClick={() => deleteIdentifier(i.id)} />

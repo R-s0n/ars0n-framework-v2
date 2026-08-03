@@ -6,7 +6,7 @@ export const FFUFConfigModal = ({
   handleClose, 
   activeTarget 
 }) => {
-  const [activeTab, setActiveTab] = useState('target');
+  const [activeTab, setActiveTab] = useState('endpoints');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -20,11 +20,24 @@ export const FFUFConfigModal = ({
     headers: [],
     cookies: '',
     postData: '',
+
+    // What the single Scan button runs. Endpoints on, the other two opt-in: they are a different
+    // kind of traffic and worth choosing deliberately.
+    fuzzEndpoints: true,
+    fuzzHeaders: false,
+    fuzzCookies: false,
+    headerWordlistId: 'builtin-headers',
+    cookieWordlistId: 'builtin-cookies',
+    headerFuzzValue: 'ars0nprobe',
+    cookieFuzzValue: 'ars0nprobe',
+
     http2: false,
-    followRedirects: false,
+    // On, because a target that redirects everything to a login page reports nothing useful
+    // otherwise. It is a switch on the Advanced tab when that is the wrong call.
+    followRedirects: true,
     timeout: 10,
-    
-    wordlistId: '',
+
+    wordlistId: 'builtin-default',
     customWordlist: null,
     wordlistName: '',
     extensions: '',
@@ -49,7 +62,9 @@ export const FFUFConfigModal = ({
     delay: '',
     maxTime: '',
     verbose: false,
-    autoCalibrate: false,
+    // On by default. Without it, a target that answers every path with the same shell returns the
+    // entire wordlist as "findings"; with it, only responses that differ are reported.
+    autoCalibrate: true,
     recursion: false,
     recursionDepth: '',
     
@@ -57,7 +72,9 @@ export const FFUFConfigModal = ({
     clientCert: '',
     clientKey: '',
     
-    stopOnAll: true,
+    // Off. `-sa` aborts the whole run on the first spurious error, which against anything behind a
+    // WAF means the scan ends in the first few seconds and reports nothing.
+    stopOnAll: false,
     stopOn403: false,
     stopOnErrors: false
   });
@@ -94,11 +111,24 @@ export const FFUFConfigModal = ({
       if (response.ok) {
         const data = await response.json();
         if (data && Object.keys(data).length > 0) {
+          // A null in the stored config must not overwrite a working default. Go marshals an empty
+          // slice as null, so `headers: null` arrived here, replaced the default `[]`, and the
+          // first .map() on it threw and unmounted the modal: that is why Configure opened blank.
+          const merged = { ...data };
+          Object.keys(merged).forEach((k) => {
+            if (merged[k] === null || merged[k] === undefined) delete merged[k];
+          });
+          // An empty wordlist id is never a choice anyone made: it is what a config written by the
+          // WAF Probe's Apply looks like. Letting it through leaves Save permanently disabled on a
+          // target the operator never configured by hand.
+          if (!merged.wordlistId) delete merged.wordlistId;
+          if (!merged.headerWordlistId) delete merged.headerWordlistId;
+          if (!merged.cookieWordlistId) delete merged.cookieWordlistId;
           setConfig(prev => ({
             ...prev,
-            ...data,
-            url: data.url || (activeTarget.scope_target 
-              ? (activeTarget.scope_target.endsWith('/') 
+            ...merged,
+            url: data.url || (activeTarget.scope_target
+              ? (activeTarget.scope_target.endsWith('/')
                 ? `${activeTarget.scope_target}FUZZ`
                 : `${activeTarget.scope_target}/FUZZ`)
               : '')
@@ -233,21 +263,21 @@ export const FFUFConfigModal = ({
   const addHeader = () => {
     setConfig(prev => ({
       ...prev,
-      headers: [...prev.headers, { name: '', value: '' }]
+      headers: [...(prev.headers || []), { name: '', value: '' }]
     }));
   };
 
   const removeHeader = (index) => {
     setConfig(prev => ({
       ...prev,
-      headers: prev.headers.filter((_, i) => i !== index)
+      headers: (prev.headers || []).filter((_, i) => i !== index)
     }));
   };
 
   const updateHeader = (index, field, value) => {
     setConfig(prev => ({
       ...prev,
-      headers: prev.headers.map((h, i) => 
+      headers: (prev.headers || []).map((h, i) => 
         i === index ? { ...h, [field]: value } : h
       )
     }));
@@ -296,8 +326,16 @@ export const FFUFConfigModal = ({
           onSelect={(k) => setActiveTab(k)}
           className="mb-3"
         >
-          <Tab eventKey="target" title="Target">
+          <Tab eventKey="endpoints" title={`Endpoints${config.fuzzEndpoints ? ' •' : ''}`}>
             <Form>
+              <Form.Check
+                type="switch"
+                id="ffuf-fuzz-endpoints"
+                className="mb-3"
+                checked={!!config.fuzzEndpoints}
+                onChange={(e) => setConfig({ ...config, fuzzEndpoints: e.target.checked })}
+                label={<span className="text-white">Fuzz paths during a scan</span>}
+              />
               <Form.Group className="mb-3">
                 <Form.Label className="text-white">Target URL <Badge bg="danger">Required</Badge></Form.Label>
                 <Form.Control
@@ -308,105 +346,13 @@ export const FFUFConfigModal = ({
                   data-bs-theme="dark"
                 />
                 <Form.Text className="text-white-50">
-                  Use FUZZ keyword where you want to inject wordlist values
+                  Put FUZZ wherever the wordlist should be injected. It is honored as written, so
+                  <code className="mx-1">https://host/api/v1/FUZZ</code> fuzzes a subdirectory and
+                  <code className="mx-1">https://host/s?q=FUZZ</code> fuzzes a query value. Leave it
+                  and the scope target gets <code>/FUZZ</code> appended.
                 </Form.Text>
               </Form.Group>
 
-              <Form.Group className="mb-3">
-                <Form.Label className="text-white">HTTP Method</Form.Label>
-                <Form.Select
-                  value={config.method}
-                  onChange={(e) => setConfig({ ...config, method: e.target.value })}
-                  data-bs-theme="dark"
-                >
-                  <option value="GET">GET</option>
-                  <option value="POST">POST</option>
-                  <option value="PUT">PUT</option>
-                  <option value="DELETE">DELETE</option>
-                  <option value="PATCH">PATCH</option>
-                  <option value="HEAD">HEAD</option>
-                  <option value="OPTIONS">OPTIONS</option>
-                </Form.Select>
-              </Form.Group>
-
-              <Form.Group className="mb-3">
-                <Form.Label className="text-white">Custom Headers</Form.Label>
-                {config.headers.map((header, index) => (
-                  <InputGroup key={index} className="mb-2">
-                    <Form.Control
-                      type="text"
-                      placeholder="Header Name"
-                      value={header.name}
-                      onChange={(e) => updateHeader(index, 'name', e.target.value)}
-                      data-bs-theme="dark"
-                    />
-                    <Form.Control
-                      type="text"
-                      placeholder="Header Value"
-                      value={header.value}
-                      onChange={(e) => updateHeader(index, 'value', e.target.value)}
-                      data-bs-theme="dark"
-                    />
-                    <Button 
-                      variant="outline-danger" 
-                      onClick={() => removeHeader(index)}
-                    >
-                      ×
-                    </Button>
-                  </InputGroup>
-                ))}
-                <Button variant="outline-success" size="sm" onClick={addHeader}>
-                  <i className="bi bi-plus me-1" />
-                  Add Header
-                </Button>
-              </Form.Group>
-
-              <Form.Group className="mb-3">
-                <Form.Label className="text-white">Cookies</Form.Label>
-                <Form.Control
-                  type="text"
-                  value={config.cookies}
-                  onChange={(e) => setConfig({ ...config, cookies: e.target.value })}
-                  placeholder="NAME1=VALUE1; NAME2=VALUE2"
-                  data-bs-theme="dark"
-                />
-              </Form.Group>
-
-              <Form.Group className="mb-3">
-                <Form.Label className="text-white">POST Data</Form.Label>
-                <Form.Control
-                  as="textarea"
-                  rows={3}
-                  value={config.postData}
-                  onChange={(e) => setConfig({ ...config, postData: e.target.value })}
-                  placeholder='{"key": "FUZZ"}'
-                  data-bs-theme="dark"
-                />
-                <Form.Text className="text-white-50">
-                  For POST/PUT requests. Can use FUZZ keyword.
-                </Form.Text>
-              </Form.Group>
-
-              <Form.Check
-                type="checkbox"
-                label="Use HTTP/2"
-                checked={config.http2}
-                onChange={(e) => setConfig({ ...config, http2: e.target.checked })}
-                className="text-white mb-2"
-              />
-
-              <Form.Check
-                type="checkbox"
-                label="Follow Redirects"
-                checked={config.followRedirects}
-                onChange={(e) => setConfig({ ...config, followRedirects: e.target.checked })}
-                className="text-white"
-              />
-            </Form>
-          </Tab>
-
-          <Tab eventKey="wordlist" title="Wordlist">
-            <Form>
               <Form.Group className="mb-3">
                 <Form.Label className="text-white">Upload New Wordlist</Form.Label>
                 <div className="d-flex gap-2 align-items-center">
@@ -486,6 +432,193 @@ export const FFUFConfigModal = ({
                 <Form.Text className="text-white-50">
                   Comma-separated list. Will be appended to FUZZ keyword.
                 </Form.Text>
+              </Form.Group>
+
+              <Form.Group className="mb-3">
+                <Form.Label className="text-white">HTTP Method</Form.Label>
+                <Form.Select
+                  value={config.method}
+                  onChange={(e) => setConfig({ ...config, method: e.target.value })}
+                  data-bs-theme="dark"
+                >
+                  <option value="GET">GET</option>
+                  <option value="POST">POST</option>
+                  <option value="PUT">PUT</option>
+                  <option value="DELETE">DELETE</option>
+                  <option value="PATCH">PATCH</option>
+                  <option value="HEAD">HEAD</option>
+                  <option value="OPTIONS">OPTIONS</option>
+                </Form.Select>
+              </Form.Group>
+
+              <Form.Group className="mb-3">
+                <Form.Label className="text-white">Custom Headers</Form.Label>
+                {/* Guarded: a stored config with no headers comes back as null, and one throw here
+                    unmounts the whole modal, which is what "Configure opens blank" was. */}
+                {(config.headers || []).map((header, index) => (
+                  <InputGroup key={index} className="mb-2">
+                    <Form.Control
+                      type="text"
+                      placeholder="Header Name"
+                      value={header.name}
+                      onChange={(e) => updateHeader(index, 'name', e.target.value)}
+                      data-bs-theme="dark"
+                    />
+                    <Form.Control
+                      type="text"
+                      placeholder="Header Value"
+                      value={header.value}
+                      onChange={(e) => updateHeader(index, 'value', e.target.value)}
+                      data-bs-theme="dark"
+                    />
+                    <Button 
+                      variant="outline-danger" 
+                      onClick={() => removeHeader(index)}
+                    >
+                      ×
+                    </Button>
+                  </InputGroup>
+                ))}
+                <Button variant="outline-success" size="sm" onClick={addHeader}>
+                  <i className="bi bi-plus me-1" />
+                  Add Header
+                </Button>
+              </Form.Group>
+
+              <Form.Group className="mb-3">
+                <Form.Label className="text-white">Cookies</Form.Label>
+                <Form.Control
+                  type="text"
+                  value={config.cookies}
+                  onChange={(e) => setConfig({ ...config, cookies: e.target.value })}
+                  placeholder="NAME1=VALUE1; NAME2=VALUE2"
+                  data-bs-theme="dark"
+                />
+              </Form.Group>
+
+              <Form.Group className="mb-3">
+                <Form.Label className="text-white">POST Data</Form.Label>
+                <Form.Control
+                  as="textarea"
+                  rows={3}
+                  value={config.postData}
+                  onChange={(e) => setConfig({ ...config, postData: e.target.value })}
+                  placeholder='{"key": "FUZZ"}'
+                  data-bs-theme="dark"
+                />
+                <Form.Text className="text-white-50">
+                  For POST/PUT requests. Can use FUZZ keyword.
+                </Form.Text>
+              </Form.Group>
+
+              <Form.Check
+                type="checkbox"
+                label="Use HTTP/2"
+                checked={config.http2}
+                onChange={(e) => setConfig({ ...config, http2: e.target.checked })}
+                className="text-white mb-2"
+              />
+
+              <Form.Check
+                type="checkbox"
+                label="Follow Redirects"
+                checked={config.followRedirects}
+                onChange={(e) => setConfig({ ...config, followRedirects: e.target.checked })}
+                className="text-white"
+              />
+            </Form>
+          </Tab>
+
+          <Tab eventKey="headers" title={`Headers${config.fuzzHeaders ? ' •' : ''}`}>
+            <Alert variant="dark" className="border-secondary">
+              <i className="bi bi-info-circle me-2" />
+              Sends every name in the wordlist as a request header against one unchanging URL, and
+              reports the ones whose response differs. Because the URL never changes, this works on
+              targets where path fuzzing cannot: a single-page app returns the same shell for every
+              path, but it still behaves differently when it honors <code>X-Original-URL</code> or
+              a debug header.
+            </Alert>
+            <Form>
+              <Form.Check
+                type="switch"
+                id="ffuf-fuzz-headers"
+                className="mb-3"
+                checked={!!config.fuzzHeaders}
+                onChange={(e) => setConfig({ ...config, fuzzHeaders: e.target.checked })}
+                label={<span className="text-white">Fuzz header names during a scan</span>}
+              />
+              <Form.Group className="mb-3">
+                <Form.Label className="text-white">Header Wordlist</Form.Label>
+                <Form.Select
+                  value={config.headerWordlistId}
+                  onChange={(e) => setConfig({ ...config, headerWordlistId: e.target.value })}
+                  data-bs-theme="dark"
+                >
+                  <option value="builtin-headers">Built-in header names ({'~'}140 entries)</option>
+                  {availableWordlists.filter((w) => !String(w.id).startsWith('builtin-')).map((w) => (
+                    <option key={w.id} value={w.id}>{w.name}</option>
+                  ))}
+                </Form.Select>
+              </Form.Group>
+              <Form.Group className="mb-3">
+                <Form.Label className="text-white">Header Probe Value</Form.Label>
+                <Form.Control
+                  type="text"
+                  value={config.headerFuzzValue}
+                  onChange={(e) => setConfig({ ...config, headerFuzzValue: e.target.value })}
+                  placeholder="ars0nprobe"
+                  data-bs-theme="dark"
+                />
+                <Form.Text className="text-white-50">
+                  The value paired with each fuzzed header name. A unique canary makes a reflected
+                  or honored header easy to spot in the response.
+                </Form.Text>
+              </Form.Group>
+            </Form>
+          </Tab>
+
+          <Tab eventKey="cookies" title={`Cookies${config.fuzzCookies ? ' •' : ''}`}>
+            <Alert variant="dark" className="border-secondary">
+              <i className="bi bi-info-circle me-2" />
+              Sends every name in the wordlist as a cookie against one unchanging URL and reports
+              the ones that change the response. This is how you find the <code>debug</code>,
+              <code>is_admin</code> or feature-flag cookies an application reads but never sets.
+            </Alert>
+            <Form>
+              <Form.Check
+                type="switch"
+                id="ffuf-fuzz-cookies"
+                className="mb-3"
+                checked={!!config.fuzzCookies}
+                onChange={(e) => setConfig({ ...config, fuzzCookies: e.target.checked })}
+                label={<span className="text-white">Fuzz cookie names during a scan</span>}
+              />
+              <Form.Group className="mb-3">
+                <Form.Label className="text-white">Cookie Wordlist</Form.Label>
+                <Form.Select
+                  value={config.cookieWordlistId}
+                  onChange={(e) => setConfig({ ...config, cookieWordlistId: e.target.value })}
+                  data-bs-theme="dark"
+                >
+                  <option value="builtin-cookies">Built-in cookie names ({'~'}180 entries)</option>
+                  {availableWordlists.filter((w) => !String(w.id).startsWith('builtin-')).map((w) => (
+                    <option key={w.id} value={w.id}>{w.name}</option>
+                  ))}
+                </Form.Select>
+                <Form.Text className="text-white-50">
+                  The saved session cookie is not sent during this phase. Two values for one cookie
+                  name would make any difference in the response unattributable.
+                </Form.Text>
+              </Form.Group>
+              <Form.Group className="mb-3">
+                <Form.Label className="text-white">Cookie Probe Value</Form.Label>
+                <Form.Control
+                  type="text"
+                  value={config.cookieFuzzValue}
+                  onChange={(e) => setConfig({ ...config, cookieFuzzValue: e.target.value })}
+                  placeholder="ars0nprobe"
+                  data-bs-theme="dark"
+                />
               </Form.Group>
             </Form>
           </Tab>

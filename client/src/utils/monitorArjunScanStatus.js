@@ -18,7 +18,9 @@ const monitorArjunScanStatus = async (
       throw new Error('Failed to fetch Arjun scans');
     }
 
-    const scans = await response.json();
+    // `|| []` because the API returns null when a target has no scans yet, and every
+    // line below assumes an array.
+    const scans = (await response.json()) || [];
     setArjunScans(scans);
 
     if (scans.length > 0) {

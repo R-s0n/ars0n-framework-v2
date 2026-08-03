@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import useTargetURLs, { targetURLsKey } from './hooks/useTargetURLs.js';
 import { cancelAllScanPolls } from './utils/scanPolling.js';
@@ -191,6 +191,8 @@ import { FFUFURLResultsModal } from './modals/FFUFURLResultsModal';
 import initiateWAFProbeScan from './utils/initiateWAFProbeScan';
 import monitorWAFProbeScanStatus from './utils/monitorWAFProbeScanStatus';
 import { WAFProbeResultsModal } from './modals/WAFProbeResultsModal';
+import { WAFProbeConfigModal } from './modals/WAFProbeConfigModal';
+import { CrawlerConfigModal } from './modals/CrawlerConfigModal';
 import initiateArjunScan from './utils/initiateArjunScan';
 import monitorArjunScanStatus from './utils/monitorArjunScanStatus';
 import initiateParamethScan from './utils/initiateParamethScan';
@@ -212,6 +214,7 @@ import { FFUFConfigModal } from './modals/FFUFConfigModal';
 import ManualCrawlResultsModal from './modals/ManualCrawlResultsModal';
 import AuthFlowModal from './modals/AuthFlowModal';
 import ClientIdentityModal from './modals/ClientIdentityModal';
+import PossibleAttacksModal from './modals/PossibleAttacksModal';
 import ExtensionInstallModal from './modals/ExtensionInstallModal';
 import ManageEndpointsModal from './modals/ManageEndpointsModal';
 
@@ -232,6 +235,80 @@ const HelpMeLearn = ({ section }) => (
     <HelpMeLearnLazy section={section} />
   </Suspense>
 );
+
+// Every URL-discovery tool writes the same summary sentence, so the count is parsed in one place
+// rather than five copies of the same regex.
+function countURLToolEndpoints(scan) {
+  if (!scan || !scan.result) return 0;
+  const match = String(scan.result).match(/Found (\d+) direct endpoints and (\d+) adjacent endpoints/);
+  return match ? parseInt(match[1], 10) + parseInt(match[2], 10) : 0;
+}
+
+// One card for every tool in both URL-discovery rows. `onConfig` is optional: the archive tools
+// have nothing to configure because they never talk to the target.
+const URLToolCard = ({ tool }) => (
+  <Col className="mb-3">
+    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
+      <Card.Body className="d-flex flex-column">
+        <Card.Title className="text-danger mb-3">
+          <a href={tool.link} className="text-danger text-decoration-none"
+             target="_blank" rel="noopener noreferrer">
+            {tool.name}
+          </a>
+        </Card.Title>
+        <Card.Text className="text-white small fst-italic">
+          {tool.description}
+        </Card.Text>
+        <div className="mt-auto">
+          <Card.Text className="text-white small mb-3">
+            {tool.resultLabel}: {tool.resultCount || '0'}
+          </Card.Text>
+          <div className="d-flex justify-content-center gap-2">
+            {tool.onConfig && (
+              <Button variant="outline-danger" className="flex-fill" onClick={tool.onConfig}
+                      disabled={!tool.isActive || tool.isScanning}>
+                Config
+              </Button>
+            )}
+            <Button variant="outline-danger" className="flex-fill" onClick={tool.onScan}
+                    disabled={!tool.isActive || tool.isScanning}>
+              <div className="btn-content">
+                {tool.isScanning ? <Spinner animation="border" size="sm" /> : 'Scan'}
+              </div>
+            </Button>
+            <Button variant="outline-danger" className="flex-fill" onClick={tool.onResults}
+                    disabled={!tool.status || tool.status !== 'success'}>
+              Results
+            </Button>
+          </div>
+        </div>
+      </Card.Body>
+    </Card>
+  </Col>
+);
+
+const WAF_PROBE_EMPTY_STATE = {
+  none: 'Not yet run',
+  error: 'Last run failed, see Results',
+  noresult: 'Ran, but stored no result',
+  unreadable: 'Stored result could not be read',
+  legacy: 'Result predates the probe rewrite, run again',
+};
+
+// Age matters more here than on most cards: a probe from last month describes both a target and an
+// egress reputation that have since moved, and neither is visible from the numbers.
+function formatProbeAge(at) {
+  if (!at) return null;
+  const ms = Date.now() - new Date(at).getTime();
+  if (Number.isNaN(ms) || ms < 0) return null;
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? 'yesterday' : `${days}d ago`;
+}
 
 function App() {
   const [showScanHistoryModal, setShowScanHistoryModal] = useState(false);
@@ -668,6 +745,11 @@ function App() {
   const [showGoSpiderURLResultsModal, setShowGoSpiderURLResultsModal] = useState(false);
   const [showFFUFURLResultsModal, setShowFFUFURLResultsModal] = useState(false);
   const [showWAFProbeResultsModal, setShowWAFProbeResultsModal] = useState(false);
+  const [showWAFProbeConfigModal, setShowWAFProbeConfigModal] = useState(false);
+  const [wafProbeAppliedCount, setWAFProbeAppliedCount] = useState(null);
+  // Which crawler's config modal is open, or null. One piece of state for all three, since only
+  // one can be open at a time.
+  const [crawlerConfigTool, setCrawlerConfigTool] = useState(null);
 
   const [showArjunConfigModal, setShowArjunConfigModal] = useState(false);
   const [showArjunResultsModal, setShowArjunResultsModal] = useState(false);
@@ -684,7 +766,17 @@ function App() {
   const [showManualCrawlResultsModal, setShowManualCrawlResultsModal] = useState(false);
   const [showExtensionInstallModal, setShowExtensionInstallModal] = useState(false);
   const [manualCrawlConnected, setManualCrawlConnected] = useState(false);
-  const [manualCrawlEndpointCount, setManualCrawlEndpointCount] = useState(0);
+  // Split the same way every other URL-workflow tool splits its results: direct is the scope
+  // target's own host, adjacent is any other in-scope host (typically a separate API domain).
+  // Previous liveness, so the card can refresh its counts the moment a recording stops rather
+  // than sitting on stale numbers until the target is switched.
+  const manualCrawlWasLiveRef = useRef(false);
+  const manualCrawlRefreshTimeoutRef = useRef(null);
+  const [manualCrawlDirectCount, setManualCrawlDirectCount] = useState(0);
+  const [manualCrawlAdjacentCount, setManualCrawlAdjacentCount] = useState(0);
+  // Distinct non-target hosts seen. This is the number that matters most for what to test next:
+  // each one is a separate application surface the target talks to.
+  const [manualCrawlAdjacentHostCount, setManualCrawlAdjacentHostCount] = useState(0);
   const [manualCrawlSessionCount, setManualCrawlSessionCount] = useState(0);
   const [showManageEndpointsModal, setShowManageEndpointsModal] = useState(false);
   const [consolidatedEndpointCount, setConsolidatedEndpointCount] = useState(0);
@@ -697,6 +789,8 @@ function App() {
   const [showAuthFlowModal, setShowAuthFlowModal] = useState(false);
   const [authFlowCategory, setAuthFlowCategory] = useState('login');
   const [showClientIdentityModal, setShowClientIdentityModal] = useState(false);
+  const [showPossibleAttacksModal, setShowPossibleAttacksModal] = useState(false);
+  const [possibleAttacksCategory, setPossibleAttacksCategory] = useState(null);
   const [headerCookieCounts, setHeaderCookieCounts] = useState({ hidden_headers: 0, hidden_cookies: 0, client_side: 0, server_side: 0 });
   const [authzCounts, setAuthzCounts] = useState({ idor: 0, acv: 0 });
   const [authFlowCounts, setAuthFlowCounts] = useState({ register: 0, login: 0, mfa_otp: 0, reset: 0 });
@@ -2958,7 +3052,7 @@ function App() {
   const startCeWLScan = () => {
     initiateCeWLScan(
       activeTarget,
-      null, // Don't use old monitoring - we handle this in the shufflednscustom useEffect now
+      monitorCeWLScanStatus, // poll the actual CeWL scan status so the spinner stops on completion
       setIsCeWLScanning,
       setCeWLScans,
       setMostRecentCeWLScanStatus,
@@ -4774,6 +4868,26 @@ function App() {
     }
   }, [activeTarget]);
 
+  // A probe whose recommendations were never applied changed nothing: every tool downstream is
+  // still running on defaults. The card looks identical in both cases unless it asks.
+  const refreshWAFProbeApplied = useCallback(async () => {
+    if (!activeTarget || activeTarget.type !== 'URL') return;
+    try {
+      const res = await fetch(`/api/waf-probe/apply-journal/${activeTarget.id}`);
+      const entries = res.ok ? await res.json() : [];
+      setWAFProbeAppliedCount(Array.isArray(entries) ? entries.length : 0);
+    } catch (e) {
+      setWAFProbeAppliedCount(null);
+    }
+  }, [activeTarget]);
+
+  useEffect(() => { refreshWAFProbeApplied(); }, [refreshWAFProbeApplied]);
+  // Re-read once a run finishes, so a scan that lands while the card is open stops claiming the
+  // previous run's applied state.
+  useEffect(() => {
+    if (!isWAFProbeScanning) refreshWAFProbeApplied();
+  }, [isWAFProbeScanning, refreshWAFProbeApplied]);
+
   // Katana Company scans useEffect
   useEffect(() => {
     if (activeTarget) {
@@ -4937,15 +5051,90 @@ function App() {
     );
   };
 
-  const startWAFProbeScan = () => {
+  const startWAFProbeScan = (configOverride = null) => {
     initiateWAFProbeScan(
       activeTarget,
       setIsWAFProbeScanning,
       setWAFProbeScans,
       setMostRecentWAFProbeScan,
-      setMostRecentWAFProbeScanStatus
+      setMostRecentWAFProbeScanStatus,
+      configOverride
     );
   };
+
+  // What the card shows at a glance. The ordering answers "can I start the next tool, and at what
+  // rate", which is the only question this card exists to answer. Everything else is in the modal.
+  //
+  // The rate and its confidence are one fact, never two. "5 req/s" alone would let an assumed
+  // default read as a measurement, which is the most expensive mistake this card could make.
+  const wafProbeCard = useMemo(() => {
+    const empty = {
+      state: 'none', rate: null, rateNote: null, rateMeasured: false,
+      threads: null, blockers: 0, topBlocker: null, posture: null,
+      runStatus: null, at: null,
+    };
+    const raw = mostRecentWAFProbeScan?.result;
+    if (!raw) {
+      if (mostRecentWAFProbeScanStatus === 'error') return { ...empty, state: 'error' };
+      return { ...empty, state: mostRecentWAFProbeScanStatus ? 'noresult' : 'none' };
+    }
+
+    let p;
+    try {
+      p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (e) {
+      return { ...empty, state: 'unreadable' };
+    }
+
+    // A result stored before the rewrite has no verdict block. Say so rather than reading v1
+    // fields that no longer mean what they used to.
+    if (!p.verdict) return { ...empty, state: 'legacy', at: mostRecentWAFProbeScan?.created_at };
+
+    const v = p.verdict;
+    const conf = v.safe_rps_confidence;
+    const p0 = (v.will_break || []).find((w) => w.tier === 'P0');
+
+    return {
+      state: 'ok',
+      rate: v.safe_rps || null,
+      rateMeasured: conf === 'measured',
+      rateNote: !v.safe_rps ? 'none established'
+        : conf === 'measured' ? (v.safe_rps_verified ? 'measured & validated' : 'measured')
+        : conf === 'inferred' ? 'inferred, not re-verified'
+        : 'assumed, not measured',
+      threads: v.safe_concurrency || null,
+      blockers: v.counts?.p0 || 0,
+      // The title, not the count. "Configured URL is not the canonical one" tells the operator
+      // what to fix; "2 critical" sends them hunting through a modal for it.
+      topBlocker: p0 ? p0.title : null,
+      posture: v.posture || null,
+      runStatus: p.run?.status || null,
+      at: mostRecentWAFProbeScan?.created_at,
+    };
+  }, [mostRecentWAFProbeScan, mostRecentWAFProbeScanStatus]);
+
+  // All three FFUF phases on the card. A scan that ran and found nothing must not look identical
+  // to one that was never run, which is what a bare "Endpoints: 0" did.
+  const ffufCardSummary = useMemo(() => {
+    const raw = mostRecentFFUFURLScan?.result;
+    if (!raw) {
+      return mostRecentFFUFURLScan?.error ? 'Last scan failed, see Results' : 'Not yet run';
+    }
+    try {
+      const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const ran = p.phases_run || ['endpoints'];
+      const counts = {
+        endpoints: (p.endpoints || []).length,
+        headers: (p.headers || []).length,
+        cookies: (p.cookies || []).length,
+      };
+      const parts = ran.map((k) => `${counts[k] ?? 0} ${k}`);
+      const total = ran.reduce((n, k) => n + (counts[k] || 0), 0);
+      return total === 0 ? `${parts.join(' · ')} (see Results for why)` : parts.join(' · ');
+    } catch (e) {
+      return 'Results ready';
+    }
+  }, [mostRecentFFUFURLScan]);
 
   const startArjunScan = () => {
     initiateArjunScan(
@@ -5004,6 +5193,14 @@ function App() {
   const handleCloseGoSpiderURLResultsModal = () => setShowGoSpiderURLResultsModal(false);
   const handleOpenFFUFURLResultsModal = () => setShowFFUFURLResultsModal(true);
   const handleCloseFFUFURLResultsModal = () => setShowFFUFURLResultsModal(false);
+  // Header/Cookie fuzzing modes for FFUF. Backend wiring for these modes is pending;
+  // the Configure modal (Headers/Cookies tabs) and Results modal tabs are in place.
+  const startFFUFHeaderFuzz = () => {
+    console.log('[FFUF] Fuzz Headers - backend mode pending');
+  };
+  const startFFUFCookieFuzz = () => {
+    console.log('[FFUF] Fuzz Cookies - backend mode pending');
+  };
   const handleOpenWAFProbeResultsModal = () => setShowWAFProbeResultsModal(true);
   const handleCloseWAFProbeResultsModal = () => setShowWAFProbeResultsModal(false);
   const handleOpenManualCrawlResultsModal = async () => {
@@ -5013,7 +5210,10 @@ function App() {
       loadManualCrawlMetrics();
     }
   };
-  const handleCloseManualCrawlResultsModal = () => setShowManualCrawlResultsModal(false);
+  const handleCloseManualCrawlResultsModal = () => {
+    setShowManualCrawlResultsModal(false);
+    loadManualCrawlMetrics();
+  };
   
   const handleOpenExtensionInstallModal = () => setShowExtensionInstallModal(true);
   const handleCloseExtensionInstallModal = () => setShowExtensionInstallModal(false);
@@ -5071,7 +5271,9 @@ function App() {
   const loadManualCrawlMetrics = async () => {
     if (!activeTarget) {
       setManualCrawlSessionCount(0);
-      setManualCrawlEndpointCount(0);
+      setManualCrawlDirectCount(0);
+      setManualCrawlAdjacentCount(0);
+      setManualCrawlAdjacentHostCount(0);
       return;
     }
     
@@ -5090,14 +5292,24 @@ function App() {
       
       if (endpointsResponse.ok) {
         const endpoints = await endpointsResponse.json();
-        setManualCrawlEndpointCount(endpoints?.length || 0);
+        const list = Array.isArray(endpoints) ? endpoints : [];
+        const adjacent = list.filter((e) => !e.is_direct);
+        setManualCrawlDirectCount(list.filter((e) => e.is_direct).length);
+        setManualCrawlAdjacentCount(adjacent.length);
+        setManualCrawlAdjacentHostCount(
+          new Set(adjacent.map((e) => e.host).filter(Boolean)).size
+        );
       } else {
-        setManualCrawlEndpointCount(0);
+        setManualCrawlDirectCount(0);
+        setManualCrawlAdjacentCount(0);
+        setManualCrawlAdjacentHostCount(0);
       }
     } catch (err) {
       console.error('Error loading manual crawl metrics:', err);
       setManualCrawlSessionCount(0);
-      setManualCrawlEndpointCount(0);
+      setManualCrawlDirectCount(0);
+      setManualCrawlAdjacentCount(0);
+      setManualCrawlAdjacentHostCount(0);
     }
   };
 
@@ -5107,9 +5319,24 @@ function App() {
       const response = await fetch(`/api/manual-crawl/sessions/${activeTarget.id}`);
       if (response.ok) {
         const sessions = await response.json();
-        const hasActive = Array.isArray(sessions) && sessions.some(s => s.status === 'active');
-        setManualCrawlConnected(hasActive);
+        // `is_live` is heartbeat-derived, not just status='active'. A browser extension whose MV3
+        // service worker was terminated leaves the row 'active' forever, which used to make this
+        // card claim it was recording when nothing was being captured.
+        const hasLive = Array.isArray(sessions) && sessions.some(s => s.is_live);
+
+        // Recording just ended. Pull the counts immediately, then once more shortly after: the
+        // extension flushes its remaining queue around the same moment it stops, so the last batch
+        // can land a beat after the session is marked complete.
+        if (manualCrawlWasLiveRef.current && !hasLive) {
+          loadManualCrawlMetrics();
+          clearTimeout(manualCrawlRefreshTimeoutRef.current);
+          manualCrawlRefreshTimeoutRef.current = setTimeout(loadManualCrawlMetrics, 3000);
+        }
+        manualCrawlWasLiveRef.current = hasLive;
+
+        setManualCrawlConnected(hasLive);
       } else {
+        manualCrawlWasLiveRef.current = false;
         setManualCrawlConnected(false);
       }
     } catch (err) {
@@ -5119,15 +5346,29 @@ function App() {
   };
 
   useEffect(() => {
+    manualCrawlWasLiveRef.current = false;
+
     if (activeTarget) {
       loadManualCrawlMetrics();
       if (activeTarget.type === 'URL') {
         checkManualCrawlConnection();
-        const interval = setInterval(checkManualCrawlConnection, 15000);
-        return () => clearInterval(interval);
+        // Poll the counts alongside liveness so the card tracks a recording as it happens, not
+        // only after the target is switched.
+        const interval = setInterval(() => {
+          checkManualCrawlConnection();
+          loadManualCrawlMetrics();
+        }, 15000);
+        return () => {
+          clearInterval(interval);
+          // Cancel the post-stop refresh: it closes over this render's target, so letting it fire
+          // after a target switch would write the previous target's counts onto the new card.
+          clearTimeout(manualCrawlRefreshTimeoutRef.current);
+        };
       }
     } else {
-      setManualCrawlEndpointCount(0);
+      setManualCrawlDirectCount(0);
+      setManualCrawlAdjacentCount(0);
+      setManualCrawlAdjacentHostCount(0);
       setManualCrawlSessionCount(0);
     }
   }, [activeTarget]);
@@ -5184,9 +5425,10 @@ function App() {
   };
   const handleCloseThreatModelModal = () => setShowThreatModelModal(false);
   const handleOpenPossibleAttacksModal = (category) => {
-    // Placeholder — the Possible Attacks modal for each STRIDE category will be built here soon.
-    console.log('[ThreatModel] Possible Attacks requested for category:', (category && category.label) || category);
+    setPossibleAttacksCategory(category && category.key ? category.key : category);
+    setShowPossibleAttacksModal(true);
   };
+  const handleClosePossibleAttacksModal = () => setShowPossibleAttacksModal(false);
   // Attack Vectors section — placeholders; the consolidation/investigation/modals will be built soon.
   const handleConsolidateAttackVectors = () => {
     console.log('[AttackVectors] Consolidate requested');
@@ -8014,10 +8256,10 @@ function App() {
             {activeTarget.type === 'URL' && (
               <div className="mb-4">
                 <h3 className="text-danger mb-3">URL</h3>
-                <h4 className="text-secondary mb-3 fs-5">Manual Crawling</h4>
+                <h4 className="text-secondary mb-3 fs-5">Starting Point</h4>
                 <HelpMeLearn section="urlManualCrawling" />
                 <Row className="mb-4">
-                  <Col md={12}>
+                  <Col md={6}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
                       <Card.Body className="d-flex flex-column">
                         <Card.Title className="text-danger mb-3">
@@ -8026,24 +8268,35 @@ function App() {
                         <Card.Text className="text-white small fst-italic">
                           Manually browse the application to discover authenticated areas, dynamic content, and endpoints that automated tools miss. Navigate as a real user to capture hidden functionality and attack surfaces.
                         </Card.Text>
+                        {/* Liveness gets its own row above the counts: it is a status, not a number,
+                            and it is heartbeat-derived so it reflects whether the extension is
+                            genuinely recording right now. */}
+                        <div className="text-center mt-2">
+                          {manualCrawlConnected ? (
+                            <div className="text-success">
+                              <i className="bi bi-record-circle-fill me-2" style={{ fontSize: '0.8rem' }}></i>
+                              <strong>Actively Recording Session</strong>
+                            </div>
+                          ) : (
+                            <div className="text-muted">
+                              <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
+                              No Active Recording
+                            </div>
+                          )}
+                        </div>
                         <div className="my-3 py-3">
                           <Row className="text-center align-items-center">
                             <Col>
-                              <div className="text-danger fw-bold fs-4">{manualCrawlEndpointCount}</div>
-                              <div className="text-muted small">Endpoints Discovered</div>
+                              <div className="text-danger fw-bold fs-4">{manualCrawlDirectCount}</div>
+                              <div className="text-muted small">Direct Endpoints</div>
                             </Col>
                             <Col>
-                              {manualCrawlConnected ? (
-                                <div className="text-success">
-                                  <i className="bi bi-record-circle-fill me-2" style={{ fontSize: '0.8rem' }}></i>
-                                  <strong>Actively Recording Session</strong>
-                                </div>
-                              ) : (
-                                <div className="text-muted">
-                                  <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
-                                  No Active Recording
-                                </div>
-                              )}
+                              <div className="text-danger fw-bold fs-4">{manualCrawlAdjacentCount}</div>
+                              <div className="text-muted small">Adjacent Endpoints</div>
+                            </Col>
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">{manualCrawlAdjacentHostCount}</div>
+                              <div className="text-muted small">Adjacent Hosts</div>
                             </Col>
                             <Col>
                               <div className="text-danger fw-bold fs-4">{manualCrawlSessionCount}</div>
@@ -8086,168 +8339,107 @@ function App() {
                       </Card.Body>
                     </Card>
                   </Col>
-                </Row>
-                <h4 className="text-secondary mb-3 fs-5 mt-4">URL Discovery & Endpoint Enumeration</h4>
-                <HelpMeLearn section="urlDiscovery" />
-                <Row className="mb-4">
-                  {[
-                    {
-                      name: 'Katana',
-                      link: 'https://github.com/projectdiscovery/katana',
-                      description: 'A next-generation crawling and spidering framework for discovering URLs and endpoints.',
-                      isActive: true,
-                      status: mostRecentKatanaURLScanStatus,
-                      isScanning: isKatanaURLScanning,
-                      onScan: startKatanaURLScan,
-                      onResults: handleOpenKatanaURLResultsModal,
-                      resultCount: mostRecentKatanaURLScan && mostRecentKatanaURLScan.result ? 
-                        (() => {
-                          const match = mostRecentKatanaURLScan.result.match(/Found (\d+) direct endpoints and (\d+) adjacent endpoints/);
-                          return match ? parseInt(match[1]) + parseInt(match[2]) : 0;
-                        })() : 0,
-                      resultLabel: 'Endpoints'
-                    },
-                    {
-                      name: 'LinkFinder',
-                      link: 'https://github.com/GerbenJavado/LinkFinder',
-                      description: 'Discover endpoints and their parameters in JavaScript files.',
-                      isActive: true,
-                      status: mostRecentLinkFinderURLScanStatus,
-                      isScanning: isLinkFinderURLScanning,
-                      onScan: startLinkFinderURLScan,
-                      onResults: handleOpenLinkFinderURLResultsModal,
-                      resultCount: mostRecentLinkFinderURLScan && mostRecentLinkFinderURLScan.result ? 
-                        (() => {
-                          const match = mostRecentLinkFinderURLScan.result.match(/Found (\d+) direct endpoints and (\d+) adjacent endpoints/);
-                          return match ? parseInt(match[1]) + parseInt(match[2]) : 0;
-                        })() : 0,
-                      resultLabel: 'Endpoints'
-                    },
-                    {
-                      name: 'Waybackurls',
-                      link: 'https://github.com/tomnomnom/waybackurls',
-                      description: 'Fetch all the URLs that the Wayback Machine knows about for a domain.',
-                      isActive: true,
-                      status: mostRecentWaybackURLsScanStatus,
-                      isScanning: isWaybackURLsScanning,
-                      onScan: startWaybackURLsScan,
-                      onResults: handleOpenWaybackURLsResultsModal,
-                      resultCount: mostRecentWaybackURLsScan && mostRecentWaybackURLsScan.result ? 
-                        (() => {
-                          const match = mostRecentWaybackURLsScan.result.match(/Found (\d+) direct endpoints and (\d+) adjacent endpoints/);
-                          return match ? parseInt(match[1]) + parseInt(match[2]) : 0;
-                        })() : 0,
-                      resultLabel: 'Endpoints'
-                    },
-                    {
-                      name: 'GAU',
-                      link: 'https://github.com/lc/gau',
-                      description: 'Get All URLs - Fetch known URLs from AlienVault\'s OTX, Wayback Machine, and Common Crawl.',
-                      isActive: true,
-                      status: mostRecentGAUURLScanStatus,
-                      isScanning: isGAUURLScanning,
-                      onScan: startGAUURLScan,
-                      onResults: handleOpenGAUURLResultsModal,
-                      resultCount: mostRecentGAUURLScan && mostRecentGAUURLScan.result ? 
-                        (() => {
-                          const match = mostRecentGAUURLScan.result.match(/Found (\d+) direct endpoints and (\d+) adjacent endpoints/);
-                          return match ? parseInt(match[1]) + parseInt(match[2]) : 0;
-                        })() : 0,
-                      resultLabel: 'Endpoints'
-                    },
-                    {
-                      name: 'GoSpider',
-                      link: 'https://github.com/jaeles-project/gospider',
-                      description: 'Fast Go-based web crawler for large-scale link enumeration with concurrent crawling and third-party source integration.',
-                      isActive: true,
-                      status: mostRecentGoSpiderURLScanStatus,
-                      isScanning: isGoSpiderURLScanning,
-                      onScan: startGoSpiderURLScan,
-                      onResults: handleOpenGoSpiderURLResultsModal,
-                      resultCount: mostRecentGoSpiderURLScan && mostRecentGoSpiderURLScan.result ? 
-                        (() => {
-                          const match = mostRecentGoSpiderURLScan.result.match(/Found (\d+) direct endpoints and (\d+) adjacent endpoints/);
-                          return match ? parseInt(match[1]) + parseInt(match[2]) : 0;
-                        })() : 0,
-                      resultLabel: 'Endpoints'
-                    }
-                  ].map((tool, index) => (
-                    <Col key={index}>
-                      <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
-                        <Card.Body className="d-flex flex-column">
-                          <Card.Title className="text-danger mb-3">
-                            <a href={tool.link} className="text-danger text-decoration-none" target="_blank" rel="noopener noreferrer">
-                              {tool.name}
-                            </a>
-                          </Card.Title>
-                          <Card.Text className="text-white small fst-italic">
-                            {tool.description}
-                          </Card.Text>
-                          <div className="mt-auto">
-                            <Card.Text className="text-white small mb-3">
-                              {tool.resultLabel}: {tool.resultCount || "0"}
-                            </Card.Text>
-                            <div className="d-flex justify-content-center gap-2">
-                              <Button
-                                variant="outline-danger"
-                                className="flex-fill"
-                                onClick={tool.onScan}
-                                disabled={!tool.isActive || tool.isScanning}
-                              >
-                                <div className="btn-content">
-                                  {tool.isScanning ? (
-                                    <Spinner animation="border" size="sm" />
-                                  ) : (
-                                    'Scan'
-                                  )}
-                                </div>
-                              </Button>
-                              <Button
-                                variant="outline-danger"
-                                className="flex-fill"
-                                onClick={tool.onResults}
-                                disabled={!tool.status || tool.status !== 'success'}
-                              >
-                                Results
-                              </Button>
-                            </div>
-                          </div>
-                        </Card.Body>
-                      </Card>
-                    </Col>
-                  ))}
-                </Row>
-
-                <h4 className="text-secondary mb-3 fs-5 mt-4">Endpoint Brute Forcing</h4>
-                <HelpMeLearn section="urlEndpointBruteForcing" />
-                <Row className="mb-4">
                   <Col md={6}>
-                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
                       <Card.Body className="d-flex flex-column">
-                        <Card.Title className="text-danger mb-3">WAF Probe</Card.Title>
+                        <Card.Title className="text-danger mb-3">Routing & WAF Probe</Card.Title>
                         <Card.Text className="text-white small fst-italic">
-                          Probe the target for a WAF, rate limiting, and block behavior, then get a recommended FFUF configuration you can apply with one click.
+                          Characterize how the target routes requests, handles volume, and blocks traffic, then apply the measured limits to every tool in the workflow.
                         </Card.Text>
+                        {/* The blocker gets its own row above the counts, same as the recording
+                            indicator on the crawl card: it is the one thing that makes every
+                            number below it moot, so it must not be a badge tucked beside them. */}
+                        <div className="text-center mt-2">
+                          {isWAFProbeScanning ? (
+                            <div className="text-muted">
+                              <Spinner animation="border" size="sm" className="me-2" />
+                              Probing the target
+                            </div>
+                          ) : wafProbeCard.topBlocker ? (
+                            <div className="text-danger">
+                              <i className="bi bi-exclamation-triangle-fill me-2" style={{ fontSize: '0.8rem' }}></i>
+                              <strong>{wafProbeCard.topBlocker}</strong>
+                            </div>
+                          ) : wafProbeCard.state === 'ok' && wafProbeCard.blockers > 0 ? (
+                            // Guards against the message and the count contradicting each other if
+                            // a blocker is ever counted without surfacing a title.
+                            <div className="text-danger">
+                              <i className="bi bi-exclamation-triangle-fill me-2" style={{ fontSize: '0.8rem' }}></i>
+                              <strong>{wafProbeCard.blockers} finding(s) will break your scans</strong>
+                            </div>
+                          ) : wafProbeCard.state === 'ok' ? (
+                            <div className="text-muted">
+                              <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
+                              Nothing found that will corrupt your scans
+                            </div>
+                          ) : (
+                            <div className="text-muted">
+                              <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
+                              {WAF_PROBE_EMPTY_STATE[wafProbeCard.state] || 'Not yet run'}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="my-3 py-3">
+                          <Row className="text-center align-items-start">
+                            <Col>
+                              {/* Muted when the rate is not a measurement, so an assumed default
+                                  cannot be mistaken for something the probe observed. */}
+                              <div className={`fw-bold fs-4 ${wafProbeCard.rateMeasured ? 'text-danger' : 'text-secondary'}`}>
+                                {wafProbeCard.rate ? `${wafProbeCard.rate}` : '-'}
+                              </div>
+                              <div className="text-muted small">req/s</div>
+                              {wafProbeCard.rateNote && (
+                                <div className="text-muted" style={{ fontSize: '0.68rem' }}>
+                                  {wafProbeCard.rateNote}
+                                </div>
+                              )}
+                            </Col>
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">
+                                {wafProbeCard.threads || '-'}
+                              </div>
+                              <div className="text-muted small">Threads</div>
+                              <div className="text-muted" style={{ fontSize: '0.68rem' }}>
+                                {wafProbeCard.threads ? 'concurrency knee' : 'not measured'}
+                              </div>
+                            </Col>
+                            <Col>
+                              <div className={`fw-bold fs-4 ${wafProbeCard.blockers ? 'text-danger' : 'text-secondary'}`}>
+                                {wafProbeCard.state === 'ok' ? wafProbeCard.blockers : '-'}
+                              </div>
+                              <div className="text-muted small">Blockers</div>
+                              <div className="text-muted" style={{ fontSize: '0.68rem' }}>
+                                {wafProbeCard.blockers ? 'will break scans' : 'critical findings'}
+                              </div>
+                            </Col>
+                          </Row>
+                        </div>
+
                         <div className="mt-auto">
-                          <Card.Text className="text-white small mb-3">
-                            {isWAFProbeScanning ? 'Probing…' : (mostRecentWAFProbeScan?.result ? (() => {
-                              try {
-                                const p = typeof mostRecentWAFProbeScan.result === 'string'
-                                  ? JSON.parse(mostRecentWAFProbeScan.result)
-                                  : mostRecentWAFProbeScan.result;
-                                const waf = p.waf?.detected ? (p.waf.vendors?.[0] || 'WAF detected') : 'No WAF';
-                                const rate = p.rate_limit?.limited ? `${p.rate_limit.safe_rps} req/s` : 'no rate limit';
-                                return `${waf} · ${rate}`;
-                              } catch (e) {
-                                return 'Results ready';
-                              }
-                            })() : 'Not yet run')}
+                          <Card.Text className="text-muted mb-3" style={{ fontSize: '0.72rem' }}>
+                            {wafProbeCard.state === 'ok' ? [
+                              (wafProbeCard.posture || '').replace(/_/g, ' ').toLowerCase(),
+                              wafProbeCard.runStatus === 'complete' ? 'complete' : wafProbeCard.runStatus,
+                              formatProbeAge(wafProbeCard.at),
+                              wafProbeAppliedCount === null ? null
+                                : wafProbeAppliedCount === 0 ? 'not applied to any tool'
+                                : `${wafProbeAppliedCount} setting${wafProbeAppliedCount === 1 ? '' : 's'} applied`,
+                            ].filter(Boolean).join(' · ') : ' '}
                           </Card.Text>
                           <div className="d-flex justify-content-center gap-2">
                             <Button
                               variant="outline-danger"
                               className="flex-fill"
-                              onClick={startWAFProbeScan}
+                              onClick={() => setShowWAFProbeConfigModal(true)}
+                              disabled={!activeTarget || isWAFProbeScanning}
+                            >
+                              Configure
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={() => startWAFProbeScan()}
                               disabled={!activeTarget || isWAFProbeScanning}
                             >
                               <div className="btn-content">
@@ -8262,7 +8454,7 @@ function App() {
                               variant="outline-danger"
                               className="flex-fill"
                               onClick={handleOpenWAFProbeResultsModal}
-                              disabled={!mostRecentWAFProbeScan || mostRecentWAFProbeScanStatus !== 'success'}
+                              disabled={!mostRecentWAFProbeScan?.result}
                             >
                               Results
                             </Button>
@@ -8271,7 +8463,96 @@ function App() {
                       </Card.Body>
                     </Card>
                   </Col>
-                  <Col md={6}>
+                </Row>
+                {/* Split in two because the two halves cost completely different things. Nothing
+                    in the first row crawls the application: Waybackurls and GAU read public
+                    archives, and LinkFinder reads JavaScript that has already been fetched. The
+                    second row walks the live target and has to be paced by what the probe measured. */}
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Archive &amp; JavaScript Mining</h4>
+                <HelpMeLearn section="urlDiscovery" />
+                <Row className="mb-4">
+                  {[
+                    {
+                      name: 'Waybackurls',
+                      link: 'https://github.com/tomnomnom/waybackurls',
+                      description: 'Fetch all the URLs that the Wayback Machine knows about for a domain. Queries the archive, never the target.',
+                      isActive: true,
+                      status: mostRecentWaybackURLsScanStatus,
+                      isScanning: isWaybackURLsScanning,
+                      onScan: startWaybackURLsScan,
+                      onResults: handleOpenWaybackURLsResultsModal,
+                      resultCount: countURLToolEndpoints(mostRecentWaybackURLsScan),
+                      resultLabel: 'Endpoints'
+                    },
+                    {
+                      name: 'LinkFinder',
+                      link: 'https://github.com/GerbenJavado/LinkFinder',
+                      description: 'Regex JavaScript bundles for endpoints and parameters. Configure it to read the JS that Katana, GoSpider and the manual crawl already discovered.',
+                      isActive: true,
+                      status: mostRecentLinkFinderURLScanStatus,
+                      isScanning: isLinkFinderURLScanning,
+                      onScan: startLinkFinderURLScan,
+                      onResults: handleOpenLinkFinderURLResultsModal,
+                      onConfig: () => setCrawlerConfigTool('linkfinder'),
+                      resultCount: countURLToolEndpoints(mostRecentLinkFinderURLScan),
+                      resultLabel: 'Endpoints'
+                    },
+                    {
+                      name: 'GAU',
+                      link: 'https://github.com/lc/gau',
+                      description: 'Get All URLs - Fetch known URLs from AlienVault\'s OTX, Wayback Machine, and Common Crawl. Queries archives, never the target.',
+                      isActive: true,
+                      status: mostRecentGAUURLScanStatus,
+                      isScanning: isGAUURLScanning,
+                      onScan: startGAUURLScan,
+                      onResults: handleOpenGAUURLResultsModal,
+                      resultCount: countURLToolEndpoints(mostRecentGAUURLScan),
+                      resultLabel: 'Endpoints'
+                    }
+                  ].map((tool) => (
+                    <URLToolCard key={tool.name} tool={tool} />
+                  ))}
+                </Row>
+
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Live Target Crawling</h4>
+                <HelpMeLearn section="urlDiscovery" />
+                <Row className="mb-4">
+                  {[
+                    {
+                      name: 'Katana',
+                      link: 'https://github.com/projectdiscovery/katana',
+                      description: 'A next-generation crawling and spidering framework for discovering URLs and endpoints. Every request hits the target, so pace it with the probe.',
+                      isActive: true,
+                      status: mostRecentKatanaURLScanStatus,
+                      isScanning: isKatanaURLScanning,
+                      onScan: startKatanaURLScan,
+                      onResults: handleOpenKatanaURLResultsModal,
+                      onConfig: () => setCrawlerConfigTool('katana'),
+                      resultCount: countURLToolEndpoints(mostRecentKatanaURLScan),
+                      resultLabel: 'Endpoints'
+                    },
+                    {
+                      name: 'GoSpider',
+                      link: 'https://github.com/jaeles-project/gospider',
+                      description: 'Fast Go-based web crawler for large-scale link enumeration with concurrent crawling and third-party source integration.',
+                      isActive: true,
+                      status: mostRecentGoSpiderURLScanStatus,
+                      isScanning: isGoSpiderURLScanning,
+                      onScan: startGoSpiderURLScan,
+                      onResults: handleOpenGoSpiderURLResultsModal,
+                      onConfig: () => setCrawlerConfigTool('gospider'),
+                      resultCount: countURLToolEndpoints(mostRecentGoSpiderURLScan),
+                      resultLabel: 'Endpoints'
+                    }
+                  ].map((tool) => (
+                    <URLToolCard key={tool.name} tool={tool} />
+                  ))}
+                </Row>
+
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Endpoint/Header/Cookie Brute Forcing</h4>
+                <HelpMeLearn section="urlEndpointBruteForcing" />
+                <Row className="mb-4">
+                  <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
                       <Card.Body className="d-flex flex-column">
                         <Card.Title className="text-danger mb-3">
@@ -8284,16 +8565,7 @@ function App() {
                         </Card.Text>
                         <div className="mt-auto">
                           <Card.Text className="text-white small mb-3">
-                            Endpoints: {mostRecentFFUFURLScan?.result ? (() => {
-                              try {
-                                const parsed = typeof mostRecentFFUFURLScan.result === 'string' 
-                                  ? JSON.parse(mostRecentFFUFURLScan.result) 
-                                  : mostRecentFFUFURLScan.result;
-                                return parsed.endpoints?.length || 0;
-                              } catch (e) {
-                                return 0;
-                              }
-                            })() : 0}
+                            {ffufCardSummary}
                           </Card.Text>
                           <div className="d-flex justify-content-center gap-2">
                             <Button
@@ -8314,9 +8586,25 @@ function App() {
                                 {isFFUFURLScanning ? (
                                   <Spinner animation="border" size="sm" />
                                 ) : (
-                                  'Scan'
+                                  'Fuzz Endpoints'
                                 )}
                               </div>
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={startFFUFHeaderFuzz}
+                              disabled={!activeTarget || isFFUFURLScanning}
+                            >
+                              Fuzz Headers
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={startFFUFCookieFuzz}
+                              disabled={!activeTarget || isFFUFURLScanning}
+                            >
+                              Fuzz Cookies
                             </Button>
                             <Button
                               variant="outline-danger"
@@ -8350,7 +8638,7 @@ function App() {
                             Consolidated Endpoints: {consolidatedEndpointCount}
                           </Card.Text>
                           <div className="d-flex gap-2">
-                            <Button 
+                            <Button
                               variant="outline-danger"
                               className="flex-fill"
                               onClick={handleConsolidateEndpoints}
@@ -8362,7 +8650,16 @@ function App() {
                                 'Consolidate'
                               )}
                             </Button>
-                            <Button 
+                            {/* Placeholder. Wired to nothing yet, and disabled so it cannot look like a button
+                                that ran and silently did nothing. */}
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              disabled
+                            >
+                              Validate
+                            </Button>
+                            <Button
                               variant="outline-danger"
                               className="flex-fill"
                               onClick={handleInvestigateEndpoints}
@@ -8374,7 +8671,7 @@ function App() {
                                 'Investigate'
                               )}
                             </Button>
-                            <Button 
+                            <Button
                               variant="outline-danger"
                               className="flex-fill"
                               onClick={handleOpenManageEndpointsModal}
@@ -8487,58 +8784,56 @@ function App() {
                   ))}
                 </Row>
 
-                <h4 className="text-secondary mb-3 fs-5 mt-4">Header/Cookie Enumeration</h4>
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Attack Surface Consolidation</h4>
+                <HelpMeLearn section="urlTargetEndpoints" />
                 <Row className="mb-4">
                   <Col md={12}>
-                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
                       <Card.Body className="d-flex flex-column">
                         <Card.Title className="text-danger mb-3">
-                          Header/Cookie Enumeration
+                          Attack Surface Consolidation
                         </Card.Title>
                         <Card.Text className="text-white small fst-italic">
-                          Discover hidden headers and cookies the application processes — fuzz for unlinked headers and cookies that change the response, then investigate the results.
+                          Consolidate everything discovered from crawling, URL discovery, brute forcing, and parameter enumeration into a single list of the unique ways an attacker can interact with the application. Each entry captures a distinct combination of HTTP verb, path, parameters, headers, cookies, and body so the full attack surface can be tested systematically.
                         </Card.Text>
-                        <Row className="g-3 justify-content-center mt-1 mb-2">
-                          <Col xs={6} md={3}>
-                            <div className="fs-3 fw-bold text-danger">{headerCookieCounts.hidden_headers}</div>
-                            <div className="text-white small pb-4">Hidden Headers</div>
-                          </Col>
-                          <Col xs={6} md={3}>
-                            <div className="fs-3 fw-bold text-danger">{headerCookieCounts.hidden_cookies}</div>
-                            <div className="text-white small pb-4">Hidden Cookies</div>
-                          </Col>
-                          <Col xs={6} md={3}>
-                            <div className="fs-3 fw-bold text-danger">{headerCookieCounts.client_side}</div>
-                            <div className="text-white small pb-4">Client-Side Impact</div>
-                          </Col>
-                          <Col xs={6} md={3}>
-                            <div className="fs-3 fw-bold text-danger">{headerCookieCounts.server_side}</div>
-                            <div className="text-white small pb-4">Server-Side Impact</div>
-                          </Col>
-                        </Row>
                         <div className="mt-auto">
-                          <Row className="g-2">
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={() => handleHeaderCookieAction('header_fuzzing')}>
-                                Header Fuzzing
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={() => handleHeaderCookieAction('cookie_fuzzing')}>
-                                Cookie Fuzzing
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={() => handleHeaderCookieAction('investigate')}>
-                                Investigate
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={() => handleHeaderCookieAction('results')}>
-                                Results
-                              </Button>
-                            </Col>
-                          </Row>
+                          <Card.Text className="text-white small mb-3">
+                            Attack Surface Entries: {consolidatedEndpointCount}
+                          </Card.Text>
+                          <div className="d-flex gap-2">
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleConsolidateEndpoints}
+                              disabled={!activeTarget || isConsolidatingEndpoints}
+                            >
+                              {isConsolidatingEndpoints ? (
+                                <><Spinner animation="border" size="sm" className="me-2" />Consolidating...</>
+                              ) : (
+                                'Consolidate'
+                              )}
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleInvestigateEndpoints}
+                              disabled={!activeTarget || isInvestigatingEndpoints || consolidatedEndpointCount === 0}
+                            >
+                              {isInvestigatingEndpoints ? (
+                                <><Spinner animation="border" size="sm" className="me-2" />Investigating...</>
+                              ) : (
+                                'Investigate'
+                              )}
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleOpenManageEndpointsModal}
+                              disabled={!activeTarget}
+                            >
+                              Manage Endpoints
+                            </Button>
+                          </div>
                         </div>
                       </Card.Body>
                     </Card>
@@ -9352,6 +9647,22 @@ function App() {
         handleClose={handleCloseWAFProbeResultsModal}
         activeTarget={activeTarget}
         mostRecentWAFProbeScan={mostRecentWAFProbeScan}
+        wafProbeScans={wafProbeScans}
+        onApplied={refreshWAFProbeApplied}
+      />
+
+      <WAFProbeConfigModal
+        show={showWAFProbeConfigModal}
+        handleClose={() => setShowWAFProbeConfigModal(false)}
+        activeTarget={activeTarget}
+        onRunNow={(cfg) => startWAFProbeScan(cfg)}
+      />
+
+      <CrawlerConfigModal
+        show={!!crawlerConfigTool}
+        handleClose={() => setCrawlerConfigTool(null)}
+        activeTarget={activeTarget}
+        tool={crawlerConfigTool}
       />
 
       <ApplicationQuestionsModal
@@ -9399,6 +9710,12 @@ function App() {
         show={showClientIdentityModal}
         handleClose={handleCloseClientIdentityModal}
         activeTarget={activeTarget}
+      />
+
+      <PossibleAttacksModal
+        show={showPossibleAttacksModal}
+        handleClose={handleClosePossibleAttacksModal}
+        category={possibleAttacksCategory}
       />
 
       <ManualCrawlResultsModal

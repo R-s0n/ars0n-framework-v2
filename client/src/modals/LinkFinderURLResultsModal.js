@@ -139,6 +139,13 @@ export const LinkFinderURLResultsModal = ({
                     <span className="text-info" style={{ fontFamily: 'monospace', fontSize: '0.9rem', flex: 1, wordBreak: 'break-all' }}>
                       {endpoint.url}
                     </span>
+                    <i
+                      role="button"
+                      className="bi bi-box-arrow-up-right text-info ms-2"
+                      title="Open in a new tab"
+                      style={{ cursor: 'pointer' }}
+                      onClick={(e) => { e.stopPropagation(); window.open(endpoint.url, '_blank', 'noopener,noreferrer'); }}
+                    />
                     {endpoint.status_code && (
                       <Badge bg={getStatusBadgeColor(endpoint.status_code)} className="ms-2">
                         {endpoint.status_code}

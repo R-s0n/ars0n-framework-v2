@@ -20,15 +20,15 @@ var paramethANSIRegexp = regexp.MustCompile("\x1b\\[[0-9;]*m")
 var paramethHitRegexp = regexp.MustCompile(`(?:GET|POST)\((?:DIFF|status|size)\):\s*(\S+)\s*\|`)
 
 type ParamethConfig struct {
-	Method        string              `json:"method"`
-	Headers       []map[string]string `json:"headers"`
-	Threads       int                 `json:"threads"`
-	Verbose       bool                `json:"verbose"`
-	Diff          int                 `json:"diff"`
-	Placeholder   string              `json:"placeholder"`
-	Wordlist      string              `json:"wordlist"`
-	IgnoreCodes   string              `json:"ignoreCodes"`
-	IgnoreSizes   string              `json:"ignoreSizes"`
+	Method      string              `json:"method"`
+	Headers     []map[string]string `json:"headers"`
+	Threads     int                 `json:"threads"`
+	Verbose     bool                `json:"verbose"`
+	Diff        int                 `json:"diff"`
+	Placeholder string              `json:"placeholder"`
+	Wordlist    string              `json:"wordlist"`
+	IgnoreCodes string              `json:"ignoreCodes"`
+	IgnoreSizes string              `json:"ignoreSizes"`
 }
 
 func SaveParamethConfig(w http.ResponseWriter, r *http.Request) {
@@ -279,18 +279,18 @@ func GetParamethScanStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"scan_id":              scanID,
-		"status":               status,
-		"result":               result,
-		"error":                errorMsg,
-		"stdout":               stdout,
-		"stderr":               stderr,
-		"command":              command,
-		"execution_time":       executionTime,
-		"total_endpoints":      totalEndpoints,
-		"processed_endpoints":  processedEndpoints,
-		"parameters_found":     parametersFound,
-		"created_at":           createdAt,
+		"scan_id":             scanID,
+		"status":              status,
+		"result":              result,
+		"error":               errorMsg,
+		"stdout":              stdout,
+		"stderr":              stderr,
+		"command":             command,
+		"execution_time":      executionTime,
+		"total_endpoints":     totalEndpoints,
+		"processed_endpoints": processedEndpoints,
+		"parameters_found":    parametersFound,
+		"created_at":          createdAt,
 	})
 }
 
@@ -312,7 +312,9 @@ func GetParamethScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	// Initialised, not nil: a nil slice marshals to JSON null, and every client that does
+	// scans.length on the response throws before it can check.
+	scans := []map[string]interface{}{}
 	for rows.Next() {
 		var scanID, status, executionTime string
 		var totalEndpoints, processedEndpoints, parametersFound int
@@ -365,12 +367,12 @@ func GetParamethScanResults(w http.ResponseWriter, r *http.Request) {
 		}
 
 		results = append(results, map[string]interface{}{
-			"endpoint_url":    endpointURL,
-			"parameter_name":  paramName,
-			"parameter_type":  paramType,
-			"example_value":   exampleValue,
-			"confidence":      confidence,
-			"created_at":      createdAt,
+			"endpoint_url":   endpointURL,
+			"parameter_name": paramName,
+			"parameter_type": paramType,
+			"example_value":  exampleValue,
+			"confidence":     confidence,
+			"created_at":     createdAt,
 		})
 	}
 

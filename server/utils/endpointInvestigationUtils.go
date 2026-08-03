@@ -50,6 +50,10 @@ type EndpointInvestigationResult struct {
 	Server          string                 `json:"server"`
 	Title           string                 `json:"title"`
 	CORS            *CORSInfo              `json:"cors"`
+	// Whether the probe carried captured credentials, and where they came from. Without this the
+	// results are ambiguous: an empty page could be a real empty page or an unauthenticated one.
+	Authenticated bool   `json:"authenticated"`
+	AuthSource    string `json:"auth_source,omitempty"`
 }
 
 type SecurityHeaders struct {
@@ -170,13 +174,23 @@ func ExecuteEndpointInvestigation(scanID, scopeTargetID string) {
 
 	UpdateEndpointInvestigationStatus(scanID, "running", len(endpoints), 0, "", "", "")
 
+	// Replay the credentials the manual crawl recorded. Without this every endpoint is fetched
+	// logged out, so an authenticated application is profiled entirely through its login wall:
+	// same title, same headers, same forms, on every single endpoint.
+	authCtx := LoadCapturedAuthContext(scopeTargetID)
+	if authCtx.IsAuthenticated() {
+		log.Printf("[INFO] Investigating with captured credentials from %s", authCtx.Source)
+	} else {
+		log.Printf("[INFO] No captured credentials for this target; investigating unauthenticated")
+	}
+
 	var results []EndpointInvestigationResult
 	for i, ep := range endpoints {
 		log.Printf("[INFO] Investigating endpoint %d/%d: %s", i+1, len(endpoints), ep.URL)
-		
-		result := investigateEndpoint(ep.ID, ep.URL, ep.Method)
+
+		result := investigateEndpoint(ep.ID, ep.URL, ep.Method, authCtx)
 		results = append(results, result)
-		
+
 		UpdateEndpointInvestigationStatus(scanID, "running", len(endpoints), i+1, "", "", "")
 	}
 
@@ -191,11 +205,13 @@ func ExecuteEndpointInvestigation(scanID, scopeTargetID string) {
 	log.Printf("[INFO] Endpoint investigation completed for scope target %s", scopeTargetID)
 }
 
-func investigateEndpoint(endpointID, urlStr, method string) EndpointInvestigationResult {
+func investigateEndpoint(endpointID, urlStr, method string, authCtx CapturedAuthContext) EndpointInvestigationResult {
 	result := EndpointInvestigationResult{
 		EndpointID:      endpointID,
 		URL:             urlStr,
 		Method:          method,
+		Authenticated:   authCtx.IsAuthenticated(),
+		AuthSource:      authCtx.Source,
 		Technologies:    []string{},
 		Forms:           []FormInfo{},
 		InputFields:     []InputFieldInfo{},
@@ -238,7 +254,8 @@ func investigateEndpoint(endpointID, urlStr, method string) EndpointInvestigatio
 	}
 
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	
+	authCtx.Apply(req)
+
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[ERROR] Failed to request %s: %v", urlStr, err)

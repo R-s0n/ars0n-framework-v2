@@ -1,6 +1,7 @@
 import { Modal, Badge, Accordion, Form, Row, Col, Button, OverlayTrigger, Tooltip, Pagination, Spinner } from 'react-bootstrap';
 import { useEffect, useState, useMemo, memo } from 'react';
 import useDebounce from '../hooks/useDebounce';
+import { calculateROIScore, getPriorityLevel } from '../components/ROIReport';
 
 // G1.4: resolve a screenshot to a renderable src without shipping base64 inline. Prefers an
 // inline base64 blob if present (back-compat with the full payload), otherwise points at the
@@ -19,8 +20,8 @@ const MetaDataModal = memo(({
   fetchScopeTargets,
   onPopulateBurp
 }) => {
-  const [sortColumn, setSortColumn] = useState('');
-  const [sortDirection, setSortDirection] = useState('asc');
+  const [sortColumn, setSortColumn] = useState('roi');
+  const [sortDirection, setSortDirection] = useState('desc');
   const [filters, setFilters] = useState({
     url: '',
     statusCode: '',
@@ -287,6 +288,16 @@ const MetaDataModal = memo(({
   // bound to the immediate `filters` state below; only this derivation uses the debounced copy.
   const debouncedFilters = useDebounce(filters, 250);
 
+  // ROI scores are computed client-side with the same scorer the ROI Report uses; the DB roi_score
+  // column is an unpopulated default (50), so score each URL here for display and sorting.
+  const roiScores = useMemo(() => {
+    const map = {};
+    (Array.isArray(targetURLs) ? targetURLs : []).forEach((u) => {
+      try { map[u.id] = calculateROIScore(u).score; } catch (e) { map[u.id] = 0; }
+    });
+    return map;
+  }, [targetURLs]);
+
   const filteredAndSortedUrls = useMemo(() => {
     const filters = debouncedFilters;
     const urls = Array.isArray(targetURLs) ? targetURLs : [];
@@ -370,6 +381,10 @@ const MetaDataModal = memo(({
           valueA = getFfufEndpointsCount(a);
           valueB = getFfufEndpointsCount(b);
           break;
+        case 'roi':
+          valueA = roiScores[a.id] || 0;
+          valueB = roiScores[b.id] || 0;
+          break;
         case 'technologies':
           valueA = getTechnologiesCount(a);
           valueB = getTechnologiesCount(b);
@@ -382,7 +397,7 @@ const MetaDataModal = memo(({
       if (valueA > valueB) return sortDirection === 'asc' ? 1 : -1;
       return 0;
     });
-  }, [targetURLs, debouncedFilters, sortColumn, sortDirection]);
+  }, [targetURLs, debouncedFilters, sortColumn, sortDirection, roiScores]);
 
   const totalPages = Math.ceil(filteredAndSortedUrls.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
@@ -639,6 +654,13 @@ const MetaDataModal = memo(({
                 <Button
                   variant="link"
                   className="p-0 text-white text-decoration-none"
+                  onClick={() => handleSort('roi')}
+                >
+                  ROI Score {renderSortIcon('roi')}
+                </Button>
+                <Button
+                  variant="link"
+                  className="p-0 text-white text-decoration-none"
                   onClick={() => handleSort('technologies')}
                 >
                   Technologies {renderSortIcon('technologies')}
@@ -733,8 +755,23 @@ const MetaDataModal = memo(({
                           <span>{url.url}</span>
                         </div>
                         <div className="d-flex align-items-center gap-2">
-                          <Badge 
-                            bg="dark" 
+                          {(() => {
+                            const roi = roiScores[url.id];
+                            if (roi === undefined) return null;
+                            const level = getPriorityLevel(roi);
+                            return (
+                              <Badge
+                                bg={level.variant}
+                                className={level.variant === 'warning' ? 'text-dark' : 'text-white'}
+                                style={{ fontSize: '0.8em' }}
+                                title={`${level.label} priority`}
+                              >
+                                ROI: {roi}
+                              </Badge>
+                            );
+                          })()}
+                          <Badge
+                            bg="dark"
                             className="text-white"
                             style={{ fontSize: '0.8em' }}
                           >

@@ -1,27 +1,38 @@
 {
   "manifest_version": 3,
   "name": "Ars0n Framework - Manual Crawling",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Capture HTTP traffic during manual exploration for the Ars0n Framework v2",
+  "minimum_chrome_version": "111",
   "permissions": [
     "tabs",
     "storage",
+    "alarms",
     "activeTab",
     "webNavigation",
-    "webRequest"
+    "webRequest",
+    "debugger"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "run_at": "document_end",
-      "all_frames": false
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["injected.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
     }
   ],
   "action": {

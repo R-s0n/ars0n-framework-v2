@@ -13,46 +13,67 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// FFUFConfig is what SaveFFUFConfig decodes into and re-marshals, so a field missing from this
+// struct is silently discarded on save. That is how headerFuzzValue and cookieFuzzValue, which the
+// config modal has always collected, never reached the database: they round-tripped through a
+// struct that had no place to put them. Anything the modal sends must have a field here.
 type FFUFConfig struct {
-	URL                string              `json:"url"`
-	Method             string              `json:"method"`
-	Headers            []map[string]string `json:"headers"`
-	Cookies            string              `json:"cookies"`
-	PostData           string              `json:"postData"`
-	HTTP2              bool                `json:"http2"`
-	FollowRedirects    bool                `json:"followRedirects"`
-	Timeout            int                 `json:"timeout"`
-	WordlistID         string              `json:"wordlistId"`
-	CustomWordlist     string              `json:"customWordlist"`
-	WordlistName       string              `json:"wordlistName"`
-	Extensions         string              `json:"extensions"`
-	Keyword            string              `json:"keyword"`
-	MatchStatusCodes   string              `json:"matchStatusCodes"`
-	MatchLines         string              `json:"matchLines"`
-	MatchSize          string              `json:"matchSize"`
-	MatchWords         string              `json:"matchWords"`
-	MatchRegex         string              `json:"matchRegex"`
-	MatcherMode        string              `json:"matcherMode"`
-	FilterStatusCodes  string              `json:"filterStatusCodes"`
-	FilterLines        string              `json:"filterLines"`
-	FilterSize         string              `json:"filterSize"`
-	FilterWords        string              `json:"filterWords"`
-	FilterRegex        string              `json:"filterRegex"`
-	FilterMode         string              `json:"filterMode"`
-	Threads            int                 `json:"threads"`
-	RateLimit          int                 `json:"rateLimit"`
-	Delay              string              `json:"delay"`
-	MaxTime            int                 `json:"maxTime"`
-	Verbose            bool                `json:"verbose"`
-	AutoCalibrate      bool                `json:"autoCalibrate"`
-	Recursion          bool                `json:"recursion"`
-	RecursionDepth     int                 `json:"recursionDepth"`
-	ProxyURL           string              `json:"proxyURL"`
-	ClientCert         string              `json:"clientCert"`
-	ClientKey          string              `json:"clientKey"`
-	StopOnAll          bool                `json:"stopOnAll"`
-	StopOn403          bool                `json:"stopOn403"`
-	StopOnErrors       bool                `json:"stopOnErrors"`
+	URL      string              `json:"url"`
+	Method   string              `json:"method"`
+	Headers  []map[string]string `json:"headers"`
+	Cookies  string              `json:"cookies"`
+	PostData string              `json:"postData"`
+
+	// Which phases a scan runs, and what each fuzzes with.
+	//
+	// FuzzEndpoints is a pointer with omitempty so that a config saved before this field existed,
+	// or written by the WAF Probe's Apply, comes back with the key absent rather than false. A
+	// plain bool would decode those to false, the modal would adopt it as the operator's choice,
+	// and the next save would permanently turn path fuzzing off for a target nobody touched.
+	// A pointer to false still serialises, so an explicit "off" survives.
+	FuzzEndpoints    *bool  `json:"fuzzEndpoints,omitempty"`
+	FuzzHeaders      bool   `json:"fuzzHeaders"`
+	FuzzCookies      bool   `json:"fuzzCookies"`
+	HeaderWordlistID string `json:"headerWordlistId"`
+	CookieWordlistID string `json:"cookieWordlistId"`
+	HeaderFuzzValue  string `json:"headerFuzzValue"`
+	CookieFuzzValue  string `json:"cookieFuzzValue"`
+
+	HTTP2 bool `json:"http2"`
+	// Same reasoning as FuzzEndpoints: absent must not read as "the operator turned it off".
+	FollowRedirects   *bool  `json:"followRedirects,omitempty"`
+	Timeout           int    `json:"timeout"`
+	WordlistID        string `json:"wordlistId"`
+	CustomWordlist    string `json:"customWordlist"`
+	WordlistName      string `json:"wordlistName"`
+	Extensions        string `json:"extensions"`
+	Keyword           string `json:"keyword"`
+	MatchStatusCodes  string `json:"matchStatusCodes"`
+	MatchLines        string `json:"matchLines"`
+	MatchSize         string `json:"matchSize"`
+	MatchWords        string `json:"matchWords"`
+	MatchRegex        string `json:"matchRegex"`
+	MatcherMode       string `json:"matcherMode"`
+	FilterStatusCodes string `json:"filterStatusCodes"`
+	FilterLines       string `json:"filterLines"`
+	FilterSize        string `json:"filterSize"`
+	FilterWords       string `json:"filterWords"`
+	FilterRegex       string `json:"filterRegex"`
+	FilterMode        string `json:"filterMode"`
+	Threads           int    `json:"threads"`
+	RateLimit         int    `json:"rateLimit"`
+	Delay             string `json:"delay"`
+	MaxTime           int    `json:"maxTime"`
+	Verbose           bool   `json:"verbose"`
+	AutoCalibrate     *bool  `json:"autoCalibrate,omitempty"`
+	Recursion         bool   `json:"recursion"`
+	RecursionDepth    int    `json:"recursionDepth"`
+	ProxyURL          string `json:"proxyURL"`
+	ClientCert        string `json:"clientCert"`
+	ClientKey         string `json:"clientKey"`
+	StopOnAll         bool   `json:"stopOnAll"`
+	StopOn403         bool   `json:"stopOn403"`
+	StopOnErrors      bool   `json:"stopOnErrors"`
 }
 
 type FFUFWordlist struct {
@@ -114,6 +135,11 @@ func GetFFUFConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// A nil slice marshals to JSON null, and the config modal renders this list directly. Sending
+	// null instead of [] threw on the first .map() and blanked the whole modal.
+	if config.Headers == nil {
+		config.Headers = []map[string]string{}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(config)
@@ -135,7 +161,7 @@ func UploadFFUFWordlist(w http.ResponseWriter, r *http.Request) {
 
 	wordlistID := uuid.New().String()
 	wordlistDir := "/app/wordlists/ffuf"
-	
+
 	if err := os.MkdirAll(wordlistDir, 0755); err != nil {
 		http.Error(w, "Failed to create wordlist directory", http.StatusInternalServerError)
 		return
@@ -349,4 +375,3 @@ func DeleteFFUFWordlist(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 }
-

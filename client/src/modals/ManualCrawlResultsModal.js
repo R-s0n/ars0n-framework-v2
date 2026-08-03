@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Modal, Button, Accordion, Badge, Alert, Spinner, Tabs, Tab } from 'react-bootstrap';
+import { Modal, Button, ButtonGroup, Accordion, Badge, Alert, Spinner, Tabs, Tab } from 'react-bootstrap';
 
 const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
   const [sessions, setSessions] = useState([]);
@@ -8,6 +8,10 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState('endpoints');
   const [allSessions, setAllSessions] = useState([]);
+  const [copiedId, setCopiedId] = useState(null);
+  // Direct = the scope target's own host. Adjacent = any other in-scope host, which is where an
+  // application's API normally lives, so it gets its own view rather than being mixed in.
+  const [scopeFilter, setScopeFilter] = useState('all');
 
   useEffect(() => {
     if (show && scopeTargetId) {
@@ -78,20 +82,34 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
     
     captures.forEach(capture => {
       const paramSignature = getParameterSignature(capture);
-      const key = `${capture.method}:${capture.endpoint}:${paramSignature}`;
+      // The host is part of the identity: /api/v1/users on the app host and on the API host are
+      // two different endpoints, and collapsing them would hide the adjacent one entirely.
+      let host = '';
+      try {
+        host = new URL(capture.url).hostname;
+      } catch (_) { /* unparseable url */ }
+      const key = `${host}:${capture.method}:${capture.endpoint}:${paramSignature}`;
       
-      if (!grouped[key]) {
-        grouped[key] = {
-          ...capture,
-          paramSignature: paramSignature
-        };
-      } else {
-        if (new Date(capture.timestamp) > new Date(grouped[key].timestamp)) {
-          grouped[key] = {
-            ...capture,
-            paramSignature: paramSignature
-          };
-        }
+      const candidate = { ...capture, paramSignature };
+      const existing = grouped[key];
+
+      if (!existing) {
+        grouped[key] = candidate;
+        return;
+      }
+
+      // Prefer the richest record for an endpoint, not merely the most recent one. A later
+      // metadata-only capture would otherwise hide an earlier one that carries the bodies.
+      const score = (c) => (c.response_body ? 2 : 0) + (c.post_data ? 1 : 0);
+      const candidateScore = score(candidate);
+      const existingScore = score(existing);
+
+      if (
+        candidateScore > existingScore ||
+        (candidateScore === existingScore &&
+          new Date(candidate.timestamp) > new Date(existing.timestamp))
+      ) {
+        grouped[key] = candidate;
       }
     });
     
@@ -100,20 +118,19 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
     );
   };
 
+  // One request for the whole target. This used to loop over the `sessions` state, which is empty
+  // on the first render pass, so the initial load reliably showed nothing.
   const loadAllCaptures = async () => {
     setLoading(true);
     setError('');
     try {
-      const allCaptures = [];
-      for (const session of sessions) {
-        const response = await fetch(`/api/manual-crawl/captures/${session.id}`);
-        if (response.ok) {
-          const data = await response.json();
-          allCaptures.push(...(data || []));
-        }
+      const response = await fetch(`/api/manual-crawl/captures/target/${scopeTargetId}`);
+      if (!response.ok) {
+        setError('Failed to load captures');
+        return;
       }
-      const uniqueEndpoints = groupCapturesByEndpoint(allCaptures);
-      setCaptures(uniqueEndpoints);
+      const data = await response.json();
+      setCaptures(groupCapturesByEndpoint(data || []));
     } catch (err) {
       setError('Error loading captures: ' + err.message);
     } finally {
@@ -138,21 +155,27 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
     }
   };
 
-  useEffect(() => {
-    if (sessions.length > 0 && captures.length === 0 && activeTab === 'endpoints') {
-      loadAllCaptures();
-    }
-  }, [sessions]);
 
   const formatDate = (dateString) => {
     if (!dateString) return 'N/A';
     return new Date(dateString).toLocaleString();
   };
 
-  const getStatusBadge = (status) => {
+  // A session row can be 'active' in the database while its extension is gone, so live/stale is
+  // decided by the heartbeat (`is_live`) rather than by status alone.
+  const getStatusBadge = (session) => {
+    const status = typeof session === 'string' ? session : session.status;
+    const isLive = typeof session === 'string' ? status === 'active' : session.is_live;
+
+    if (status === 'active') {
+      return isLive
+        ? <Badge bg="success">recording</Badge>
+        : <Badge bg="warning" text="dark">stalled</Badge>;
+    }
+
     const variants = {
-      'active': 'success',
       'completed': 'info',
+      'abandoned': 'warning',
       'failed': 'danger'
     };
     return <Badge bg={variants[status] || 'secondary'}>{status}</Badge>;
@@ -189,21 +212,109 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
 
   const buildRawResponse = (capture) => {
     let raw = `HTTP/1.1 ${capture.status_code} ${capture.status_code < 400 ? 'OK' : 'Error'}\n`;
-    
+
     if (capture.response_headers) {
       Object.entries(capture.response_headers).forEach(([key, value]) => {
         raw += `${key}: ${value}\n`;
       });
     }
-    
+
     raw += '\n';
     if (capture.response_body) {
       raw += capture.response_body;
+      if (capture.response_body_truncated) {
+        raw += '\n\n... (truncated at the extension body size limit)';
+      }
+    } else if (capture.error) {
+      raw += `(No response: ${capture.error})`;
+    } else if ((capture.sources || []).length && !hasBodySource(capture)) {
+      // Explains the gap rather than leaving a blank pane: only the page hook and deep capture can
+      // read a response body, so a webRequest-only record will never have one.
+      raw += '(Response body not captured. This request was only seen by the network observer.\n' +
+             ' Turn on Deep Capture in the extension to record bodies for navigations and\n' +
+             ' non-JavaScript requests.)';
     } else {
       raw += '(Response body not captured)';
     }
-    
+
     return raw;
+  };
+
+  const hasBodySource = (capture) =>
+    (capture.sources || []).some((s) => s === 'hook' || s === 'debugger');
+
+  // Single-quote shell escaping: end the quote, insert an escaped quote, reopen. Safe for the
+  // arbitrary bytes that turn up in real cookies and bodies.
+  const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+
+  // A captured request is only useful if you can take it somewhere else. curl is the lowest common
+  // denominator: it pastes into a terminal, into Burp, or into a report.
+  const buildCurl = (capture) => {
+    const parts = [`curl -i -X ${capture.method || 'GET'} ${shellQuote(capture.url)}`];
+
+    Object.entries(capture.headers || {}).forEach(([key, value]) => {
+      const lower = key.toLowerCase();
+      // Recomputed by curl, or meaningless outside the original connection.
+      if (['host', 'content-length', 'connection', 'accept-encoding'].includes(lower)) return;
+      if (lower.startsWith(':')) return;
+      parts.push(`  -H ${shellQuote(`${key}: ${Array.isArray(value) ? value.join(', ') : value}`)}`);
+    });
+
+    if (capture.post_data) {
+      parts.push(`  --data-raw ${shellQuote(capture.post_data)}`);
+    }
+
+    return parts.join(' \\\n');
+  };
+
+  const copyCurl = async (capture) => {
+    const command = buildCurl(capture);
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopiedId(capture.id);
+      setTimeout(() => setCopiedId(null), 1500);
+    } catch (err) {
+      // Clipboard access can be denied; showing the command still lets the user copy it by hand.
+      setError('Could not copy automatically. Command:\n' + command);
+    }
+  };
+
+  const directCaptures = captures.filter((c) => c.is_direct);
+  const adjacentCaptures = captures.filter((c) => !c.is_direct);
+  const visibleCaptures =
+    scopeFilter === 'direct' ? directCaptures : scopeFilter === 'adjacent' ? adjacentCaptures : captures;
+
+  // Hosts represented in the adjacent bucket, so the API domain is visible at a glance.
+  const adjacentHosts = Array.from(
+    adjacentCaptures.reduce((set, c) => {
+      try {
+        set.add(new URL(c.url).hostname);
+      } catch (_) { /* unparseable url */ }
+      return set;
+    }, new Set())
+  );
+
+  const hostOf = (capture) => {
+    try {
+      return new URL(capture.url).hostname;
+    } catch (_) {
+      return '';
+    }
+  };
+
+  // Merged across every session for this target: a host dropped in an earlier session is still the
+  // explanation for why its traffic is missing now.
+  const droppedHosts = sessions.reduce((acc, session) => {
+    Object.entries(session.observed_out_of_scope || {}).forEach(([host, count]) => {
+      acc[host] = (acc[host] || 0) + count;
+    });
+    return acc;
+  }, {});
+
+  const SOURCE_LABELS = {
+    webrequest: { label: 'network', variant: 'secondary', title: 'chrome.webRequest: headers, status, cookies' },
+    hook: { label: 'page hook', variant: 'info', title: 'Page fetch/XHR hook: request and response bodies' },
+    debugger: { label: 'deep', variant: 'primary', title: 'DevTools protocol: full request and response' },
   };
 
   return (
@@ -263,12 +374,76 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
           </Alert>
         )}
 
+        {/* The single most common reason for a thin capture list is that the app's API lives on a
+            host outside the recording scope. The extension counts what it rejected; showing it
+            here means the answer is where the question gets asked. */}
+        {Object.keys(droppedHosts).length > 0 && (
+          <div
+            className="rounded p-2 mb-3"
+            style={{ border: '1px solid rgba(255, 193, 7, 0.45)', backgroundColor: 'transparent' }}
+          >
+            <div className="d-flex align-items-start">
+              <i className="bi bi-exclamation-triangle me-2 mt-1 text-warning"></i>
+              <div className="flex-grow-1">
+                <strong className="text-warning">Traffic was seen but not captured.</strong>
+                <div className="small mt-1 text-light" style={{ opacity: 0.75 }}>
+                  These hosts were requested while recording but are outside the capture scope. If
+                  the application's API is among them, add it in the extension popup under
+                  <em> Scope</em>, then record again.
+                </div>
+                <div className="d-flex flex-wrap gap-2 mt-2">
+                  {Object.entries(droppedHosts)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 15)
+                    .map(([host, count]) => (
+                      <Badge key={host} bg="dark" className="border border-warning text-warning">
+                        {host} <span className="text-white-50">({count})</span>
+                      </Badge>
+                    ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         <Tabs
           activeKey={activeTab}
           onSelect={(k) => setActiveTab(k)}
           className="mb-3"
         >
           <Tab eventKey="endpoints" title={`Endpoints (${captures.length})`}>
+            {captures.length > 0 && (
+              <div className="d-flex align-items-center flex-wrap gap-2 mb-3">
+                <ButtonGroup size="sm">
+                  <Button
+                    variant={scopeFilter === 'all' ? 'danger' : 'outline-danger'}
+                    onClick={() => setScopeFilter('all')}
+                  >
+                    All ({captures.length})
+                  </Button>
+                  <Button
+                    variant={scopeFilter === 'direct' ? 'danger' : 'outline-danger'}
+                    onClick={() => setScopeFilter('direct')}
+                    title="Requests to the scope target's own host"
+                  >
+                    Direct ({directCaptures.length})
+                  </Button>
+                  <Button
+                    variant={scopeFilter === 'adjacent' ? 'danger' : 'outline-danger'}
+                    onClick={() => setScopeFilter('adjacent')}
+                    title="Requests to other in-scope hosts, such as a separate API domain"
+                  >
+                    Adjacent ({adjacentCaptures.length})
+                  </Button>
+                </ButtonGroup>
+                {adjacentHosts.length > 0 && (
+                  <span className="small text-light" style={{ opacity: 0.7 }}>
+                    Adjacent Hosts ({adjacentHosts.length}): {adjacentHosts.slice(0, 4).join(', ')}
+                    {adjacentHosts.length > 4 ? ` +${adjacentHosts.length - 4} more` : ''}
+                  </span>
+                )}
+              </div>
+            )}
             {loading ? (
               <div className="text-center py-5">
                 <Spinner animation="border" variant="danger" />
@@ -296,7 +471,14 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
               </>
             ) : (
               <Accordion>
-                {captures.map((capture, index) => (
+                {visibleCaptures.length === 0 && (
+                  <Alert variant="secondary" className="py-3">
+                    {scopeFilter === 'adjacent'
+                      ? 'No adjacent endpoints. Every captured request went to the target host itself. If the application calls an API on another domain, add that host in the extension popup under Scope and record again.'
+                      : 'No direct endpoints. Every captured request went to another in-scope host.'}
+                  </Alert>
+                )}
+                {visibleCaptures.map((capture, index) => (
                   <Accordion.Item 
                     eventKey={index.toString()} 
                     key={capture.id} 
@@ -307,6 +489,23 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                       <div className="d-flex justify-content-between align-items-center w-100 me-3">
                         <div className="d-flex align-items-center flex-grow-1">
                           {getMethodBadge(capture.method)}
+                          <Badge
+                            bg="danger"
+                            className="ms-2"
+                            style={{ opacity: capture.is_direct ? 1 : 0.6, fontSize: '0.65rem' }}
+                            title={capture.is_direct
+                              ? "On the scope target's own host"
+                              : 'On another in-scope host'}
+                          >
+                            {capture.is_direct ? 'Direct' : 'Adjacent'}
+                          </Badge>
+                          {/* The host is what distinguishes one adjacent endpoint from another, so
+                              a bare path would be ambiguous here. */}
+                          {!capture.is_direct && (
+                            <span className="text-warning ms-2" style={{ fontSize: '0.75rem' }}>
+                              {hostOf(capture)}
+                            </span>
+                          )}
                           <code className="text-info ms-2" style={{ fontSize: '0.9rem' }}>
                             {capture.endpoint}
                           </code>
@@ -327,18 +526,101 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                           )}
                         </div>
                         <div className="d-flex align-items-center">
-                          <Badge bg={capture.status_code < 400 ? 'success' : 'danger'} className="me-2">
-                            {capture.status_code}
+                          {capture.response_body && (
+                            <Badge bg="info" className="me-2" style={{ fontSize: '0.65rem' }} title="Response body captured">
+                              <i className="bi bi-file-earmark-code" />
+                            </Badge>
+                          )}
+                          {(capture.sources || []).map((source) => {
+                            const meta = SOURCE_LABELS[source];
+                            if (!meta) return null;
+                            return (
+                              <Badge
+                                key={source}
+                                bg={meta.variant}
+                                className="me-1"
+                                style={{ fontSize: '0.6rem' }}
+                                title={meta.title}
+                              >
+                                {meta.label}
+                              </Badge>
+                            );
+                          })}
+                          <Badge
+                            bg={capture.error ? 'warning' : capture.status_code === 0 ? 'secondary' : capture.status_code < 400 ? 'success' : 'danger'}
+                            text={capture.error ? 'dark' : undefined}
+                            className="me-2"
+                            title={capture.error || ''}
+                          >
+                            {capture.error ? 'failed' : capture.status_code || '-'}
                           </Badge>
                           <small className="text-light">{formatDate(capture.timestamp)}</small>
                         </div>
                       </div>
                     </Accordion.Header>
                     <Accordion.Body className="text-white" style={{ backgroundColor: '#2b2b2b' }}>
-                      <div className="mb-3">
-                        <strong className="text-warning d-block mb-1">Full URL:</strong>
-                        <code className="text-info small">{capture.url}</code>
+                      <div className="mb-3 d-flex justify-content-between align-items-start gap-2">
+                        <div className="flex-grow-1">
+                          <strong className="text-warning d-block mb-1">Full URL:</strong>
+                          <code className="text-info small" style={{ wordBreak: 'break-all' }}>{capture.url}</code>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant={copiedId === capture.id ? 'success' : 'outline-info'}
+                          className="flex-shrink-0"
+                          onClick={() => copyCurl(capture)}
+                          title="Copy this request as a curl command, with its real headers and body"
+                        >
+                          <i className={`bi ${copiedId === capture.id ? 'bi-check-lg' : 'bi-terminal'} me-1`} />
+                          {copiedId === capture.id ? 'Copied' : 'Copy as curl'}
+                        </Button>
                       </div>
+
+                      {(capture.graphql_operation || capture.resource_type || capture.initiator ||
+                        capture.duration_ms > 0 || capture.error) && (
+                        <div className="mb-3 d-flex flex-wrap gap-2 align-items-center">
+                          {capture.graphql_operation && (
+                            <Badge bg="dark" className="border border-info text-info">
+                              GraphQL: {capture.graphql_operation}
+                            </Badge>
+                          )}
+                          {capture.resource_type && (
+                            <Badge bg="dark" className="border border-secondary text-light">
+                              {capture.resource_type}
+                            </Badge>
+                          )}
+                          {capture.initiator && (
+                            <Badge bg="dark" className="border border-secondary text-light">
+                              via {capture.initiator}
+                            </Badge>
+                          )}
+                          {capture.duration_ms > 0 && (
+                            <Badge bg="dark" className="border border-secondary text-light">
+                              {capture.duration_ms} ms
+                            </Badge>
+                          )}
+                          {capture.error && (
+                            <Badge bg="warning" text="dark">{capture.error}</Badge>
+                          )}
+                        </div>
+                      )}
+
+                      {capture.redirect_chain && capture.redirect_chain.length > 0 && (
+                        <div className="mb-3">
+                          <strong className="text-warning d-block mb-1">
+                            <i className="bi bi-signpost-split me-1"></i>
+                            Redirect Chain:
+                          </strong>
+                          <ul className="small mb-0 ps-3">
+                            {capture.redirect_chain.map((hop, i) => (
+                              <li key={i} className="text-light">
+                                <Badge bg="secondary" className="me-2">{hop.statusCode}</Badge>
+                                <code className="text-info">{hop.location}</code>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
 
                       {capture.get_params && Object.keys(capture.get_params).length > 0 && (
                         <div className="mb-3">
@@ -449,12 +731,14 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                     <div className="d-flex justify-content-between align-items-center">
                       <div>
                         <h6 className="mb-1 text-white">
-                          {getStatusBadge(session.status)}
+                          {getStatusBadge(session)}
                           <span className="ms-2 text-info">{session.target_url}</span>
                         </h6>
                         <small className="text-light" style={{ opacity: 0.7 }}>
                           Started: {formatDate(session.started_at)}
                           {session.ended_at && ` | Ended: ${formatDate(session.ended_at)}`}
+                          {session.status === 'active' && !session.is_live && session.last_heartbeat_at &&
+                            ` | Last heartbeat: ${formatDate(session.last_heartbeat_at)}`}
                         </small>
                       </div>
                       <div>

@@ -56,6 +56,53 @@
               Capture Static Assets
             </label>
           </div>
+
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="captureResponseBodies" checked>
+            <label class="form-check-label small" for="captureResponseBodies">
+              Capture Response Bodies
+            </label>
+          </div>
+
+          <div class="form-check form-switch mb-1">
+            <input class="form-check-input" type="checkbox" id="deepCapture">
+            <label class="form-check-label small" for="deepCapture">
+              Deep Capture <span class="badge bg-warning text-dark" style="font-size: 9px;">DevTools</span>
+            </label>
+          </div>
+          <small class="text-muted d-block" style="font-size: 11px;">
+            Attaches the DevTools protocol for full bodies on navigations, form posts, and worker
+            traffic. Chrome will show an automation banner, and it cannot attach to a tab that has
+            DevTools open.
+          </small>
+          <div id="deepCaptureStatus" class="small mt-2 d-none"></div>
+        </div>
+      </div>
+
+      <div class="card shadow-sm mb-3">
+        <div class="card-body">
+          <h6 class="card-title text-danger mb-2">
+            <i class="bi bi-bullseye"></i> Scope
+          </h6>
+
+          <div class="mb-2">
+            <div class="text-muted small mb-1">Capturing traffic to:</div>
+            <div id="scopeHostList" class="d-flex flex-wrap gap-1"></div>
+          </div>
+
+          <div id="outOfScopeBlock" class="d-none">
+            <div class="text-muted small mb-1 mt-2">
+              Seen but <strong>not</strong> captured. Add any that belong to the target:
+            </div>
+            <!-- Scrolls rather than truncating, so a host discovered late in a session is still
+                 reachable instead of being cut off the bottom of a top-N list. -->
+            <div id="outOfScopeList" style="max-height: 172px; overflow-y: auto;"></div>
+          </div>
+
+          <div class="input-group input-group-sm mt-2">
+            <input type="text" class="form-control form-control-sm" id="addHostInput" placeholder="api.example.com">
+            <button class="btn btn-outline-danger btn-sm" id="addHostBtn" type="button">Add</button>
+          </div>
         </div>
       </div>
 
@@ -75,9 +122,24 @@
             <span id="requestCount" class="badge bg-info">0</span>
           </div>
 
-          <div class="d-flex justify-content-between align-items-center mb-3">
+          <div class="d-flex justify-content-between align-items-center mb-2">
             <span class="small">Unique Endpoints:</span>
             <span id="endpointCount" class="badge bg-success">0</span>
+          </div>
+
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <span class="small">Pending Upload:</span>
+            <span id="queuedCount" class="badge bg-secondary">0</span>
+          </div>
+
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <span class="small">With Response Body:</span>
+            <span id="bodyCount" class="badge bg-primary">0</span>
+          </div>
+
+          <div id="failedRow" class="d-flex justify-content-between align-items-center mb-2 d-none">
+            <span class="small">Failed:</span>
+            <span id="failedCount" class="badge bg-warning text-dark">0</span>
           </div>
 
           <div class="progress mb-2" style="height: 5px;">

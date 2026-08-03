@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Modal, Row, Col, Button, Form, Spinner, Badge, ListGroup } from 'react-bootstrap';
 import AuthFlowChart from '../components/AuthFlowChart';
+import ImportAuthFlowModal from './ImportAuthFlowModal';
 
 const CATEGORY_LABELS = { register: 'Register', login: 'Login', mfa_otp: 'MFA/OTP', reset: 'Reset' };
 
@@ -68,6 +69,7 @@ const AuthFlowModal = ({ show, handleClose, category, activeTarget, onFlowsChang
 
   const [newFlowName, setNewFlowName] = useState('');
   const [flowForm, setFlowForm] = useState({ name: '', description: '', auth_type: '', base_url: '' });
+  const [showImport, setShowImport] = useState(false);
   const [addStepName, setAddStepName] = useState('');
   const [addStepRaw, setAddStepRaw] = useState('');
   const [editRaw, setEditRaw] = useState('');
@@ -241,6 +243,7 @@ const AuthFlowModal = ({ show, handleClose, category, activeTarget, onFlowsChang
   };
 
   return (
+    <>
     <Modal data-bs-theme="dark" show={show} onHide={handleClose} size="xl" dialogClassName="modal-90w">
       <Modal.Header closeButton>
         <Modal.Title className="text-danger">{categoryLabel} Auth Flows</Modal.Title>
@@ -252,7 +255,7 @@ const AuthFlowModal = ({ show, handleClose, category, activeTarget, onFlowsChang
           <Row>
             {/* LEFT: flow list */}
             <Col md={4} className="border-end border-secondary">
-              <div className="d-flex gap-2 mb-3">
+              <div className="d-flex gap-2 mb-2">
                 <Form.Control
                   size="sm"
                   placeholder={`New ${categoryLabel} flow name…`}
@@ -264,6 +267,18 @@ const AuthFlowModal = ({ show, handleClose, category, activeTarget, onFlowsChang
                   New Flow
                 </Button>
               </div>
+              {/* The manual crawl already recorded these requests with their real headers, cookies,
+                  and bodies; importing beats retyping them from memory. */}
+              <Button
+                size="sm"
+                variant="outline-info"
+                className="w-100 mb-3"
+                onClick={() => setShowImport(true)}
+                disabled={busy}
+              >
+                <i className="bi bi-download me-2" />
+                Import from Manual Crawl
+              </Button>
               {loadingFlows ? (
                 <div className="text-center py-3"><Spinner size="sm" animation="border" variant="danger" /></div>
               ) : flows.length === 0 ? (
@@ -404,6 +419,21 @@ const AuthFlowModal = ({ show, handleClose, category, activeTarget, onFlowsChang
         )}
       </Modal.Body>
     </Modal>
+
+    {/* Sibling rather than a child of the dialog, so the stacked modal is not mounted inside the
+        one it opens from. */}
+    <ImportAuthFlowModal
+      show={showImport}
+      handleClose={() => setShowImport(false)}
+      category={category}
+      activeTarget={activeTarget}
+      onImported={async (created) => {
+        await fetchFlows(false);
+        if (created && created.id) setSelectedFlowId(created.id);
+        notifyChange();
+      }}
+    />
+    </>
   );
 };
 

@@ -27,11 +27,15 @@ type ConsolidatedEndpoint struct {
 	StatusCodes     []int                  `json:"status_codes"`
 	Headers         map[string]interface{} `json:"headers"`
 	ResponseHeaders map[string]interface{} `json:"response_headers"`
-	RequestCount    int                    `json:"request_count"`
-	FirstSeen       time.Time              `json:"first_seen"`
-	LastSeen        time.Time              `json:"last_seen"`
-	Sources         []string               `json:"sources"`
-	Parameters      []ConsolidatedParameter `json:"parameters"`
+	// The recorded request body and its content type, so the raw request rebuilt downstream (IDOR
+	// work, auth-flow import) is the real one rather than a request line with no payload.
+	RequestBody  string                  `json:"request_body"`
+	ContentType  string                  `json:"content_type"`
+	RequestCount int                     `json:"request_count"`
+	FirstSeen    time.Time               `json:"first_seen"`
+	LastSeen     time.Time               `json:"last_seen"`
+	Sources      []string                `json:"sources"`
+	Parameters   []ConsolidatedParameter `json:"parameters"`
 }
 
 type ConsolidatedParameter struct {
@@ -56,6 +60,10 @@ func ConsolidateURLEndpoints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolved once and threaded through: this used to run a database round trip for every single
+	// capture row being consolidated.
+	targetDomain := extractDomainFromScopeTarget(scopeTargetID)
+
 	endpointMap := make(map[string]*ConsolidatedEndpoint)
 
 	err = consolidateDiscoveredEndpoints(scopeTargetID, endpointMap)
@@ -65,16 +73,24 @@ func ConsolidateURLEndpoints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = consolidateManualCrawlEndpoints(scopeTargetID, endpointMap)
+	err = consolidateManualCrawlEndpoints(scopeTargetID, targetDomain, endpointMap)
 	if err != nil {
 		log.Printf("[ERROR] Failed to consolidate manual crawl endpoints: %v", err)
 		http.Error(w, "Failed to consolidate manual crawl endpoints", http.StatusInternalServerError)
 		return
 	}
 
-	err = consolidateFFUFEndpoints(scopeTargetID, endpointMap)
+	err = consolidateFFUFEndpoints(scopeTargetID, targetDomain, endpointMap)
 	if err != nil {
 		log.Printf("[ERROR] Failed to consolidate FFUF endpoints: %v", err)
+	}
+
+	// Hidden parameters found by Arjun / parameth / x8 used to be a dead end: they were written to
+	// parameter_enumeration_results and read back only by their own results modals, so
+	// re-consolidating discarded them and nothing downstream ever saw them.
+	err = consolidateEnumeratedParameters(scopeTargetID, endpointMap)
+	if err != nil {
+		log.Printf("[ERROR] Failed to consolidate enumerated parameters: %v", err)
 	}
 
 	err = storeConsolidatedEndpoints(scopeTargetID, endpointMap)
@@ -225,12 +241,13 @@ func consolidateDiscoveredEndpoints(scopeTargetID string, endpointMap map[string
 	return nil
 }
 
-func consolidateManualCrawlEndpoints(scopeTargetID string, endpointMap map[string]*ConsolidatedEndpoint) error {
+func consolidateManualCrawlEndpoints(scopeTargetID, targetDomain string, endpointMap map[string]*ConsolidatedEndpoint) error {
 	query := `
-		SELECT url, endpoint, method, status_code, headers, response_headers, get_params, post_params, mime_type
+		SELECT url, endpoint, method, status_code, headers, response_headers, get_params, post_params,
+		       mime_type, COALESCE(post_data,''), COALESCE(body_type,'')
 		FROM manual_crawl_captures
 		WHERE scope_target_id = $1
-		ORDER BY url
+		ORDER BY timestamp ASC
 	`
 
 	rows, err := dbPool.Query(context.Background(), query, scopeTargetID)
@@ -240,13 +257,13 @@ func consolidateManualCrawlEndpoints(scopeTargetID string, endpointMap map[strin
 	defer rows.Close()
 
 	for rows.Next() {
-		var urlStr, endpoint, method string
+		var urlStr, endpoint, method, postData, bodyType string
 		var statusCode *int
 		var headersJSON, responseHeadersJSON, getParamsJSON, postParamsJSON []byte
 		var mimeType *string
 
 		err := rows.Scan(&urlStr, &endpoint, &method, &statusCode, &headersJSON, &responseHeadersJSON,
-			&getParamsJSON, &postParamsJSON, &mimeType)
+			&getParamsJSON, &postParamsJSON, &mimeType, &postData, &bodyType)
 		if err != nil {
 			log.Printf("[ERROR] Failed to scan manual crawl row: %v", err)
 			continue
@@ -259,8 +276,6 @@ func consolidateManualCrawlEndpoints(scopeTargetID string, endpointMap map[strin
 
 		domain := parsedURL.Hostname()
 		path := parsedURL.Path
-
-		targetDomain := extractDomainFromScopeTarget(scopeTargetID)
 		isDirect := (domain == targetDomain)
 
 		normalizedURL := normalizeURL(urlStr)
@@ -272,6 +287,14 @@ func consolidateManualCrawlEndpoints(scopeTargetID string, endpointMap map[strin
 			}
 			if statusCode != nil && !containsInt(endpoint.StatusCodes, *statusCode) {
 				endpoint.StatusCodes = append(endpoint.StatusCodes, *statusCode)
+			}
+			// Real headers and bodies only exist on captures, so let a capture fill them in even
+			// when a crawler got here first with a bare URL.
+			mergeHeaderMap(&endpoint.Headers, headersJSON)
+			mergeHeaderMap(&endpoint.ResponseHeaders, responseHeadersJSON)
+			if endpoint.RequestBody == "" && postData != "" {
+				endpoint.RequestBody = postData
+				endpoint.ContentType = bodyType
 			}
 			endpoint.RequestCount++
 			endpoint.LastSeen = time.Now()
@@ -304,6 +327,8 @@ func consolidateManualCrawlEndpoints(scopeTargetID string, endpointMap map[strin
 			if len(responseHeadersJSON) > 0 {
 				json.Unmarshal(responseHeadersJSON, &endpoint.ResponseHeaders)
 			}
+			endpoint.RequestBody = postData
+			endpoint.ContentType = bodyType
 
 			endpointMap[key] = endpoint
 		}
@@ -371,7 +396,7 @@ func consolidateManualCrawlEndpoints(scopeTargetID string, endpointMap map[strin
 	return nil
 }
 
-func consolidateFFUFEndpoints(scopeTargetID string, endpointMap map[string]*ConsolidatedEndpoint) error {
+func consolidateFFUFEndpoints(scopeTargetID, targetDomain string, endpointMap map[string]*ConsolidatedEndpoint) error {
 	query := `
 		SELECT url, result
 		FROM ffuf_url_scans
@@ -429,8 +454,6 @@ func consolidateFFUFEndpoints(scopeTargetID string, endpointMap map[string]*Cons
 			}
 			fullURL := fmt.Sprintf("%s://%s%s", parsedURL.Scheme, parsedURL.Host, path)
 			domain := parsedURL.Hostname()
-
-			targetDomain := extractDomainFromScopeTarget(scopeTargetID)
 			isDirect := (domain == targetDomain)
 
 			normalizedURL := normalizeURL(fullURL)
@@ -484,14 +507,19 @@ func storeConsolidatedEndpoints(scopeTargetID string, endpointMap map[string]*Co
 		query := `
 			INSERT INTO consolidated_url_endpoints 
 			(id, scope_target_id, url, normalized_url, domain, path, method, is_direct, status_codes, 
-			 headers, response_headers, request_count, first_seen, last_seen, sources)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			 headers, response_headers, request_count, first_seen, last_seen, sources,
+			 request_body, content_type)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 			ON CONFLICT (scope_target_id, url, method) 
 			DO UPDATE SET 
 				request_count = EXCLUDED.request_count,
 				last_seen = EXCLUDED.last_seen,
 				status_codes = EXCLUDED.status_codes,
-				sources = EXCLUDED.sources
+				sources = EXCLUDED.sources,
+				headers = EXCLUDED.headers,
+				response_headers = EXCLUDED.response_headers,
+				request_body = EXCLUDED.request_body,
+				content_type = EXCLUDED.content_type
 			RETURNING id
 		`
 
@@ -500,6 +528,7 @@ func storeConsolidatedEndpoints(scopeTargetID string, endpointMap map[string]*Co
 			endpoint.Path, endpoint.Method, endpoint.IsDirect, statusCodesJSON,
 			headersJSON, responseHeadersJSON, endpoint.RequestCount,
 			endpoint.FirstSeen, endpoint.LastSeen, endpoint.Sources,
+			endpoint.RequestBody, endpoint.ContentType,
 		).Scan(&endpointID)
 
 		if err != nil {
@@ -539,7 +568,8 @@ func GetConsolidatedURLEndpoints(w http.ResponseWriter, r *http.Request) {
 
 	query := `
 		SELECT id, scope_target_id, url, normalized_url, domain, path, method, is_direct, origin_url,
-		       status_codes, headers, response_headers, request_count, first_seen, last_seen, sources
+		       status_codes, headers, response_headers, request_count, first_seen, last_seen, sources,
+		       COALESCE(request_body,''), COALESCE(content_type,'')
 		FROM consolidated_url_endpoints
 		WHERE scope_target_id = $1
 		ORDER BY is_direct DESC, domain, path
@@ -564,6 +594,7 @@ func GetConsolidatedURLEndpoints(w http.ResponseWriter, r *http.Request) {
 			&endpoint.Domain, &endpoint.Path, &endpoint.Method, &endpoint.IsDirect, &endpoint.OriginURL,
 			&statusCodesJSON, &headersJSON, &responseHeadersJSON,
 			&endpoint.RequestCount, &endpoint.FirstSeen, &endpoint.LastSeen, &endpoint.Sources,
+			&endpoint.RequestBody, &endpoint.ContentType,
 		)
 
 		if err != nil {
@@ -600,6 +631,131 @@ func GetConsolidatedURLEndpoints(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(endpoints)
+}
+
+// mergeHeaderMap folds a captured header blob into an existing map without dropping what is
+// already there. Crawlers create endpoints with no headers at all, so a later capture is usually
+// the only chance to attach the real ones.
+func mergeHeaderMap(target *map[string]interface{}, headersJSON []byte) {
+	if len(headersJSON) == 0 {
+		return
+	}
+	var incoming map[string]interface{}
+	if json.Unmarshal(headersJSON, &incoming) != nil {
+		return
+	}
+	if *target == nil {
+		*target = make(map[string]interface{})
+	}
+	for name, value := range incoming {
+		if _, exists := (*target)[name]; !exists {
+			(*target)[name] = value
+		}
+	}
+}
+
+// consolidateEnumeratedParameters folds Arjun / parameth / x8 findings onto the endpoints they were
+// discovered against. Hidden parameters are the whole point of running those tools, and until now
+// they never reached the consolidated attack surface that everything downstream reads.
+func consolidateEnumeratedParameters(scopeTargetID string, endpointMap map[string]*ConsolidatedEndpoint) error {
+	query := `
+		SELECT endpoint_url, parameter_name, parameter_type, COALESCE(example_value,''), scan_type
+		FROM parameter_enumeration_results
+		WHERE scope_target_id = $1
+	`
+
+	rows, err := dbPool.Query(context.Background(), query, scopeTargetID)
+	if err != nil {
+		return fmt.Errorf("failed to query parameter enumeration results: %w", err)
+	}
+	defer rows.Close()
+
+	attached := 0
+	for rows.Next() {
+		var endpointURL, paramName, paramType, exampleValue, scanType string
+		if err := rows.Scan(&endpointURL, &paramName, &paramType, &exampleValue, &scanType); err != nil {
+			continue
+		}
+		if paramName == "" {
+			continue
+		}
+
+		if paramType == "" {
+			paramType = "query"
+		}
+
+		normalizedURL := normalizeURL(endpointURL)
+
+		// These tools probe a URL, not a verb, so attach the finding to every method recorded for
+		// that URL rather than assuming GET.
+		matched := false
+		for key, endpoint := range endpointMap {
+			if !strings.HasPrefix(key, normalizedURL+"|") {
+				continue
+			}
+			matched = true
+			addOrMergeParameter(endpoint, paramType, paramName, exampleValue)
+			if !contains(endpoint.Sources, scanType) {
+				endpoint.Sources = append(endpoint.Sources, scanType)
+			}
+			attached++
+		}
+
+		// The endpoint may have been discovered only by the parameter tool itself.
+		if !matched {
+			key := fmt.Sprintf("%s|GET", normalizedURL)
+			parsed, perr := url.Parse(normalizedURL)
+			if perr != nil {
+				continue
+			}
+			endpoint := &ConsolidatedEndpoint{
+				ScopeTargetID:   scopeTargetID,
+				URL:             normalizedURL,
+				NormalizedURL:   parsed.Path,
+				Domain:          parsed.Hostname(),
+				Path:            parsed.Path,
+				Method:          "GET",
+				IsDirect:        true,
+				StatusCodes:     []int{},
+				Sources:         []string{scanType},
+				RequestCount:    1,
+				FirstSeen:       time.Now(),
+				LastSeen:        time.Now(),
+				Parameters:      []ConsolidatedParameter{},
+				Headers:         make(map[string]interface{}),
+				ResponseHeaders: make(map[string]interface{}),
+			}
+			addOrMergeParameter(endpoint, paramType, paramName, exampleValue)
+			endpointMap[key] = endpoint
+			attached++
+		}
+	}
+
+	log.Printf("[CONSOLIDATE] Attached %d enumerated parameter findings", attached)
+	return nil
+}
+
+func addOrMergeParameter(endpoint *ConsolidatedEndpoint, paramType, paramName, exampleValue string) {
+	for i := range endpoint.Parameters {
+		if endpoint.Parameters[i].ParamType == paramType && endpoint.Parameters[i].ParamName == paramName {
+			if exampleValue != "" && !contains(endpoint.Parameters[i].ExampleValues, exampleValue) {
+				endpoint.Parameters[i].ExampleValues = append(endpoint.Parameters[i].ExampleValues, exampleValue)
+			}
+			endpoint.Parameters[i].Frequency++
+			return
+		}
+	}
+
+	param := ConsolidatedParameter{
+		ParamType:     paramType,
+		ParamName:     paramName,
+		ExampleValues: []string{},
+		Frequency:     1,
+	}
+	if exampleValue != "" {
+		param.ExampleValues = append(param.ExampleValues, exampleValue)
+	}
+	endpoint.Parameters = append(endpoint.Parameters, param)
 }
 
 func extractDomainFromScopeTarget(scopeTargetID string) string {
