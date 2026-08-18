@@ -394,7 +394,7 @@ func GetInvestigateScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []InvestigateStatus
+	var scans = []InvestigateStatus{}
 	for rows.Next() {
 		var scan InvestigateStatus
 		var result, error, stdout, stderr, command, execTime sql.NullString

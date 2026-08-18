@@ -27,7 +27,10 @@ const monitorWAFProbeScanStatus = async (
       throw new Error('Failed to fetch WAF probe scans');
     }
 
-    const scans = await response.json();
+    const scansPayload = await response.json();
+    // A Go handler that returns a nil slice encodes it as JSON null rather than [],
+    // and reading .length off null threw a TypeError that killed this poll loop.
+    const scans = Array.isArray(scansPayload) ? scansPayload : [];
     if (!Array.isArray(scans)) {
       setWAFProbeScans([]);
       setMostRecentWAFProbeScan(null);

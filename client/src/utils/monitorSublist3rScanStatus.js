@@ -22,7 +22,10 @@ const monitorSublist3rScanStatus = async (
       throw new Error(`Failed to fetch Sublist3r scans: ${response.statusText}`);
     }
 
-    const scans = await response.json();
+    const scansPayload = await response.json();
+    // A Go handler that returns a nil slice encodes it as JSON null rather than [],
+    // and reading .length off null threw a TypeError that killed this poll loop.
+    const scans = Array.isArray(scansPayload) ? scansPayload : [];
     setSublist3rScans(scans);
 
     if (scans && scans.length > 0) {

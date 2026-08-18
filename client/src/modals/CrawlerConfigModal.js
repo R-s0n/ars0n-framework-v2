@@ -34,19 +34,22 @@ export const CrawlerConfigModal = ({ show, handleClose, activeTarget, tool, onSa
       if (!res.ok) throw new Error('Failed to load configuration');
       setConfig(await res.json());
 
-      // Read the newest probe verdict so the modal can show what was measured next to what is
-      // currently set. Absence is normal and not an error.
-      const scans = await fetch(`/api/scopetarget/${activeTarget.id}/scans/waf-probe`);
-      if (scans.ok) {
-        const list = await scans.json();
-        const newest = Array.isArray(list) ? list.find((s) => s.result) : null;
-        if (newest) {
-          const parsed = typeof newest.result === 'string'
-            ? JSON.parse(newest.result) : newest.result;
-          setProbe(parsed?.verdict || null);
-        } else {
-          setProbe(null);
-        }
+      // What the probe recommends for this tool, already resolved into this tool's own field name
+      // and units by the server. Absence is normal and not an error.
+      //
+      // Asking the server rather than recomputing it here is deliberate. This modal used to derive
+      // the delay itself, which meant two copies of arithmetic that has to know that katana counts
+      // requests per second, gospider counts whole seconds and linkfinder counts milliseconds. A
+      // copy that drifts is how a rate ends up wrong by a factor of a thousand.
+      const recs = await fetch(`/api/waf-probe/recommendations/${activeTarget.id}`);
+      if (recs.ok) {
+        const data = await recs.json();
+        const mine = data?.status === 'ok'
+          ? (data.tools || []).find((t) => t.tool === tool)
+          : null;
+        setProbe(mine ? { measured: data.measured, settings: mine.settings || [] } : null);
+      } else {
+        setProbe(null);
       }
     } catch (e) {
       setError(e.message);
@@ -82,30 +85,19 @@ export const CrawlerConfigModal = ({ show, handleClose, activeTarget, tool, onSa
     }
   };
 
-  // Translate the probe's measured rate into the knob this particular tool actually reads, using
-  // the same arithmetic the backend uses when applying. Shown, not silently written: adopting a
-  // measurement should be a click the operator makes.
-  const probeSuggestion = () => {
-    if (!config || !probe?.safe_rps) return null;
-    const rps = probe.safe_rps;
-    if (tool === 'katana') {
-      const want = Math.max(1, Math.floor(rps));
-      return config.rateLimit === want ? null
-        : { label: `Set rate limit to ${want} req/s`, apply: () => set('rateLimit', want) };
-    }
-    if (tool === 'gospider') {
-      const want = Math.max(1, Math.ceil((config.concurrent || 10) / rps));
-      return config.delay === want ? null
-        : { label: `Set delay to ${want}s for ~${rps} req/s at ${config.concurrent || 10} concurrent`,
-            apply: () => set('delay', want) };
-    }
-    const want = Math.max(1, Math.round(1000 / rps));
-    return config.requestDelayMs === want ? null
-      : { label: `Set delay to ${want}ms between files for ~${rps} req/s`,
-          apply: () => set('requestDelayMs', want) };
-  };
+  // The settings the probe recommends for this tool that are not already set to that value. Shown,
+  // not silently written: adopting a measurement should be a click the operator makes, and when it
+  // is a click there is someone to notice if the number looks wrong.
+  const suggestions = (probe?.settings || [])
+    .filter((s) => config && String(config[s.setting] ?? '') !== String(s.value))
+    .map((s) => ({
+      key: s.setting,
+      label: `Set ${s.setting} to ${s.value}${s.unit ? ` (${s.unit})` : ''}`,
+      why: s.why,
+      apply: () => set(s.setting, s.value),
+    }));
 
-  const suggestion = probeSuggestion();
+  const applyAll = () => suggestions.forEach((s) => s.apply());
   const title = { katana: 'Katana', gospider: 'GoSpider', linkfinder: 'LinkFinder' }[tool] || tool;
 
   return (
@@ -122,26 +114,39 @@ export const CrawlerConfigModal = ({ show, handleClose, activeTarget, tool, onSa
         {config && (
           <>
             <div className="rounded p-2 mb-3" style={{ border: '1px solid rgba(220,53,69,0.45)' }}>
-              {probe?.safe_rps ? (
-                <div className="d-flex align-items-center flex-wrap gap-2">
-                  <Badge bg={probe.safe_rps_confidence === 'measured' ? 'danger' : 'secondary'}>
-                    probe: {probe.safe_rps} req/s
-                  </Badge>
-                  <span className="text-white-50 small">
-                    {probe.safe_rps_confidence}
-                    {probe.safe_rps_verified ? ' and validated' : ''}
-                    {probe.safe_concurrency ? `, ${probe.safe_concurrency} safe concurrent` : ''}
-                  </span>
-                  {suggestion && (
-                    <Button size="sm" variant="outline-danger" className="ms-auto"
-                            onClick={suggestion.apply}>
-                      {suggestion.label}
-                    </Button>
-                  )}
-                  {!suggestion && (
-                    <span className="text-success small ms-auto">Settings match the probe.</span>
-                  )}
-                </div>
+              {probe?.measured?.safe_rps ? (
+                <>
+                  <div className="d-flex align-items-center flex-wrap gap-2">
+                    <Badge bg={probe.measured.confidence === 'measured' ? 'danger' : 'secondary'}>
+                      probe: {probe.measured.safe_rps} req/s
+                    </Badge>
+                    <span className="text-white-50 small">
+                      {probe.measured.confidence}
+                      {probe.measured.verified ? ' and validated' : ''}
+                      {probe.measured.safe_concurrency
+                        ? `, ${probe.measured.safe_concurrency} safe concurrent` : ''}
+                    </span>
+                    {suggestions.length > 1 && (
+                      <Button size="sm" variant="outline-danger" className="ms-auto"
+                              onClick={applyAll}>
+                        Fill in all {suggestions.length}
+                      </Button>
+                    )}
+                    {suggestions.length === 0 && (
+                      <span className="text-success small ms-auto">Settings match the probe.</span>
+                    )}
+                  </div>
+                  {/* One button per setting, each naming its units. Filling a field in is still the
+                      operator's action; nothing is saved until they press Save. */}
+                  {suggestions.map((s) => (
+                    <div key={s.key} className="d-flex align-items-center gap-2 mt-2">
+                      <Button size="sm" variant="outline-danger" onClick={s.apply}>
+                        {s.label}
+                      </Button>
+                      {s.why && <span className="text-white-50 small">{s.why}</span>}
+                    </div>
+                  ))}
+                </>
               ) : (
                 <span className="text-white-50 small">
                   No probe result for this target yet. Run the Routing &amp; WAF Probe first and

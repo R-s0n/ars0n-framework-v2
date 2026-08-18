@@ -254,8 +254,15 @@ func probeTimeout(cfgJSON []byte) time.Duration {
 	var env probeConfigEnvelope
 	_ = json.Unmarshal(cfgJSON, &env)
 
+	// The grace is added to a wall clock that exists, never to a missing one.
+	//
+	// This read `seconds = WallClockSeconds + grace` unconditionally, so a config with no
+	// wall_clock_seconds produced 0 + 90 = 90. Ninety is positive, so the 420 fallback below could
+	// never fire, and every preset was cut off long before its budget: a standard run configured
+	// for 660 seconds died at 90 with a backend_timeout and no verdict, having completed 30 of 44
+	// tests. Any caller that saves a partial config hits this, which is easy to do.
 	seconds := env.Global.GoContextTimeoutSecs
-	if seconds <= 0 {
+	if seconds <= 0 && env.Global.WallClockSeconds > 0 {
 		seconds = env.Global.WallClockSeconds + probeTimeoutGraceSeconds
 	}
 	if seconds <= 0 {
@@ -558,210 +565,22 @@ func UpdateWAFProbeScanStatus(scanID, status, result, errorMsg, stdout, stderr, 
 }
 
 // ---------------------------------------------------------------------------
-// Apply
+// Recommendation translation
 // ---------------------------------------------------------------------------
-
-type applyRow struct {
-	Tool       string          `json:"tool"`
-	Field      string          `json:"field"`
-	Value      json.RawMessage `json:"value"`
-	FindingID  string          `json:"finding_id"`
-	Confidence string          `json:"confidence"`
-	Bundle     string          `json:"bundle"`
-}
-
-// ApplyWAFProbeRecommendations handles POST /waf-probe/apply/{scope_target_id}/{scan_id}.
-//
-// Takes an explicit list of rows rather than "apply everything from the newest scan". v1 did the
-// latter, which meant an operator reviewing an older result and clicking Apply silently applied a
-// different scan's numbers, and clobbered their own settings with no record.
-func ApplyWAFProbeRecommendations(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	scopeTargetID := vars["scope_target_id"]
-	scanID := vars["scan_id"]
-
-	var payload struct {
-		Rows []applyRow `json:"rows"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-	if len(payload.Rows) == 0 {
-		http.Error(w, "No rows selected to apply", http.StatusBadRequest)
-		return
-	}
-
-	// The scan must belong to this target, so a scan id from another target cannot be applied here.
-	if scanID != "" {
-		var exists bool
-		_ = dbPool.QueryRow(context.Background(),
-			`SELECT EXISTS(SELECT 1 FROM waf_probe_scans WHERE scan_id = $1 AND scope_target_id = $2)`,
-			scanID, scopeTargetID).Scan(&exists)
-		if !exists {
-			http.Error(w, "That scan does not belong to this scope target", http.StatusBadRequest)
-			return
-		}
-	}
-
-	byTool := map[string][]applyRow{}
-	for _, row := range payload.Rows {
-		byTool[row.Tool] = append(byTool[row.Tool], row)
-	}
-
-	applied := 0
-	results := map[string]interface{}{}
-	for tool, rows := range byTool {
-		n, err := applyToolRows(scopeTargetID, scanID, tool, rows)
-		if err != nil {
-			results[tool] = map[string]interface{}{"error": err.Error()}
-			continue
-		}
-		applied += n
-		results[tool] = map[string]interface{}{"applied": n}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status": "success", "applied": applied, "by_tool": results,
-	})
-}
-
-func applyToolRows(scopeTargetID, scanID, tool string, rows []applyRow) (int, error) {
-	if tool == "nuclei" {
-		// nuclei keeps its runtime settings in nuclei_configs.advanced_config, not in a `config`
-		// column, so the generic path below would fail on it.
-		return applyNucleiRows(scopeTargetID, scanID, rows)
-	}
-
-	table, ok := toolConfigTable(tool)
-	if !ok {
-		// Tools without a config table of their own land in probe_tool_tuning, which their
-		// launchers read. That keeps katana, gospider and endpoint replay tunable without
-		// inventing a config table each.
-		return applyGenericTuning(scopeTargetID, scanID, tool, rows)
-	}
-
-	current := map[string]interface{}{}
-	var existing []byte
-	if err := dbPool.QueryRow(context.Background(),
-		fmt.Sprintf(`SELECT config FROM %s WHERE scope_target_id = $1`, table),
-		scopeTargetID).Scan(&existing); err == nil {
-		_ = json.Unmarshal(existing, &current)
-	}
-
-	applied := 0
-	var untranslated []applyRow
-	for _, row := range rows {
-		var value interface{}
-		if json.Unmarshal(row.Value, &value) != nil {
-			continue
-		}
-
-		field, translated, ok := translateField(tool, current, row.Field, value)
-		if !ok {
-			// The tool has no knob for this. Recording it in probe_tool_tuning keeps it visible
-			// and usable by the launcher instead of writing it under a name the tool ignores.
-			untranslated = append(untranslated, row)
-			continue
-		}
-
-		before := current[field]
-		if field == "headers" {
-			current[field] = mergeHeaderLists(current[field], translated)
-		} else {
-			current[field] = translated
-		}
-		journalApply(scopeTargetID, scanID, tool, storeToolConfig, applyRow{
-			Tool: row.Tool, Field: field, Value: row.Value,
-			FindingID: row.FindingID, Confidence: row.Confidence, Bundle: row.Bundle,
-		}, before, current[field])
-		applied++
-	}
-
-	merged, err := json.Marshal(current)
-	if err != nil {
-		return 0, err
-	}
-	if _, err = dbPool.Exec(context.Background(), fmt.Sprintf(`
-		INSERT INTO %s (scope_target_id, config) VALUES ($1, $2)
-		ON CONFLICT (scope_target_id) DO UPDATE SET config = $2, updated_at = NOW()`, table),
-		scopeTargetID, merged); err != nil {
-		return 0, err
-	}
-
-	if len(untranslated) > 0 {
-		n, _ := applyGenericTuning(scopeTargetID, scanID, tool, untranslated)
-		applied += n
-	}
-	return applied, nil
-}
-
-func applyNucleiRows(scopeTargetID, scanID string, rows []applyRow) (int, error) {
-	current := map[string]interface{}{}
-	var existing []byte
-	if err := dbPool.QueryRow(context.Background(),
-		`SELECT advanced_config FROM nuclei_configs WHERE scope_target_id = $1`,
-		scopeTargetID).Scan(&existing); err == nil && len(existing) > 0 {
-		_ = json.Unmarshal(existing, &current)
-	}
-
-	applied := 0
-	var untranslated []applyRow
-	for _, row := range rows {
-		var value interface{}
-		if json.Unmarshal(row.Value, &value) != nil {
-			continue
-		}
-		field, translated, ok := translateField("nuclei", current, row.Field, value)
-		if !ok {
-			untranslated = append(untranslated, row)
-			continue
-		}
-		before := current[field]
-		current[field] = translated
-		journalApply(scopeTargetID, scanID, "nuclei", storeToolConfig, applyRow{
-			Tool: "nuclei", Field: field, Value: row.Value,
-			FindingID: row.FindingID, Confidence: row.Confidence, Bundle: row.Bundle,
-		}, before, translated)
-		applied++
-	}
-
-	merged, err := json.Marshal(current)
-	if err != nil {
-		return 0, err
-	}
-	// A nuclei row may not exist yet, and the table has no unique constraint on scope_target_id,
-	// so update-then-insert rather than an upsert.
-	tag, err := dbPool.Exec(context.Background(),
-		`UPDATE nuclei_configs SET advanced_config = $2 WHERE scope_target_id = $1`,
-		scopeTargetID, merged)
-	if err != nil {
-		return 0, err
-	}
-	if tag.RowsAffected() == 0 {
-		if _, err := dbPool.Exec(context.Background(),
-			`INSERT INTO nuclei_configs (scope_target_id, advanced_config) VALUES ($1, $2)`,
-			scopeTargetID, merged); err != nil {
-			return 0, err
-		}
-	}
-
-	if len(untranslated) > 0 {
-		n, _ := applyGenericTuning(scopeTargetID, scanID, "nuclei", untranslated)
-		applied += n
-	}
-	return applied, nil
-}
 
 // translateField maps a probe field name onto the field the tool's own config actually uses, and
 // converts the value into that field's units.
 //
-// This layer exists because the probe speaks one vocabulary and each tool speaks its own. Without
-// it, applying `rate_limit` to ffuf writes a key ffuf's launcher never reads: the operator is told
-// the setting was applied, the scan runs at the old rate, and the probe carries the blame for a
-// limit it measured correctly. A silent no-op is worse than a refusal, so a field with no
-// equivalent returns false and is recorded in probe_tool_tuning instead.
+// This layer exists because the probe speaks one vocabulary and each tool speaks its own: a
+// measured `rate_limit` is ffuf's `rateLimit`, arjun's `-d` in whole seconds and x8's `--delay` in
+// milliseconds. Getting that mapping right is the whole value of the probe's output, so it is worth
+// doing carefully and worth showing the operator.
+//
+// It is used for display only. This used to feed an automated apply that wrote straight into the
+// tool configs, and the writes failed silently: a fractional delay landed in an integer column and
+// decoded to zero, so the tool ran unpaced while the UI reported the rate as applied. See
+// GetWAFProbeRecommendations in wafProbeRecommend.go. A field with no equivalent returns false and
+// is reported as "this tool has no setting for it" rather than being written anywhere.
 func translateField(tool string, current map[string]interface{}, field string,
 	value interface{}) (string, interface{}, bool) {
 
@@ -787,9 +606,22 @@ func translateField(tool string, current map[string]interface{}, field string,
 		case "arjun":
 			// arjun has no rate flag; it has a per-request delay applied within each thread, so
 			// the aggregate rate is threads/delay. Solving for delay gives threads/rps.
-			return "delay", roundTo(numberOr(current["threads"], 5)/rps, 2), true
+			//
+			// arjun -d is WHOLE SECONDS and ArjunConfig.Delay is an int. This used to return a
+			// rounded float, and two things went wrong with it. A fractional result such as 1.67
+			// cannot be unmarshalled into an int field, and ExecuteArjunScan ignores the unmarshal
+			// error, so Delay silently became 0 and the `-d` flag was never emitted: applying a
+			// rate limit left arjun running with no rate limit at all. Ceiling to a whole second
+			// keeps the achieved rate at or under what was measured, which is the direction an
+			// error has to fall.
+			return "delay", maxInt(1, int(math.Ceil(numberOr(current["threads"], 5)/rps))), true
 		case "x8":
-			return "delay", roundTo(numberOr(current["concurrency"], 10)/rps, 2), true
+			// x8 --delay is MILLISECONDS, not seconds, and --workers is the concurrency. The old
+			// formula computed a delay in seconds and wrote it into a millisecond field, so a
+			// measured 5 rps was applied as a 2ms pause across 10 workers, roughly 5000 rps: three
+			// orders of magnitude faster than the rate the probe had just established was safe.
+			// Same int truncation problem on top of it.
+			return "delay", maxInt(1, int(math.Ceil(1000.0*numberOr(current["concurrency"], 10)/rps))), true
 		case "katana":
 			// katana -rl is an integer requests-per-second cap.
 			return "rateLimit", maxInt(1, int(rps)), true
@@ -803,7 +635,6 @@ func translateField(tool string, current map[string]interface{}, field string,
 			// Paced by the launcher between bundles, in milliseconds.
 			return "requestDelayMs", maxInt(1, int(1000.0/rps)), true
 		}
-		// parameth exposes neither a rate nor a delay, so there is nothing honest to write.
 		return "", nil, false
 
 	case "threads", "concurrency":
@@ -812,7 +643,7 @@ func translateField(tool string, current map[string]interface{}, field string,
 			return "", nil, false
 		}
 		switch tool {
-		case "ffuf", "arjun", "parameth":
+		case "ffuf", "arjun":
 			return "threads", int(n), true
 		case "x8", "nuclei", "katana":
 			return "concurrency", int(n), true
@@ -830,10 +661,10 @@ func translateField(tool string, current map[string]interface{}, field string,
 		return "", nil, false
 
 	case "cache_bust", "reuse_session":
-		switch tool {
-		case "katana", "gospider":
-			return field, value, true
-		}
+		// No tool here has a flag for either. This used to return true for katana and gospider, so
+		// the Recommendations tab told the operator to set a switch that no command builder read.
+		// Returning false makes it say plainly that the tool has no setting for it, which is the
+		// truth and is actionable: it means pacing that tool has to be done another way.
 		return "", nil, false
 
 	case "select_by_extension":
@@ -870,101 +701,12 @@ func translateField(tool string, current map[string]interface{}, field string,
 	return "", nil, false
 }
 
-// Where an applied value landed. Recorded per journal entry so a revert puts it back in the same
-// place, instead of inferring the store from the tool name and missing the rows that fell through
-// to shared tuning because the tool had no knob of its own.
-const (
-	storeToolConfig = "tool_config"
-	storeTuning     = "tuning"
-)
-
-// restoreToolField writes a value straight into the store the journal recorded, under the field
-// name the journal recorded, with no translation. Sending it back through translateField would
-// translate an already-translated name, find no match, and quietly file the restore somewhere else
-// while reporting success.
-//
-// A previous value of null means the field did not exist before the probe wrote it, so restoring
-// means removing the key rather than setting it to null: a tool reading `rateLimit: null` is not in
-// the state it was in before Apply.
-func restoreToolField(scopeTargetID, tool, field, store string, before interface{}) error {
-	set := func(current map[string]interface{}) {
-		if before == nil {
-			delete(current, field)
-		} else {
-			current[field] = before
-		}
-	}
-
-	if store == storeTuning {
-		current := map[string]interface{}{}
-		var existing []byte
-		if err := dbPool.QueryRow(context.Background(),
-			`SELECT config FROM probe_tool_tuning WHERE scope_target_id = $1 AND tool = $2`,
-			scopeTargetID, tool).Scan(&existing); err == nil {
-			_ = json.Unmarshal(existing, &current)
-		}
-		set(current)
-		merged, err := json.Marshal(current)
-		if err != nil {
-			return err
-		}
-		_, err = dbPool.Exec(context.Background(), `
-			INSERT INTO probe_tool_tuning (scope_target_id, tool, config) VALUES ($1, $2, $3)
-			ON CONFLICT (scope_target_id, tool) DO UPDATE SET config = $3, updated_at = NOW()`,
-			scopeTargetID, tool, merged)
-		return err
-	}
-
-	if tool == "nuclei" {
-		current := map[string]interface{}{}
-		var existing []byte
-		if err := dbPool.QueryRow(context.Background(),
-			`SELECT advanced_config FROM nuclei_configs WHERE scope_target_id = $1`,
-			scopeTargetID).Scan(&existing); err == nil && len(existing) > 0 {
-			_ = json.Unmarshal(existing, &current)
-		}
-		set(current)
-		merged, err := json.Marshal(current)
-		if err != nil {
-			return err
-		}
-		_, err = dbPool.Exec(context.Background(),
-			`UPDATE nuclei_configs SET advanced_config = $2 WHERE scope_target_id = $1`,
-			scopeTargetID, merged)
-		return err
-	}
-
-	table, ok := toolConfigTable(tool)
-	if !ok {
-		return fmt.Errorf("no config table for tool %q", tool)
-	}
-	current := map[string]interface{}{}
-	var existing []byte
-	if err := dbPool.QueryRow(context.Background(),
-		fmt.Sprintf(`SELECT config FROM %s WHERE scope_target_id = $1`, table),
-		scopeTargetID).Scan(&existing); err == nil {
-		_ = json.Unmarshal(existing, &current)
-	}
-	set(current)
-	merged, err := json.Marshal(current)
-	if err != nil {
-		return err
-	}
-	_, err = dbPool.Exec(context.Background(), fmt.Sprintf(`
-		INSERT INTO %s (scope_target_id, config) VALUES ($1, $2)
-		ON CONFLICT (scope_target_id) DO UPDATE SET config = $2, updated_at = NOW()`, table),
-		scopeTargetID, merged)
-	return err
-}
-
 func toolConfigTable(tool string) (string, bool) {
 	switch tool {
 	case "ffuf":
 		return "ffuf_configs", true
 	case "arjun":
 		return "arjun_configs", true
-	case "parameth":
-		return "parameth_configs", true
 	case "x8":
 		return "x8_configs", true
 	case "katana":
@@ -1011,163 +753,3 @@ func maxInt(a, b int) int {
 	return b
 }
 
-func applyGenericTuning(scopeTargetID, scanID, tool string, rows []applyRow) (int, error) {
-	current := map[string]interface{}{}
-	var existing []byte
-	if err := dbPool.QueryRow(context.Background(),
-		`SELECT config FROM probe_tool_tuning WHERE scope_target_id = $1 AND tool = $2`,
-		scopeTargetID, tool).Scan(&existing); err == nil {
-		_ = json.Unmarshal(existing, &current)
-	}
-
-	applied := 0
-	for _, row := range rows {
-		var value interface{}
-		if json.Unmarshal(row.Value, &value) != nil {
-			continue
-		}
-		before := current[row.Field]
-		current[row.Field] = value
-		journalApply(scopeTargetID, scanID, tool, storeTuning, row, before, value)
-		applied++
-	}
-
-	merged, err := json.Marshal(current)
-	if err != nil {
-		return 0, err
-	}
-	_, err = dbPool.Exec(context.Background(), `
-		INSERT INTO probe_tool_tuning (scope_target_id, tool, config) VALUES ($1, $2, $3)
-		ON CONFLICT (scope_target_id, tool) DO UPDATE SET config = $3, updated_at = NOW()`,
-		scopeTargetID, tool, merged)
-	return applied, err
-}
-
-func journalApply(scopeTargetID, scanID, tool, store string, row applyRow, before, after interface{}) {
-	beforeJSON, _ := json.Marshal(before)
-	afterJSON, _ := json.Marshal(after)
-	_, err := dbPool.Exec(context.Background(), `
-		INSERT INTO waf_probe_apply_journal
-		  (scope_target_id, scan_id, tool, field, store, before_value, after_value, finding_id,
-		   confidence, bundle)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		scopeTargetID, scanID, tool, row.Field, store, beforeJSON, afterJSON,
-		row.FindingID, row.Confidence, row.Bundle)
-	if err != nil {
-		log.Printf("[PROBE] Failed to journal apply for %s.%s: %v", tool, row.Field, err)
-	}
-}
-
-// GetWAFProbeApplyJournal handles GET /waf-probe/apply-journal/{scope_target_id}. Downstream config
-// modals read this so a field the probe set can say so, instead of looking like an operator choice.
-func GetWAFProbeApplyJournal(w http.ResponseWriter, r *http.Request) {
-	scopeTargetID := mux.Vars(r)["scope_target_id"]
-
-	rows, err := dbPool.Query(context.Background(), `
-		SELECT id, scan_id, tool, field, before_value, after_value, finding_id, confidence,
-		       applied_at, reverted_at
-		FROM waf_probe_apply_journal
-		WHERE scope_target_id = $1 AND reverted_at IS NULL
-		ORDER BY applied_at DESC LIMIT 200`, scopeTargetID)
-	if err != nil {
-		http.Error(w, "Failed to read apply journal", http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
-	entries := make([]map[string]interface{}, 0)
-	for rows.Next() {
-		var (
-			id, scanID, tool, field string
-			beforeVal, afterVal     []byte
-			findingID, confidence   *string
-			appliedAt               time.Time
-			revertedAt              *time.Time
-		)
-		if err := rows.Scan(&id, &scanID, &tool, &field, &beforeVal, &afterVal,
-			&findingID, &confidence, &appliedAt, &revertedAt); err != nil {
-			continue
-		}
-		var before, after interface{}
-		_ = json.Unmarshal(beforeVal, &before)
-		_ = json.Unmarshal(afterVal, &after)
-		entries = append(entries, map[string]interface{}{
-			"id": id, "scan_id": scanID, "tool": tool, "field": field,
-			"before": before, "after": after, "finding_id": findingID,
-			"confidence": confidence, "applied_at": appliedAt,
-		})
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(entries)
-}
-
-// RevertWAFProbeApply handles POST /waf-probe/revert/{journal_id}.
-func RevertWAFProbeApply(w http.ResponseWriter, r *http.Request) {
-	journalID := mux.Vars(r)["journal_id"]
-
-	var (
-		scopeTargetID, tool, field, store string
-		beforeVal                         []byte
-	)
-	err := dbPool.QueryRow(context.Background(), `
-		SELECT scope_target_id, tool, field, store, before_value FROM waf_probe_apply_journal
-		WHERE id = $1 AND reverted_at IS NULL`, journalID).Scan(
-		&scopeTargetID, &tool, &field, &store, &beforeVal)
-	if err != nil {
-		http.Error(w, "Journal entry not found or already reverted", http.StatusNotFound)
-		return
-	}
-
-	var before interface{}
-	_ = json.Unmarshal(beforeVal, &before)
-
-	// The journal already records the tool's own field name, so the restore writes it verbatim.
-	// Sending it back through translateField would translate a translated name, find no match,
-	// and quietly file the restore in probe_tool_tuning while reporting success.
-	if err := restoreToolField(scopeTargetID, tool, field, store, before); err != nil {
-		http.Error(w, "Failed to restore the previous value: "+err.Error(),
-			http.StatusInternalServerError)
-		return
-	}
-
-	_, _ = dbPool.Exec(context.Background(),
-		`UPDATE waf_probe_apply_journal SET reverted_at = NOW() WHERE id = $1`, journalID)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"status": "reverted", "restored": before})
-}
-
-// mergeHeaderLists merges recommended headers into existing ones by name, so a recommended
-// User-Agent adds to rather than replaces the operator's headers.
-func mergeHeaderLists(existing, recommended interface{}) []interface{} {
-	byName := map[string]interface{}{}
-	order := []string{}
-
-	add := func(list interface{}) {
-		items, ok := list.([]interface{})
-		if !ok {
-			return
-		}
-		for _, it := range items {
-			h, ok := it.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			name, _ := h["name"].(string)
-			if _, seen := byName[name]; !seen {
-				order = append(order, name)
-			}
-			byName[name] = h
-		}
-	}
-
-	add(existing)
-	add(recommended)
-
-	merged := make([]interface{}, 0, len(order))
-	for _, name := range order {
-		merged = append(merged, byName[name])
-	}
-	return merged
-}

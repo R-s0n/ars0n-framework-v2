@@ -325,9 +325,102 @@ services:
     networks:
       - ars0n-network
 
-  parameth:
-    container_name: ars0n-framework-v2-parameth-1
-    build: ./docker/parameth
+  x8:
+    container_name: ars0n-framework-v2-x8-1
+    build: ./docker/x8
+    depends_on:
+      - api
+    volumes:
+      # x8 ships no wordlist of its own and reads from stdin when -w is absent, so without a
+      # wordlist mounted here every scan tests only x8's 11 built-in custom parameter names.
+      # Same mount and same path as the ffuf container, so a path that works in one works in both.
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  # The three XSS scanners. All are driven per attack vector by the API through `docker exec`, so
+  # they idle here rather than running anything of their own, same as every other tool container.
+  dalfox:
+    container_name: ars0n-framework-v2-dalfox-1
+    build: ./docker/dalfox
+    depends_on:
+      - api
+    volumes:
+      # Payload and parameter wordlists reach dalfox through --custom-payload and -W, both of which
+      # take a path INSIDE this container. Same mount and same path as ffuf and x8, so a wordlist
+      # path that works in one works in all three.
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  domdig:
+    container_name: ars0n-framework-v2-domdig-1
+    build: ./docker/domdig
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    # Chromium needs more than the default 64MB of shared memory or tabs crash on pages of any size,
+    # and the crash reads as "target closed" rather than as anything about memory.
+    shm_size: "1gb"
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  xssfuzz:
+    container_name: ars0n-framework-v2-xssfuzz-1
+    build: ./docker/xssfuzz
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    shm_size: "1gb"
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  # The three SQL and NoSQL injection scanners. Driven per attack vector by the API through
+  # `docker exec`, so they idle here like every other tool container.
+  sqlmap:
+    container_name: ars0n-framework-v2-sqlmap-1
+    build: ./docker/sqlmap
+    depends_on:
+      - api
+    volumes:
+      # Tamper scripts and payload files reach sqlmap through paths INSIDE this container, and its
+      # JSON reports are read back off the shared volume, which is why /tmp is mounted.
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  ghauri:
+    container_name: ars0n-framework-v2-ghauri-1
+    build: ./docker/ghauri
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  sqlidetector:
+    container_name: ars0n-framework-v2-sqlidetector-1
+    build: ./docker/sqlidetector
     depends_on:
       - api
     volumes:
@@ -337,12 +430,169 @@ services:
     networks:
       - ars0n-network
 
-  x8:
-    container_name: ars0n-framework-v2-x8-1
-    build: ./docker/x8
+  # The two web cache scanners. Both take a URL rather than a parameter, so the API runs them once
+  # per distinct URL rather than once per attack vector.
+  wcvs:
+    container_name: ars0n-framework-v2-wcvs-1
+    build: ./docker/wcvs
     depends_on:
       - api
     volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  cacheboom:
+    container_name: ars0n-framework-v2-cacheboom-1
+    build: ./docker/cacheboom
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  # Command injection and server-side template injection.
+  commix:
+    container_name: ars0n-framework-v2-commix-1
+    build: ./docker/commix
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  sstimap:
+    container_name: ars0n-framework-v2-sstimap-1
+    build: ./docker/sstimap
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  tinja:
+    container_name: ars0n-framework-v2-tinja-1
+    build: ./docker/tinja
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    # --csti starts a headless Chromium, which needs more than the default 64MB of shared memory.
+    shm_size: "1gb"
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  # Open redirect and SSRF. The detector for this section is the nuclei container that already
+  # exists; these two only have work to do once it has found something.
+  recollapse:
+    container_name: ars0n-framework-v2-recollapse-1
+    build: ./docker/recollapse
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  ssrfmap:
+    container_name: ars0n-framework-v2-ssrfmap-1
+    build: ./docker/ssrfmap
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  # Local file inclusion.
+  lfimap:
+    container_name: ars0n-framework-v2-lfimap-1
+    build: ./docker/lfimap
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  lfihunt:
+    container_name: ars0n-framework-v2-lfihunt-1
+    build: ./docker/lfihunt
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  smugglex:
+    container_name: ars0n-framework-v2-smugglex-1
+    build: ./docker/smugglex
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  http2smugl:
+    container_name: ars0n-framework-v2-http2smugl-1
+    build: ./docker/http2smugl
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  nomore403:
+    container_name: ars0n-framework-v2-nomore403-1
+    build: ./docker/nomore403
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  forbidden:
+    container_name: ars0n-framework-v2-forbidden-1
+    build: ./docker/forbidden
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
       - temp_data:/tmp
     entrypoint: ["sleep", "infinity"]
     restart: "no"

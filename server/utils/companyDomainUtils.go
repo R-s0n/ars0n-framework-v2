@@ -364,7 +364,7 @@ func GetCTLCompanyScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan CTLCompanyScanStatus
 		err := rows.Scan(

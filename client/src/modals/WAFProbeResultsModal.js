@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { Modal, Button, Badge, Table, Alert, Spinner, Tabs, Tab, Accordion,
-         Form, ListGroup } from 'react-bootstrap';
+         ListGroup } from 'react-bootstrap';
 
 // Results for the Target Behaviour Probe.
 //
@@ -8,10 +8,11 @@ import { Modal, Button, Badge, Table, Alert, Spinner, Tabs, Tab, Accordion,
 // so the first screen answers only two questions: what rate can I scan at, and what is going to
 // break. Everything else is one tab away.
 //
-// Apply is two-step and row-level. v1 applied "the newest successful scan" to FFUF wholesale, which
-// meant reviewing an older result and clicking Apply silently wrote a different scan's numbers over
-// settings the operator had chosen by hand, with no record of the previous value. Here the operator
-// picks rows, sees exactly what will change, and every write is journalled and revertible.
+// Recommendations are shown, not applied. The probe used to write its numbers into the tool configs
+// directly, and when a translation was wrong nothing said so: a delay that did not fit the tool's
+// field decoded to zero and the tool ran with no rate limit at all, while this modal reported the
+// rate as applied. Reading a value off the screen and typing it in is slower and is honest, so each
+// recommendation names the tool's own setting, its units, and the modal to set it in.
 
 const POSTURE = {
   DEFENDED:           { variant: 'danger',    text: 'Defended' },
@@ -40,16 +41,15 @@ const parseResult = (scan) => {
 };
 
 export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
-                                       mostRecentWAFProbeScan, wafProbeScans = [],
-                                       onApplied }) => {
+                                       mostRecentWAFProbeScan, wafProbeScans = [] }) => {
   const [viewScan, setViewScan] = useState(null);
-  const [selected, setSelected] = useState({});
-  const [applyStep, setApplyStep] = useState('select');   // select | confirm | done
-  const [applying, setApplying] = useState(false);
-  const [applyErr, setApplyErr] = useState('');
-  const [applyResult, setApplyResult] = useState(null);
-  const [journal, setJournal] = useState([]);
   const [tab, setTab] = useState('verdict');
+  // Resolved server-side, because turning a measured rate into a tool's own setting means knowing
+  // that arjun counts seconds and x8 counts milliseconds. Duplicating that here would let the two
+  // drift, and a stale copy would hand the operator a number that is wrong by a factor of 1000.
+  const [recs, setRecs] = useState(null);
+  const [recsLoading, setRecsLoading] = useState(false);
+  const [copied, setCopied] = useState('');
 
   const scan = viewScan || mostRecentWAFProbeScan;
   const probe = useMemo(() => parseResult(scan), [scan]);
@@ -83,70 +83,41 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
   const suppressed = recommendations.suppressed || [];
   const rateChain = recommendations.rate_chain || probe?.verdict?.rate_chain || [];
 
-  const loadJournal = useCallback(async () => {
+  // Tied to the scan being viewed, not to the target's newest scan. Reading an older result and
+  // seeing the newest scan's numbers would be the same confusion the old wholesale apply caused.
+  const loadRecommendations = useCallback(async (scanID) => {
     if (!activeTarget) return;
+    setRecsLoading(true);
     try {
-      const res = await fetch(`/api/waf-probe/apply-journal/${activeTarget.id}`);
-      if (res.ok) setJournal(await res.json());
-    } catch { /* the journal is informational; its absence must not break the modal */ }
+      const url = scanID
+        ? `/api/waf-probe/recommendations/${activeTarget.id}/${scanID}`
+        : `/api/waf-probe/recommendations/${activeTarget.id}`;
+      const res = await fetch(url);
+      setRecs(res.ok ? await res.json() : null);
+    } catch {
+      setRecs(null);   // shown as "could not load", never as "no recommendations"
+    } finally {
+      setRecsLoading(false);
+    }
   }, [activeTarget]);
 
   useEffect(() => {
     if (!show) return;
     setViewScan(null);
-    setApplyStep('select');
-    setApplyErr('');
-    setApplyResult(null);
     setTab('verdict');
-    loadJournal();
-  }, [show, loadJournal]);
+  }, [show]);
 
-  // Restrictive rows are pre-checked; loosening rows never are. Relaxing a setting on a tool's
-  // advice should be a deliberate act, because the operator carries the consequence, not the probe.
   useEffect(() => {
-    const next = {};
-    rows.forEach((r) => { next[r.key] = !!r.restrictive; });
-    setSelected(next);
-  }, [rows]);
+    if (!show) return;
+    loadRecommendations(scan?.scan_id);
+  }, [show, scan?.scan_id, loadRecommendations]);
 
-  const chosen = rows.filter((r) => selected[r.key]);
-
-  const doApply = async () => {
-    if (!activeTarget || !scan?.scan_id) return;
-    setApplying(true);
-    setApplyErr('');
-    try {
-      const res = await fetch(`/api/waf-probe/apply/${activeTarget.id}/${scan.scan_id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          rows: chosen.map((r) => ({
-            tool: r.tool, field: r.field, value: r.value,
-            finding_id: r.finding_id || '', confidence: r.confidence || '',
-            bundle: r.bundle || '',
-          })),
-        }),
-      });
-      if (!res.ok) throw new Error(await res.text() || 'Failed to apply');
-      setApplyResult(await res.json());
-      setApplyStep('done');
-      loadJournal();
-      if (onApplied) onApplied();
-    } catch (e) {
-      setApplyErr(e.message);
-    } finally {
-      setApplying(false);
-    }
-  };
-
-  const revert = async (entryId) => {
-    try {
-      const res = await fetch(`/api/waf-probe/revert/${entryId}`, { method: 'POST' });
-      if (res.ok) {
-        loadJournal();
-        if (onApplied) onApplied();
-      }
-    } catch { /* leave the entry in place; a failed revert must not look like a success */ }
+  const copyTool = (tool, settings) => {
+    const text = settings.map((s) =>
+      `${s.setting} = ${formatValue(s.value)}${s.unit ? `   (${s.unit})` : ''}`).join('\n');
+    navigator.clipboard?.writeText(text)
+      .then(() => { setCopied(tool); setTimeout(() => setCopied(''), 1500); })
+      .catch(() => { /* clipboard can be blocked; the values are on screen regardless */ });
   };
 
   const posture = POSTURE[verdict.posture] || POSTURE.UNKNOWN;
@@ -320,147 +291,128 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
               </Tab>
 
               {/* -------------------------------------------------- apply */}
-              <Tab eventKey="apply" title={`Apply (${rows.length})`}>
-                {applyErr && <Alert variant="danger" className="py-2">{applyErr}</Alert>}
+              <Tab eventKey="apply"
+                   title={`Recommendations (${recs?.tools?.reduce((n, t) => n + t.settings.length, 0) ?? rows.length})`}>
+                <Alert variant="dark" className="border-secondary py-2 small">
+                  Nothing here has been written to any tool configuration. Each row names the tool's
+                  own setting and the units it counts in, so it can be typed into the modal listed
+                  against that tool.
+                </Alert>
 
-                {applyStep === 'done' ? (
+                {recsLoading && <Spinner size="sm" animation="border" variant="danger" />}
+
+                {!recsLoading && !recs && (
+                  <Alert variant="warning" className="py-2 small">
+                    The recommendations could not be loaded. The raw values are still in the
+                    Findings and Test detail tabs.
+                  </Alert>
+                )}
+
+                {!recsLoading && recs?.status === 'ok' && recs.tools?.length === 0 && (
+                  <Alert variant="secondary" className="py-2 small">
+                    This run produced no applicable settings.
+                  </Alert>
+                )}
+
+                {!recsLoading && recs?.tools?.map((t) => (
+                  <div key={t.tool} className="mb-3">
+                    <div className="d-flex align-items-center gap-2 flex-wrap">
+                      <h6 className="text-danger text-capitalize mb-0">{t.tool}</h6>
+                      {t.where && (
+                        <span className="text-white-50" style={{ fontSize: '0.75rem' }}>
+                          {t.where}
+                        </span>
+                      )}
+                      {t.settings.length > 0 && (
+                        <Button variant="outline-secondary" size="sm" className="py-0 ms-auto"
+                                style={{ fontSize: '0.7rem' }}
+                                onClick={() => copyTool(t.tool, t.settings)}>
+                          {copied === t.tool ? 'Copied' : 'Copy'}
+                        </Button>
+                      )}
+                    </div>
+
+                    {t.settings.length > 0 && (
+                      <Table size="sm" variant="dark" className="small align-middle mt-2">
+                        <thead>
+                          <tr className="text-white-50">
+                            <th style={{ width: '20%' }}>Setting</th>
+                            <th style={{ width: '22%' }}>Set it to</th>
+                            <th>Why</th>
+                            <th style={{ width: '12%' }}>Confidence</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {t.settings.map((s, i) => (
+                            <tr key={`${s.setting}:${i}`}>
+                              <td><code className="text-white">{s.setting}</code></td>
+                              <td>
+                                <span className="text-danger fw-bold">{formatValue(s.value)}</span>
+                                {/* The unit is the point. "delay 2" means two seconds to arjun and
+                                    two milliseconds to x8, and that ambiguity is exactly what made
+                                    the old automatic apply run a thousand times too fast. */}
+                                {s.unit && (
+                                  <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
+                                    {s.unit}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="text-white-50">
+                                {s.why}
+                                {!s.restrictive && (
+                                  <Badge bg="warning" text="dark" className="ms-2"
+                                         style={{ fontSize: '0.6rem' }}>loosening</Badge>
+                                )}
+                              </td>
+                              <td title={CONFIDENCE_HELP[s.confidence]}>{s.confidence}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </Table>
+                    )}
+
+                    {/* Said out loud rather than silently dropped. The probe measuring a limit a
+                        tool cannot honour is a real result: it means that tool has to be paced by
+                        hand or left out of the run. */}
+                    {t.notes?.map((n, i) => (
+                      <div key={i} className="text-warning small ms-1 mt-1">{n}</div>
+                    ))}
+                  </div>
+                ))}
+
+                {notes.length > 0 && (
                   <>
-                    <Alert variant="success" className="py-2">
-                      Applied {applyResult?.applied || 0} setting(s).
-                      {Object.entries(applyResult?.by_tool || {})
-                        .filter(([, v]) => v.error)
-                        .map(([t, v]) => <div key={t} className="text-warning">{t}: {v.error}</div>)}
-                    </Alert>
-                    <Button variant="outline-secondary" size="sm"
-                            onClick={() => { setApplyStep('select'); setApplyResult(null); }}>
-                      Apply more
-                    </Button>
-                    <JournalTable journal={journal} onRevert={revert} />
-                  </>
-                ) : applyStep === 'confirm' ? (
-                  <>
-                    <Alert variant="dark" className="border-secondary py-2 small">
-                      These {chosen.length} setting(s) will be written to your tool configurations
-                      for this target. Every write is recorded below and can be reverted to its
-                      previous value.
-                    </Alert>
+                    <h6 className="text-danger mt-3">Exempt from these limits</h6>
                     <Table size="sm" variant="dark" className="small">
-                      <thead>
-                        <tr><th>Tool</th><th>Setting</th><th>New value</th><th>Confidence</th></tr>
-                      </thead>
                       <tbody>
-                        {chosen.map((r) => (
-                          <tr key={r.key}>
-                            <td>{r.tool}</td>
-                            <td>{r.field}</td>
-                            <td className="text-danger">{formatValue(r.value)}</td>
-                            <td>{r.confidence}</td>
+                        {notes.map((n) => (
+                          <tr key={n.key}>
+                            <td style={{ width: '25%' }} className="text-capitalize">{n.tool}</td>
+                            <td className="text-white-50">{n.why}</td>
                           </tr>
                         ))}
                       </tbody>
                     </Table>
-                    <Button variant="outline-secondary" size="sm" className="me-2"
-                            onClick={() => setApplyStep('select')}>Back</Button>
-                    <Button variant="danger" size="sm" onClick={doApply} disabled={applying}>
-                      {applying ? <Spinner size="sm" animation="border" /> : 'Write these settings'}
-                    </Button>
                   </>
-                ) : (
+                )}
+
+                {suppressed.length > 0 && (
                   <>
+                    <h6 className="text-danger mt-3">Deliberately not recommended</h6>
                     <p className="text-white-50 small">
-                      Restrictive settings (which make a scan quieter or more accurate) are
-                      pre-selected. Loosening settings are not, because relaxing a limit on a
-                      tool's advice should be a deliberate choice.
+                      The probe had a candidate value for each of these and withheld it. A withheld
+                      setting is a result, not a gap.
                     </p>
-                    {rows.length === 0 && (
-                      <Alert variant="secondary" className="py-2 small">
-                        This run produced no applicable settings.
-                      </Alert>
-                    )}
-                    {groupByTool(rows).map(([tool, toolRows]) => (
-                      <div key={tool} className="mb-3">
-                        <h6 className="text-danger text-capitalize">{tool}</h6>
-                        <Table size="sm" variant="dark" className="small align-middle">
-                          <tbody>
-                            {toolRows.map((r) => (
-                              <tr key={r.key}>
-                                <td style={{ width: '32px' }}>
-                                  <Form.Check
-                                    checked={!!selected[r.key]}
-                                    onChange={(e) => setSelected((s) => ({ ...s, [r.key]: e.target.checked }))}
-                                  />
-                                </td>
-                                <td style={{ width: '22%' }}>{r.field}</td>
-                                <td style={{ width: '20%' }} className="text-danger">
-                                  {formatValue(r.value)}
-                                </td>
-                                <td className="text-white-50">
-                                  {r.why}
-                                  {!r.restrictive && (
-                                    <Badge bg="warning" text="dark" className="ms-2"
-                                           style={{ fontSize: '0.6rem' }}>loosening</Badge>
-                                  )}
-                                  {r.bundle && (
-                                    <Badge bg="dark" className="ms-2 border border-secondary text-white-50"
-                                           style={{ fontSize: '0.6rem' }}
-                                           title="These settings were measured together and are only correct together">
-                                      bundle: {r.bundle}
-                                    </Badge>
-                                  )}
-                                </td>
-                                <td style={{ width: '12%' }} title={CONFIDENCE_HELP[r.confidence]}>
-                                  {r.confidence}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </Table>
-                      </div>
-                    ))}
-
-                    {notes.length > 0 && (
-                      <>
-                        <h6 className="text-danger mt-3">Exempt from these limits</h6>
-                        <Table size="sm" variant="dark" className="small">
-                          <tbody>
-                            {notes.map((n) => (
-                              <tr key={n.key}>
-                                <td style={{ width: '25%' }} className="text-capitalize">{n.tool}</td>
-                                <td className="text-white-50">{n.why}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </Table>
-                      </>
-                    )}
-
-                    {suppressed.length > 0 && (
-                      <>
-                        <h6 className="text-danger mt-3">Deliberately not recommended</h6>
-                        <p className="text-white-50 small">
-                          The probe had a candidate value for each of these and withheld it. A
-                          withheld setting is a result, not a gap.
-                        </p>
-                        <Table size="sm" variant="dark" className="small">
-                          <tbody>
-                            {suppressed.map((s, i) => (
-                              <tr key={i}>
-                                <td style={{ width: '25%' }}>{s.field}</td>
-                                <td className="text-white-50">{s.reason}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </Table>
-                      </>
-                    )}
-
-                    {rows.length > 0 && (
-                      <Button variant="danger" size="sm" disabled={chosen.length === 0}
-                              onClick={() => setApplyStep('confirm')}>
-                        Review {chosen.length} change(s)
-                      </Button>
-                    )}
-                    <JournalTable journal={journal} onRevert={revert} />
+                    <Table size="sm" variant="dark" className="small">
+                      <tbody>
+                        {suppressed.map((s, i) => (
+                          <tr key={i}>
+                            <td style={{ width: '25%' }}>{s.field}</td>
+                            <td className="text-white-50">{s.reason}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </Table>
                   </>
                 )}
               </Tab>
@@ -584,36 +536,6 @@ const Metric = ({ label, value, note }) => (
   </div>
 );
 
-const JournalTable = ({ journal, onRevert }) => {
-  if (!journal || journal.length === 0) return null;
-  return (
-    <>
-      <h6 className="text-danger mt-4">Applied by this probe ({journal.length})</h6>
-      <Table size="sm" variant="dark" className="small align-middle">
-        <thead>
-          <tr><th>When</th><th>Tool</th><th>Setting</th><th>Was</th><th>Now</th><th /></tr>
-        </thead>
-        <tbody>
-          {journal.map((e) => (
-            <tr key={e.id}>
-              <td>{new Date(e.applied_at).toLocaleString()}</td>
-              <td>{e.tool}</td>
-              <td>{e.field}</td>
-              <td className="text-white-50">{formatValue(e.before)}</td>
-              <td className="text-danger">{formatValue(e.after)}</td>
-              <td>
-                <Button size="sm" variant="outline-secondary" onClick={() => onRevert(e.id)}>
-                  Revert
-                </Button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </Table>
-    </>
-  );
-};
-
 /* ------------------------------------------------------------------ helpers */
 
 function formatValue(v) {
@@ -624,12 +546,6 @@ function formatValue(v) {
   }
   if (typeof v === 'object') return JSON.stringify(v);
   return String(v);
-}
-
-function groupByTool(rows) {
-  const map = {};
-  rows.forEach((r) => { (map[r.tool] = map[r.tool] || []).push(r); });
-  return Object.keys(map).sort().map((t) => [t, map[t]]);
 }
 
 export default WAFProbeResultsModal;

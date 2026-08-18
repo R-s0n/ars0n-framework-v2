@@ -6,7 +6,11 @@ const { apiGet, apiPost, apiPut, apiDelete } = require('../api');
 // HTTP request that the app SENDS to the target and records the live response for (replay engine),
 // carrying cookies/session between steps. These proxy the same Go endpoints the web UI uses.
 
-const CATEGORY = z.enum(['register', 'login', 'mfa_otp', 'reset']);
+// Five, matching the DB CHECK constraint, the Go validator, the recorder and the UI. magic_link
+// was missing here, so an agent could not create a magic-link flow and could not update ANY flow
+// imported from one: the client sends the category back on every update, so the zod enum rejected
+// the request before it ever reached the API.
+const CATEGORY = z.enum(['register', 'login', 'mfa_otp', 'magic_link', 'reset']);
 
 // A recorded response body can be up to 2MB; trim it before returning to an MCP client so it
 // doesn't blow up the model's context. The full body stays available in the web UI / DB.

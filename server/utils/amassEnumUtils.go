@@ -244,7 +244,7 @@ func ExecuteAmassEnumCompanyScan(scanID string, domains []string, scopeTargetID 
 func ParseAmassEnumResults(scanID, domain, result string) ([]AmassEnumCloudDomain, []AmassEnumDNSRecord) {
 	log.Printf("[AMASS-ENUM-COMPANY] [INFO] Starting to parse results for scan %s on domain %s", scanID, domain)
 
-	var cloudDomains []AmassEnumCloudDomain
+	var cloudDomains = []AmassEnumCloudDomain{}
 	var dnsRecords []AmassEnumDNSRecord
 
 	patterns := map[string]*regexp.Regexp{
@@ -388,7 +388,7 @@ func InsertAmassEnumDomainResult(scopeTargetID, domain, scanID, rawOutput string
 func ParseAmassEnumResultsDomainCentric(scopeTargetID, domain, result string) ([]AmassEnumCloudDomain, []AmassEnumDNSRecord) {
 	log.Printf("[AMASS-ENUM-COMPANY] [INFO] Starting to parse results for domain %s", domain)
 
-	var cloudDomains []AmassEnumCloudDomain
+	var cloudDomains = []AmassEnumCloudDomain{}
 	var dnsRecords []AmassEnumDNSRecord
 
 	patterns := map[string]*regexp.Regexp{
@@ -518,7 +518,7 @@ func GetAmassEnumCompanyScansForScopeTarget(w http.ResponseWriter, r *http.Reque
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var id, scanID, domainsJSON, status string
 		var result, error, stdout, stderr, command, execTime sql.NullString
@@ -627,7 +627,7 @@ func GetAmassEnumCloudDomains(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var cloudDomains []map[string]interface{}
+	var cloudDomains = []map[string]interface{}{}
 	for rows.Next() {
 		var id, rootDomain, cloudDomain, domainType string
 		var lastScannedAt time.Time
@@ -684,7 +684,7 @@ func GetAmassEnumRawResults(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var rawResults []map[string]interface{}
+	var rawResults = []map[string]interface{}{}
 	for rows.Next() {
 		var id, domain, rawOutput string
 		var lastScannedAt time.Time

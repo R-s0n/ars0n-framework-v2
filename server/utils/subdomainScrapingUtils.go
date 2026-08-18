@@ -477,7 +477,7 @@ func GetSublist3rScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan Sublist3rScanStatus
 		var scopeTargetID string
@@ -692,7 +692,7 @@ func GetAssetfinderScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan AssetfinderScanStatus
 		var scopeTargetID string
@@ -1032,7 +1032,7 @@ func GetGauScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan GauScanStatus
 		var scopeTargetID string
@@ -1369,7 +1369,7 @@ func GetCTLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan CTLScanStatus
 		var scopeTargetID string
@@ -1584,7 +1584,7 @@ func GetSubfinderScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan SubfinderScanStatus
 		var scopeTargetID string

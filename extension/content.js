@@ -147,7 +147,18 @@ function renderState(state) {
 
   if (!state || !state.active) {
     removeRecordingIndicator();
-    if (lastConfig && lastConfig.active) sendConfigToPage({ ...lastConfig, active: false });
+    // The page hook is deliberately NOT disarmed here.
+    //
+    // This function only ever sees the manual crawl's state, but the hook serves two recorders: the
+    // crawl and a standalone auth-flow recording. Turning it off whenever the crawl was idle killed
+    // response-body capture for auth recordings within about twenty seconds of every page load,
+    // which is precisely when the interesting bodies (the token-issuing responses) arrive. The
+    // symptom was an auth recording that captured requests but almost no response bodies, with
+    // nothing anywhere reporting a problem.
+    //
+    // Arming is owned by the `hookConfig` message, which background.js computes from BOTH recorders
+    // in pageHookConfig(). That is the only thing entitled to decide, so it is the only thing that
+    // decides.
     return;
   }
 

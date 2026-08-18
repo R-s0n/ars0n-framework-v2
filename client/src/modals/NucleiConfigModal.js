@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Modal, Button, Spinner, Alert, Row, Col, Form, Badge, Tab, Tabs, Table, InputGroup, Accordion } from 'react-bootstrap';
 import { FaSearch, FaUpload, FaTrash } from 'react-icons/fa';
+import { DEFAULT_NUCLEI_TEMPLATES, DEFAULT_NUCLEI_SEVERITIES } from '../utils/nucleiDefaults';
 
 const NucleiConfigModal = ({ 
   show, 
@@ -12,8 +13,8 @@ const NucleiConfigModal = ({
   const [activeTab, setActiveTab] = useState('targets');
   const [selectedCategory, setSelectedCategory] = useState('live_web_servers');
   const [selectedTargets, setSelectedTargets] = useState(new Set());
-  const [selectedTemplates, setSelectedTemplates] = useState(new Set(['cves', 'vulnerabilities', 'exposures', 'technologies', 'misconfiguration', 'takeovers', 'network', 'dns', 'headless']));
-  const [selectedSeverities, setSelectedSeverities] = useState(new Set(['critical', 'high', 'medium', 'low', 'info']));
+  const [selectedTemplates, setSelectedTemplates] = useState(new Set(DEFAULT_NUCLEI_TEMPLATES));
+  const [selectedSeverities, setSelectedSeverities] = useState(new Set(DEFAULT_NUCLEI_SEVERITIES));
   const [attackSurfaceAssets, setAttackSurfaceAssets] = useState([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -197,9 +198,6 @@ const NucleiConfigModal = ({
     }
   }, [allTemplates.length]);
 
-  const ALL_TEMPLATE_CATEGORIES = ['cves', 'vulnerabilities', 'exposures', 'technologies', 'misconfiguration', 'takeovers', 'network', 'dns', 'headless'];
-  const ALL_SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'];
-
   const loadSavedConfig = async () => {
     if (!activeTarget?.id) return;
     try {
@@ -212,12 +210,12 @@ const NucleiConfigModal = ({
         if (config.templates && Array.isArray(config.templates) && config.templates.length > 0) {
           setSelectedTemplates(new Set(config.templates));
         } else {
-          setSelectedTemplates(new Set(ALL_TEMPLATE_CATEGORIES));
+          setSelectedTemplates(new Set(DEFAULT_NUCLEI_TEMPLATES));
         }
         if (config.severities && Array.isArray(config.severities) && config.severities.length > 0) {
           setSelectedSeverities(new Set(config.severities));
         } else {
-          setSelectedSeverities(new Set(ALL_SEVERITIES));
+          setSelectedSeverities(new Set(DEFAULT_NUCLEI_SEVERITIES));
         }
         if (config.uploaded_templates && Array.isArray(config.uploaded_templates)) {
           setUploadedTemplates(config.uploaded_templates);
@@ -237,7 +235,7 @@ const NucleiConfigModal = ({
       }
     } catch (err) {
       console.error('Error loading Nuclei config:', err);
-      setSelectedTemplates(new Set(ALL_TEMPLATE_CATEGORIES));
+      setSelectedTemplates(new Set(DEFAULT_NUCLEI_TEMPLATES));
     }
   };
 

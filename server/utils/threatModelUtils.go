@@ -30,7 +30,7 @@ func GetThreatModel(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var threats []map[string]interface{}
+	var threats = []map[string]interface{}{}
 	for rows.Next() {
 		var threat struct {
 			ID                        string    `json:"id"`

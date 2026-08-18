@@ -1393,7 +1393,7 @@ func GetMetaDataScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan MetaDataStatus
 		err := rows.Scan(
@@ -1898,7 +1898,7 @@ func GetCompanyMetaDataScansForIPPortScan(w http.ResponseWriter, r *http.Request
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan struct {
 			ScanID        string         `json:"scan_id"`
@@ -2002,7 +2002,7 @@ func GetCompanyMetaDataResults(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var targetURLs []map[string]interface{}
+	var targetURLs = []map[string]interface{}{}
 	for rows.Next() {
 		var (
 			id                  string

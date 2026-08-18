@@ -56,6 +56,12 @@ func main() {
 
 	createTables()
 
+	// Finish the endpoint_key migration for anyone upgrading. Adding the column was not enough:
+	// ON CONFLICT cannot match a NULL key, so the first Consolidate after the upgrade inserted a
+	// second copy of the whole corpus and orphaned the first. Idempotent, soft-delete only, and it
+	// merges operator-owned state onto the surviving row before retiring a duplicate.
+	utils.BackfillEndpointKeys()
+
 	r := mux.NewRouter()
 
 	// Apply CORS middleware first
@@ -121,6 +127,44 @@ func main() {
 	r.HandleFunc("/scopetarget/{id}/scans/subfinder", utils.GetSubfinderScansForScopeTarget).Methods("GET", "OPTIONS")
 	r.HandleFunc("/consolidate-subdomains/{id}", utils.HandleConsolidateSubdomains).Methods("GET", "OPTIONS")
 	r.HandleFunc("/consolidated-subdomains/{id}", utils.GetConsolidatedSubdomains).Methods("GET", "OPTIONS")
+	// Every target's metrics in one response, with the per-type column definitions alongside them.
+	r.HandleFunc("/scope-target-metrics", utils.GetScopeTargetMetrics).Methods("GET", "OPTIONS")
+
+	// Attack vectors: one request carrying user-controlled input the application processes.
+	r.HandleFunc("/attack-vectors/{scope_target_id}/consolidate", utils.ConsolidateAttackVectors).Methods("POST", "OPTIONS")
+	r.HandleFunc("/attack-vectors/{scope_target_id}/summary", utils.GetAttackVectorSummary).Methods("GET", "OPTIONS")
+	r.HandleFunc("/attack-vectors/item/{id}/request", utils.GetAttackVectorRequest).Methods("GET", "OPTIONS")
+	r.HandleFunc("/attack-vectors/item/{id}/notes", utils.SetAttackVectorNotes).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/attack-vectors/item/{id}", utils.UpdateAttackVector).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/attack-vectors/item/{id}", utils.DeleteAttackVector).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/attack-vectors/{scope_target_id}", utils.GetAttackVectors).Methods("GET", "OPTIONS")
+	r.HandleFunc("/attack-vectors/{scope_target_id}", utils.CreateAttackVector).Methods("POST", "OPTIONS")
+
+	// The vector-testing sections: XSS, SQL injection, and the ten to come. One handler set,
+	// registered once per section, so a new section is a prefix here rather than a second copy of the
+	// settings store, the runner and the API.
+	//
+	// /{category}/tools and /{category}/finding/... go FIRST, or "tools" and "finding" are swallowed
+	// by the {scope_target_id} pattern and every one of those calls 404s against a target that does
+	// not exist.
+	for _, category := range []string{"xss", "sqli", "cmdi", "redirect-ssrf", "lfi", "cache", "smuggling", "access-bypass"} {
+		prefix := "/" + category
+		r.HandleFunc(prefix+"/tools", utils.GetVectorTools(category)).Methods("GET", "OPTIONS")
+		r.HandleFunc(prefix+"/{scope_target_id}/section-settings", utils.GetVectorSectionSettings(category)).Methods("GET", "OPTIONS")
+		r.HandleFunc(prefix+"/{scope_target_id}/section-settings", utils.SaveVectorSectionSettings(category)).Methods("POST", "OPTIONS")
+		r.HandleFunc(prefix+"/finding/{id}/triage", utils.SetVectorFindingTriage).Methods("POST", "OPTIONS")
+		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/settings", utils.GetVectorSettings).Methods("GET", "OPTIONS")
+		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/settings", utils.SaveVectorSettings).Methods("POST", "OPTIONS")
+		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/scan", utils.RunVectorScan).Methods("POST", "OPTIONS")
+		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/status", utils.GetVectorScanStatus).Methods("GET", "OPTIONS")
+		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/results", utils.GetVectorResults).Methods("GET", "OPTIONS")
+	}
+	// The access control bypass section scans URLs that already returned 401 or 403, not attack
+	// vectors, so it has its own target list with its own consolidate/review/prune cycle.
+	r.HandleFunc("/access-bypass/{scope_target_id}/targets", utils.GetBypassTargets).Methods("GET", "OPTIONS")
+	r.HandleFunc("/access-bypass/{scope_target_id}/targets/consolidate", utils.RunBypassTargetConsolidation).Methods("POST", "OPTIONS")
+	r.HandleFunc("/access-bypass/target/{id}", utils.DeleteBypassTarget).Methods("DELETE", "OPTIONS")
+
 	r.HandleFunc("/consolidate-company-domains/{id}", utils.HandleConsolidateCompanyDomains).Methods("GET", "OPTIONS")
 	r.HandleFunc("/consolidated-company-domains/{id}", utils.GetConsolidatedCompanyDomains).Methods("GET", "OPTIONS")
 	r.HandleFunc("/consolidate-network-ranges/{id}", utils.HandleConsolidateNetworkRanges).Methods("GET", "OPTIONS")
@@ -331,9 +375,11 @@ func main() {
 	r.HandleFunc("/waf-probe/config/{scope_target_id}", utils.SaveWAFProbeConfig).Methods("POST", "OPTIONS")
 	r.HandleFunc("/waf-probe/dry-run/{scope_target_id}", utils.DryRunWAFProbe).Methods("POST", "OPTIONS")
 	r.HandleFunc("/waf-probe/abort/{scan_id}", utils.AbortWAFProbeScan).Methods("POST", "OPTIONS")
-	r.HandleFunc("/waf-probe/apply-journal/{scope_target_id}", utils.GetWAFProbeApplyJournal).Methods("GET", "OPTIONS")
-	r.HandleFunc("/waf-probe/revert/{journal_id}", utils.RevertWAFProbeApply).Methods("POST", "OPTIONS")
-	r.HandleFunc("/waf-probe/apply/{scope_target_id}/{scan_id}", utils.ApplyWAFProbeRecommendations).Methods("POST", "OPTIONS")
+	// Recommendations are read only. The probe measures, the operator decides. An earlier version
+	// wrote these numbers into the tool configs automatically, and when a translation was wrong the
+	// failure was invisible: the journal said applied, the tool ran unpaced.
+	r.HandleFunc("/waf-probe/recommendations/{scope_target_id}", utils.GetWAFProbeRecommendations).Methods("GET", "OPTIONS")
+	r.HandleFunc("/waf-probe/recommendations/{scope_target_id}/{scan_id}", utils.GetWAFProbeRecommendations).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/ffuf-config/{scope_target_id}", utils.SaveFFUFConfig).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ffuf-config/{scope_target_id}", utils.GetFFUFConfig).Methods("GET", "OPTIONS")
@@ -356,13 +402,6 @@ func main() {
 	r.HandleFunc("/gospider-url-config/{scope_target_id}", utils.GetGoSpiderURLConfig).Methods("GET", "OPTIONS")
 	r.HandleFunc("/linkfinder-url-config/{scope_target_id}", utils.SaveLinkFinderURLConfig).Methods("POST", "OPTIONS")
 	r.HandleFunc("/linkfinder-url-config/{scope_target_id}", utils.GetLinkFinderURLConfig).Methods("GET", "OPTIONS")
-
-	r.HandleFunc("/parameth/run", utils.RunParamethScan).Methods("POST", "OPTIONS")
-	r.HandleFunc("/parameth/status/{scan_id}", utils.GetParamethScanStatus).Methods("GET", "OPTIONS")
-	r.HandleFunc("/scopetarget/{id}/scans/parameth", utils.GetParamethScansForScopeTarget).Methods("GET", "OPTIONS")
-	r.HandleFunc("/parameth/results/{scan_id}", utils.GetParamethScanResults).Methods("GET", "OPTIONS")
-	r.HandleFunc("/parameth-config/{scope_target_id}", utils.SaveParamethConfig).Methods("POST", "OPTIONS")
-	r.HandleFunc("/parameth-config/{scope_target_id}", utils.GetParamethConfig).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/x8/run", utils.RunX8Scan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/x8/status/{scan_id}", utils.GetX8ScanStatus).Methods("GET", "OPTIONS")
@@ -392,6 +431,34 @@ func main() {
 	r.HandleFunc("/security-controls/notes/{note_id}", utils.DeleteSecurityControlNote).Methods("DELETE", "OPTIONS")
 
 	// Auth Flows — document & replay register/login/mfa_otp/reset HTTP request/response flows.
+	// Auth flow recording, driven by the browser extension.
+	//
+	// The literal paths are registered before the {recording_id} patterns because gorilla/mux
+	// matches in declaration order: "/auth-recording/start" would otherwise be swallowed by
+	// "/auth-recording/{recording_id}" and every start would look like a missing recording.
+	r.HandleFunc("/auth-recording/start", utils.StartAuthRecording).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth-recording/capture", utils.CaptureAuthRecordingRequests).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth-recording/heartbeat", utils.HeartbeatAuthRecording).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth-recording/stop", utils.StopAuthRecording).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth-recording/target/{scope_target_id}", utils.GetAuthRecordingsForTarget).Methods("GET", "OPTIONS")
+	r.HandleFunc("/auth-recording/active/{scope_target_id}", utils.GetActiveAuthRecording).Methods("GET", "OPTIONS")
+	r.HandleFunc("/auth-recording/{recording_id}/requests", utils.GetAuthRecordingRequests).Methods("GET", "OPTIONS")
+	r.HandleFunc("/auth-recording/{recording_id}/requests", utils.UpdateAuthRecordedRequests).Methods("PATCH", "OPTIONS")
+	r.HandleFunc("/auth-recording/{recording_id}/import", utils.ImportAuthRecording).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth-recording/{recording_id}", utils.DeleteAuthRecording).Methods("DELETE", "OPTIONS")
+
+	// Session tokens. Same ordering rule: /session-tokens/target/... is a literal segment and has
+	// to beat /session-tokens/{id}.
+	r.HandleFunc("/session-tokens/target/{scope_target_id}", utils.GetSessionTokens).Methods("GET", "OPTIONS")
+	r.HandleFunc("/session-tokens/target/{scope_target_id}", utils.CreateSessionToken).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-tokens/target/{scope_target_id}/parse", utils.ParseSessionTokens).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-tokens/{id}/activate", utils.ActivateSessionToken).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-tokens/{id}/validate", utils.ValidateSessionToken).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-tokens/{id}/refresh", utils.RefreshSessionToken).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-tokens/{id}/events", utils.GetSessionTokenEvents).Methods("GET", "OPTIONS")
+	r.HandleFunc("/session-tokens/{id}", utils.UpdateSessionToken).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/session-tokens/{id}", utils.DeleteSessionToken).Methods("DELETE", "OPTIONS")
+
 	r.HandleFunc("/auth-flows/{scope_target_id}", utils.GetAuthFlows).Methods("GET", "OPTIONS")
 	r.HandleFunc("/auth-flows/{scope_target_id}", utils.CreateAuthFlow).Methods("POST", "OPTIONS")
 	r.HandleFunc("/auth-flows/flow/{flow_id}", utils.UpdateAuthFlow).Methods("PUT", "OPTIONS")
@@ -409,6 +476,49 @@ func main() {
 	r.HandleFunc("/authz/client-identifiers/{scope_target_id}", utils.CreateClientIdentifier).Methods("POST", "OPTIONS")
 	r.HandleFunc("/authz/client-identifiers/id/{id}", utils.DeleteClientIdentifier).Methods("DELETE", "OPTIONS")
 	r.HandleFunc("/authz/client-identifiers/{scope_target_id}/auto-detect", utils.AutoDetectClientIdentifiers).Methods("POST", "OPTIONS")
+
+	// Authorization modelling. Four sections, each recording the rules the application claims to
+	// enforce so later testing knows what should have been refused.
+	//
+	// Literal path segments are registered before the {id} patterns throughout, because gorilla/mux
+	// matches in declaration order and "/authz/policy/entity/..." would otherwise be swallowed by
+	// "/authz/policy/{scope_target_id}".
+	r.HandleFunc("/authz/summary/{scope_target_id}", utils.GetAuthzSummary).Methods("GET", "OPTIONS")
+
+	r.HandleFunc("/authz/identity-patterns/id/{id}/replay", utils.ReplayAuthzIdentityPattern).Methods("POST", "OPTIONS")
+	r.HandleFunc("/authz/identity-patterns/id/{id}", utils.UpdateAuthzIdentityPattern).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/authz/identity-patterns/id/{id}", utils.DeleteAuthzIdentityPattern).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/authz/identity-patterns/{scope_target_id}", utils.GetAuthzIdentityPatterns).Methods("GET", "OPTIONS")
+	r.HandleFunc("/authz/identity-patterns/{scope_target_id}", utils.CreateAuthzIdentityPattern).Methods("POST", "OPTIONS")
+
+	r.HandleFunc("/authz/policy/entity/{id}/permissions", utils.CreateAuthzPolicyPermission).Methods("POST", "OPTIONS")
+	r.HandleFunc("/authz/policy/entity/{id}/instances", utils.CreateAuthzPolicyInstance).Methods("POST", "OPTIONS")
+	r.HandleFunc("/authz/policy/entity/{id}", utils.UpdateAuthzPolicyEntity).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/authz/policy/entity/{id}", utils.DeleteAuthzPolicyEntity).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/authz/policy/permission/{id}", utils.UpdateAuthzPolicyPermission).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/authz/policy/permission/{id}", utils.DeleteAuthzPolicyPermission).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/authz/policy/instance/{id}/settings", utils.SetAuthzPolicyInstanceSettings).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/authz/policy/instance/{id}", utils.UpdateAuthzPolicyInstance).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/authz/policy/instance/{id}", utils.DeleteAuthzPolicyInstance).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/authz/policy/{scope_target_id}", utils.GetAuthzPolicy).Methods("GET", "OPTIONS")
+	r.HandleFunc("/authz/policy/{scope_target_id}", utils.CreateAuthzPolicyEntity).Methods("POST", "OPTIONS")
+
+	r.HandleFunc("/authz/rbac/role/{id}", utils.UpdateAuthzRole).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/authz/rbac/role/{id}", utils.DeleteAuthzRole).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/authz/rbac/action/{id}", utils.UpdateAuthzAction).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/authz/rbac/action/{id}", utils.DeleteAuthzAction).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/authz/rbac/{scope_target_id}/roles", utils.CreateAuthzRole).Methods("POST", "OPTIONS")
+	r.HandleFunc("/authz/rbac/{scope_target_id}/actions", utils.CreateAuthzAction).Methods("POST", "OPTIONS")
+	r.HandleFunc("/authz/rbac/{scope_target_id}/matrix", utils.UpdateAuthzMatrix).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/authz/rbac/{scope_target_id}", utils.GetAuthzRBAC).Methods("GET", "OPTIONS")
+
+	r.HandleFunc("/authz/dac/object/{id}/levels", utils.CreateAuthzDACLevel).Methods("POST", "OPTIONS")
+	r.HandleFunc("/authz/dac/object/{id}", utils.UpdateAuthzDACObject).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/authz/dac/object/{id}", utils.DeleteAuthzDACObject).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/authz/dac/level/{id}", utils.UpdateAuthzDACLevel).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/authz/dac/level/{id}", utils.DeleteAuthzDACLevel).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/authz/dac/{scope_target_id}", utils.GetAuthzDAC).Methods("GET", "OPTIONS")
+	r.HandleFunc("/authz/dac/{scope_target_id}", utils.CreateAuthzDACObject).Methods("POST", "OPTIONS")
 
 	r.HandleFunc("/threat-model/{scope_target_id}", utils.GetThreatModel).Methods("GET", "OPTIONS")
 	r.HandleFunc("/threat-model/{scope_target_id}", utils.CreateThreatModel).Methods("POST", "OPTIONS")
@@ -428,12 +538,78 @@ func main() {
 	r.HandleFunc("/manual-crawl/captures/target/{scope_target_id}", utils.GetManualCrawlCapturesForTarget).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/captures/{session_id}", utils.GetManualCrawlCaptures).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/endpoints/{scope_target_id}", utils.GetManualCrawlEndpoints).Methods("GET", "OPTIONS")
+	// Promote before the bare host route: gorilla matches in registration order, and the wildcard
+	// would otherwise swallow /promote.
+	// The valid-endpoint corpus behind the parameter tools, and which of them each tool runs.
+	r.HandleFunc("/param-enum/{scope_target_id}/targets", utils.GetParamEnumTargets).Methods("GET", "OPTIONS")
+	r.HandleFunc("/param-enum/{scope_target_id}/preview", utils.GetParamEnumPreview).Methods("GET", "OPTIONS")
 
-	r.HandleFunc("/consolidated-endpoints/{scope_target_id}/consolidate", utils.ConsolidateURLEndpoints).Methods("POST", "OPTIONS")
+	// The fuzz composer. Seeding turns a discovered endpoint into the raw HTTP request text that is
+	// the composer's authoritative artifact.
+	// Literal segments before the {step_id} wildcard, or gorilla matches the wildcard first.
+	r.HandleFunc("/fuzz/{scope_target_id}/endpoints", utils.ListFuzzSeedEndpoints).Methods("GET", "OPTIONS")
+	r.HandleFunc("/fuzz/{scope_target_id}/flow", utils.GetFuzzFlow).Methods("GET", "OPTIONS")
+	r.HandleFunc("/fuzz/{scope_target_id}/steps", utils.CreateFuzzStep).Methods("POST", "OPTIONS")
+	r.HandleFunc("/fuzz/{scope_target_id}/steps/reorder", utils.ReorderFuzzSteps).Methods("POST", "OPTIONS")
+	r.HandleFunc("/fuzz/seed/{endpoint_id}", utils.GetFuzzSeed).Methods("GET", "OPTIONS")
+	r.HandleFunc("/fuzz/steps/{step_id}/preview", utils.PreviewFuzzStep).Methods("GET", "OPTIONS")
+	// The option contract, served so the UI and the MCP tool cannot drift from what the composer reads.
+	r.HandleFunc("/fuzz/option-reference", utils.GetFuzzOptionReference).Methods("GET", "OPTIONS")
+	// Flow-wide ffuf settings, the same store the Settings modal and manage_fuzz both read and write.
+	r.HandleFunc("/fuzz/{scope_target_id}/settings", utils.GetFuzzSettings).Methods("GET", "OPTIONS")
+	r.HandleFunc("/fuzz/{scope_target_id}/settings", utils.SaveFuzzSettings).Methods("POST", "OPTIONS")
+	r.HandleFunc("/fuzz/{scope_target_id}/run", utils.RunFuzzFlow).Methods("POST", "OPTIONS")
+	// What the flow is doing right now, so a card can show progress it did not start itself.
+	r.HandleFunc("/fuzz/{scope_target_id}/latest-run", utils.GetLatestFuzzRun).Methods("GET", "OPTIONS")
+	r.HandleFunc("/fuzz/{scope_target_id}/findings", utils.GetFuzzFindings).Methods("GET", "OPTIONS")
+	// One finding expanded: the request that produced it, with the payload's position marked, plus a
+	// curl to replay it. A table row cannot show where in a request a payload landed.
+	// Triage takes a list, because dismissing a page of noise one row at a time is a workflow nobody
+	// completes. The states route serves the closed vocabulary so no caller invents a fourth.
+	//
+	// Registered BEFORE /fuzz/findings/{finding_id}: mux matches in order, and the wildcard route
+	// also accepts OPTIONS, so it would otherwise shadow the preflight for this literal path.
+	r.HandleFunc("/fuzz/findings/triage", utils.SetFuzzTriage).Methods("POST", "OPTIONS")
+	r.HandleFunc("/fuzz/triage-states", utils.GetFuzzTriageStates).Methods("GET", "OPTIONS")
+	r.HandleFunc("/fuzz/findings/{finding_id}", utils.GetFuzzFindingDetail).Methods("GET", "OPTIONS")
+	r.HandleFunc("/fuzz/runs/{run_id}/cancel", utils.CancelFuzzRun).Methods("POST", "OPTIONS")
+	r.HandleFunc("/fuzz/runs/{run_id}", utils.GetFuzzRunStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/fuzz/steps/{step_id}", utils.UpdateFuzzStep).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/fuzz/steps/{step_id}", utils.DeleteFuzzStep).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/param-enum/{scope_target_id}/selection", utils.SetParamEnumSelection).Methods("POST", "OPTIONS")
+
+	r.HandleFunc("/manual-crawl/hosts/{scope_target_id}/promote", utils.PromoteManualCrawlHosts).Methods("POST", "OPTIONS")
+	r.HandleFunc("/manual-crawl/hosts/{scope_target_id}", utils.GetManualCrawlHosts).Methods("GET", "OPTIONS")
+	r.HandleFunc("/manual-crawl/hosts/{scope_target_id}", utils.SetManualCrawlHostScope).Methods("POST", "OPTIONS")
+
+	// Consolidate is asynchronous now: folding tens of thousands of archive rows inside an HTTP
+	// handler ties up the connection until the client gives up.
+	r.HandleFunc("/consolidated-endpoints/{scope_target_id}/consolidate", utils.RunConsolidation).Methods("POST", "OPTIONS")
+	r.HandleFunc("/consolidated-endpoints/{scope_target_id}/status/{scan_id}", utils.GetConsolidationStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/consolidated-endpoints/{scope_target_id}", utils.GetConsolidatedURLEndpoints).Methods("GET", "OPTIONS")
+
+	// Validate: confirm which consolidated endpoints address a distinct resource that exists.
+	r.HandleFunc("/endpoint-validation/{scope_target_id}", utils.RunEndpointValidation).Methods("POST", "OPTIONS")
+	r.HandleFunc("/endpoint-validation/{scope_target_id}/status/{scan_id}", utils.GetValidationStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/endpoint-validation/{scope_target_id}/latest", utils.GetLatestValidation).Methods("GET", "OPTIONS")
+
+	// Manage Endpoints mutations.
+	r.HandleFunc("/consolidated-endpoints/{scope_target_id}/add", utils.AddManualEndpoint).Methods("POST", "OPTIONS")
+	r.HandleFunc("/consolidated-endpoints/{scope_target_id}/delete", utils.DeleteEndpoints).Methods("POST", "OPTIONS")
+	r.HandleFunc("/consolidated-endpoints/{scope_target_id}/restore", utils.RestoreEndpoints).Methods("POST", "OPTIONS")
+	r.HandleFunc("/consolidated-endpoints/{scope_target_id}/override", utils.OverrideEndpointVerdict).Methods("POST", "OPTIONS")
+	// Re-runnable repair for corpora that predate endpoint_key. Also runs once at startup.
+	r.HandleFunc("/consolidated-endpoints/{scope_target_id}/repair-keys", utils.RepairEndpointKeysHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/endpoint-investigation/{scope_target_id}", utils.RunEndpointInvestigation).Methods("POST", "OPTIONS")
 	r.HandleFunc("/endpoint-investigation/{scope_target_id}/status/{scan_id}", utils.GetEndpointInvestigationStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/endpoint-investigation/{scope_target_id}/results", utils.GetEndpointInvestigationResults).Methods("GET", "OPTIONS")
+
+	// The combined run the Investigate button drives: validate, then investigate whatever validation
+	// did not rule out. The two routes above stay for API callers that want one phase on its own.
+	r.HandleFunc("/endpoint-scan/{scope_target_id}", utils.RunEndpointScan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/endpoint-scan/{scope_target_id}/status/{run_id}", utils.GetEndpointScanStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/endpoint-scan/{scope_target_id}/latest", utils.GetEndpointScanLatest).Methods("GET", "OPTIONS")
+	r.HandleFunc("/endpoint-scan/{scope_target_id}/results", utils.GetEndpointScanResults).Methods("GET", "OPTIONS")
 
 	log.Println("API server started on :8443")
 	http.ListenAndServe(":8443", r)
@@ -3569,12 +3745,10 @@ func getNucleiConfig(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			defaultTemplates := []string{"cves", "vulnerabilities", "exposures", "technologies", "misconfiguration", "takeovers", "network", "dns", "headless"}
-			defaultSeverities := []string{"critical", "high", "medium", "low", "info"}
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"targets":            []string{},
-				"templates":          defaultTemplates,
-				"severities":         defaultSeverities,
+				"templates":          utils.DefaultNucleiTemplates,
+				"severities":         utils.DefaultNucleiSeverities,
 				"uploaded_templates": []interface{}{},
 				"created_at":         nil,
 				"target_mode":        "attack_surface",

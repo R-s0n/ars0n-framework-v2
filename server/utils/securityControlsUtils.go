@@ -28,7 +28,7 @@ func GetSecurityControlsNotes(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var notes []map[string]interface{}
+	var notes = []map[string]interface{}{}
 	for rows.Next() {
 		var note struct {
 			ID          string    `json:"id"`

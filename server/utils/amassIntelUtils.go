@@ -285,7 +285,7 @@ func GetAmassIntelScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan AmassIntelScanStatus
 		err := rows.Scan(
@@ -349,7 +349,7 @@ func GetIntelNetworkRanges(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var networkRanges []IntelNetworkRangeResponse
+	var networkRanges = []IntelNetworkRangeResponse{}
 	for rows.Next() {
 		var networkRange IntelNetworkRangeResponse
 		if err := rows.Scan(&networkRange.ID, &networkRange.CIDRBlock, &networkRange.ASN, &networkRange.Organization, &networkRange.Description, &networkRange.Country, &networkRange.ScanID); err != nil {
@@ -385,7 +385,7 @@ func GetIntelASNData(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var asnData []IntelASNResponse
+	var asnData = []IntelASNResponse{}
 	for rows.Next() {
 		var asn IntelASNResponse
 		if err := rows.Scan(&asn.ASNNumber, &asn.Organization, &asn.Description, &asn.Country, &asn.ScanID); err != nil {

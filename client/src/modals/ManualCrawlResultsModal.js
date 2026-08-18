@@ -12,12 +12,18 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
   // Direct = the scope target's own host. Adjacent = any other in-scope host, which is where an
   // application's API normally lives, so it gets its own view rather than being mixed in.
   const [scopeFilter, setScopeFilter] = useState('all');
+  // The hosts this crawl observed, and what the framework is allowed to do with each.
+  const [hosts, setHosts] = useState([]);
+  const [scopeDescription, setScopeDescription] = useState('');
+  const [hostsBusy, setHostsBusy] = useState(false);
+  const [hostNotice, setHostNotice] = useState('');
 
   useEffect(() => {
     if (show && scopeTargetId) {
       loadSessions();
       loadAllSessions();
       loadAllCaptures();
+      loadHosts();
     }
   }, [show, scopeTargetId]);
 
@@ -25,6 +31,74 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
     loadSessions();
     loadAllSessions();
     loadAllCaptures();
+    loadHosts();
+  };
+
+  const loadHosts = async () => {
+    try {
+      const response = await fetch(`/api/manual-crawl/hosts/${scopeTargetId}`);
+      if (!response.ok) return;
+      const data = await response.json();
+      setHosts(data.hosts || []);
+      setScopeDescription(data.scope || '');
+    } catch (err) {
+      console.error('Error loading crawl hosts:', err);
+    }
+  };
+
+  // Both host actions reload rather than patching local state, because the scope description the
+  // header shows is computed server-side and would otherwise disagree with the rows under it.
+  const setHostScope = async (hostList, inScope) => {
+    if (!hostList.length) return;
+    setHostsBusy(true);
+    setHostNotice('');
+    try {
+      const response = await fetch(`/api/manual-crawl/hosts/${scopeTargetId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hosts: hostList, in_scope: inScope }),
+      });
+      if (!response.ok) {
+        setError('Failed to update scope');
+        return;
+      }
+      await loadHosts();
+      setHostNotice(`${hostList.length} host${hostList.length === 1 ? '' : 's'} ${
+        inScope ? 'included in' : 'excluded from'} scope.`);
+    } catch (err) {
+      setError('Error updating scope: ' + err.message);
+    } finally {
+      setHostsBusy(false);
+    }
+  };
+
+  const promoteHosts = async (hostList) => {
+    if (!hostList.length) return;
+    setHostsBusy(true);
+    setHostNotice('');
+    try {
+      const response = await fetch(`/api/manual-crawl/hosts/${scopeTargetId}/promote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hosts: hostList }),
+      });
+      if (!response.ok) {
+        setError('Failed to add scope targets');
+        return;
+      }
+      const data = await response.json();
+      await loadHosts();
+      const parts = [];
+      if (data.created_count) parts.push(`${data.created_count} URL target${data.created_count === 1 ? '' : 's'} added`);
+      if ((data.skipped || []).length) parts.push(`${data.skipped.length} already existed`);
+      const failedCount = Object.keys(data.failed || {}).length;
+      if (failedCount) parts.push(`${failedCount} failed`);
+      setHostNotice(parts.join(', ') || 'Nothing to add.');
+    } catch (err) {
+      setError('Error adding scope targets: ' + err.message);
+    } finally {
+      setHostsBusy(false);
+    }
   };
 
   const loadSessions = async () => {
@@ -169,28 +243,25 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
 
     if (status === 'active') {
       return isLive
-        ? <Badge bg="success">recording</Badge>
-        : <Badge bg="warning" text="dark">stalled</Badge>;
+        ? <Badge bg="dark" className="border border-secondary text-light">recording</Badge>
+        : <Badge bg="dark" className="border border-secondary text-white-50">stalled</Badge>;
     }
-
-    const variants = {
-      'completed': 'info',
-      'abandoned': 'warning',
-      'failed': 'danger'
-    };
-    return <Badge bg={variants[status] || 'secondary'}>{status}</Badge>;
+    return (
+      <Badge bg="dark" className={`border ${status === 'failed'
+        ? 'border-danger text-danger' : 'border-secondary text-white-50'}`}>
+        {status}
+      </Badge>
+    );
   };
 
-  const getMethodBadge = (method) => {
-    const variants = {
-      'GET': 'primary',
-      'POST': 'success',
-      'PUT': 'warning',
-      'DELETE': 'danger',
-      'PATCH': 'info'
-    };
-    return <Badge bg={variants[method] || 'secondary'}>{method}</Badge>;
-  };
+  // One palette for the whole modal: dark chips with a neutral outline, and the red accent reserved
+  // for the things that actually need attention. A per-verb colour wheel made every row shout.
+  const getMethodBadge = (method) => (
+    <Badge bg="dark" className={`border ${method && method !== 'GET'
+      ? 'border-danger text-danger' : 'border-secondary text-light'}`}>
+      {method}
+    </Badge>
+  );
 
   const buildRawRequest = (capture) => {
     let raw = `${capture.method} ${new URL(capture.url).pathname}${new URL(capture.url).search} HTTP/1.1\n`;
@@ -311,6 +382,15 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
     return acc;
   }, {});
 
+  // Adjacent hosts that do not have a URL target yet, and hosts currently outside the scan
+  // boundary. Both drive the bulk buttons, so they are derived once rather than inline.
+  const promotableHosts = hosts
+    .filter((h) => !h.is_direct && !h.existing_target_id)
+    .map((h) => h.host);
+  const excludedHosts = hosts
+    .filter((h) => !h.within_target_domain && !h.in_scope)
+    .map((h) => h.host);
+
   const SOURCE_LABELS = {
     webrequest: { label: 'network', variant: 'secondary', title: 'chrome.webRequest: headers, status, cookies' },
     hook: { label: 'page hook', variant: 'info', title: 'Page fetch/XHR hook: request and response bodies' },
@@ -318,7 +398,7 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
   };
 
   return (
-    <Modal show={show} onHide={onHide} size="xl" fullscreen="lg-down">
+    <Modal show={show} onHide={onHide} fullscreen data-bs-theme="dark">
       <style>
         {`
           .accordion-button {
@@ -367,7 +447,7 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
           Manual Crawling Results
         </Modal.Title>
       </Modal.Header>
-      <Modal.Body className="bg-dark text-white" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+      <Modal.Body className="bg-dark text-white" style={{ overflowY: 'auto' }}>
         {error && (
           <Alert variant="danger" onClose={() => setError('')} dismissible>
             {error}
@@ -451,12 +531,12 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
               </div>
             ) : captures.length === 0 ? (
               <>
-                <Alert variant="info">
+                <Alert variant="dark" className="border border-secondary text-light">
                   <i className="bi bi-info-circle me-2"></i>
                   No endpoints captured yet. Start the Chrome extension and begin capturing to see results here.
                 </Alert>
                 {allSessions.length > 0 && (
-                  <Alert variant="warning">
+                  <Alert variant="dark" className="border border-secondary text-light">
                     <strong><i className="bi bi-exclamation-triangle me-2"></i>Found {allSessions.length} session(s) for other targets:</strong>
                     <ul className="mt-2 mb-0 small">
                       {allSessions.map(s => (
@@ -472,7 +552,7 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
             ) : (
               <Accordion>
                 {visibleCaptures.length === 0 && (
-                  <Alert variant="secondary" className="py-3">
+                  <Alert variant="dark" className="py-3 border border-secondary text-light">
                     {scopeFilter === 'adjacent'
                       ? 'No adjacent endpoints. Every captured request went to the target host itself. If the application calls an API on another domain, add that host in the extension popup under Scope and record again.'
                       : 'No direct endpoints. Every captured request went to another in-scope host.'}
@@ -490,44 +570,44 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                         <div className="d-flex align-items-center flex-grow-1">
                           {getMethodBadge(capture.method)}
                           <Badge
-                            bg="danger"
-                            className="ms-2"
-                            style={{ opacity: capture.is_direct ? 1 : 0.6, fontSize: '0.65rem' }}
+                            bg="dark"
+                            className="ms-2 border border-secondary text-white-50"
+                            style={{ fontSize: '0.65rem' }}
                             title={capture.is_direct
                               ? "On the scope target's own host"
-                              : 'On another in-scope host'}
+                              : 'On another host this application contacted'}
                           >
                             {capture.is_direct ? 'Direct' : 'Adjacent'}
                           </Badge>
                           {/* The host is what distinguishes one adjacent endpoint from another, so
                               a bare path would be ambiguous here. */}
                           {!capture.is_direct && (
-                            <span className="text-warning ms-2" style={{ fontSize: '0.75rem' }}>
+                            <span className="text-white-50 ms-2" style={{ fontSize: '0.75rem' }}>
                               {hostOf(capture)}
                             </span>
                           )}
-                          <code className="text-info ms-2" style={{ fontSize: '0.9rem' }}>
+                          <code className="text-light ms-2" style={{ fontSize: '0.9rem' }}>
                             {capture.endpoint}
                           </code>
                           {capture.get_params && Object.keys(capture.get_params).length > 0 && (
-                            <Badge bg="primary" className="ms-2" style={{ fontSize: '0.7rem' }}>
+                            <Badge bg="dark" className="ms-2 border border-secondary text-light" style={{ fontSize: '0.7rem' }}>
                               ?{Object.keys(capture.get_params).join(', ')}
                             </Badge>
                           )}
                           {capture.post_params && Object.keys(capture.post_params).length > 0 && (
-                            <Badge bg="success" className="ms-2" style={{ fontSize: '0.7rem' }}>
+                            <Badge bg="dark" className="ms-2 border border-secondary text-light" style={{ fontSize: '0.7rem' }}>
                               body: {Object.keys(capture.post_params).join(', ')}
                             </Badge>
                           )}
                           {!capture.post_params && capture.post_data && (
-                            <Badge bg="warning" className="ms-2" style={{ fontSize: '0.7rem' }}>
+                            <Badge bg="dark" className="ms-2 border border-secondary text-light" style={{ fontSize: '0.7rem' }}>
                               body: {capture.body_type || 'raw'}
                             </Badge>
                           )}
                         </div>
                         <div className="d-flex align-items-center">
                           {capture.response_body && (
-                            <Badge bg="info" className="me-2" style={{ fontSize: '0.65rem' }} title="Response body captured">
+                            <Badge bg="dark" className="me-2 border border-secondary text-light" style={{ fontSize: '0.65rem' }} title="Response body captured">
                               <i className="bi bi-file-earmark-code" />
                             </Badge>
                           )}
@@ -537,8 +617,8 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                             return (
                               <Badge
                                 key={source}
-                                bg={meta.variant}
-                                className="me-1"
+                                bg="dark"
+                                className="me-1 border border-secondary text-white-50"
                                 style={{ fontSize: '0.6rem' }}
                                 title={meta.title}
                               >
@@ -547,9 +627,9 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                             );
                           })}
                           <Badge
-                            bg={capture.error ? 'warning' : capture.status_code === 0 ? 'secondary' : capture.status_code < 400 ? 'success' : 'danger'}
-                            text={capture.error ? 'dark' : undefined}
-                            className="me-2"
+                            bg="dark"
+                            className={`me-2 border ${capture.error || capture.status_code >= 400
+                              ? 'border-danger text-danger' : 'border-secondary text-light'}`}
                             title={capture.error || ''}
                           >
                             {capture.error ? 'failed' : capture.status_code || '-'}
@@ -561,8 +641,8 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                     <Accordion.Body className="text-white" style={{ backgroundColor: '#2b2b2b' }}>
                       <div className="mb-3 d-flex justify-content-between align-items-start gap-2">
                         <div className="flex-grow-1">
-                          <strong className="text-warning d-block mb-1">Full URL:</strong>
-                          <code className="text-info small" style={{ wordBreak: 'break-all' }}>{capture.url}</code>
+                          <strong className="text-white-50 d-block mb-1">Full URL:</strong>
+                          <code className="text-light small" style={{ wordBreak: 'break-all' }}>{capture.url}</code>
                         </div>
                         <Button
                           size="sm"
@@ -580,7 +660,7 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                         capture.duration_ms > 0 || capture.error) && (
                         <div className="mb-3 d-flex flex-wrap gap-2 align-items-center">
                           {capture.graphql_operation && (
-                            <Badge bg="dark" className="border border-info text-info">
+                            <Badge bg="dark" className="border border-secondary text-light">
                               GraphQL: {capture.graphql_operation}
                             </Badge>
                           )}
@@ -600,22 +680,22 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                             </Badge>
                           )}
                           {capture.error && (
-                            <Badge bg="warning" text="dark">{capture.error}</Badge>
+                            <Badge bg="dark" className="border border-danger text-danger">{capture.error}</Badge>
                           )}
                         </div>
                       )}
 
                       {capture.redirect_chain && capture.redirect_chain.length > 0 && (
                         <div className="mb-3">
-                          <strong className="text-warning d-block mb-1">
+                          <strong className="text-white-50 d-block mb-1">
                             <i className="bi bi-signpost-split me-1"></i>
                             Redirect Chain:
                           </strong>
                           <ul className="small mb-0 ps-3">
                             {capture.redirect_chain.map((hop, i) => (
                               <li key={i} className="text-light">
-                                <Badge bg="secondary" className="me-2">{hop.statusCode}</Badge>
-                                <code className="text-info">{hop.location}</code>
+                                <Badge bg="dark" className="me-2 border border-secondary text-light">{hop.statusCode}</Badge>
+                                <code className="text-light">{hop.location}</code>
                               </li>
                             ))}
                           </ul>
@@ -624,7 +704,7 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
 
                       {capture.get_params && Object.keys(capture.get_params).length > 0 && (
                         <div className="mb-3">
-                          <strong className="text-warning d-block mb-1">
+                          <strong className="text-white-50 d-block mb-1">
                             <i className="bi bi-question-circle me-1"></i>
                             GET Parameters:
                           </strong>
@@ -640,7 +720,7 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                             <i className="bi bi-file-earmark-text me-1"></i>
                             Request Body:
                             {capture.body_type && (
-                              <Badge bg="secondary" className="ms-2" style={{ fontSize: '0.7rem' }}>
+                              <Badge bg="dark" className="ms-2 border border-secondary text-light" style={{ fontSize: '0.7rem' }}>
                                 {capture.body_type}
                               </Badge>
                             )}
@@ -659,7 +739,7 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
 
                       <div className="row mb-3">
                         <div className="col-md-6">
-                          <strong className="text-info d-block mb-1">
+                          <strong className="text-white-50 d-block mb-1">
                             <i className="bi bi-box-arrow-up-right me-1"></i>
                             Request Headers:
                           </strong>
@@ -672,7 +752,7 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                           )}
                         </div>
                         <div className="col-md-6">
-                          <strong className="text-info d-block mb-1">
+                          <strong className="text-white-50 d-block mb-1">
                             <i className="bi bi-box-arrow-in-down me-1"></i>
                             Response Headers:
                           </strong>
@@ -688,7 +768,7 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
 
                       <div className="row">
                         <div className="col-md-6 mb-3">
-                          <strong className="text-warning d-block mb-1">
+                          <strong className="text-white-50 d-block mb-1">
                             <i className="bi bi-code-square me-1"></i>
                             Raw HTTP Request:
                           </strong>
@@ -713,9 +793,131 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
             )}
           </Tab>
 
+          <Tab eventKey="hosts" title={`Hosts (${hosts.length})`}>
+            <div className="mb-3">
+              <div className="text-white-50 small mb-2">
+                Every host this application contacted while you were recording. An adjacent host is
+                one other than the scope target itself, which is normally where the API lives.
+                In-scope hosts are the ones the endpoint scan is allowed to send requests to, so
+                excluding a host here removes its endpoints from testing without deleting them.
+              </div>
+              {scopeDescription && (
+                <div className="small">
+                  <span className="text-white-50">Current scan boundary: </span>
+                  <code className="text-light">{scopeDescription}</code>
+                </div>
+              )}
+            </div>
+
+            {hostNotice && (
+              <Alert variant="dark" className="border border-secondary text-light py-2"
+                     onClose={() => setHostNotice('')} dismissible>
+                {hostNotice}
+              </Alert>
+            )}
+
+            {hosts.length === 0 ? (
+              <Alert variant="dark" className="py-3 border border-secondary text-light">
+                No hosts recorded yet. Record a session with the extension first.
+              </Alert>
+            ) : (
+              <>
+                <div className="d-flex flex-wrap gap-2 mb-3">
+                  <Button
+                    size="sm"
+                    variant="outline-danger"
+                    disabled={hostsBusy || promotableHosts.length === 0}
+                    onClick={() => promoteHosts(promotableHosts)}
+                    title="Create a URL scope target for every adjacent host that does not have one"
+                  >
+                    {hostsBusy ? <Spinner animation="border" size="sm" className="me-1" /> : null}
+                    Add all adjacent as URL targets ({promotableHosts.length})
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline-secondary"
+                    disabled={hostsBusy || excludedHosts.length === 0}
+                    onClick={() => setHostScope(excludedHosts, true)}
+                  >
+                    Include all in scope ({excludedHosts.length})
+                  </Button>
+                </div>
+
+                <div className="table-responsive">
+                  <table className="table table-dark table-sm align-middle mb-0">
+                    <thead>
+                      <tr className="text-white-50">
+                        <th>Host</th>
+                        <th className="text-end">Requests</th>
+                        <th className="text-end">Endpoints</th>
+                        <th>Relation</th>
+                        <th>Scope</th>
+                        <th className="text-end">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {hosts.map((h) => (
+                        <tr key={h.host}>
+                          <td><code className="text-light">{h.host}</code></td>
+                          <td className="text-end text-white-50">{h.requests}</td>
+                          <td className="text-end text-white-50">{h.endpoints}</td>
+                          <td>
+                            <Badge bg="dark" className="border border-secondary text-white-50"
+                                   style={{ fontSize: '0.65rem' }}>
+                              {h.is_direct ? 'Direct' : 'Adjacent'}
+                            </Badge>
+                          </td>
+                          <td>
+                            {h.within_target_domain ? (
+                              <span className="text-white-50 small"
+                                    title="Inside the scope target's own domain, so always in scope">
+                                always in scope
+                              </span>
+                            ) : (
+                              <span className={`small ${h.in_scope ? 'text-light' : 'text-danger'}`}>
+                                {h.in_scope ? 'in scope' : 'excluded'}
+                                {h.decided && <span className="text-white-50"> (set)</span>}
+                              </span>
+                            )}
+                          </td>
+                          <td className="text-end">
+                            {!h.within_target_domain && (
+                              <Button
+                                size="sm"
+                                variant="link"
+                                className={`p-0 me-3 ${h.in_scope ? 'text-white-50' : 'text-danger'}`}
+                                disabled={hostsBusy}
+                                onClick={() => setHostScope([h.host], !h.in_scope)}
+                              >
+                                {h.in_scope ? 'Exclude' : 'Include'}
+                              </Button>
+                            )}
+                            {h.existing_target_id ? (
+                              <span className="text-white-50 small">target exists</span>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="link"
+                                className="p-0 text-danger"
+                                disabled={hostsBusy}
+                                onClick={() => promoteHosts([h.host])}
+                              >
+                                Add as URL target
+                              </Button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </Tab>
+
           <Tab eventKey="sessions" title={`Sessions (${sessions.length})`}>
             {sessions.length === 0 ? (
-              <Alert variant="info">
+              <Alert variant="dark" className="border border-secondary text-light">
                 <i className="bi bi-info-circle me-2"></i>
                 No capture sessions found for this target.
               </Alert>
@@ -732,7 +934,7 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                       <div>
                         <h6 className="mb-1 text-white">
                           {getStatusBadge(session)}
-                          <span className="ms-2 text-info">{session.target_url}</span>
+                          <span className="ms-2 text-light">{session.target_url}</span>
                         </h6>
                         <small className="text-light" style={{ opacity: 0.7 }}>
                           Started: {formatDate(session.started_at)}
@@ -742,8 +944,8 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                         </small>
                       </div>
                       <div>
-                        <Badge bg="info" className="me-2">{session.request_count || 0} requests</Badge>
-                        <Badge bg="success">{session.endpoint_count || 0} endpoints</Badge>
+                        <Badge bg="dark" className="me-2 border border-secondary text-light">{session.request_count || 0} requests</Badge>
+                        <Badge bg="dark" className="border border-secondary text-light">{session.endpoint_count || 0} endpoints</Badge>
                       </div>
                     </div>
                   </div>

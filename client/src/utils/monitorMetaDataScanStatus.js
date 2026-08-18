@@ -17,7 +17,10 @@ const monitorMetaDataScanStatus = async (
       throw new Error('Failed to get Nuclei SSL scans');
     }
 
-    const scans = await response.json();
+    const scansPayload = await response.json();
+    // A Go handler that returns a nil slice encodes it as JSON null rather than [],
+    // and reading .length off null threw a TypeError that killed this poll loop.
+    const scans = Array.isArray(scansPayload) ? scansPayload : [];
     setMetaDataScans(scans);
 
     if (scans && scans.length > 0) {
@@ -99,7 +102,10 @@ const monitorCompanyMetaDataScanStatus = async (
       throw new Error('Failed to get Company metadata scans');
     }
 
-    const scans = await response.json();
+    const scansPayload = await response.json();
+    // A Go handler that returns a nil slice encodes it as JSON null rather than [],
+    // and reading .length off null threw a TypeError that killed this poll loop.
+    const scans = Array.isArray(scansPayload) ? scansPayload : [];
     setCompanyMetaDataScans(scans);
 
     if (scans && scans.length > 0) {

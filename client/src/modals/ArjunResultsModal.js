@@ -27,16 +27,21 @@ export const ArjunResultsModal = ({ show, handleClose, activeTarget, mostRecentA
     }
   };
 
+  const term = searchTerm.toLowerCase();
   const filteredResults = results.filter(r =>
-    r.endpoint_url.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    r.parameter_name.toLowerCase().includes(searchTerm.toLowerCase())
+    r.endpoint_url.toLowerCase().includes(term) ||
+    r.parameter_name.toLowerCase().includes(term) ||
+    (r.http_method || '').toLowerCase().includes(term)
   );
 
+  // Keyed by verb AND url. A hidden parameter on POST /accounts is a different finding from one
+  // on GET /accounts, and grouping by url alone hid the body-side result behind the query-side one.
   const groupedResults = filteredResults.reduce((acc, result) => {
-    if (!acc[result.endpoint_url]) {
-      acc[result.endpoint_url] = [];
+    const key = `${result.http_method || 'GET'} ${result.endpoint_url}`;
+    if (!acc[key]) {
+      acc[key] = [];
     }
-    acc[result.endpoint_url].push(result);
+    acc[key].push(result);
     return acc;
   }, {});
 
@@ -57,11 +62,12 @@ export const ArjunResultsModal = ({ show, handleClose, activeTarget, mostRecentA
         ) : (
           <>
             {mostRecentArjunScan && (
-              <Alert variant="secondary" className="mb-3">
+              <Alert variant="dark" className="mb-3 border border-secondary text-light">
                 <div className="d-flex justify-content-between">
                   <div>
                     <strong>Status:</strong>{' '}
-                    <Badge bg={mostRecentArjunScan.status === 'success' ? 'success' : 'warning'}>
+                    <Badge bg="dark" className={`border ${mostRecentArjunScan.status === 'success'
+                      ? 'border-secondary text-light' : 'border-danger text-danger'}`}>
                       {mostRecentArjunScan.status}
                     </Badge>
                   </div>
@@ -94,29 +100,44 @@ export const ArjunResultsModal = ({ show, handleClose, activeTarget, mostRecentA
 
             {Object.keys(groupedResults).length > 0 ? (
               <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
-                {Object.entries(groupedResults).map(([endpoint, params]) => (
-                  <div key={endpoint} className="mb-4">
-                    <h6 className="text-info">{endpoint}</h6>
+                {Object.entries(groupedResults).map(([key, params]) => (
+                  <div key={key} className="mb-4">
+                    <h6 className="d-flex align-items-center gap-2">
+                      <Badge bg="dark" className={`border ${
+                        (params[0].http_method || 'GET') === 'GET'
+                          ? 'border-secondary text-light' : 'border-danger text-danger'}`}>
+                        {params[0].http_method || 'GET'}
+                      </Badge>
+                      <span className="text-light">{params[0].endpoint_url}</span>
+                    </h6>
                     <Table striped bordered hover variant="dark" size="sm">
                       <thead>
                         <tr>
                           <th>Parameter Name</th>
-                          <th>Type</th>
+                          <th>Where</th>
                           <th>Confidence</th>
-                          <th>Example Value</th>
+                          <th>Found by</th>
                         </tr>
                       </thead>
                       <tbody>
                         {params.map((param, idx) => (
                           <tr key={idx}>
-                            <td><code>{param.parameter_name}</code></td>
+                            <td><code className="text-light">{param.parameter_name}</code></td>
                             <td>
-                              <Badge bg="info">{param.parameter_type}</Badge>
+                              <Badge bg="dark" className="border border-secondary text-light">
+                                {param.parameter_type}
+                              </Badge>
                             </td>
                             <td>
-                              <Badge bg="success">{param.confidence}</Badge>
+                              <Badge bg="dark" className={`border ${
+                                param.confidence === 'high'
+                                  ? 'border-danger text-danger' : 'border-secondary text-white-50'}`}>
+                                {param.confidence || 'unknown'}
+                              </Badge>
                             </td>
-                            <td><code>{param.example_value || 'N/A'}</code></td>
+                            {/* Which pass produced it. Arjun scans a body endpoint twice, form
+                                then JSON, so the group is what tells those two apart. */}
+                            <td className="text-white-50 small">{param.verb_group || '-'}</td>
                           </tr>
                         ))}
                       </tbody>

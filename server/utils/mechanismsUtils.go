@@ -28,7 +28,7 @@ func GetMechanismsExamples(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var examples []map[string]interface{}
+	var examples = []map[string]interface{}{}
 	for rows.Next() {
 		var example struct {
 			ID        string    `json:"id"`

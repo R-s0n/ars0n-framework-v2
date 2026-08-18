@@ -17,7 +17,10 @@ const monitorGauScanStatus = async (
       throw new Error('Failed to fetch GAU scans');
     }
 
-    const scans = await response.json();
+    const scansPayload = await response.json();
+    // A Go handler that returns a nil slice encodes it as JSON null rather than [],
+    // and reading .length off null threw a TypeError that killed this poll loop.
+    const scans = Array.isArray(scansPayload) ? scansPayload : [];
     setGauScans(scans || []);
 
     if (Array.isArray(scans) && scans.length > 0) {

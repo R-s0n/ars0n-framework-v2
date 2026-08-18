@@ -141,11 +141,18 @@ func headerString(headers map[string]interface{}, name string) string {
 // Paths and body fields that mark a request as part of an authentication exchange. Deliberately
 // broad: a false positive costs the user one unchecked checkbox, a false negative means they have
 // to hand-type the request they already recorded.
-var authPathPattern = regexp.MustCompile(`(?i)(^|/)(login|signin|sign-in|log-in|auth|authenticate|authorize|oauth|oidc|sso|saml|token|session|register|signup|sign-up|account/create|mfa|2fa|otp|verify|challenge|reset|forgot|recover|password|passwd|credential|logout|signout|sign-out|refresh)`)
+// start, initiate, begin, challenge and send are how a passwordless flow opens: the request that
+// asks the server to send an OTP. Missing them meant the candidate list began at step two, so an
+// operator importing it got a flow that verifies a code nobody asked for. On the live corpus the
+// SMS login's own first step, POST /cookieless/start, was the one request the classifier did not
+// return, and it is the step without which the rest cannot run.
+var authPathPattern = regexp.MustCompile(`(?i)(^|/)(login|signin|sign-in|log-in|auth|authenticate|authorize|oauth|oidc|sso|saml|token|session|register|signup|sign-up|account/create|mfa|2fa|otp|verify|challenge|reset|forgot|recover|password|passwd|passcode|credential|logout|signout|sign-out|refresh|start|initiate|begin|send-code|sendcode)`)
 
-var authBodyFieldPattern = regexp.MustCompile(`(?i)"(password|passwd|pwd|username|user_name|email|otp|code|token|refresh_token|access_token|client_secret|grant_type|totp|mfa_code|verification_code)"\s*:`)
+// phone_number and passcode carry credentials just as plainly as password does, and a phone-first
+// login is the normal shape for consumer and fintech applications.
+var authBodyFieldPattern = regexp.MustCompile(`(?i)"(password|passwd|pwd|passcode|pin|username|user_name|email|phone|phone_number|msisdn|otp|code|token|refresh_token|access_token|id_token|client_secret|grant_type|totp|mfa_code|verification_code|device_id)"\s*:`)
 
-var authFormFieldPattern = regexp.MustCompile(`(?i)(^|&)(password|passwd|pwd|username|user|email|otp|code|token|grant_type)=`)
+var authFormFieldPattern = regexp.MustCompile(`(?i)(^|&)(password|passwd|pwd|passcode|pin|username|user|email|phone|phone_number|otp|code|token|grant_type)=`)
 
 // AuthFlowCandidate is a recorded request that looks like part of an auth exchange.
 type AuthFlowCandidate struct {
@@ -234,6 +241,15 @@ func classifyAuthCapture(urlStr, method, body string) (string, string) {
 	}
 
 	upperMethod := strings.ToUpper(method)
+
+	// A CORS preflight is never a step in a flow. It carries no credentials, the browser sends it on
+	// the caller's behalf, and replaying one authenticates nobody. They were 7 of the 17 candidates
+	// on the live corpus, which is a lot of noise in a list the operator is meant to read and pick
+	// from, and picking one produces a flow with a dead step in the middle.
+	if upperMethod == http.MethodOptions {
+		return "", ""
+	}
+
 	pathMatch := authPathPattern.MatchString(path)
 	bodyMatch := body != "" && (authBodyFieldPattern.MatchString(body) || authFormFieldPattern.MatchString(body))
 
@@ -538,7 +554,7 @@ func AutoDetectClientIdentifiers(w http.ResponseWriter, r *http.Request) {
 		json.Unmarshal(headersJSON, &headers)
 
 		method = strings.ToUpper(method)
-		normalizedURL := normalizeURL(urlStr)
+		normalizedURL := normalizeURLForMatch(urlStr)
 
 		add := func(value, label string) {
 			value = strings.TrimSpace(value)
@@ -773,87 +789,38 @@ func leafKey(keyPath string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Captured auth context, used by endpoint investigation
-// ---------------------------------------------------------------------------
+// Investigation and validation both use the host-scoped ScopedAuthContext in scanCredentials.go.
+// A second, target-wide credential loader used to live here: it chose one capture by recency with
+// no host match, could not see the Session Manager, and stamped every result authenticated whether
+// or not anything was attached. It is gone rather than deprecated, because leaving a divergent
+// credential path in the tree is how the two implementations drifted apart in the first place.
 
-// CapturedAuthContext is the credential material to replay against a target so an authenticated
-// area is profiled instead of its login wall.
-type CapturedAuthContext struct {
-	Cookie  string
-	Headers map[string]string
-	Source  string
-}
-
-// LoadCapturedAuthContext picks the best-known credentials for a target. Manual-crawl captures win
-// because they are what a real logged-in browser actually sent; the FFUF config is the fallback for
-// targets that were configured by hand and never crawled.
-func LoadCapturedAuthContext(scopeTargetID string) CapturedAuthContext {
-	ctx := CapturedAuthContext{Headers: map[string]string{}}
-
-	// Most recent capture that carried credentials. Recency matters: a session cookie captured an
-	// hour ago is likelier still valid than the first one of the crawl.
-	var headersJSON []byte
-	err := dbPool.QueryRow(context.Background(), `
-		SELECT headers
-		FROM manual_crawl_captures
-		WHERE scope_target_id = $1
-		  AND (headers ? 'cookie' OR headers ? 'authorization')
-		ORDER BY timestamp DESC
-		LIMIT 1`, scopeTargetID).Scan(&headersJSON)
-
-	if err == nil && len(headersJSON) > 0 {
-		var headers map[string]interface{}
-		if json.Unmarshal(headersJSON, &headers) == nil {
-			ctx.Cookie = headerString(headers, "cookie")
-			if authz := headerString(headers, "authorization"); authz != "" {
-				ctx.Headers["Authorization"] = authz
-			}
-			for _, name := range []string{"x-csrf-token", "x-xsrf-token", "x-api-key", "x-auth-token"} {
-				if value := headerString(headers, name); value != "" {
-					ctx.Headers[canonicalHeaderName(name)] = value
-				}
-			}
-			if ctx.Cookie != "" || len(ctx.Headers) > 0 {
-				ctx.Source = "manual_crawl"
-				return ctx
-			}
-		}
+// normalizeURLForMatch strips the query and trailing slash so a captured request can be matched to
+// a stored endpoint. It is a display-level match, not the identity function: canonical identity
+// lives in endpointIdentity.go and is what consolidation keys on.
+func normalizeURLForMatch(urlStr string) string {
+	urlStr = strings.TrimSpace(urlStr)
+	urlStr = strings.TrimSuffix(urlStr, ".")
+	// A scheme is only added when there is none.
+	//
+	// Testing for the http prefixes specifically meant any other scheme got one prefixed onto it:
+	// a captured websocket URL wss://web.example/iojs/star became https://wss://web.example/iojs/star,
+	// whose host parses as "wss". Two of those reached the live endpoint corpus and were requested
+	// as though they were real HTTP endpoints. Leaving a foreign scheme intact lets
+	// CanonicalizeEndpoint reject it, which is what it is there for.
+	if !strings.Contains(urlStr, "://") {
+		urlStr = "https://" + urlStr
 	}
-
-	// Fall back to whatever was configured for FFUF, which the WAF probe already reuses.
-	var configJSON []byte
-	if err := dbPool.QueryRow(context.Background(),
-		`SELECT config FROM ffuf_configs WHERE scope_target_id = $1`, scopeTargetID).Scan(&configJSON); err == nil {
-		var cfg struct {
-			Headers []map[string]string `json:"headers"`
-			Cookies string              `json:"cookies"`
-		}
-		if json.Unmarshal(configJSON, &cfg) == nil {
-			ctx.Cookie = cfg.Cookies
-			for _, h := range cfg.Headers {
-				if name := h["name"]; name != "" {
-					ctx.Headers[name] = h["value"]
-				}
-			}
-			if ctx.Cookie != "" || len(ctx.Headers) > 0 {
-				ctx.Source = "ffuf_config"
-			}
-		}
+	parsed, err := url.Parse(urlStr)
+	if err != nil {
+		return strings.TrimSuffix(urlStr, "/")
 	}
-
-	return ctx
-}
-
-// Apply sets the captured credentials on an outgoing request.
-func (c CapturedAuthContext) Apply(req *http.Request) {
-	if c.Cookie != "" {
-		req.Header.Set("Cookie", c.Cookie)
+	parsed.Host = strings.TrimSuffix(parsed.Host, ".")
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+	if parsed.Path == "" {
+		parsed.Path = "/"
 	}
-	for name, value := range c.Headers {
-		req.Header.Set(name, value)
-	}
-}
-
-func (c CapturedAuthContext) IsAuthenticated() bool {
-	return c.Cookie != "" || len(c.Headers) > 0
+	parsed.Fragment = ""
+	parsed.RawQuery = ""
+	return parsed.String()
 }

@@ -160,11 +160,16 @@ class Recorder:
             )
             s.mount("http://", adapter)
             s.mount("https://", adapter)
-            s.headers.update({
-                "User-Agent": self.g["user_agent"],
-                "Accept": "*/*",
-                self.g["attribution_header"]: "authorized-testing",
-            })
+            # Each attribution header is sent only when the operator turned it on. Resolved to an
+            # empty string by _resolve_attribution when disabled, so the check here is the whole
+            # implementation of the switch. Setting an empty header NAME would be malformed, and
+            # setting an empty User-Agent would still override requests' own default with nothing.
+            s.headers["Accept"] = "*/*"
+            if str(self.g.get("user_agent") or "").strip():
+                s.headers["User-Agent"] = self.g["user_agent"]
+            attribution = str(self.g.get("attribution_header") or "").strip()
+            if attribution:
+                s.headers[attribution] = "authorized-testing"
             auth = (self.cfg.get("target") or {}).get("auth") or {}
             for h in auth.get("headers") or []:
                 if h.get("name"):

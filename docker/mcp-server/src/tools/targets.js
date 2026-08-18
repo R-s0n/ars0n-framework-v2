@@ -88,7 +88,7 @@ async function getScanStatus(params) {
     'amass_intel_scans', 'metabigor_company_scans', 'amass_enum_company_scans',
     'dnsx_company_scans', 'katana_company_scans', 'metadata_scans',
     'securitytrails_company_scans', 'censys_company_scans', 'shodan_company_scans',
-    'github_recon_scans', 'cloud_enum_scans', 'arjun_scans', 'parameth_scans', 'x8_scans',
+    'github_recon_scans', 'cloud_enum_scans', 'arjun_scans', 'x8_scans',
   ];
 
   const statuses = {};

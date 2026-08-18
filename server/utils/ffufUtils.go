@@ -131,7 +131,7 @@ func GetFFUFConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var config FFUFConfig
-	if err := json.Unmarshal(configJSON, &config); err != nil {
+	if err := UnmarshalConfigTolerant(configJSON, &config); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -221,7 +221,7 @@ func UploadFFUFWordlist(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetFFUFWordlists(w http.ResponseWriter, r *http.Request) {
-	var wordlists []FFUFWordlist
+	var wordlists = []FFUFWordlist{}
 
 	possiblePaths := []string{
 		"/app/wordlists/ffuf-wordlist-5000.txt",

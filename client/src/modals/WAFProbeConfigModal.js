@@ -374,15 +374,27 @@ export const WAFProbeConfigModal = ({ show, handleClose, activeTarget, onSaved, 
                 ))}
 
                 <h6 className="text-danger mt-4">Attribution</h6>
+                <p className="text-white-50 small mb-2">
+                  Three independent choices about what names this tool in the target's logs. Only the
+                  header is on by default: it is what lets you point at your own traffic afterwards.
+                </p>
                 <Row className="g-3">
-                  <TextKnob label="Attribution header"
-                    help="Sent on every request so the operator can point at their own traffic in the target's logs. It may not be empty."
+                  <ToggleTextKnob label="Attribution header"
+                    help="Sent on every request so you can point at your own traffic in the target's logs."
+                    enabled={config.global.attribution_header_enabled !== false}
+                    onToggle={(v) => setGlobal('attribution_header_enabled', v)}
                     value={config.global.attribution_header}
                     onChange={(v) => setGlobal('attribution_header', v)} />
-                  <TextKnob label="User-Agent" help="Stable identifying UA on every request except the persona arm."
+                  <ToggleTextKnob label="User-Agent"
+                    help="Stable identifying UA on every request except the persona arm. Off means the default client UA is sent instead."
+                    enabled={!!config.global.user_agent_enabled}
+                    onToggle={(v) => setGlobal('user_agent_enabled', v)}
                     value={config.global.user_agent}
                     onChange={(v) => setGlobal('user_agent', v)} />
-                  <TextKnob label="Marker prefix" help="Embedded in every random token the probe generates."
+                  <ToggleTextKnob label="Marker prefix"
+                    help="Embedded in every random token the probe generates. Off means a random unbranded prefix is used per run, since these become header names and cannot be empty."
+                    enabled={!!config.global.probe_token_prefix_enabled}
+                    onToggle={(v) => setGlobal('probe_token_prefix_enabled', v)}
                     value={config.global.probe_token_prefix}
                     onChange={(v) => setGlobal('probe_token_prefix', v)} />
                 </Row>
@@ -406,38 +418,6 @@ export const WAFProbeConfigModal = ({ show, handleClose, activeTarget, onSaved, 
               </Tab>
 
               {/* ------------------------------------------------ scope */}
-              <Tab eventKey="scope" title="Scope & Auth">
-                <Row className="g-3">
-                  <TextKnob label="Target URL" value={config.target?.url || ''} wide
-                    help="Defaults to the scope target. The probe reports the canonical URL if this one redirects."
-                    onChange={(v) => patch((c) => { c.target.url = v; })} />
-                </Row>
-
-                <h6 className="text-danger mt-4">Credentials</h6>
-                <Form.Select size="sm" style={{ maxWidth: '320px' }}
-                  value={config.target?.auth?.source || 'ffuf_config'}
-                  onChange={(e) => patch((c) => { c.target.auth.source = e.target.value; })}>
-                  <option value="ffuf_config">Reuse the target's saved FFUF session</option>
-                  <option value="inline">Enter headers and cookies here</option>
-                  <option value="none">None (public view)</option>
-                </Form.Select>
-                <Form.Text className="text-white-50 d-block mt-2">
-                  Reusing the FFUF session means the probe characterises the application the way the
-                  scanners will actually see it. If that session has expired, the probe will
-                  fingerprint the login wall instead and say so.
-                </Form.Text>
-
-                {config.target?.auth?.source === 'inline' && (
-                  <Form.Group className="mt-3">
-                    <Form.Label className="small">Cookie header</Form.Label>
-                    <Form.Control size="sm" value={config.target.auth.cookies || ''}
-                      onChange={(e) => patch((c) => { c.target.auth.cookies = e.target.value; })} />
-                    <Form.Text className="text-white-50">
-                      Redacted from every log, transcript and stored result.
-                    </Form.Text>
-                  </Form.Group>
-                )}
-              </Tab>
             </Tabs>
           </>
         )}
@@ -564,11 +544,25 @@ const NumberKnob = ({ label, help, value, min, max, step = 1, onChange }) => (
   </Col>
 );
 
-const TextKnob = ({ label, help, value, onChange, wide }) => (
+// A text field the operator can switch off entirely. The value stays editable while enabled and
+// stays stored while disabled, so turning something off and back on does not lose what was typed.
+const ToggleTextKnob = ({ label, help, enabled, onToggle, value, onChange, wide }) => (
   <Col md={wide ? 12 : 4}>
-    <Form.Label className="small mb-1">{label}</Form.Label>
-    <Form.Control size="sm" value={value || ''} onChange={(e) => onChange(e.target.value)} />
-    {help && <Form.Text className="text-white-50" style={{ fontSize: '0.7rem' }}>{help}</Form.Text>}
+    <Form.Check
+      type="switch"
+      id={`attr-${label.replace(/\s+/g, '-').toLowerCase()}`}
+      className="small mb-1"
+      label={label}
+      checked={!!enabled}
+      onChange={(e) => onToggle(e.target.checked)}
+    />
+    <Form.Control size="sm" value={value || ''} disabled={!enabled}
+                  onChange={(e) => onChange(e.target.value)} />
+    {help && (
+      <Form.Text className="text-white-50" style={{ fontSize: '0.7rem' }}>
+        {enabled ? help : 'Off. Nothing identifying this probe is sent for this field.'}
+      </Form.Text>
+    )}
   </Col>
 );
 

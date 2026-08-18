@@ -400,7 +400,7 @@ func GetSecurityTrailsCompanyScansForScopeTarget(w http.ResponseWriter, r *http.
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan SecurityTrailsCompanyScanStatus
 		err := rows.Scan(

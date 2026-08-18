@@ -1411,7 +1411,7 @@ func GetTargetURLsForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var targetURLs []map[string]interface{}
+	var targetURLs = []map[string]interface{}{}
 	for rows.Next() {
 		var (
 			id                  string

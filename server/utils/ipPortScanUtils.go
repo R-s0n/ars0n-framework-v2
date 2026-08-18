@@ -809,7 +809,7 @@ func GetLiveWebServers(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var webServers []LiveWebServer
+	var webServers = []LiveWebServer{}
 	for rows.Next() {
 		var ws LiveWebServer
 		var technologiesJSON *string
@@ -928,7 +928,7 @@ func GetDiscoveredIPs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var discoveredIPs []DiscoveredIP
+	var discoveredIPs = []DiscoveredIP{}
 	for rows.Next() {
 		var ip DiscoveredIP
 		var ipAddress net.IP

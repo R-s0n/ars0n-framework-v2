@@ -410,7 +410,7 @@ func GetGoSpiderScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan GoSpiderScanStatus
 		err := rows.Scan(
@@ -729,7 +729,7 @@ func GetSubdomainizerScansForScopeTarget(w http.ResponseWriter, r *http.Request)
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan SubdomainizerScanStatus
 		err := rows.Scan(

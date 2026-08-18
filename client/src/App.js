@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } fro
 import { useQueryClient } from '@tanstack/react-query';
 import useTargetURLs, { targetURLsKey } from './hooks/useTargetURLs.js';
 import { cancelAllScanPolls } from './utils/scanPolling.js';
+import { DEFAULT_NUCLEI_TEMPLATES, DEFAULT_NUCLEI_SEVERITIES } from './utils/nucleiDefaults';
 import { getHttpxResultsCount, calculateEstimatedScanTime } from './utils/scanMetrics.js';
 import AddScopeTargetModal from './modals/addScopeTargetModal.js';
 import SelectActiveScopeTargetModal from './modals/selectActiveScopeTargetModal.js';
@@ -51,7 +52,7 @@ import {
   getResultLength,
   copyToClipboard,
 } from './utils/miscUtils.js';
-import { MdCopyAll, MdCheckCircle } from 'react-icons/md';
+import { MdCopyAll, MdCheckCircle, MdWarning } from 'react-icons/md';
 import initiateHttpxScan from './utils/initiateHttpxScan';
 import monitorHttpxScanStatus from './utils/monitorHttpxScanStatus';
 import initiateGauScan from './utils/initiateGauScan.js';
@@ -195,14 +196,10 @@ import { WAFProbeConfigModal } from './modals/WAFProbeConfigModal';
 import { CrawlerConfigModal } from './modals/CrawlerConfigModal';
 import initiateArjunScan from './utils/initiateArjunScan';
 import monitorArjunScanStatus from './utils/monitorArjunScanStatus';
-import initiateParamethScan from './utils/initiateParamethScan';
-import monitorParamethScanStatus from './utils/monitorParamethScanStatus';
 import initiateX8Scan from './utils/initiateX8Scan';
 import monitorX8ScanStatus from './utils/monitorX8ScanStatus';
 import { ArjunConfigModal } from './modals/ArjunConfigModal';
 import { ArjunResultsModal } from './modals/ArjunResultsModal';
-import { ParamethConfigModal } from './modals/ParamethConfigModal';
-import { ParamethResultsModal } from './modals/ParamethResultsModal';
 import { X8ConfigModal } from './modals/X8ConfigModal';
 import { X8ResultsModal } from './modals/X8ResultsModal';
 import { ApplicationQuestionsModal } from './modals/ApplicationQuestionsModal';
@@ -211,16 +208,48 @@ import { NotableObjectsModal } from './modals/NotableObjectsModal';
 import { SecurityControlsModal } from './modals/SecurityControlsModal';
 import { ThreatModelModal } from './modals/ThreatModelModal';
 import { FFUFConfigModal } from './modals/FFUFConfigModal';
+import FFUFSettingsModal from './modals/FFUFSettingsModal';
+import AddAttackVectorModal from './modals/AddAttackVectorModal';
+import AttackVectorsModal from './modals/AttackVectorsModal';
+import AttackToolCard from './components/AttackToolCard';
+import { ATTACK_TOOL_SECTIONS } from './data/attackTools';
+import { WIRED_CATEGORIES } from './data/wiredCategories';
+import VectorToolConfigModal from './modals/VectorToolConfigModal';
+import VectorToolResultsModal from './modals/VectorToolResultsModal';
+import SectionWebhookModal from './modals/SectionWebhookModal';
 import ManualCrawlResultsModal from './modals/ManualCrawlResultsModal';
 import AuthFlowModal from './modals/AuthFlowModal';
-import ClientIdentityModal from './modals/ClientIdentityModal';
+import RecordAuthFlowsModal from './modals/RecordAuthFlowsModal';
+import ManualAuthFlowModal from './modals/ManualAuthFlowModal';
+import ManageSessionsModal from './modals/ManageSessionsModal';
+import RefreshSessionModal from './modals/RefreshSessionModal';
+import ClientIdentityPatternsModal from './modals/ClientIdentityPatternsModal';
+import PolicyAccessModal from './modals/PolicyAccessModal';
+import RoleAccessModal from './modals/RoleAccessModal';
+import DiscretionaryAccessModal from './modals/DiscretionaryAccessModal';
 import PossibleAttacksModal from './modals/PossibleAttacksModal';
 import ExtensionInstallModal from './modals/ExtensionInstallModal';
 import ManageEndpointsModal from './modals/ManageEndpointsModal';
+import EndpointScanResultsModal from './modals/EndpointScanResultsModal';
 
 const ExportModal = lazy(() => import('./modals/ExportModal.js'));
 const ImportModal = lazy(() => import('./modals/ImportModal.js'));
 const WelcomeModal = lazy(() => import('./modals/WelcomeModal.js'));
+// Which sections have their Config, Scan and Results built, and which category each tool belongs to.
+//
+// Derived from the section list rather than typed again, so wiring a new section up is adding its
+// key here once the server side exists. The category is what the API routes are keyed on, so a tool
+// in the wrong section would call /xss/ for a SQL scanner and get a 404 rather than a wrong answer.
+// Sections whose tools share a setting that belongs to the section rather than to any one of them.
+// The label is what the button says.
+const SECTION_SETTINGS_BUTTON = { 'redirect-ssrf': 'Configure Webhook' };
+
+const VECTOR_TOOL_CATEGORY = new Map(
+  ATTACK_TOOL_SECTIONS
+    .filter((section) => WIRED_CATEGORIES.includes(section.key))
+    .flatMap((section) => section.tools.map((tool) => [tool.key, section.key])),
+);
+
 const LaunchPadModal = lazy(() => import('./modals/LaunchPadModal.js'));
 const ConfigUploadModal = lazy(() => import('./modals/ConfigUploadModal.js'));
 const APIIntegrationModal = lazy(() => import('./modals/APIIntegrationModal.js'));
@@ -352,6 +381,9 @@ function App() {
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [toastTitle, setToastTitle] = useState('Success');
+  // Success or warning. The toast was success-only, so anything that went wrong had nowhere to go but
+  // a blocking alert() the operator had to dismiss before they could carry on.
+  const [toastVariant, setToastVariant] = useState('success');
   const [showInfraModal, setShowInfraModal] = useState(false);
   const [httpxScans, setHttpxScans] = useState([]);
   const [mostRecentHttpxScanStatus, setMostRecentHttpxScanStatus] = useState(null);
@@ -437,8 +469,6 @@ function App() {
   const [mostRecentInvestigateScanStatus, setMostRecentInvestigateScanStatus] = useState(null);
   const [mostRecentInvestigateScan, setMostRecentInvestigateScan] = useState(null);
   const [isInvestigateScanning, setIsInvestigateScanning] = useState(false);
-  const [isInvestigatingEndpoints, setIsInvestigatingEndpoints] = useState(false);
-  const [endpointInvestigationResults, setEndpointInvestigationResults] = useState(null);
   const [targetURLs, setTargetURLs] = useState([]);
   const [showROIReport, setShowROIReport] = useState(false);
   const [selectedTargetURL, setSelectedTargetURL] = useState(null);
@@ -728,10 +758,6 @@ function App() {
   const [mostRecentArjunScan, setMostRecentArjunScan] = useState(null);
   const [isArjunScanning, setIsArjunScanning] = useState(false);
   
-  const [paramethScans, setParamethScans] = useState([]);
-  const [mostRecentParamethScanStatus, setMostRecentParamethScanStatus] = useState(null);
-  const [mostRecentParamethScan, setMostRecentParamethScan] = useState(null);
-  const [isParamethScanning, setIsParamethScanning] = useState(false);
   
   const [x8Scans, setX8Scans] = useState([]);
   const [mostRecentX8ScanStatus, setMostRecentX8ScanStatus] = useState(null);
@@ -746,15 +772,13 @@ function App() {
   const [showFFUFURLResultsModal, setShowFFUFURLResultsModal] = useState(false);
   const [showWAFProbeResultsModal, setShowWAFProbeResultsModal] = useState(false);
   const [showWAFProbeConfigModal, setShowWAFProbeConfigModal] = useState(false);
-  const [wafProbeAppliedCount, setWAFProbeAppliedCount] = useState(null);
+  const [wafProbeRecCount, setWAFProbeRecCount] = useState(null);
   // Which crawler's config modal is open, or null. One piece of state for all three, since only
   // one can be open at a time.
   const [crawlerConfigTool, setCrawlerConfigTool] = useState(null);
 
   const [showArjunConfigModal, setShowArjunConfigModal] = useState(false);
   const [showArjunResultsModal, setShowArjunResultsModal] = useState(false);
-  const [showParamethConfigModal, setShowParamethConfigModal] = useState(false);
-  const [showParamethResultsModal, setShowParamethResultsModal] = useState(false);
   const [showX8ConfigModal, setShowX8ConfigModal] = useState(false);
   const [showX8ResultsModal, setShowX8ResultsModal] = useState(false);
   const [showApplicationQuestionsModal, setShowApplicationQuestionsModal] = useState(false);
@@ -763,6 +787,7 @@ function App() {
   const [showSecurityControlsModal, setShowSecurityControlsModal] = useState(false);
   const [showThreatModelModal, setShowThreatModelModal] = useState(false);
   const [showFFUFConfigModal, setShowFFUFConfigModal] = useState(false);
+  const [showFFUFSettingsModal, setShowFFUFSettingsModal] = useState(false);
   const [showManualCrawlResultsModal, setShowManualCrawlResultsModal] = useState(false);
   const [showExtensionInstallModal, setShowExtensionInstallModal] = useState(false);
   const [manualCrawlConnected, setManualCrawlConnected] = useState(false);
@@ -781,19 +806,40 @@ function App() {
   const [showManageEndpointsModal, setShowManageEndpointsModal] = useState(false);
   const [consolidatedEndpointCount, setConsolidatedEndpointCount] = useState(0);
   const [isConsolidatingEndpoints, setIsConsolidatingEndpoints] = useState(false);
+  // The latest validation scan, which drives the card's counts and the Investigate gate.
+  const [endpointValidation, setEndpointValidation] = useState(null);
+  // The combined run: Validate, then Investigate whatever Validate did not rule out. One record so
+  // the card can show which phase is moving and the Results modal can show both from one run.
+  const [endpointScanRun, setEndpointScanRun] = useState(null);
+  const [isEndpointScanRunning, setIsEndpointScanRunning] = useState(false);
+  const [showEndpointScanResultsModal, setShowEndpointScanResultsModal] = useState(false);
+  // Surfaced on the card. A refusal to run is the most useful message this workflow produces and
+  // it must not be swallowed into the console.
+  const [endpointWorkflowError, setEndpointWorkflowError] = useState('');
   const [mechanismsForThreatModel, setMechanismsForThreatModel] = useState([]);
   const [notableObjectsForThreatModel, setNotableObjectsForThreatModel] = useState([]);
   const [securityControlsForThreatModel, setSecurityControlsForThreatModel] = useState([]);
   const [threatModelCounts, setThreatModelCounts] = useState({ questions: 0, mechanisms: 0, notableObjects: 0, securityControls: 0 });
-  const [injectionAttackVectorCounts, setInjectionAttackVectorCounts] = useState({ client_side: 0, server_side: 0, database: 0, other: 0 });
   const [showAuthFlowModal, setShowAuthFlowModal] = useState(false);
   const [authFlowCategory, setAuthFlowCategory] = useState('login');
   const [showClientIdentityModal, setShowClientIdentityModal] = useState(false);
   const [showPossibleAttacksModal, setShowPossibleAttacksModal] = useState(false);
   const [possibleAttacksCategory, setPossibleAttacksCategory] = useState(null);
   const [headerCookieCounts, setHeaderCookieCounts] = useState({ hidden_headers: 0, hidden_cookies: 0, client_side: 0, server_side: 0 });
-  const [authzCounts, setAuthzCounts] = useState({ idor: 0, acv: 0 });
-  const [authFlowCounts, setAuthFlowCounts] = useState({ register: 0, login: 0, mfa_otp: 0, reset: 0 });
+  const [authzCounts, setAuthzCounts] = useState(
+    { patterns: 0, parameter: 0, rules: 0, forbidden: 0 });
+  const [showPolicyAccessModal, setShowPolicyAccessModal] = useState(false);
+  const [showRoleAccessModal, setShowRoleAccessModal] = useState(false);
+  const [showDiscretionaryAccessModal, setShowDiscretionaryAccessModal] = useState(false);
+  const [authFlowCounts, setAuthFlowCounts] = useState(
+    { register: 0, login: 0, mfa_otp: 0, magic_link: 0, reset: 0, total: 0, recorded: 0 });
+  // Session tokens the operator has saved, and how many are switched on. Active is the number that
+  // decides whether every other scan runs authenticated or against a login wall.
+  const [sessionTokenCounts, setSessionTokenCounts] = useState({ total: 0, active: 0 });
+  const [showRecordAuthFlowsModal, setShowRecordAuthFlowsModal] = useState(false);
+  const [showManualAuthFlowModal, setShowManualAuthFlowModal] = useState(false);
+  const [showManageSessionsModal, setShowManageSessionsModal] = useState(false);
+  const [showRefreshSessionModal, setShowRefreshSessionModal] = useState(false);
   
   const handleCloseSubdomainsModal = () => setShowSubdomainsModal(false);
   const handleCloseCloudDomainsModal = () => setShowCloudDomainsModal(false);
@@ -1238,49 +1284,6 @@ function App() {
     );
   };
 
-  const handleInvestigateEndpoints = async () => {
-    if (!activeTarget) return;
-    
-    setIsInvestigatingEndpoints(true);
-    try {
-      const response = await fetch(`/api/endpoint-investigation/${activeTarget.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        const scanID = data.scan_id;
-        
-        const pollStatus = async () => {
-          const statusResp = await fetch(`/api/endpoint-investigation/${activeTarget.id}/status/${scanID}`);
-          if (statusResp.ok) {
-            const status = await statusResp.json();
-            
-            if (status.status === 'success') {
-              const resultsResp = await fetch(`/api/endpoint-investigation/${activeTarget.id}/results`);
-              if (resultsResp.ok) {
-                const results = await resultsResp.json();
-                setEndpointInvestigationResults(results);
-              }
-              setIsInvestigatingEndpoints(false);
-            } else if (status.status === 'error') {
-              console.error('Endpoint investigation failed:', status.error);
-              setIsInvestigatingEndpoints(false);
-            } else {
-              setTimeout(pollStatus, 2000);
-            }
-          }
-        };
-        
-        pollStatus();
-      }
-    } catch (err) {
-      console.error('Error investigating endpoints:', err);
-      setIsInvestigatingEndpoints(false);
-    }
-  };
-
   const handleValidateRootDomains = () => {
     console.log('Validate Root Domains clicked');
   };
@@ -1498,18 +1501,6 @@ function App() {
         setMostRecentArjunScan,
         setIsArjunScanning,
         setMostRecentArjunScanStatus
-      );
-    }
-  }, [activeTarget]);
-
-  useEffect(() => {
-    if (activeTarget && activeTarget.type === 'URL') {
-      monitorParamethScanStatus(
-        activeTarget,
-        setParamethScans,
-        setMostRecentParamethScan,
-        setIsParamethScanning,
-        setMostRecentParamethScanStatus
       );
     }
   }, [activeTarget]);
@@ -3162,8 +3153,6 @@ function App() {
   const loadNucleiConfig = async () => {
     if (!activeTarget?.id) return;
 
-    const ALL_TEMPLATES = ['cves', 'vulnerabilities', 'exposures', 'technologies', 'misconfiguration', 'takeovers', 'network', 'dns', 'headless'];
-    const ALL_SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'];
 
     try {
       const response = await fetch(
@@ -3174,10 +3163,10 @@ function App() {
         const config = await response.json();
 
         if (!config.templates || config.templates.length === 0) {
-          config.templates = ALL_TEMPLATES;
+          config.templates = DEFAULT_NUCLEI_TEMPLATES;
         }
         if (!config.severities || config.severities.length === 0) {
-          config.severities = ALL_SEVERITIES;
+          config.severities = DEFAULT_NUCLEI_SEVERITIES;
         }
 
         if (!config.targets || config.targets.length === 0) {
@@ -3328,8 +3317,6 @@ function App() {
   const loadWildcardNucleiConfig = async () => {
     if (!activeTarget?.id) return;
 
-    const ALL_TEMPLATES = ['cves', 'vulnerabilities', 'exposures', 'technologies', 'misconfiguration', 'takeovers', 'network', 'dns', 'headless'];
-    const ALL_SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'];
 
     try {
       const response = await fetch(`/api/nuclei-config/${activeTarget.id}`);
@@ -3338,11 +3325,11 @@ function App() {
         let needsSave = false;
 
         if (!config.templates || config.templates.length === 0) {
-          config.templates = ALL_TEMPLATES;
+          config.templates = DEFAULT_NUCLEI_TEMPLATES;
           needsSave = true;
         }
         if (!config.severities || config.severities.length === 0) {
-          config.severities = ALL_SEVERITIES;
+          config.severities = DEFAULT_NUCLEI_SEVERITIES;
           needsSave = true;
         }
 
@@ -4868,25 +4855,29 @@ function App() {
     }
   }, [activeTarget]);
 
-  // A probe whose recommendations were never applied changed nothing: every tool downstream is
-  // still running on defaults. The card looks identical in both cases unless it asks.
-  const refreshWAFProbeApplied = useCallback(async () => {
+  // How many settings the probe has to suggest. The probe does not change any tool config itself,
+  // so this is the card's way of saying there is something waiting to be read and acted on.
+  const refreshWAFProbeRecCount = useCallback(async () => {
     if (!activeTarget || activeTarget.type !== 'URL') return;
     try {
-      const res = await fetch(`/api/waf-probe/apply-journal/${activeTarget.id}`);
-      const entries = res.ok ? await res.json() : [];
-      setWAFProbeAppliedCount(Array.isArray(entries) ? entries.length : 0);
+      const res = await fetch(`/api/waf-probe/recommendations/${activeTarget.id}`);
+      const data = res.ok ? await res.json() : null;
+      setWAFProbeRecCount(
+        data?.status === 'ok'
+          ? (data.tools || []).reduce((n, t) => n + (t.settings || []).length, 0)
+          : null,
+      );
     } catch (e) {
-      setWAFProbeAppliedCount(null);
+      setWAFProbeRecCount(null);
     }
   }, [activeTarget]);
 
-  useEffect(() => { refreshWAFProbeApplied(); }, [refreshWAFProbeApplied]);
-  // Re-read once a run finishes, so a scan that lands while the card is open stops claiming the
-  // previous run's applied state.
+  useEffect(() => { refreshWAFProbeRecCount(); }, [refreshWAFProbeRecCount]);
+  // Re-read once a run finishes, so a scan that lands while the card is open stops showing the
+  // previous run's count.
   useEffect(() => {
-    if (!isWAFProbeScanning) refreshWAFProbeApplied();
-  }, [isWAFProbeScanning, refreshWAFProbeApplied]);
+    if (!isWAFProbeScanning) refreshWAFProbeRecCount();
+  }, [isWAFProbeScanning, refreshWAFProbeRecCount]);
 
   // Katana Company scans useEffect
   useEffect(() => {
@@ -5115,26 +5106,167 @@ function App() {
 
   // All three FFUF phases on the card. A scan that ran and found nothing must not look identical
   // to one that was never run, which is what a bare "Endpoints: 0" did.
-  const ffufCardSummary = useMemo(() => {
-    const raw = mostRecentFFUFURLScan?.result;
-    if (!raw) {
-      return mostRecentFFUFURLScan?.error ? 'Last scan failed, see Results' : 'Not yet run';
-    }
+  // Accumulated across every run of the flow, which is the point of the composer: a re-run adds
+  // what is new instead of replacing what was there.
+  const [ffufFindingCount, setFfufFindingCount] = useState(null);
+  const [isFFUFFlowRunning, setIsFFUFFlowRunning] = useState(false);
+
+  // Two numbers, because one of them was actively misleading on its own. `total` counts every row
+  // ever stored, and a step pointed at an endpoint behind an expired credential contributes one row
+  // per wordlist word: 5080 "findings" of which 4997 were the same 401. `notable` is total minus each
+  // step's own baseline response, which is the count worth putting on a card.
+  const [ffufNotableCount, setFfufNotableCount] = useState(null);
+
+  const loadFuzzFindingCount = useCallback(async () => {
+    if (!activeTarget) return;
     try {
-      const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      const ran = p.phases_run || ['endpoints'];
-      const counts = {
-        endpoints: (p.endpoints || []).length,
-        headers: (p.headers || []).length,
-        cookies: (p.cookies || []).length,
-      };
-      const parts = ran.map((k) => `${counts[k] ?? 0} ${k}`);
-      const total = ran.reduce((n, k) => n + (counts[k] || 0), 0);
-      return total === 0 ? `${parts.join(' · ')} (see Results for why)` : parts.join(' · ');
-    } catch (e) {
-      return 'Results ready';
+      // limit=1 because only the counts are wanted here; the summary is computed over the whole set
+      // server-side, so pulling rows to throw away would be waste.
+      const res = await fetch(`/api/fuzz/${activeTarget.id}/findings?tool=ffuf&limit=1`);
+      if (res.ok) {
+        const data = await res.json();
+        setFfufFindingCount(data.total || 0);
+        setFfufNotableCount(data.summary && typeof data.summary.notable === 'number'
+          ? data.summary.notable : null);
+      }
+    } catch (err) {
+      console.error('Error loading fuzz findings:', err);
     }
-  }, [mostRecentFFUFURLScan]);
+  }, [activeTarget]);
+
+  useEffect(() => { loadFuzzFindingCount(); }, [loadFuzzFindingCount]);
+
+  // What the flow is doing, read from the server rather than remembered from a click.
+  //
+  // A run belongs to the target, not to the browser tab that started it: reloading the page used to
+  // show an idle card over a running scan, and a run started from the MCP was invisible here
+  // entirely. Polling one endpoint fixes both, and is also how the card knows how many steps the
+  // flow has when nothing is running.
+  const [ffufRun, setFfufRun] = useState(null);
+  const [ffufFlowSteps, setFfufFlowSteps] = useState({ enabled: 0, total: 0 });
+
+  // Raising a toast, in one call.
+  //
+  // A warning stays up far longer than a success, because they are read differently: a success is
+  // confirmation of something you just did and already expected, and a warning is news. The blocked
+  // step message in particular is several lines naming which rounds will not run, and three seconds
+  // is not enough to read that, which is the reason it used to be an alert() instead.
+  const notify = useCallback((title, message, variant = 'success') => {
+    setToastTitle(title);
+    setToastMessage(message);
+    setToastVariant(variant);
+    setShowToast(true);
+    setTimeout(() => setShowToast(false), variant === 'warning' ? 12000 : 3000);
+  }, []);
+
+  const loadFuzzRunState = useCallback(async () => {
+    if (!activeTarget) return null;
+    try {
+      const res = await fetch(`/api/fuzz/${activeTarget.id}/latest-run`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      setFfufFlowSteps({ enabled: data.enabled_steps || 0, total: data.total_steps || 0 });
+      setFfufRun(data.run || null);
+      return data.run || null;
+    } catch {
+      return null;
+    }
+  }, [activeTarget]);
+
+  // Poll while something is running, and once on arrival to discover a run already in flight.
+  useEffect(() => {
+    let live = true;
+    let timer = null;
+    const tick = async () => {
+      const run = await loadFuzzRunState();
+      if (!live) return;
+      if (run && run.running) {
+        timer = setTimeout(tick, 3000);
+      } else if (run && !run.running) {
+        loadFuzzFindingCount();
+      }
+    };
+    tick();
+    return () => { live = false; if (timer) clearTimeout(timer); };
+  }, [loadFuzzRunState, loadFuzzFindingCount]);
+
+  const isFFUFRunning = !!(ffufRun && ffufRun.running) || isFFUFFlowRunning;
+
+  // How much of the discovered surface each parameter tool is actually pointed at.
+  //
+  // "Parameters: 8" says nothing about coverage: eight found across every endpoint in scope and eight
+  // found across two of nineteen are different results, and only one of them means the surface has
+  // been looked at. The selection lives server-side, which is also what the scan reads, so the card
+  // and the run cannot disagree about what is enabled.
+  const [paramTargetCounts, setParamTargetCounts] = useState({ arjun: null, x8: null });
+
+  const loadParamTargetCounts = useCallback(async () => {
+    if (!activeTarget) return;
+    const next = {};
+    await Promise.all(['arjun', 'x8'].map(async (tool) => {
+      try {
+        const res = await fetch(`/api/param-enum/${activeTarget.id}/targets?tool=${tool}`);
+        if (res.ok) {
+          const data = await res.json();
+          next[tool] = { enabled: data.enabled || 0, total: data.total || 0 };
+        }
+      } catch {
+        next[tool] = null;
+      }
+    }));
+    setParamTargetCounts((prev) => ({ ...prev, ...next }));
+  }, [activeTarget]);
+
+  useEffect(() => { loadParamTargetCounts(); }, [loadParamTargetCounts]);
+
+  // The Scan button runs the flow. Each round is an independent ffuf invocation run in order.
+  const startFFUFFlow = async () => {
+    if (!activeTarget) return;
+    const go = async (acknowledge) => {
+      const res = await fetch(`/api/fuzz/${activeTarget.id}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool: 'ffuf', acknowledge }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409 && data.acknowledgeable) {
+        if (window.confirm(data.reason + ' Run it anyway?')) return go(true);
+        return null;
+      }
+      // A second run of the same flow is refused rather than queued: two would send twice the paced
+      // rate at one target.
+      if (res.status === 409) {
+        notify('Already running', data.reason || 'A run for this flow is already going.', 'warning');
+        return null;
+      }
+      if (!res.ok) {
+        notify('Flow did not start',
+          data.message || data.reason || 'The flow could not start', 'warning');
+        return null;
+      }
+      return data;
+    };
+
+    setIsFFUFFlowRunning(true);
+    const started = await go(false);
+    if (!started) { setIsFFUFFlowRunning(false); return; }
+
+    // Steps refused before the run started were reported here and thrown away, so a three-step flow
+    // that ran one step looked like a clean run. Saying it at the moment the operator clicked is the
+    // only point where they can still do something about it.
+    if (started.blocked && started.blocked.length > 0) {
+      const covered = `${started.steps} of ${started.steps + started.blocked.length}`;
+      notify(`Covering ${covered} steps`,
+        `${started.blocked.length} step(s) will not run:\n\n${started.blocked.join('\n\n')}`,
+        'warning');
+    }
+
+    // Progress is read from the server by the latest-run effect, which polls for as long as anything
+    // is running and picks up runs this tab did not start. All this has to do is stop claiming to be
+    // running once that effect has something to say.
+    await loadFuzzRunState();
+    setIsFFUFFlowRunning(false);
+  };
 
   const startArjunScan = () => {
     initiateArjunScan(
@@ -5143,16 +5275,6 @@ function App() {
       setArjunScans,
       setMostRecentArjunScan,
       setMostRecentArjunScanStatus
-    );
-  };
-
-  const startParamethScan = () => {
-    initiateParamethScan(
-      activeTarget,
-      setIsParamethScanning,
-      setParamethScans,
-      setMostRecentParamethScan,
-      setMostRecentParamethScanStatus
     );
   };
 
@@ -5178,10 +5300,6 @@ function App() {
   const handleOpenArjunResultsModal = () => setShowArjunResultsModal(true);
   const handleCloseArjunResultsModal = () => setShowArjunResultsModal(false);
   
-  const handleOpenParamethConfigModal = () => setShowParamethConfigModal(true);
-  const handleCloseParamethConfigModal = () => setShowParamethConfigModal(false);
-  const handleOpenParamethResultsModal = () => setShowParamethResultsModal(true);
-  const handleCloseParamethResultsModal = () => setShowParamethResultsModal(false);
   
   const handleOpenX8ConfigModal = () => setShowX8ConfigModal(true);
   const handleCloseX8ConfigModal = () => setShowX8ConfigModal(false);
@@ -5195,12 +5313,6 @@ function App() {
   const handleCloseFFUFURLResultsModal = () => setShowFFUFURLResultsModal(false);
   // Header/Cookie fuzzing modes for FFUF. Backend wiring for these modes is pending;
   // the Configure modal (Headers/Cookies tabs) and Results modal tabs are in place.
-  const startFFUFHeaderFuzz = () => {
-    console.log('[FFUF] Fuzz Headers - backend mode pending');
-  };
-  const startFFUFCookieFuzz = () => {
-    console.log('[FFUF] Fuzz Cookies - backend mode pending');
-  };
   const handleOpenWAFProbeResultsModal = () => setShowWAFProbeResultsModal(true);
   const handleCloseWAFProbeResultsModal = () => setShowWAFProbeResultsModal(false);
   const handleOpenManualCrawlResultsModal = async () => {
@@ -5218,26 +5330,203 @@ function App() {
   const handleOpenExtensionInstallModal = () => setShowExtensionInstallModal(true);
   const handleCloseExtensionInstallModal = () => setShowExtensionInstallModal(false);
 
+  // Consolidate is asynchronous now, because folding tens of thousands of archive rows inside an
+  // HTTP handler ties up the connection until the browser gives up.
   const handleConsolidateEndpoints = async () => {
     if (!activeTarget) return;
-    
+
     setIsConsolidatingEndpoints(true);
+    setEndpointWorkflowError('');
     try {
       const response = await fetch(`/api/consolidated-endpoints/${activeTarget.id}/consolidate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
-      
-      if (response.ok) {
-        const data = await response.json();
-        setConsolidatedEndpointCount(data.endpoint_count || 0);
-      }
+      if (!response.ok) throw new Error(await response.text() || 'Failed to start consolidation');
+
+      const { scan_id: scanId } = await response.json();
+
+      const poll = async () => {
+        try {
+          const statusResp = await fetch(
+            `/api/consolidated-endpoints/${activeTarget.id}/status/${scanId}`);
+          if (!statusResp.ok) throw new Error('Lost track of the consolidation run');
+          const status = await statusResp.json();
+
+          if (status.status === 'success') {
+            setConsolidatedEndpointCount(status.endpoint_count || 0);
+            setIsConsolidatingEndpoints(false);
+            loadEndpointValidationSummary();
+          } else if (status.status === 'error') {
+            setEndpointWorkflowError(status.error || 'Consolidation failed');
+            setIsConsolidatingEndpoints(false);
+          } else {
+            setTimeout(poll, 1500);
+          }
+        } catch (err) {
+          setEndpointWorkflowError(err.message);
+          setIsConsolidatingEndpoints(false);
+        }
+      };
+      poll();
     } catch (err) {
-      console.error('Error consolidating endpoints:', err);
-    } finally {
+      setEndpointWorkflowError(err.message);
       setIsConsolidatingEndpoints(false);
     }
   };
+
+  // Investigate is both phases as one run: Validate, then Investigate whatever Validate did not
+  // rule out.
+  //
+  // They were two buttons, and the ordering was left to the operator. Investigating first on a
+  // target that answers 200 with its login page for every path produces several thousand copies of
+  // one page presented as several thousand findings, and nothing on screen says so.
+  const handleInvestigateEndpoints = async (acknowledge = false) => {
+    if (!activeTarget) return;
+
+    setIsEndpointScanRunning(true);
+    setEndpointWorkflowError('');
+    try {
+      const response = await fetch(`/api/endpoint-scan/${activeTarget.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acknowledge })
+      });
+
+      if (response.status === 409) {
+        // Either a competing scan, or the probe found the saved credentials are dead. Both are
+        // worth surfacing verbatim; a generic failure hides the one thing the operator can act on.
+        let reason = await response.text();
+        try { reason = JSON.parse(reason).reason || reason; } catch (e) { /* plain text */ }
+        setEndpointWorkflowError(reason);
+        setIsEndpointScanRunning(false);
+        return;
+      }
+      if (!response.ok) throw new Error(await response.text() || 'Failed to start the endpoint scan');
+
+      const { run_id: runId } = await response.json();
+
+      const poll = async () => {
+        try {
+          const statusResp = await fetch(`/api/endpoint-scan/${activeTarget.id}/status/${runId}`);
+          if (!statusResp.ok) throw new Error('Lost track of the endpoint scan');
+          const status = await statusResp.json();
+          setEndpointScanRun(status);
+
+          if (['success', 'partial', 'aborted', 'error'].includes(status.status)) {
+            setIsEndpointScanRunning(false);
+            if (status.status === 'error') {
+              setEndpointWorkflowError(status.error || 'The endpoint scan failed');
+            }
+            loadEndpointValidationSummary();
+            loadConsolidatedEndpointCount();
+          } else {
+            setTimeout(poll, 2000);
+          }
+        } catch (err) {
+          setEndpointWorkflowError(err.message);
+          setIsEndpointScanRunning(false);
+        }
+      };
+      poll();
+    } catch (err) {
+      setEndpointWorkflowError(err.message);
+      setIsEndpointScanRunning(false);
+    }
+  };
+
+  const endpointValidationCounts = useMemo(
+    () => endpointValidation?.counts || {}, [endpointValidation]);
+
+  // A count of zero is a measurement. A dash means nothing has looked yet.
+  //
+  // The counts map only carries the verdicts that actually occurred, so `counts.unverified ?? '-'`
+  // rendered a dash on a run where nothing was unverified, which reads as "not measured" when it
+  // is in fact the best possible outcome.
+  const verdictCount = useCallback((key) => (
+    endpointValidation && endpointValidation.status !== 'not_run'
+      ? (endpointValidationCounts[key] ?? 0)
+      : '-'
+  ), [endpointValidation, endpointValidationCounts]);
+
+  // The label on the Investigate button while it runs. One button covering two phases has to say
+  // which one is moving, or a run that spends twenty minutes in phase 1 looks hung.
+  const endpointScanProgressLabel = useMemo(() => {
+    if (!isEndpointScanRunning) return '';
+    const phase = endpointScanRun?.phase;
+    if (phase === 'validate') {
+      const v = endpointScanRun?.validation;
+      return v?.processed_endpoints
+        ? `Validating ${v.processed_endpoints}/${v.total_endpoints}`
+        : 'Validating...';
+    }
+    if (phase === 'investigate') {
+      const i = endpointScanRun?.investigation;
+      return i?.processed_endpoints
+        ? `Investigating ${i.processed_endpoints}/${i.total_endpoints}`
+        : 'Investigating...';
+    }
+    return 'Starting...';
+  }, [isEndpointScanRunning, endpointScanRun]);
+
+  // What the last validation actually established, including what it had to assume. An operator
+  // reading "412 valid" needs to know whether that rested on a measured probe or on a default.
+  const endpointWorkflowSummary = useMemo(() => {
+    if (isEndpointScanRunning) {
+      return endpointScanRun?.phase === 'investigate'
+        ? 'Enriching the endpoints validation did not rule out.'
+        : 'Validating. Each endpoint is measured against a control from its own directory.';
+    }
+    if (isConsolidatingEndpoints) return 'Folding the six discovery sources into unique endpoint and verb combinations.';
+    if (!endpointValidation || endpointValidation.status === 'not_run') {
+      return consolidatedEndpointCount > 0
+        ? 'Not yet investigated. Investigate validates first, then enriches whatever survives.'
+        : 'Not yet consolidated.';
+    }
+
+    const parts = [];
+    if (endpointValidation.status !== 'success') parts.push(endpointValidation.status);
+    if (endpointValidation.requests_sent) parts.push(`${endpointValidation.requests_sent} requests`);
+    if (endpointValidation.abort_reason) parts.push(`stopped: ${endpointValidation.abort_reason}`);
+    // A skipped phase 2 is the single most useful thing this run can report, so it outranks the
+    // request count rather than sitting behind a modal.
+    if (endpointScanRun?.note) parts.push(endpointScanRun.note.split('.')[0]);
+    const assumptions = endpointValidation.assumptions || [];
+    if (assumptions.length > 0) {
+      parts.push(`${assumptions.length} assumption${assumptions.length === 1 ? '' : 's'}, see Results`);
+    }
+    return parts.length > 0 ? parts.join(' · ') : 'Validated and investigated. Every verdict is measured.';
+  }, [endpointValidation, endpointScanRun, isEndpointScanRunning, isConsolidatingEndpoints,
+      consolidatedEndpointCount]);
+
+  const loadEndpointValidationSummary = useCallback(async () => {
+    if (!activeTarget) return;
+    try {
+      const resp = await fetch(`/api/endpoint-validation/${activeTarget.id}/latest`);
+      if (resp.ok) setEndpointValidation(await resp.json());
+    } catch (err) {
+      // A target that has never been validated is the normal case, not an error.
+    }
+  }, [activeTarget]);
+
+  const loadEndpointScanRun = useCallback(async () => {
+    if (!activeTarget) return;
+    try {
+      const resp = await fetch(`/api/endpoint-scan/${activeTarget.id}/latest`);
+      if (resp.ok) {
+        const run = await resp.json();
+        setEndpointScanRun(run.status === 'not_run' ? null : run);
+      }
+    } catch (err) {
+      // A target that has never been scanned is the normal case, not an error.
+    }
+  }, [activeTarget]);
+
+  // Declared after loadEndpointValidationSummary and loadEndpointScanRun on purpose. A hook's
+  // dependency array is evaluated while the component body runs, so referencing a callback above
+  // its own const declaration throws a temporal dead zone error and nothing renders at all.
+  useEffect(() => { loadEndpointValidationSummary(); }, [loadEndpointValidationSummary]);
+  useEffect(() => { loadEndpointScanRun(); }, [loadEndpointScanRun]);
 
   const handleOpenManageEndpointsModal = async () => {
     setShowManageEndpointsModal(true);
@@ -5247,6 +5536,14 @@ function App() {
   };
 
   const handleCloseManageEndpointsModal = () => setShowManageEndpointsModal(false);
+
+  const handleOpenEndpointScanResultsModal = () => setShowEndpointScanResultsModal(true);
+  const handleCloseEndpointScanResultsModal = () => {
+    setShowEndpointScanResultsModal(false);
+    // An override applied from Manage Endpoints changes the verdicts behind these counts, so the
+    // card is refreshed on close rather than left showing what was true when the modal opened.
+    loadEndpointValidationSummary();
+  };
 
   const loadConsolidatedEndpointCount = async () => {
     if (!activeTarget) return;
@@ -5429,42 +5726,183 @@ function App() {
     setShowPossibleAttacksModal(true);
   };
   const handleClosePossibleAttacksModal = () => setShowPossibleAttacksModal(false);
-  // Attack Vectors section — placeholders; the consolidation/investigation/modals will be built soon.
-  const handleConsolidateAttackVectors = () => {
-    console.log('[AttackVectors] Consolidate requested');
+  // Attack Vectors: one request carrying user-controlled input, identified by verb, host, path, the
+  // parameter in play and where the payload goes.
+  const [attackVectorCounts, setAttackVectorCounts] = useState({});
+  const [isConsolidatingAttackVectors, setIsConsolidatingAttackVectors] = useState(false);
+  const [showAddAttackVectorModal, setShowAddAttackVectorModal] = useState(false);
+  const [showAttackVectorsModal, setShowAttackVectorsModal] = useState(false);
+
+  // XSS. One status object per tool, keyed by tool key, holding both the eligibility figures (which
+  // exist before any scan has run, so the card can say 27/71 up front) and the latest run.
+  const [vectorToolStatus, setVectorToolStatus] = useState({});
+  const [vectorTool, setVectorTool] = useState(null);
+  const [showVectorConfigModal, setShowVectorConfigModal] = useState(false);
+  const [showVectorResultsModal, setShowVectorResultsModal] = useState(false);
+  const [webhookSection, setWebhookSection] = useState(null);
+
+  const loadAttackVectorCounts = useCallback(async () => {
+    if (!activeTarget) return;
+    try {
+      const res = await fetch(`/api/attack-vectors/${activeTarget.id}/summary`);
+      if (res.ok) setAttackVectorCounts(await res.json());
+    } catch {
+      // A target that has never been consolidated has no summary, which the card shows as dashes.
+    }
+  }, [activeTarget]);
+
+  useEffect(() => { loadAttackVectorCounts(); }, [loadAttackVectorCounts]);
+
+  const handleConsolidateAttackVectors = async () => {
+    if (!activeTarget) return;
+    setIsConsolidatingAttackVectors(true);
+    try {
+      const res = await fetch(`/api/attack-vectors/${activeTarget.id}/consolidate`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        notify('Consolidation failed', data.message || 'Attack vectors could not be consolidated.',
+          'warning');
+        return;
+      }
+      await loadAttackVectorCounts();
+      notify('Attack vectors consolidated', data.summary
+        || `${data.total ?? 0} unique vectors across ${data.hosts ?? 0} host(s).`);
+    } catch (err) {
+      notify('Consolidation failed', err.message, 'warning');
+    } finally {
+      setIsConsolidatingAttackVectors(false);
+    }
   };
-  const handleInvestigateAttackVectors = () => {
-    console.log('[AttackVectors] Investigate requested');
+
+  // Declared ABOVE everything that names it. A const arrow referenced from a dependency array before
+  // its own declaration is a ReferenceError on every render, which compiles clean and white-screens
+  // the whole workflow; this file has been broken that way once already.
+  const loadVectorToolStatus = useCallback(async (toolKey) => {
+    const category = VECTOR_TOOL_CATEGORY.get(toolKey);
+    if (!activeTarget || !category) return;
+    try {
+      const res = await fetch(`/api/${category}/${activeTarget.id}/${toolKey}/status`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setVectorToolStatus((prev) => ({ ...prev, [toolKey]: data }));
+    } catch {
+      // A status poll that fails leaves the last known numbers on the card, which is better than
+      // blanking them: the scan is still running, we just did not hear back this time.
+    }
+  }, [activeTarget]);
+
+  // Whether to poll at all, derived so the effect below is KEYED on it. Reading this inside the
+  // effect instead would mean the effect never re-runs when a scan starts, the interval is never
+  // created, and the card sits at 0 of 63 until the operator reopens the page.
+  const anyVectorToolRunning = useMemo(
+    () => Object.values(vectorToolStatus).some((s) => s?.scan?.status === 'running'),
+    [vectorToolStatus],
+  );
+
+  // Once on arrival, so the cards carry their eligibility figures before the operator presses
+  // anything: 27 of 71 is the fact that makes the Scan button honest.
+  useEffect(() => {
+    if (!activeTarget) return;
+    VECTOR_TOOL_CATEGORY.forEach((_category, key) => loadVectorToolStatus(key));
+  }, [activeTarget, loadVectorToolStatus]);
+
+  useEffect(() => {
+    if (!activeTarget || !anyVectorToolRunning) return undefined;
+    const timer = setInterval(() => {
+      VECTOR_TOOL_CATEGORY.forEach((_category, key) => loadVectorToolStatus(key));
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [activeTarget, anyVectorToolRunning, loadVectorToolStatus]);
+
+  // The tools that are actually built. Everything else still says so rather than opening an empty
+  // modal, because a Config screen with no settings in it is harder to read than a message.
+  const startVectorToolScan = async (tool) => {
+    const category = VECTOR_TOOL_CATEGORY.get(tool.key);
+    if (!activeTarget || !category) return;
+    try {
+      const res = await fetch(`/api/${category}/${activeTarget.id}/${tool.key}/scan`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        notify(`${tool.name} scan failed`, data.message || 'The scan could not be started.', 'warning');
+        return;
+      }
+      await loadVectorToolStatus(tool.key);
+    } catch (err) {
+      notify(`${tool.name} scan failed`, err.message, 'warning');
+    }
   };
-  const handleAddAttackVectorManually = () => {
-    console.log('[AttackVectors] Add Manually requested');
+
+  const handleAttackToolAction = (action, tool) => {
+    if (VECTOR_TOOL_CATEGORY.has(tool.key)) {
+      if (action === 'Config') { setVectorTool(tool); setShowVectorConfigModal(true); return; }
+      if (action === 'Results') { setVectorTool(tool); setShowVectorResultsModal(true); return; }
+      startVectorToolScan(tool);
+      return;
+    }
+    notify(`${tool.name}: ${action} not wired up yet`,
+      `The card is in place; ${action.toLowerCase()} for ${tool.name} is not built yet.`, 'warning');
   };
-  const handleOpenUniqueAttackVectorsModal = () => {
-    console.log('[AttackVectors] Unique Attack Vectors requested');
-  };
+
+  const handleAddAttackVectorManually = () => setShowAddAttackVectorModal(true);
+  const handleOpenUniqueAttackVectorsModal = () => setShowAttackVectorsModal(true);
   const handleOpenAuthFlowModal = (categoryKey) => {
     setAuthFlowCategory(categoryKey);
     setShowAuthFlowModal(true);
   };
   const handleCloseAuthFlowModal = () => setShowAuthFlowModal(false);
+
+  // The four Authentication buttons. Each close refreshes the counts on the card, because every one
+  // of these modals can change them and a stale card is how an operator concludes nothing happened.
+  const handleOpenRecordAuthFlowsModal = () => setShowRecordAuthFlowsModal(true);
+  const handleCloseRecordAuthFlowsModal = () => {
+    setShowRecordAuthFlowsModal(false); fetchAuthFlowCounts(); fetchSessionTokenCounts();
+  };
+  const handleOpenManualAuthFlowModal = () => setShowManualAuthFlowModal(true);
+  const handleCloseManualAuthFlowModal = () => {
+    setShowManualAuthFlowModal(false); fetchAuthFlowCounts();
+  };
+  const handleOpenManageSessionsModal = () => setShowManageSessionsModal(true);
+  const handleCloseManageSessionsModal = () => {
+    setShowManageSessionsModal(false); fetchSessionTokenCounts();
+  };
+  const handleOpenRefreshSessionModal = () => setShowRefreshSessionModal(true);
+  const handleCloseRefreshSessionModal = () => {
+    setShowRefreshSessionModal(false); fetchSessionTokenCounts();
+  };
   const handleOpenClientIdentityModal = () => setShowClientIdentityModal(true);
   const handleCloseClientIdentityModal = () => { setShowClientIdentityModal(false); fetchAuthzCounts(); };
   // Possible IDOR Targets = saved client identifiers; Possible ACV Targets is a placeholder until the
   // access-control (Policy/Role/Discretionary) work lands.
   const fetchAuthzCounts = async (targetId) => {
     const id = targetId || (activeTarget && activeTarget.id);
-    if (!id) { setAuthzCounts({ idor: 0, acv: 0 }); return; }
+    if (!id) { setAuthzCounts({ patterns: 0, parameter: 0, rules: 0, forbidden: 0 }); return; }
     try {
-      const res = await fetch(`/api/authz/client-identifiers/${id}`);
-      if (res.ok) {
-        const data = await res.json();
-        setAuthzCounts({ idor: Array.isArray(data) ? data.length : 0, acv: 0 });
-      }
+      const res = await fetch(`/api/authz/summary/${id}`);
+      if (!res.ok) return;
+      const d = await res.json();
+      const ip = d.identity_patterns || {};
+      const pol = d.policy || {};
+      const rbac = d.rbac || {};
+      const dac = d.dac || {};
+      setAuthzCounts({
+        patterns: ip.total || 0,
+        parameter: ip.parameter || 0,
+        // One number for "rules modelled" across the three access-control schemes, because the
+        // card has room for one and the operator cares whether the model exists at all, not
+        // whether it happens to live in the policy tab or the role tab.
+        rules: (pol.permissions || 0) + (rbac.roles || 0) * (rbac.actions || 0) + (dac.levels || 0),
+        forbidden: rbac.forbidden_cells || 0,
+      });
     } catch (error) { console.error('Error fetching authorization counts:', error); }
   };
-  const handleOpenAccessControlModal = (aclType) => {
-    // Placeholder — Policy/Role/Discretionary access-control modeling modals will be built here soon.
-    console.log('[Authorization] Access control requested:', aclType);
+  // Each close refreshes the card, because every one of these modals changes the counts on it.
+  const handleOpenPolicyAccessModal = () => setShowPolicyAccessModal(true);
+  const handleClosePolicyAccessModal = () => { setShowPolicyAccessModal(false); fetchAuthzCounts(); };
+  const handleOpenRoleAccessModal = () => setShowRoleAccessModal(true);
+  const handleCloseRoleAccessModal = () => { setShowRoleAccessModal(false); fetchAuthzCounts(); };
+  const handleOpenDiscretionaryAccessModal = () => setShowDiscretionaryAccessModal(true);
+  const handleCloseDiscretionaryAccessModal = () => {
+    setShowDiscretionaryAccessModal(false); fetchAuthzCounts();
   };
   const handleHeaderCookieAction = (action) => {
     // Placeholder — Header/Cookie Enumeration (fuzzing, investigate, results) will be built here soon.
@@ -5474,20 +5912,39 @@ function App() {
   const fetchAuthFlowCounts = async (targetId) => {
     const id = targetId || (activeTarget && activeTarget.id);
     if (!id) {
-      setAuthFlowCounts({ register: 0, login: 0, mfa_otp: 0, reset: 0 });
+      setAuthFlowCounts({ register: 0, login: 0, mfa_otp: 0, magic_link: 0, reset: 0, total: 0, recorded: 0 });
       return;
     }
     try {
       const res = await fetch(`/api/auth-flows/${id}`);
       if (res.ok) {
         const data = await res.json();
-        const counts = { register: 0, login: 0, mfa_otp: 0, reset: 0 };
+        const counts = { register: 0, login: 0, mfa_otp: 0, magic_link: 0, reset: 0, total: 0, recorded: 0 };
         if (Array.isArray(data)) {
-          data.forEach((f) => { if (counts[f.category] !== undefined) counts[f.category] += 1; });
+          data.forEach((f) => {
+            if (counts[f.category] !== undefined) counts[f.category] += 1;
+            counts.total += 1;
+            // Where the flow came from decides whether it can be trusted to replay: a recorded
+            // flow is what the browser really did, a manual one is what somebody typed.
+            if (f.source === 'recorded') counts.recorded += 1;
+          });
         }
         setAuthFlowCounts(counts);
       }
     } catch (error) { console.error('Error fetching auth flow counts:', error); }
+  };
+
+  const fetchSessionTokenCounts = async (targetId) => {
+    const id = targetId || (activeTarget && activeTarget.id);
+    if (!id) { setSessionTokenCounts({ total: 0, active: 0 }); return; }
+    try {
+      const res = await fetch(`/api/session-tokens/target/${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        const list = Array.isArray(data) ? data : (data?.tokens || []);
+        setSessionTokenCounts({ total: list.length, active: list.filter((t) => t.is_active).length });
+      }
+    } catch (error) { console.error('Error fetching session token counts:', error); }
   };
   // Count how many threat-model items have actually been filled out for the active target, so the
   // STRIDE card can surface real progress instead of a static legend.
@@ -5532,11 +5989,6 @@ function App() {
     fetchThreatModelCounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTarget]);
-  // Placeholder — reset the injection attack-vector counts per target until the backend consolidation
-  // that produces attack vectors exists; then fetch and set the real counts here.
-  useEffect(() => {
-    setInjectionAttackVectorCounts({ client_side: 0, server_side: 0, database: 0, other: 0 });
-  }, [activeTarget]);
   useEffect(() => {
     setHeaderCookieCounts({ hidden_headers: 0, hidden_cookies: 0, client_side: 0, server_side: 0 });
     fetchAuthzCounts();
@@ -5544,10 +5996,13 @@ function App() {
   }, [activeTarget]);
   useEffect(() => {
     fetchAuthFlowCounts();
+    fetchSessionTokenCounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTarget]);
   const handleOpenFFUFConfigModal = () => setShowFFUFConfigModal(true);
   const handleCloseFFUFConfigModal = () => setShowFFUFConfigModal(false);
+  const handleOpenFFUFSettingsModal = () => setShowFFUFSettingsModal(true);
+  const handleCloseFFUFSettingsModal = () => setShowFFUFSettingsModal(false);
 
   useEffect(() => {
     if (activeTarget) {
@@ -5974,14 +6429,18 @@ function App() {
           onClose={() => setShowToast(false)}
           className={`custom-toast ${!showToast ? 'hide' : ''}`}
           autohide
-          delay={3000}
+          delay={toastVariant === 'warning' ? 12000 : 3000}
         >
           <Toast.Header>
-            <MdCheckCircle 
-              className="success-icon me-2" 
-              size={20} 
-              color="#ff0000"
-            />
+            {toastVariant === 'warning' ? (
+              <MdWarning className="me-2" size={20} color="#ff0000" />
+            ) : (
+              <MdCheckCircle
+                className="success-icon me-2"
+                size={20}
+                color="#ff0000"
+              />
+            )}
             <strong className="me-auto" style={{ 
               color: '#ff0000',
               fontSize: '0.95rem',
@@ -5992,7 +6451,8 @@ function App() {
           </Toast.Header>
           <Toast.Body style={{ color: '#ffffff' }}>
             <div className="d-flex align-items-center">
-              <span>{toastMessage}</span>
+              {/* pre-wrap because a warning may name several steps, one per line. */}
+              <span style={{ whiteSpace: 'pre-wrap' }}>{toastMessage}</span>
             </div>
           </Toast.Body>
         </Toast>
@@ -8422,9 +8882,9 @@ function App() {
                               (wafProbeCard.posture || '').replace(/_/g, ' ').toLowerCase(),
                               wafProbeCard.runStatus === 'complete' ? 'complete' : wafProbeCard.runStatus,
                               formatProbeAge(wafProbeCard.at),
-                              wafProbeAppliedCount === null ? null
-                                : wafProbeAppliedCount === 0 ? 'not applied to any tool'
-                                : `${wafProbeAppliedCount} setting${wafProbeAppliedCount === 1 ? '' : 's'} applied`,
+                              wafProbeRecCount === null ? null
+                                : wafProbeRecCount === 0 ? 'no settings to change'
+                                : `${wafProbeRecCount} recommendation${wafProbeRecCount === 1 ? '' : 's'}`,
                             ].filter(Boolean).join(' · ') : ' '}
                           </Card.Text>
                           <div className="d-flex justify-content-center gap-2">
@@ -8464,6 +8924,141 @@ function App() {
                     </Card>
                   </Col>
                 </Row>
+
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Authentication</h4>
+                <Row className="mb-4">
+                  <Col md={12}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          Authentication
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Record a real authentication against the target with the browser extension, or write the requests out by hand, then keep the session tokens those flows produce. Every token is tied to the flow that can mint another one, so when a session dies the framework can go and get a new one instead of quietly testing a login wall.
+                        </Card.Text>
+                        <Row className="g-3 justify-content-center mt-1 mb-2">
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{authFlowCounts.total ?? 0}</div>
+                            <div className="text-white small pb-4">Auth Flows</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{authFlowCounts.recorded ?? 0}</div>
+                            <div className="text-white small pb-4">Recorded</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{sessionTokenCounts.total ?? 0}</div>
+                            <div className="text-white small pb-4">Session Tokens</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            {/* Active is the number that matters: it is what the other tools will
+                                actually send. Zero active tokens with a full list is the state that
+                                makes every scan report a login wall. */}
+                            <div className={`fs-3 fw-bold ${(sessionTokenCounts.active ?? 0) > 0 ? 'text-danger' : 'text-secondary'}`}>
+                              {sessionTokenCounts.active ?? 0}
+                            </div>
+                            <div className="text-white small pb-4">Active</div>
+                          </Col>
+                        </Row>
+                        <div className="mt-auto">
+                          <Row className="g-2">
+                            <Col>
+                              <Button variant="outline-danger" className="w-100"
+                                      onClick={handleOpenRecordAuthFlowsModal} disabled={!activeTarget}>
+                                Record Auth Flows
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100"
+                                      onClick={handleOpenManualAuthFlowModal} disabled={!activeTarget}>
+                                Manual Auth Flows
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100"
+                                      onClick={handleOpenManageSessionsModal} disabled={!activeTarget}>
+                                Manage Sessions
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100"
+                                      onClick={handleOpenRefreshSessionModal} disabled={!activeTarget}>
+                                Refresh Session
+                              </Button>
+                            </Col>
+                          </Row>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
+
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Authorization</h4>
+                <Row className="mb-4">
+                  <Col md={12}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          Authorization
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Model how this application decides who may do what, so later testing knows what should have been refused. Identity patterns record how the server works out who is asking and how much of that the caller controls; the three access-control sections record the rules the application claims to enforce.
+                        </Card.Text>
+                        <Row className="g-3 justify-content-center mt-1 mb-2">
+                          <Col xs={6} md={3}>
+                            {/* Parameter-based identity is the count that matters here: it is the
+                                one where the caller controls the id outright, so it is where IDOR
+                                testing actually starts. */}
+                            <div className="fs-3 fw-bold text-danger">{authzCounts.parameter ?? 0}</div>
+                            <div className="text-white small pb-4">Attacker-Controlled IDs</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{authzCounts.patterns ?? 0}</div>
+                            <div className="text-white small pb-4">Identity Patterns</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            <div className="fs-3 fw-bold text-danger">{authzCounts.rules ?? 0}</div>
+                            <div className="text-white small pb-4">Access Rules Modelled</div>
+                          </Col>
+                          <Col xs={6} md={3}>
+                            {/* Forbidden cells are the only ones whose violation is automatically a
+                                finding, so they get their own number. */}
+                            <div className="fs-3 fw-bold text-danger">{authzCounts.forbidden ?? 0}</div>
+                            <div className="text-white small pb-4">Forbidden Actions</div>
+                          </Col>
+                        </Row>
+                        <div className="mt-auto">
+                          <Row className="g-2">
+                            <Col>
+                              <Button variant="outline-danger" className="w-100"
+                                      onClick={handleOpenClientIdentityModal} disabled={!activeTarget}>
+                                Client Identity Patterns
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100"
+                                      onClick={handleOpenPolicyAccessModal} disabled={!activeTarget}>
+                                Policy-Based Access Controls
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100"
+                                      onClick={handleOpenRoleAccessModal} disabled={!activeTarget}>
+                                Role-Based Access Controls
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button variant="outline-danger" className="w-100"
+                                      onClick={handleOpenDiscretionaryAccessModal} disabled={!activeTarget}>
+                                Discretionary Access Controls
+                              </Button>
+                            </Col>
+                          </Row>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
+
                 {/* Split in two because the two halves cost completely different things. Nothing
                     in the first row crawls the application: Waybackurls and GAU read public
                     archives, and LinkFinder reads JavaScript that has already been fetched. The
@@ -8549,8 +9144,300 @@ function App() {
                   ))}
                 </Row>
 
-                <h4 className="text-secondary mb-3 fs-5 mt-4">Endpoint/Header/Cookie Brute Forcing</h4>
-                <HelpMeLearn section="urlEndpointBruteForcing" />
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Target URL Endpoints</h4>
+                <HelpMeLearn section="urlTargetEndpoints" />
+                <Row className="mb-4">
+                  <Col md={12}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          Consolidate Endpoints
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Fold everything the crawlers, the archives and the manual crawl found into one list of unique endpoint and verb combinations. Investigate then runs both halves as one scan: it validates each endpoint against a control taken from its own directory to separate real pages from the target's catch-all, then gathers detail on everything validation did not rule out.
+                        </Card.Text>
+
+                        {/* A refusal to run is the most useful thing this workflow says. It belongs
+                            on the card, not in the console. */}
+                        {endpointWorkflowError && (
+                          <Alert variant="warning" className="py-2 small text-start mb-2"
+                                 dismissible onClose={() => setEndpointWorkflowError('')}>
+                            {endpointWorkflowError}
+                          </Alert>
+                        )}
+
+                        <div className="my-3 py-2">
+                          <Row className="text-center align-items-start">
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">{consolidatedEndpointCount}</div>
+                              <div className="text-muted small">Endpoints</div>
+                              <div className="text-muted" style={{ fontSize: '0.68rem' }}>
+                                unique url + verb
+                              </div>
+                            </Col>
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">
+                                {verdictCount('valid')}
+                              </div>
+                              <div className="text-muted small">Valid</div>
+                              <div className="text-muted" style={{ fontSize: '0.68rem' }}>
+                                distinct real pages
+                              </div>
+                            </Col>
+                            <Col>
+                              <div className="text-secondary fw-bold fs-4">
+                                {verdictCount('unverified')}
+                              </div>
+                              <div className="text-muted small">Unverified</div>
+                              <div className="text-muted" style={{ fontSize: '0.68rem' }}>
+                                still tested
+                              </div>
+                            </Col>
+                            <Col>
+                              <div className="text-secondary fw-bold fs-4">
+                                {verdictCount('ruled_out')}
+                              </div>
+                              <div className="text-muted small">Ruled Out</div>
+                              <div className="text-muted" style={{ fontSize: '0.68rem' }}>
+                                catch-all or gone
+                              </div>
+                            </Col>
+                          </Row>
+                        </div>
+
+                        <div className="mt-auto">
+                          <Card.Text className="text-muted mb-3" style={{ fontSize: '0.72rem' }}>
+                            {endpointWorkflowSummary}
+                          </Card.Text>
+                          <div className="d-flex gap-2">
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleConsolidateEndpoints}
+                              disabled={!activeTarget || isConsolidatingEndpoints || isEndpointScanRunning}
+                            >
+                              {isConsolidatingEndpoints ? (
+                                <><Spinner animation="border" size="sm" className="me-2" />Consolidating...</>
+                              ) : (
+                                'Consolidate'
+                              )}
+                            </Button>
+                            {/* One button for both phases. Validate cannot be run out of order or
+                                skipped, because investigating an unvalidated target profiles its
+                                catch-all page once per endpoint and reports it as findings. */}
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={() => handleInvestigateEndpoints()}
+                              disabled={!activeTarget || isEndpointScanRunning || isConsolidatingEndpoints || consolidatedEndpointCount === 0}
+                            >
+                              {isEndpointScanRunning ? (
+                                <><Spinner animation="border" size="sm" className="me-2" />
+                                  {endpointScanProgressLabel}</>
+                              ) : (
+                                'Investigate'
+                              )}
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleOpenEndpointScanResultsModal}
+                              disabled={!activeTarget || !endpointScanRun}
+                            >
+                              Results
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleOpenManageEndpointsModal}
+                              disabled={!activeTarget}
+                            >
+                              Manage Endpoints
+                            </Button>
+                          </div>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
+
+                {/* Both sections guess at input the app never advertised. They are split by HOW they
+                    guess, because that decides what a run costs and what its output means.
+
+                    Chunking sends a batch of candidate names at once and bisects the batch when the
+                    response changes, so it finds parameters in a number of requests closer to the log
+                    of the wordlist than to its length. Brute force sends one request per word. */}
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Hidden Attack Vector Fuzzing - Chunking</h4>
+                <HelpMeLearn section="urlHiddenAttackVectorFuzzingChunking" />
+                <Row className="mb-4">
+                  <Col md={6}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          <a href="https://github.com/s0md3v/Arjun" className="text-danger text-decoration-none" target="_blank" rel="noopener noreferrer">
+                            Arjun
+                          </a>
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Brute-forces hidden HTTP parameters (GET/POST/JSON/XML) using a large built-in wordlist. Fast and accurate.
+                        </Card.Text>
+                        <div className="my-3 py-2">
+                          <Row className="text-center align-items-center">
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">
+                                {paramTargetCounts.arjun
+                                  ? `${paramTargetCounts.arjun.enabled}/${paramTargetCounts.arjun.total}`
+                                  : '-'}
+                              </div>
+                              <div className="text-muted small">Targets Enabled</div>
+                            </Col>
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">
+                                {mostRecentArjunScan?.parameters_found || 0}
+                              </div>
+                              <div className="text-muted small">Parameters Found</div>
+                            </Col>
+                          </Row>
+                        </div>
+                        <div className="mt-auto">
+                          {/* Config, Scan, Results: the order the operator actually works in. */}
+                          <div className="d-flex justify-content-center gap-2">
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleOpenArjunConfigModal}
+                              disabled={!activeTarget}
+                            >
+                              Config
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={startArjunScan}
+                              disabled={!activeTarget || isArjunScanning}
+                            >
+                              <div className="btn-content">
+                                {isArjunScanning ? (
+                                  <Spinner animation="border" size="sm" />
+                                ) : (
+                                  'Scan'
+                                )}
+                              </div>
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleOpenArjunResultsModal}
+                              disabled={!activeTarget || mostRecentArjunScanStatus !== 'success'}
+                            >
+                              Results
+                            </Button>
+                          </div>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+
+                  {/* x8 sits beside Arjun rather than with FFUF: both ask "does this endpoint read a
+                      parameter it never advertised", and both answer it a batch at a time. x8 differs
+                      in WHERE it injects, not in how it searches. */}
+                  <Col md={6}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          <a href="https://github.com/Sh1Yo/x8" className="text-danger text-decoration-none" target="_blank" rel="noopener noreferrer">
+                            x8
+                          </a>
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Rust parameter fuzzer that injects candidates into the query, body, headers or cookies, learns the target's normal response variation, then bisects a batch to find which parameter caused a difference.
+                        </Card.Text>
+                        <div className="my-3 py-2">
+                          <Row className="text-center align-items-center">
+                            <Col>
+                              {/* While a run is going this becomes the endpoint counter: a pass covers
+                                  up to four injection places and takes as long as it takes, so it is
+                                  the difference between "working" and "hung" from the operator's
+                                  side. */}
+                              <div className="text-danger fw-bold fs-4">
+                                {isX8Scanning && mostRecentX8Scan?.total_endpoints
+                                  ? `${mostRecentX8Scan.processed_endpoints || 0}/${mostRecentX8Scan.total_endpoints}`
+                                  : paramTargetCounts.x8
+                                    ? `${paramTargetCounts.x8.enabled}/${paramTargetCounts.x8.total}`
+                                    : '-'}
+                              </div>
+                              <div className="text-muted small">
+                                {isX8Scanning && mostRecentX8Scan?.total_endpoints
+                                  ? 'Endpoints Scanned' : 'Targets Enabled'}
+                              </div>
+                            </Col>
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">
+                                {mostRecentX8Scan?.parameters_found || 0}
+                              </div>
+                              <div className="text-muted small">Parameters Found</div>
+                            </Col>
+                          </Row>
+                          {!isX8Scanning && mostRecentX8ScanStatus === 'partial' && (
+                            <div className="text-danger small text-center mt-2">
+                              Some passes failed
+                            </div>
+                          )}
+                          {!isX8Scanning && mostRecentX8ScanStatus === 'error' && (
+                            <div className="text-danger small text-center mt-2">Scan failed</div>
+                          )}
+                        </div>
+                        <div className="mt-auto">
+                          <div className="d-flex justify-content-center gap-2">
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleOpenX8ConfigModal}
+                              disabled={!activeTarget}
+                            >
+                              Config
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={startX8Scan}
+                              disabled={!activeTarget || isX8Scanning}
+                            >
+                              <div className="btn-content">
+                                {isX8Scanning ? (
+                                  <Spinner animation="border" size="sm" />
+                                ) : (
+                                  'Scan'
+                                )}
+                              </div>
+                            </Button>
+                            {/* 'partial' counts: it means one pass failed and the others produced
+                                real findings, so gating on 'success' alone made those findings
+                                unreachable. 'error' is also allowed through, because the modal is
+                                where the failure reason is shown. */}
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleOpenX8ResultsModal}
+                              disabled={!activeTarget || !mostRecentX8Scan ||
+                                mostRecentX8ScanStatus === 'pending' ||
+                                mostRecentX8ScanStatus === 'running'}
+                            >
+                              Results
+                            </Button>
+                          </div>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
+
+                {/* FFUF is on its own because it is the only tool here that spends one request per
+                    word. That is what makes its settings and its wordlist worth a screen of their
+                    own: the difference between a good filter and none is thousands of requests and a
+                    result set nobody can read. */}
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Hidden Attack Vector Fuzzing - Brute Force</h4>
+                <HelpMeLearn section="urlHiddenAttackVectorFuzzingBruteForce" />
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
@@ -8563,54 +9450,121 @@ function App() {
                         <Card.Text className="text-white small fst-italic">
                           Fast web fuzzer written in Go. Brute force endpoints, parameters, directories, and more with custom wordlists and extensive filtering options.
                         </Card.Text>
+                        <div className="my-3 py-2">
+                          <Row className="text-center align-items-center">
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">
+                                {ffufFlowSteps.total > 0
+                                  ? `${ffufFlowSteps.enabled}/${ffufFlowSteps.total}`
+                                  : '-'}
+                              </div>
+                              <div className="text-muted small">Scans Enabled</div>
+                            </Col>
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">
+                                {ffufNotableCount === null ? (ffufFindingCount ?? 0) : ffufNotableCount}
+                              </div>
+                              <div className="text-muted small">
+                                {ffufNotableCount !== null && ffufNotableCount !== ffufFindingCount
+                                  ? `Worth Review (${ffufFindingCount} stored)`
+                                  : 'Findings'}
+                              </div>
+                            </Col>
+                          </Row>
+
+                          {/* What the flow is doing, while it does it. A spinner on the button said
+                              only "something is happening", which on a flow of nine rounds against
+                              several hosts, each of which can take many minutes, is the same as
+                              saying nothing. */}
+                          {isFFUFRunning && (
+                            <div className="mt-3">
+                              <div className="d-flex justify-content-between align-items-baseline">
+                                <span className="text-white small">
+                                  {ffufRun?.steps_total
+                                    ? `Scan ${Math.min((ffufRun.steps_done || 0) + 1, ffufRun.steps_total)} of ${ffufRun.steps_total}`
+                                    : 'Starting'}
+                                </span>
+                                <span className="text-white-50" style={{ fontSize: '0.75rem' }}>
+                                  {ffufRun?.findings_new > 0 ? `${ffufRun.findings_new} new` : ''}
+                                </span>
+                              </div>
+                              {ffufRun?.current_step && (
+                                <div className="text-white-50 text-truncate"
+                                  style={{ fontSize: '0.72rem' }}
+                                  title={`${ffufRun.current_step.name} on ${ffufRun.current_step.host}`}>
+                                  {ffufRun.current_step.name || 'unnamed step'}
+                                  {ffufRun.current_step.host ? ` on ${ffufRun.current_step.host}` : ''}
+                                </div>
+                              )}
+                              <div className="progress mt-1" style={{ height: '4px' }}>
+                                <div className="progress-bar bg-danger"
+                                  style={{
+                                    width: `${ffufRun?.steps_total
+                                      ? Math.round(((ffufRun.steps_done || 0) / ffufRun.steps_total) * 100)
+                                      : 0}%`,
+                                  }} />
+                              </div>
+                            </div>
+                          )}
+
+                          {/* A run that refused steps, or ended badly, said so once in an alert the
+                              operator may not have been looking at. */}
+                          {!isFFUFRunning && ffufRun && ffufRun.steps_blocked > 0 && (
+                            <div className="text-danger small text-center mt-2">
+                              {ffufRun.steps_blocked} step(s) were refused before the last run started
+                            </div>
+                          )}
+                          {!isFFUFRunning && ffufRun && ffufRun.status === 'error' && (
+                            <div className="text-danger small text-center mt-2">Last run failed</div>
+                          )}
+                          {!isFFUFRunning && ffufRun && ffufRun.status === 'cancelled' && (
+                            <div className="text-white-50 small text-center mt-2">
+                              Last run was cancelled
+                            </div>
+                          )}
+                        </div>
                         <div className="mt-auto">
-                          <Card.Text className="text-white small mb-3">
-                            {ffufCardSummary}
-                          </Card.Text>
+                          {/* Settings, Configure, Scan, Results: settings first because they apply to
+                              every round the flow contains, so they are the thing to get right before
+                              building any of them. One Scan button, because which of endpoints,
+                              headers and cookies gets fuzzed is a configuration decision rather than
+                              three separate buttons. */}
                           <div className="d-flex justify-content-center gap-2">
                             <Button
                               variant="outline-danger"
                               className="flex-fill"
-                              onClick={handleOpenFFUFConfigModal}
+                              onClick={handleOpenFFUFSettingsModal}
+                              disabled={!activeTarget}
                             >
-                              <i className="bi bi-gear me-2" />
+                              Settings
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={handleOpenFFUFConfigModal}
+                              disabled={!activeTarget}
+                            >
                               Configure
                             </Button>
                             <Button
                               variant="outline-danger"
                               className="flex-fill"
-                              onClick={startFFUFURLScan}
-                              disabled={!activeTarget || isFFUFURLScanning}
+                              onClick={startFFUFFlow}
+                              disabled={!activeTarget || isFFUFRunning}
                             >
                               <div className="btn-content">
-                                {isFFUFURLScanning ? (
+                                {isFFUFRunning ? (
                                   <Spinner animation="border" size="sm" />
                                 ) : (
-                                  'Fuzz Endpoints'
+                                  'Scan'
                                 )}
                               </div>
                             </Button>
                             <Button
                               variant="outline-danger"
                               className="flex-fill"
-                              onClick={startFFUFHeaderFuzz}
-                              disabled={!activeTarget || isFFUFURLScanning}
-                            >
-                              Fuzz Headers
-                            </Button>
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
-                              onClick={startFFUFCookieFuzz}
-                              disabled={!activeTarget || isFFUFURLScanning}
-                            >
-                              Fuzz Cookies
-                            </Button>
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
                               onClick={handleOpenFFUFURLResultsModal}
-                              disabled={!mostRecentFFUFURLScan || mostRecentFFUFURLScanStatus !== 'success'}
+                              disabled={!activeTarget}
                             >
                               Results
                             </Button>
@@ -8621,273 +9575,64 @@ function App() {
                   </Col>
                 </Row>
 
-                <h4 className="text-secondary mb-3 fs-5 mt-4">Target URL Endpoints</h4>
-                <HelpMeLearn section="urlTargetEndpoints" />
-                <Row className="mb-4">
-                  <Col md={12}>
-                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
-                      <Card.Body className="d-flex flex-column">
-                        <Card.Title className="text-danger mb-3">
-                          Endpoint Consolidation
-                        </Card.Title>
-                        <Card.Text className="text-white small fst-italic">
-                          Consolidate all discovered endpoints from crawling, link discovery, and brute forcing into a unified collection of HTTP requests and responses. Prepare your attack surface for parameter enumeration and vulnerability testing.
-                        </Card.Text>
-                        <div className="mt-auto">
-                          <Card.Text className="text-white small mb-3">
-                            Consolidated Endpoints: {consolidatedEndpointCount}
-                          </Card.Text>
-                          <div className="d-flex gap-2">
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
-                              onClick={handleConsolidateEndpoints}
-                              disabled={!activeTarget || isConsolidatingEndpoints}
-                            >
-                              {isConsolidatingEndpoints ? (
-                                <><Spinner animation="border" size="sm" className="me-2" />Consolidating...</>
-                              ) : (
-                                'Consolidate'
-                              )}
-                            </Button>
-                            {/* Placeholder. Wired to nothing yet, and disabled so it cannot look like a button
-                                that ran and silently did nothing. */}
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
-                              disabled
-                            >
-                              Validate
-                            </Button>
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
-                              onClick={handleInvestigateEndpoints}
-                              disabled={!activeTarget || isInvestigatingEndpoints || consolidatedEndpointCount === 0}
-                            >
-                              {isInvestigatingEndpoints ? (
-                                <><Spinner animation="border" size="sm" className="me-2" />Investigating...</>
-                              ) : (
-                                'Investigate'
-                              )}
-                            </Button>
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
-                              onClick={handleOpenManageEndpointsModal}
-                              disabled={!activeTarget}
-                            >
-                              Manage Endpoints
-                            </Button>
-                          </div>
-                        </div>
-                      </Card.Body>
-                    </Card>
-                  </Col>
-                </Row>
-
-                <h4 className="text-secondary mb-3 fs-5 mt-4">Parameter Enumeration</h4>
-                <HelpMeLearn section="urlParameterEnumeration" />
-                <Row className="mb-4">
-                  {[
-                    {
-                      name: 'Arjun',
-                      link: 'https://github.com/s0md3v/Arjun',
-                      description: 'Brute-forces hidden HTTP parameters (GET/POST/JSON/XML) using a large built-in wordlist. Fast and accurate.',
-                      isActive: activeTarget,
-                      isScanning: isArjunScanning,
-                      status: mostRecentArjunScanStatus,
-                      resultCount: mostRecentArjunScan?.parameters_found || 0,
-                      onScan: startArjunScan,
-                      onResults: handleOpenArjunResultsModal,
-                      onConfig: handleOpenArjunConfigModal,
-                      resultLabel: 'Parameters'
-                    },
-                    {
-                      name: 'parameth',
-                      link: 'https://github.com/maK-/parameth',
-                      description: 'Brute-forces GET/POST parameters by detecting changes in the response. Configurable filters and threading.',
-                      isActive: activeTarget,
-                      isScanning: isParamethScanning,
-                      status: mostRecentParamethScanStatus,
-                      resultCount: mostRecentParamethScan?.parameters_found || 0,
-                      onScan: startParamethScan,
-                      onResults: handleOpenParamethResultsModal,
-                      onConfig: handleOpenParamethConfigModal,
-                      resultLabel: 'Parameters'
-                    },
-                    {
-                      name: 'x8',
-                      link: 'https://github.com/Sh1Yo/x8',
-                      description: 'Rust parameter fuzzer that injects params via query, body, or headers and confirms hits by comparing responses. Fast and accurate.',
-                      isActive: activeTarget,
-                      isScanning: isX8Scanning,
-                      status: mostRecentX8ScanStatus,
-                      resultCount: mostRecentX8Scan?.parameters_found || 0,
-                      onScan: startX8Scan,
-                      onResults: handleOpenX8ResultsModal,
-                      onConfig: handleOpenX8ConfigModal,
-                      resultLabel: 'Parameters'
-                    }
-                  ].map((tool, index) => (
-                    <Col key={index}>
-                      <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
-                        <Card.Body className="d-flex flex-column">
-                          <Card.Title className="text-danger mb-3">
-                            <a href={tool.link} className="text-danger text-decoration-none" target="_blank" rel="noopener noreferrer">
-                              {tool.name}
-                            </a>
-                          </Card.Title>
-                          <Card.Text className="text-white small fst-italic">
-                            {tool.description}
-                          </Card.Text>
-                          <div className="mt-auto">
-                            <Card.Text className="text-white small mb-3">
-                              {tool.resultLabel}: {tool.resultCount || "0"}
-                            </Card.Text>
-                            <div className="d-flex justify-content-center gap-2">
-                              <Button
-                                variant="outline-danger"
-                                className="flex-fill"
-                                onClick={tool.onScan}
-                                disabled={!tool.isActive || tool.isScanning}
-                              >
-                                <div className="btn-content">
-                                  {tool.isScanning ? (
-                                    <Spinner animation="border" size="sm" />
-                                  ) : (
-                                    'Scan'
-                                  )}
-                                </div>
-                              </Button>
-                              <Button
-                                variant="outline-danger"
-                                className="flex-fill"
-                                onClick={tool.onConfig}
-                                disabled={!tool.isActive}
-                              >
-                                Config
-                              </Button>
-                              <Button
-                                variant="outline-danger"
-                                className="flex-fill"
-                                onClick={tool.onResults}
-                                disabled={!tool.isActive || tool.status !== 'success'}
-                              >
-                                Results
-                              </Button>
-                            </div>
-                          </div>
-                        </Card.Body>
-                      </Card>
-                    </Col>
-                  ))}
-                </Row>
-
-                <h4 className="text-secondary mb-3 fs-5 mt-4">Attack Surface Consolidation</h4>
-                <HelpMeLearn section="urlTargetEndpoints" />
-                <Row className="mb-4">
-                  <Col md={12}>
-                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
-                      <Card.Body className="d-flex flex-column">
-                        <Card.Title className="text-danger mb-3">
-                          Attack Surface Consolidation
-                        </Card.Title>
-                        <Card.Text className="text-white small fst-italic">
-                          Consolidate everything discovered from crawling, URL discovery, brute forcing, and parameter enumeration into a single list of the unique ways an attacker can interact with the application. Each entry captures a distinct combination of HTTP verb, path, parameters, headers, cookies, and body so the full attack surface can be tested systematically.
-                        </Card.Text>
-                        <div className="mt-auto">
-                          <Card.Text className="text-white small mb-3">
-                            Attack Surface Entries: {consolidatedEndpointCount}
-                          </Card.Text>
-                          <div className="d-flex gap-2">
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
-                              onClick={handleConsolidateEndpoints}
-                              disabled={!activeTarget || isConsolidatingEndpoints}
-                            >
-                              {isConsolidatingEndpoints ? (
-                                <><Spinner animation="border" size="sm" className="me-2" />Consolidating...</>
-                              ) : (
-                                'Consolidate'
-                              )}
-                            </Button>
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
-                              onClick={handleInvestigateEndpoints}
-                              disabled={!activeTarget || isInvestigatingEndpoints || consolidatedEndpointCount === 0}
-                            >
-                              {isInvestigatingEndpoints ? (
-                                <><Spinner animation="border" size="sm" className="me-2" />Investigating...</>
-                              ) : (
-                                'Investigate'
-                              )}
-                            </Button>
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
-                              onClick={handleOpenManageEndpointsModal}
-                              disabled={!activeTarget}
-                            >
-                              Manage Endpoints
-                            </Button>
-                          </div>
-                        </div>
-                      </Card.Body>
-                    </Card>
-                  </Col>
-                </Row>
-
-                <h4 className="text-secondary mb-3 fs-5 mt-4">Injection Attack Vectors</h4>
+                <h4 className="text-secondary mb-3 fs-5 mt-4">Consolidate Attack Vectors</h4>
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
                       <Card.Body className="d-flex flex-column">
                         <Card.Title className="text-danger mb-3">
-                          Injection Attack Vectors
+                          Consolidate Attack Vectors
                         </Card.Title>
                         <Card.Text className="text-white small fst-italic">
-                          Consolidate discovered endpoints and parameters into distinct injection attack vectors, investigate them, and visualize the results.
+                          An attack vector is one request carrying user-controlled input the application
+                          actually processes: a verb, a host, a path, the parameters in play, and the
+                          single place a payload goes. Consolidate folds everything the crawls, the
+                          archives, Arjun, x8 and FFUF found into one list of unique vectors to test.
                         </Card.Text>
-                        <Row className="g-3 justify-content-center mt-1 mb-2">
-                          <Col xs={6} md={3}>
-                            <div className="fs-3 fw-bold text-danger">{injectionAttackVectorCounts.client_side}</div>
-                            <div className="text-white small pb-4">Client-Side Attack Vectors</div>
-                          </Col>
-                          <Col xs={6} md={3}>
-                            <div className="fs-3 fw-bold text-danger">{injectionAttackVectorCounts.server_side}</div>
-                            <div className="text-white small pb-4">Server-Side Attack Vectors</div>
-                          </Col>
-                          <Col xs={6} md={3}>
-                            <div className="fs-3 fw-bold text-danger">{injectionAttackVectorCounts.database}</div>
-                            <div className="text-white small pb-4">Database Attack Vectors</div>
-                          </Col>
-                          <Col xs={6} md={3}>
-                            <div className="fs-3 fw-bold text-danger">{injectionAttackVectorCounts.other}</div>
-                            <div className="text-white small pb-4">Other Injection Attack Vectors</div>
-                          </Col>
-                        </Row>
+                        <div className="my-3 py-2">
+                          <Row className="text-center align-items-center">
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">
+                                {attackVectorCounts.total ?? '-'}
+                              </div>
+                              <div className="text-muted small">Unique Attack Vectors</div>
+                            </Col>
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">
+                                {attackVectorCounts.hosts ?? '-'}
+                              </div>
+                              <div className="text-muted small">Hosts</div>
+                            </Col>
+                            <Col>
+                              <div className="text-danger fw-bold fs-4">
+                                {attackVectorCounts.manual ?? '-'}
+                              </div>
+                              <div className="text-muted small">Added by Hand</div>
+                            </Col>
+                          </Row>
+                        </div>
                         <div className="mt-auto">
                           <Row className="g-2">
                             <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={handleConsolidateAttackVectors}>
-                                Consolidate
+                              <Button variant="outline-danger" className="w-100"
+                                onClick={handleConsolidateAttackVectors}
+                                disabled={!activeTarget || isConsolidatingAttackVectors}>
+                                <div className="btn-content">
+                                  {isConsolidatingAttackVectors
+                                    ? <Spinner animation="border" size="sm" />
+                                    : 'Consolidate'}
+                                </div>
                               </Button>
                             </Col>
                             <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={handleInvestigateAttackVectors}>
-                                Investigate
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={handleAddAttackVectorManually}>
+                              <Button variant="outline-danger" className="w-100"
+                                onClick={handleAddAttackVectorManually} disabled={!activeTarget}>
                                 Add Manually
                               </Button>
                             </Col>
                             <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={handleOpenUniqueAttackVectorsModal}>
+                              <Button variant="outline-danger" className="w-100"
+                                onClick={handleOpenUniqueAttackVectorsModal} disabled={!activeTarget}>
                                 Unique Attack Vectors
                               </Button>
                             </Col>
@@ -8898,113 +9643,40 @@ function App() {
                   </Col>
                 </Row>
 
-                <h4 className="text-secondary mb-3 fs-5 mt-4">Authentication</h4>
-                <Row className="mb-4">
-                  <Col md={12}>
-                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
-                      <Card.Body className="d-flex flex-column">
-                        <Card.Title className="text-danger mb-3">
-                          Authentication
-                        </Card.Title>
-                        <Card.Text className="text-white small fst-italic">
-                          Document and replay the HTTP request/response flows for each authentication action. Capture steps manually (the app sends each request and records the response) or let AI populate them via the MCP server.
-                        </Card.Text>
-                        <Row className="g-3 justify-content-center mt-1 mb-2">
-                          <Col xs={6} md={3}>
-                            <div className="fs-3 fw-bold text-danger">{authFlowCounts.register}</div>
-                            <div className="text-white small pb-4">Register Flows</div>
-                          </Col>
-                          <Col xs={6} md={3}>
-                            <div className="fs-3 fw-bold text-danger">{authFlowCounts.login}</div>
-                            <div className="text-white small pb-4">Login Flows</div>
-                          </Col>
-                          <Col xs={6} md={3}>
-                            <div className="fs-3 fw-bold text-danger">{authFlowCounts.mfa_otp}</div>
-                            <div className="text-white small pb-4">MFA/OTP Flows</div>
-                          </Col>
-                          <Col xs={6} md={3}>
-                            <div className="fs-3 fw-bold text-danger">{authFlowCounts.reset}</div>
-                            <div className="text-white small pb-4">Reset Flows</div>
-                          </Col>
-                        </Row>
-                        <div className="mt-auto">
-                          <Row className="g-2">
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAuthFlowModal('register')}>
-                                Register Auth Flows
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAuthFlowModal('login')}>
-                                Login Auth Flows
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAuthFlowModal('mfa_otp')}>
-                                MFA/OTP Auth Flows
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAuthFlowModal('reset')}>
-                                Reset Auth Flows
-                              </Button>
-                            </Col>
-                          </Row>
-                        </div>
-                      </Card.Body>
-                    </Card>
-                  </Col>
-                </Row>
-
-                <h4 className="text-secondary mb-3 fs-5 mt-4">Authorization</h4>
-                <Row className="mb-4">
-                  <Col md={12}>
-                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
-                      <Card.Body className="d-flex flex-column">
-                        <Card.Title className="text-danger mb-3">
-                          Authorization
-                        </Card.Title>
-                        <Card.Text className="text-white small fst-italic">
-                          Build context for testing Insecure Direct Object References (IDOR) and access-control violations — identify the unique identifiers a client uses to reach data, and model the target's access-control schemes.
-                        </Card.Text>
-                        <Row className="g-3 justify-content-center mt-1 mb-2">
-                          <Col xs={6} md={4}>
-                            <div className="fs-3 fw-bold text-danger">{authzCounts.idor}</div>
-                            <div className="text-white small pb-4">Possible IDOR Targets</div>
-                          </Col>
-                          <Col xs={6} md={4}>
-                            <div className="fs-3 fw-bold text-danger">{authzCounts.acv}</div>
-                            <div className="text-white small pb-4">Possible ACV Targets</div>
-                          </Col>
-                        </Row>
-                        <div className="mt-auto">
-                          <Row className="g-2">
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={handleOpenClientIdentityModal}>
-                                Client Identity
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAccessControlModal('policy')}>
-                                Policy-Based Access Controls
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAccessControlModal('role')}>
-                                Role-Based Access Controls
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button variant="outline-danger" className="w-100" onClick={() => handleOpenAccessControlModal('discretionary')}>
-                                Discretionary Access Controls
-                              </Button>
-                            </Col>
-                          </Row>
-                        </div>
-                      </Card.Body>
-                    </Card>
-                  </Col>
-                </Row>
+                {/* Testing the vectors. Each section is one vulnerability class and the tools that
+                    find it; the cards come from data/attackTools.js so a tool is added by editing
+                    data rather than by copying a hundred lines of markup. */}
+                {ATTACK_TOOL_SECTIONS.map((section) => (
+                  <div key={section.key}>
+                    <div className="d-flex align-items-center justify-content-between mt-4 mb-3">
+                      <h4 className="text-secondary fs-5 mb-0">{section.title}</h4>
+                      {SECTION_SETTINGS_BUTTON[section.key] && (
+                        <Button
+                          variant="outline-danger"
+                          size="sm"
+                          disabled={!activeTarget}
+                          onClick={() => setWebhookSection(section)}
+                        >
+                          {SECTION_SETTINGS_BUTTON[section.key]}
+                        </Button>
+                      )}
+                    </div>
+                    <Row className="mb-4">
+                      {section.tools.map((tool) => (
+                        <Col md={section.tools.length >= 3 ? 4 : 6} key={tool.key}>
+                          <AttackToolCard
+                            tool={tool}
+                            status={vectorToolStatus[tool.key]}
+                            disabled={!activeTarget}
+                            onConfig={(t) => handleAttackToolAction('Config', t)}
+                            onScan={(t) => handleAttackToolAction('Scan', t)}
+                            onResults={(t) => handleAttackToolAction('Results', t)}
+                          />
+                        </Col>
+                      ))}
+                    </Row>
+                  </div>
+                ))}
 
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Threat Modeling</h4>
                 <HelpMeLearn section="threatModeling" />
@@ -9609,19 +10281,6 @@ function App() {
         mostRecentArjunScan={mostRecentArjunScan}
       />
 
-      <ParamethConfigModal
-        show={showParamethConfigModal}
-        handleClose={handleCloseParamethConfigModal}
-        activeTarget={activeTarget}
-      />
-
-      <ParamethResultsModal
-        show={showParamethResultsModal}
-        handleClose={handleCloseParamethResultsModal}
-        activeTarget={activeTarget}
-        mostRecentParamethScan={mostRecentParamethScan}
-      />
-
       <X8ConfigModal
         show={showX8ConfigModal}
         handleClose={handleCloseX8ConfigModal}
@@ -9640,6 +10299,10 @@ function App() {
         handleClose={handleCloseFFUFURLResultsModal}
         activeTarget={activeTarget}
         mostRecentFFUFURLScan={mostRecentFFUFURLScan}
+        // Dismissing findings inside the modal changes the numbers the card is showing. Without this
+        // the card kept the count it fetched when the target was selected, so triaging a page of noise
+        // left the card advertising findings the list no longer contains.
+        onFindingsChanged={loadFuzzFindingCount}
       />
 
       <WAFProbeResultsModal
@@ -9648,7 +10311,6 @@ function App() {
         activeTarget={activeTarget}
         mostRecentWAFProbeScan={mostRecentWAFProbeScan}
         wafProbeScans={wafProbeScans}
-        onApplied={refreshWAFProbeApplied}
       />
 
       <WAFProbeConfigModal
@@ -9706,10 +10368,57 @@ function App() {
         onFlowsChange={fetchAuthFlowCounts}
       />
 
-      <ClientIdentityModal
+      <RecordAuthFlowsModal
+        show={showRecordAuthFlowsModal}
+        handleClose={handleCloseRecordAuthFlowsModal}
+        scopeTargetId={activeTarget?.id}
+        scopeTargetUrl={activeTarget?.scope_target}
+      />
+
+      <ManualAuthFlowModal
+        show={showManualAuthFlowModal}
+        handleClose={handleCloseManualAuthFlowModal}
+        scopeTargetId={activeTarget?.id}
+        scopeTargetUrl={activeTarget?.scope_target}
+      />
+
+      <ManageSessionsModal
+        show={showManageSessionsModal}
+        handleClose={handleCloseManageSessionsModal}
+        scopeTargetId={activeTarget?.id}
+        scopeTargetUrl={activeTarget?.scope_target}
+      />
+
+      <RefreshSessionModal
+        show={showRefreshSessionModal}
+        handleClose={handleCloseRefreshSessionModal}
+        scopeTargetId={activeTarget?.id}
+        scopeTargetUrl={activeTarget?.scope_target}
+      />
+
+      <ClientIdentityPatternsModal
         show={showClientIdentityModal}
         handleClose={handleCloseClientIdentityModal}
-        activeTarget={activeTarget}
+        scopeTargetId={activeTarget?.id}
+        scopeTargetUrl={activeTarget?.scope_target}
+      />
+
+      <PolicyAccessModal
+        show={showPolicyAccessModal}
+        handleClose={handleClosePolicyAccessModal}
+        scopeTargetId={activeTarget?.id}
+      />
+
+      <RoleAccessModal
+        show={showRoleAccessModal}
+        handleClose={handleCloseRoleAccessModal}
+        scopeTargetId={activeTarget?.id}
+      />
+
+      <DiscretionaryAccessModal
+        show={showDiscretionaryAccessModal}
+        handleClose={handleCloseDiscretionaryAccessModal}
+        scopeTargetId={activeTarget?.id}
       />
 
       <PossibleAttacksModal
@@ -9735,10 +10444,73 @@ function App() {
         scopeTargetId={activeTarget?.id}
       />
 
+      <EndpointScanResultsModal
+        show={showEndpointScanResultsModal}
+        handleClose={handleCloseEndpointScanResultsModal}
+        scopeTargetId={activeTarget?.id}
+      />
+
       <FFUFConfigModal
         show={showFFUFConfigModal}
         handleClose={handleCloseFFUFConfigModal}
         activeTarget={activeTarget}
+      />
+
+      <FFUFSettingsModal
+        show={showFFUFSettingsModal}
+        handleClose={handleCloseFFUFSettingsModal}
+        activeTarget={activeTarget}
+      />
+
+      <AddAttackVectorModal
+        show={showAddAttackVectorModal}
+        handleClose={() => setShowAddAttackVectorModal(false)}
+        activeTarget={activeTarget}
+        onAdded={loadAttackVectorCounts}
+      />
+
+      <AttackVectorsModal
+        show={showAttackVectorsModal}
+        handleClose={() => setShowAttackVectorsModal(false)}
+        activeTarget={activeTarget}
+        onChanged={loadAttackVectorCounts}
+      />
+
+      {/* Reloaded on close because saving a setting can change how many vectors are eligible: turning
+          on skipReflectionPath takes every path vector out of the run, and the card has to say so. */}
+      <VectorToolConfigModal
+        show={showVectorConfigModal}
+        handleClose={() => {
+          setShowVectorConfigModal(false);
+          if (vectorTool) loadVectorToolStatus(vectorTool.key);
+        }}
+        activeTarget={activeTarget}
+        tool={vectorTool}
+        category={vectorTool ? VECTOR_TOOL_CATEGORY.get(vectorTool.key) : undefined}
+      />
+
+      <SectionWebhookModal
+        show={webhookSection !== null}
+        handleClose={() => {
+          const closing = webhookSection;
+          setWebhookSection(null);
+          // Reloaded on close because configuring the webhook is what makes this section's tools
+          // eligible, and the cards have to stop saying zero the moment it is filled in.
+          if (closing) {
+            (closing.tools || []).forEach((tool) => loadVectorToolStatus(tool.key));
+          }
+        }}
+        activeTarget={activeTarget}
+        category={webhookSection?.key}
+        title={webhookSection?.title}
+      />
+
+      <VectorToolResultsModal
+        show={showVectorResultsModal}
+        handleClose={() => setShowVectorResultsModal(false)}
+        activeTarget={activeTarget}
+        tool={vectorTool}
+        category={vectorTool ? VECTOR_TOOL_CATEGORY.get(vectorTool.key) : undefined}
       />
 
       <ExploreAttackSurfaceModal

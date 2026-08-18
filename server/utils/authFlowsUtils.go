@@ -14,17 +14,24 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
 
 // validAuthFlowCategories mirrors the DB CHECK constraint on auth_flows.category.
+//
+// Five, not four. magic_link was added to the constraint and to the recorder's own category list
+// but missed here, which broke two things: creating a magic link flow answered 400, and so did
+// editing ANY flow imported from a magic link recording, because the client sends the category back
+// on every update whether or not the operator touched it.
 var validAuthFlowCategories = map[string]bool{
-	"register": true,
-	"login":    true,
-	"mfa_otp":  true,
-	"reset":    true,
+	"register":   true,
+	"login":      true,
+	"mfa_otp":    true,
+	"magic_link": true,
+	"reset":      true,
 }
 
 // AuthFlowStep is one ordered HTTP request/response in a flow.
@@ -51,7 +58,11 @@ func GetAuthFlows(w http.ResponseWriter, r *http.Request) {
 	scopeTargetID := mux.Vars(r)["scope_target_id"]
 	category := r.URL.Query().Get("category")
 
+	// source and recording_id are selected because the client distinguishes a flow the browser
+	// really performed from one somebody typed out. Without them the Authentication card counted
+	// zero recorded flows while a recorded flow sat in the list.
 	query := `SELECT f.id, f.scope_target_id, f.category, f.name, f.description, f.auth_type, f.base_url,
+	                 COALESCE(f.source,'manual'), COALESCE(f.recording_id::text,''),
 	                 f.created_at, f.updated_at,
 	                 (SELECT COUNT(*) FROM auth_flow_steps s WHERE s.auth_flow_id = f.id) AS step_count
 	          FROM auth_flows f
@@ -73,10 +84,11 @@ func GetAuthFlows(w http.ResponseWriter, r *http.Request) {
 
 	flows := []map[string]interface{}{}
 	for rows.Next() {
-		var id, stID, cat, name, desc, authType, baseURL string
+		var id, stID, cat, name, desc, authType, baseURL, source, recordingID string
 		var createdAt, updatedAt time.Time
 		var stepCount int
-		if err := rows.Scan(&id, &stID, &cat, &name, &desc, &authType, &baseURL, &createdAt, &updatedAt, &stepCount); err != nil {
+		if err := rows.Scan(&id, &stID, &cat, &name, &desc, &authType, &baseURL, &source,
+			&recordingID, &createdAt, &updatedAt, &stepCount); err != nil {
 			log.Printf("[ERROR] Failed to scan auth flow row: %v", err)
 			continue
 		}
@@ -88,6 +100,8 @@ func GetAuthFlows(w http.ResponseWriter, r *http.Request) {
 			"description":     desc,
 			"auth_type":       authType,
 			"base_url":        baseURL,
+			"source":          source,
+			"recording_id":    recordingID,
 			"created_at":      createdAt,
 			"updated_at":      updatedAt,
 			"step_count":      stepCount,
@@ -247,19 +261,24 @@ func AddAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "raw_request is required", http.StatusBadRequest)
 		return
 	}
-
-	var nextOrder int
-	if err := dbPool.QueryRow(context.Background(),
-		`SELECT COALESCE(MAX(step_order),0)+1 FROM auth_flow_steps WHERE auth_flow_id = $1`, flowID).Scan(&nextOrder); err != nil {
-		log.Printf("[ERROR] Failed to compute next step order: %v", err)
-		http.Error(w, "Failed to add step", http.StatusInternalServerError)
+	payload.RawRequest = normalizeRawRequest(payload.RawRequest)
+	if problem := rawRequestProblem(payload.RawRequest); problem != "" {
+		http.Error(w, problem, http.StatusBadRequest)
 		return
 	}
 
+	// Order is chosen and claimed in one statement. Reading MAX and then inserting let two concurrent
+	// appends pick the same number, and with no uniqueness on (auth_flow_id, step_order) both
+	// succeeded, leaving a flow whose replay order depended on how Postgres felt like returning the
+	// rows that day.
 	stepID := uuid.New().String()
-	if _, err := dbPool.Exec(context.Background(),
-		`INSERT INTO auth_flow_steps (id, auth_flow_id, step_order, name, raw_request) VALUES ($1, $2, $3, $4, $5)`,
-		stepID, flowID, nextOrder, payload.Name, payload.RawRequest); err != nil {
+	var nextOrder int
+	if err := dbPool.QueryRow(context.Background(),
+		`INSERT INTO auth_flow_steps (id, auth_flow_id, step_order, name, raw_request)
+		 SELECT $1, $2, COALESCE(MAX(step_order),0)+1, $3, $4
+		 FROM auth_flow_steps WHERE auth_flow_id = $2
+		 RETURNING step_order`,
+		stepID, flowID, payload.Name, payload.RawRequest).Scan(&nextOrder); err != nil {
 		log.Printf("[ERROR] Failed to insert auth flow step: %v", err)
 		http.Error(w, "Failed to add step", http.StatusInternalServerError)
 		return
@@ -291,6 +310,16 @@ func UpdateAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
+	}
+	// Same treatment an appended step gets. An edited step is the more likely one to lose its
+	// Content-Length, because editing the body is the usual reason to edit a step at all.
+	if payload.RawRequest != nil {
+		normalized := normalizeRawRequest(*payload.RawRequest)
+		if problem := rawRequestProblem(normalized); problem != "" {
+			http.Error(w, problem, http.StatusBadRequest)
+			return
+		}
+		payload.RawRequest = &normalized
 	}
 
 	if _, err := dbPool.Exec(context.Background(),
@@ -336,8 +365,9 @@ func DeleteAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 
 func ReplayAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 	stepID := mux.Vars(r)["step_id"]
-	if err := replayStepByID(stepID); err != nil {
-		log.Printf("[ERROR] Failed to replay step %s: %v", stepID, err)
+	replayErr := replayStepByID(stepID)
+	if replayErr != nil {
+		log.Printf("[ERROR] Failed to replay step %s: %v", stepID, replayErr)
 	}
 	step, err := getStepByID(stepID)
 	if err != nil {
@@ -345,6 +375,21 @@ func ReplayAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	// When the replay itself failed, the row still holds the PREVIOUS run's response. Returning it
+	// with no marker showed the operator a stale success for a request that had just gone wrong, so
+	// the failure is attached to the payload rather than left in the log.
+	if replayErr != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": step.ID, "auth_flow_id": step.AuthFlowID, "step_order": step.StepOrder,
+			"name": step.Name, "raw_request": step.RawRequest,
+			"response_status": step.ResponseStatus, "response_headers": step.ResponseHeaders,
+			"response_body": step.ResponseBody, "response_time_ms": step.ResponseTimeMs,
+			"error": step.Error, "created_at": step.CreatedAt, "updated_at": step.UpdatedAt,
+			"replay_error": replayErr.Error(),
+			"replay_note":  "The replay did not complete. The response shown is from the previous run.",
+		})
+		return
+	}
 	json.NewEncoder(w).Encode(step)
 }
 
@@ -473,28 +518,132 @@ func sendRawRequest(rawRequest, baseURL string, jar http.CookieJar) (int, map[st
 	return resp.StatusCode, resp.Header, string(respBody), elapsed, nil
 }
 
-// resolveBaseURL returns the flow base_url, or derives one from the raw request's Host header.
-func resolveBaseURL(rawRequest, flowBaseURL string) string {
-	if strings.TrimSpace(flowBaseURL) != "" {
-		return flowBaseURL
+// normalizeRawRequest makes a pasted request actually sendable.
+//
+// http.ReadRequest will not read a body without a Content-Length or a chunked Transfer-Encoding, and
+// it needs a blank line to end the headers. Both are easy to lose when a request is typed or pasted
+// through an API rather than copied whole out of a proxy, and both fail silently: the step is stored,
+// the request goes out with an empty body, and the target answers 400. The operator then debugs the
+// target instead of the paste.
+//
+// Rather than reject those, fix what can be fixed unambiguously: terminate the headers, and compute
+// the Content-Length the body actually has. An explicit Content-Length that disagrees with the body
+// is corrected too, because the body is the thing the operator edited.
+func normalizeRawRequest(raw string) string {
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	if strings.TrimSpace(raw) == "" {
+		return raw
 	}
-	if req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(rawRequest))); err == nil && req.Host != "" {
-		return "https://" + req.Host
+
+	head, body, found := strings.Cut(raw, "\n\n")
+	if !found {
+		// No blank line: everything is headers, and there is no body.
+		head = strings.TrimRight(raw, "\n")
+		body = ""
+	}
+
+	lines := strings.Split(head, "\n")
+	kept := make([]string, 0, len(lines)+1)
+	for _, ln := range lines {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(ln)), "content-length:") {
+			continue // recomputed below
+		}
+		kept = append(kept, ln)
+	}
+
+	hasChunked := false
+	for _, ln := range kept {
+		l := strings.ToLower(ln)
+		if strings.HasPrefix(strings.TrimSpace(l), "transfer-encoding:") && strings.Contains(l, "chunked") {
+			hasChunked = true
+		}
+	}
+	if body != "" && !hasChunked {
+		kept = append(kept, fmt.Sprintf("Content-Length: %d", len(body)))
+	}
+
+	out := strings.Join(kept, "\r\n") + "\r\n\r\n"
+	if body != "" {
+		out += body
+	}
+	return out
+}
+
+// rawRequestProblem returns a human explanation when a pasted request cannot be sent at all, so the
+// operator is told at the moment they save rather than by a confusing response from the target.
+func rawRequestProblem(raw string) string {
+	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+	if err != nil {
+		return "This does not parse as an HTTP request: " + err.Error() +
+			". Expected a request line, then headers, then a blank line, then the body."
+	}
+	if req.Host == "" {
+		return "The request has no Host header, so there is no way to tell which server to send it to."
 	}
 	return ""
 }
 
+// resolveBaseURL decides which server a step is actually sent to.
+//
+// The step's own Host header wins whenever it has one. base_url is only a fallback, because an auth
+// flow routinely crosses hosts: the app posts to an identity provider, then back. The recorder sets
+// base_url to the scope target unconditionally and there is no field for it in the UI, so treating
+// it as an override meant every recorded cross-host flow replayed every step against the scope
+// target. Step one would go to the CDN instead of the auth service, fail, and the operator would be
+// told their credentials were wrong.
+//
+// base_url still matters for a hand-written step that has no Host header, and for pointing a whole
+// flow at a staging origin, which is what it reads as in the UI.
+func resolveBaseURL(rawRequest, flowBaseURL string) string {
+	if req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(rawRequest))); err == nil && req.Host != "" {
+		scheme := "https"
+		// Keep the flow's scheme and port if it named one for this same host, so a flow pinned to
+		// http://localhost:8080 is not silently upgraded.
+		if u, perr := url.Parse(strings.TrimSpace(flowBaseURL)); perr == nil && u.Host != "" &&
+			strings.EqualFold(hostOnly(u.Host), hostOnly(req.Host)) {
+			if u.Scheme != "" {
+				scheme = u.Scheme
+			}
+			return scheme + "://" + u.Host
+		}
+		return scheme + "://" + req.Host
+	}
+	if strings.TrimSpace(flowBaseURL) != "" {
+		return flowBaseURL
+	}
+	return ""
+}
+
+// hostOnly strips a port so a Host header can be compared with a base URL's authority.
+func hostOnly(hostport string) string {
+	if i := strings.LastIndex(hostport, ":"); i > 0 && !strings.Contains(hostport[i:], "]") {
+		return hostport[:i]
+	}
+	return hostport
+}
+
 // seedJar loads cookies from earlier steps' captured Set-Cookie response headers into the jar.
+//
+// Each step's cookies are filed against the host that ISSUED them, not against the host the current
+// step happens to target. Attributing them all to the current step's host handed one host's
+// host-only cookies to another, so replaying step 3 alone sent the identity provider a
+// load-balancer cookie minted by a different service, and single-step replay disagreed with
+// full-flow replay on the same step.
 func seedJar(jar http.CookieJar, baseURL string, priorSteps []AuthFlowStep) {
-	if baseURL == "" {
-		return
-	}
-	u, err := url.Parse(baseURL)
-	if err != nil || u.Host == "" {
-		return
-	}
 	for _, s := range priorSteps {
 		if len(s.ResponseHeaders) == 0 {
+			continue
+		}
+		// The step's own request says who answered it.
+		issuer := resolveBaseURL(s.RawRequest, "")
+		if issuer == "" {
+			issuer = baseURL
+		}
+		if issuer == "" {
+			continue
+		}
+		u, err := url.Parse(issuer)
+		if err != nil || u.Host == "" {
 			continue
 		}
 		dummy := &http.Response{Header: http.Header(s.ResponseHeaders)}
@@ -513,8 +662,33 @@ func updateStepResponse(stepID string, status int, headers map[string][]string, 
 	_, err := dbPool.Exec(context.Background(),
 		`UPDATE auth_flow_steps SET response_status = $1, response_headers = $2, response_body = $3,
 		   response_time_ms = $4, error = $5, updated_at = NOW() WHERE id = $6`,
-		statusVal, headersJSON, body, ms, errStr, stepID)
+		statusVal, headersJSON, sanitizeForTextColumn(body), ms, errStr, stepID)
 	return err
+}
+
+// sanitizeForTextColumn makes an arbitrary response body storable in a Postgres text column.
+//
+// A text column cannot hold a NUL byte or invalid UTF-8, and a body that is neither is common: any
+// gzip or brotli response that was not decoded, or an image, starts with bytes Postgres rejects. The
+// UPDATE then failed, the error was only logged, and both replay endpoints answered 200 carrying the
+// PREVIOUS run's response, so the operator was shown a stale success for a request that had just
+// behaved differently.
+func sanitizeForTextColumn(s string) string {
+	if s == "" {
+		return s
+	}
+	if utf8.ValidString(s) && !strings.ContainsRune(s, 0) {
+		return s
+	}
+	// Replace what cannot be stored rather than dropping the body: the fact that a binary or
+	// mis-encoded body came back is itself worth seeing.
+	cleaned := strings.Map(func(r rune) rune {
+		if r == 0 || r == utf8.RuneError {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(s, ""))
+	return cleaned
 }
 
 // ---------------------------------------------------------------------------

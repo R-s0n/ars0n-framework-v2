@@ -389,7 +389,7 @@ func GetNucleiScreenshotScansForScopeTarget(w http.ResponseWriter, r *http.Reque
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan NucleiScreenshotStatus
 		err := rows.Scan(

@@ -12,6 +12,8 @@ because unknown ids are warned about, not rejected.
 
 import copy
 import json
+import random
+import string
 
 from . import SCHEMA_VERSION
 from .payloads import DEFAULT_PAYLOAD_CLASSES, PAYLOAD_CLASSES
@@ -242,9 +244,16 @@ def default_config():
             "load_request_timeout_s": 10.0,
             "sched_delay_abort_ms": 250,
             "jitter_pct": 30.0,
+            # Attribution is three independent choices, not one. Only the header is on by default:
+            # it is the one that lets an operator point at their own traffic in the target's logs,
+            # and it costs nothing. A branded User-Agent and a branded marker prefix both name the
+            # tool in places the operator may not want it named, so they are opt in.
             "probe_token_prefix": "ars0nprobe",
+            "probe_token_prefix_enabled": False,
             "attribution_header": "X-Ars0n-Probe",
+            "attribution_header_enabled": True,
             "user_agent": "ars0n-probe/2.0 (+authorized-testing)",
+            "user_agent_enabled": False,
             "verify_tls": False,
             "pin_resolved_ip": True,
             "dry_run": False,
@@ -529,7 +538,31 @@ def merge_config(incoming):
                 continue
             base["tests"].setdefault(tid, {})[k] = v
 
+    _resolve_attribution(base["global"])
+
     return base, warnings
+
+
+def _resolve_attribution(g):
+    """Turn the three attribution switches into the values the rest of the probe reads.
+
+    Resolved once here so the ~15 call sites that use probe_token_prefix, and the session builder
+    that uses the other two, need no knowledge of whether a switch is on.
+
+    The header and the User-Agent resolve to an empty string when disabled, and the session builder
+    omits an empty one. The marker prefix cannot: it is concatenated into header NAMES, so an empty
+    prefix would produce the malformed header "X-" rather than an unbranded one. Disabled therefore
+    means unbranded, not absent, and a per-run random prefix is used: still a valid identifier, still
+    recognisable as one marker family within the run, no longer naming the tool in the target's logs.
+    """
+    if not g.get("attribution_header_enabled", True):
+        g["attribution_header"] = ""
+    if not g.get("user_agent_enabled", False):
+        g["user_agent"] = ""
+    if not g.get("probe_token_prefix_enabled", False):
+        g["probe_token_prefix"] = "".join(
+            random.choice(string.ascii_lowercase) for _ in range(6)
+        )
 
 
 def _deep_update(dst, src):
@@ -554,8 +587,18 @@ def validate_config(cfg):
             f"({g['go_context_timeout_seconds']}); the run would be killed and its result lost"
         )
 
-    if not str(g.get("attribution_header") or "").strip():
-        problems.append("global.attribution_header may not be empty; the probe must be attributable")
+    # Only required when the operator has the header switched on. Turning it off is a deliberate
+    # choice about what appears in the target's logs, not a misconfiguration; leaving the name blank
+    # while it is switched on is.
+    if g.get("attribution_header_enabled", True) and not str(g.get("attribution_header") or "").strip():
+        problems.append("global.attribution_header may not be empty while it is enabled; "
+                        "give it a name or turn it off")
+    if g.get("user_agent_enabled", False) and not str(g.get("user_agent") or "").strip():
+        problems.append("global.user_agent may not be empty while it is enabled; "
+                        "give it a value or turn it off")
+    if g.get("probe_token_prefix_enabled", False) and not str(g.get("probe_token_prefix") or "").strip():
+        problems.append("global.probe_token_prefix may not be empty while it is enabled; "
+                        "give it a value or turn it off")
 
     if g["max_rps"] <= 0 or g["max_concurrency"] < 1:
         problems.append("global.max_rps and global.max_concurrency must be positive")

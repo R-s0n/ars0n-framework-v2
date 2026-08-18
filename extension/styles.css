@@ -61,10 +61,36 @@ body {
   padding-bottom: 8px;
 }
 
+/* A card title that doubles as its section's collapse control, so it has to read as clickable. The
+   rule under the title is dropped while the section is collapsed, where it would otherwise be
+   underlining nothing. */
+.section-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.section-toggle.collapsed {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.section-toggle .bi-chevron-down {
+  transition: transform 0.2s;
+}
+
+.section-toggle:not(.collapsed) .bi-chevron-down {
+  transform: rotate(180deg);
+}
+
 .form-control {
   background-color: #2d2d2d;
   border: 1px solid #555;
   color: #ffffff;
+}
+
+.form-control:disabled {
+  background-color: #262626;
+  color: #999;
 }
 
 .form-control:focus {

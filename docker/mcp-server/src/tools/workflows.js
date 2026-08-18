@@ -15,6 +15,27 @@ async function runWildcardWorkflow(params) {
   const phases = params.phases || ['subdomain_discovery', 'consolidation', 'httpx', 'metadata', 'nuclei'];
   const results = {};
 
+  // The Wildcard run handlers take {fqdn}, not {scope_target_id}, and answer 400 without it. Every
+  // tool below was posted the wrong key, so this workflow could not start a single scan: the loop
+  // caught each 400 and reported six "error" entries, which reads as six broken tools rather than
+  // as one wrong field name. Resolve the bare domain once, up front.
+  let fqdn = null;
+  const needsFqdn = phases.some((p) => p === 'subdomain_discovery' || p === 'httpx');
+  if (needsFqdn) {
+    const res = await query('SELECT scope_target, type FROM scope_targets WHERE id = $1', [params.target_id]);
+    if (!res.rows.length) {
+      return { workflow: 'wildcard', target_id: params.target_id, error: 'No scope target with that id' };
+    }
+    if (res.rows[0].type !== 'Wildcard') {
+      return {
+        workflow: 'wildcard', target_id: params.target_id,
+        error: `This workflow needs a Wildcard target; ${params.target_id} is type ${res.rows[0].type}.`,
+      };
+    }
+    // Stored as "*.example.com"; the handlers rebuild that form themselves from the bare domain.
+    fqdn = String(res.rows[0].scope_target || '').replace(/^\*\./, '');
+  }
+
   for (const phase of phases) {
     try {
       if (phase === 'subdomain_discovery') {
@@ -22,7 +43,7 @@ async function runWildcardWorkflow(params) {
         const scanResults = {};
         for (const tool of tools) {
           try {
-            const res = await apiPost(`/${tool}/run`, { scope_target_id: params.target_id });
+            const res = await apiPost(`/${tool}/run`, { fqdn });
             scanResults[tool] = { status: 'started', ...res };
           } catch (err) {
             scanResults[tool] = { status: 'error', error: err.message };
@@ -33,7 +54,7 @@ async function runWildcardWorkflow(params) {
         const res = await apiGet(`/consolidate-subdomains/${params.target_id}`);
         results.consolidation = res;
       } else if (phase === 'httpx') {
-        const res = await apiPost('/httpx/run', { scope_target_id: params.target_id });
+        const res = await apiPost('/httpx/run', { fqdn });
         results.httpx = { status: 'started', ...res };
       } else if (phase === 'metadata') {
         const res = await apiPost('/metadata/run', { scope_target_id: params.target_id });
@@ -68,16 +89,35 @@ async function runCompanyWorkflow(params) {
   const phases = params.phases || ['network_discovery', 'consolidate_ranges', 'ip_port_scan', 'domain_discovery', 'consolidate_domains', 'httpx', 'metadata', 'nuclei'];
   const results = {};
 
+  // Amass Intel, Metabigor and Cloud Enum take {company_name}, not {scope_target_id}, and answer
+  // 400 without it. Same defect the Wildcard workflow had with {fqdn}: every one of these phases
+  // reported an error that read as a broken tool rather than as a wrong field name.
+  let companyName = null;
+  const needsName = phases.some((p) => p === 'network_discovery' || p === 'domain_discovery');
+  if (needsName) {
+    const res = await query('SELECT scope_target, type FROM scope_targets WHERE id = $1', [params.target_id]);
+    if (!res.rows.length) {
+      return { workflow: 'company', target_id: params.target_id, error: 'No scope target with that id' };
+    }
+    if (res.rows[0].type !== 'Company') {
+      return {
+        workflow: 'company', target_id: params.target_id,
+        error: `This workflow needs a Company target; ${params.target_id} is type ${res.rows[0].type}.`,
+      };
+    }
+    companyName = res.rows[0].scope_target;
+  }
+
   for (const phase of phases) {
     try {
       if (phase === 'network_discovery') {
         const scanResults = {};
         try {
-          const res = await apiPost('/amass-intel/run', { scope_target_id: params.target_id });
+          const res = await apiPost('/amass-intel/run', { company_name: companyName });
           scanResults.amass_intel = { status: 'started', ...res };
         } catch (err) { scanResults.amass_intel = { status: 'error', error: err.message }; }
         try {
-          const res = await apiPost('/metabigor-company/run', { scope_target_id: params.target_id });
+          const res = await apiPost('/metabigor-company/run', { company_name: companyName });
           scanResults.metabigor = { status: 'started', ...res };
         } catch (err) { scanResults.metabigor = { status: 'error', error: err.message }; }
         results.network_discovery = scanResults;
@@ -97,7 +137,7 @@ async function runCompanyWorkflow(params) {
           scanResults.dnsx = { status: 'started', ...res };
         } catch (err) { scanResults.dnsx = { status: 'error', error: err.message }; }
         try {
-          const res = await apiPost('/cloud-enum/run', { scope_target_id: params.target_id });
+          const res = await apiPost('/cloud-enum/run', { company_name: companyName });
           scanResults.cloud_enum = { status: 'started', ...res };
         } catch (err) { scanResults.cloud_enum = { status: 'error', error: err.message }; }
         results.domain_discovery = scanResults;
@@ -131,7 +171,7 @@ const runUrlWorkflowSchema = z.object({
   target_id: z.string().uuid().describe('The URL scope target UUID'),
   phases: z.array(z.enum([
     'url_discovery', 'consolidate_endpoints', 'ffuf', 'parameter_discovery', 'nuclei',
-  ])).optional().describe('Specific phases to run (default: all). Phases: url_discovery (katana/linkfinder/waybackurls/gau/gospider), consolidate_endpoints, ffuf, parameter_discovery (arjun/parameth/x8), nuclei'),
+  ])).optional().describe('Specific phases to run (default: all). Phases: url_discovery (katana/linkfinder/waybackurls/gau/gospider), consolidate_endpoints, ffuf, parameter_discovery (arjun/x8), nuclei'),
 });
 
 async function runUrlWorkflow(params) {
@@ -162,11 +202,28 @@ async function runUrlWorkflow(params) {
         const res = await apiPost(`/consolidated-endpoints/${params.target_id}/consolidate`, {});
         results.consolidate_endpoints = res;
       } else if (phase === 'ffuf') {
-        const res = await apiPost('/ffuf-url/run', { scope_target_id: params.target_id });
-        results.ffuf = { status: 'started', ...res };
+        // The live ffuf is the fuzz flow. This phase used to post /ffuf-url/run, which drove the
+        // retired runner AND omitted the `url` that handler required, so it failed on every
+        // invocation and reported "started" anyway.
+        //
+        // A fuzz run needs steps, and steps are a deliberate act: a raw request with marked
+        // positions and a wordlist bound to each. There is nothing sensible to invent here, so a
+        // target with no steps is reported as such rather than silently skipped.
+        const flow = await apiGet(`/fuzz/${params.target_id}/flow?tool=ffuf`);
+        const enabled = (flow.steps || []).filter((s) => s.enabled);
+        if (enabled.length === 0) {
+          results.ffuf = {
+            status: 'skipped',
+            reason: 'This target has no enabled ffuf steps, so there is nothing to run. Build them '
+              + 'with the manage_fuzz tool (action save_step), then run this phase again.',
+          };
+        } else {
+          const res = await apiPost(`/fuzz/${params.target_id}/run`, { tool: 'ffuf' });
+          results.ffuf = { status: 'started', steps: enabled.length, ...res };
+        }
       } else if (phase === 'parameter_discovery') {
         const scanResults = {};
-        for (const tool of ['arjun', 'parameth', 'x8']) {
+        for (const tool of ['arjun', 'x8']) {
           try {
             const res = await apiPost(`/${tool}/run`, { scope_target_id: params.target_id });
             scanResults[tool] = { status: 'started', ...res };

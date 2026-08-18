@@ -208,7 +208,7 @@ func ExecuteDNSxCompanyScan(scanID string, domains []string, scopeTargetID strin
 func ParseDNSxResultsDomainCentric(scopeTargetID, domain, result, scanID string) []DNSxDNSRecord {
 	log.Printf("[DNSX-COMPANY] [INFO] Starting to parse results for domain %s", domain)
 
-	var dnsRecords []DNSxDNSRecord
+	var dnsRecords = []DNSxDNSRecord{}
 
 	// Parse JSON output from DNSx
 	lines := strings.Split(strings.TrimSpace(result), "\n")
@@ -434,7 +434,7 @@ func GetDNSxCompanyScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []DNSxScanStatus
+	var scans = []DNSxScanStatus{}
 	for rows.Next() {
 		var scan DNSxScanStatus
 		var domainsJSON string
@@ -565,7 +565,7 @@ func GetDNSxDNSRecords(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var dnsRecords []DNSxDNSRecord
+	var dnsRecords = []DNSxDNSRecord{}
 	for rows.Next() {
 		var record DNSxDNSRecord
 		err := rows.Scan(&record.ID, &record.ScanID, &record.Domain, &record.Record, &record.Type, &record.CreatedAt)
@@ -610,7 +610,7 @@ func GetDNSxRawResults(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var rawResults []DNSxRawResult
+	var rawResults = []DNSxRawResult{}
 	for rows.Next() {
 		var result DNSxRawResult
 		err := rows.Scan(&result.ID, &result.ScanID, &result.Domain, &result.RawOutput, &result.CreatedAt)

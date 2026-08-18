@@ -28,7 +28,7 @@ func GetNotableObjects(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var objects []map[string]interface{}
+	var objects = []map[string]interface{}{}
 	for rows.Next() {
 		var object struct {
 			ID         string    `json:"id"`

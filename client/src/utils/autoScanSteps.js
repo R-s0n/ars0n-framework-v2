@@ -1,4 +1,5 @@
 import { AUTO_SCAN_STEPS, waitForScanCompletion, debugTrace, waitForCeWLAndShuffleDNSCustom, updateAutoScanState } from './wildcardAutoScan';
+import { DEFAULT_NUCLEI_TEMPLATES, DEFAULT_NUCLEI_SEVERITIES } from './nucleiDefaults';
 import initiateGauScan from './initiateGauScan';
 import initiateCTLScan from './initiateCTLScan';
 import initiateSubfinderScan from './initiateSubfinderScan';
@@ -1442,8 +1443,8 @@ const getAutoScanSteps = (
 
         const finalConfig = {
           targets: targets,
-          templates: hasTemplates ? (nucleiConfig.templates || []) : ['cves', 'vulnerabilities', 'exposures', 'technologies', 'misconfiguration', 'takeovers', 'network', 'dns', 'headless'],
-          severities: (nucleiConfig && nucleiConfig.severities && nucleiConfig.severities.length > 0) ? nucleiConfig.severities : ['critical', 'high', 'medium', 'low', 'info'],
+          templates: hasTemplates ? (nucleiConfig.templates || []) : DEFAULT_NUCLEI_TEMPLATES,
+          severities: (nucleiConfig && nucleiConfig.severities && nucleiConfig.severities.length > 0) ? nucleiConfig.severities : DEFAULT_NUCLEI_SEVERITIES,
           target_mode: 'httpx',
           template_ids: hasTemplates ? (nucleiConfig.template_ids || []) : [],
           exclude_ids: (nucleiConfig && nucleiConfig.exclude_ids) || [],

@@ -73,7 +73,7 @@ func ReadScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var results []ResponsePayload
+	var results = []ResponsePayload{}
 	for rows.Next() {
 		var res ResponsePayload
 		if err := rows.Scan(&res.ID, &res.Type, &res.ScopeTarget, &res.Active); err != nil {
@@ -210,7 +210,7 @@ func GetAllScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer gauRows.Close()
 
-	var allScans []ScanSummary
+	var allScans = []ScanSummary{}
 
 	// Process Amass scans
 	for amassRows.Next() {

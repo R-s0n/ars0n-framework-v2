@@ -279,8 +279,8 @@ func ParseAndStoreMetabigorResults(scanID, companyName, result, scanType string)
 	log.Printf("[METABIGOR] [INFO] Parsing Metabigor verbose results for scan %s", scanID)
 
 	lines := strings.Split(result, "\n")
-	var networkRanges []MetabigorNetworkRange
-	var asnData []MetabigorASNData
+	var networkRanges = []MetabigorNetworkRange{}
+	var asnData = []MetabigorASNData{}
 	seenASNs := make(map[string]bool) // Track unique ASNs
 
 	// Pattern for verbose format: ASN - CIDR - ORGANIZATION - COUNTRY
@@ -492,7 +492,7 @@ func GetMetabigorCompanyScansForScopeTarget(w http.ResponseWriter, r *http.Reque
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan MetabigorCompanyScanStatus
 		err := rows.Scan(
@@ -558,7 +558,7 @@ func GetMetabigorNetworkRanges(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var networkRanges []MetabigorNetworkRange
+	var networkRanges = []MetabigorNetworkRange{}
 	for rows.Next() {
 		var nr MetabigorNetworkRange
 		err := rows.Scan(&nr.ID, &nr.CIDRBlock, &nr.ASN, &nr.Organization, &nr.Country, &nr.ScanType)
@@ -590,7 +590,7 @@ func GetMetabigorASNData(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var asnData []MetabigorASNData
+	var asnData = []MetabigorASNData{}
 	for rows.Next() {
 		var asn MetabigorASNData
 		err := rows.Scan(&asn.ID, &asn.ASNNumber, &asn.Organization, &asn.Country, &asn.ScanType)
@@ -907,7 +907,7 @@ func GetMetabigorIPIntelligence(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var ipIntel []MetabigorIPIntelligence
+	var ipIntel = []MetabigorIPIntelligence{}
 	for rows.Next() {
 		var ip MetabigorIPIntelligence
 		err := rows.Scan(&ip.IPAddress, &ip.ASN, &ip.Organization, &ip.Country, &ip.City, &ip.OpenPorts, &ip.Services)

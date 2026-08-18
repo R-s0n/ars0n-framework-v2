@@ -28,7 +28,7 @@ func GetApplicationQuestionsAnswers(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var answers []map[string]interface{}
+	var answers = []map[string]interface{}{}
 	for rows.Next() {
 		var answer struct {
 			ID        string    `json:"id"`

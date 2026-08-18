@@ -8,6 +8,16 @@
 const DEFAULT_FRAMEWORK_URL = 'http://localhost';
 const POLL_INTERVAL_MS = 2000;
 
+// The categories the framework stores on an auth flow. The values are the ones the API expects; the
+// labels are what the user reads.
+const AUTH_CATEGORY_LABELS = {
+  register: 'Register',
+  login: 'Login',
+  mfa_otp: 'MFA/OTP',
+  magic_link: 'Magic Link',
+  reset: 'Reset',
+};
+
 let sessionState = {
   active: false,
   scopeHosts: [],
@@ -15,6 +25,17 @@ let sessionState = {
   observedOutOfScope: {},
   deepCapture: { enabled: false, attachedTabs: [], errors: [] },
   stats: { requestCount: 0, endpointCount: 0, queuedCount: 0, failedCount: 0, withResponseBody: 0 },
+};
+// Auth flow recording is its own session in the worker, so the popup keeps its own copy of it and
+// never infers one from the other.
+let authState = {
+  active: false,
+  recordingId: null,
+  scopeTargetId: null,
+  name: '',
+  category: 'login',
+  stats: { requestCount: 0, queuedCount: 0, failedCount: 0 },
+  lastError: null,
 };
 let frameworkUrl = DEFAULT_FRAMEWORK_URL;
 let availableTargets = [];
@@ -24,15 +45,23 @@ let extraHosts = [];
 // Errors raised by a user action stay visible until the next action, so the 2s state poll cannot
 // wipe a message the user has not read yet.
 let localError = null;
+// The recorder's own error and result lines, kept apart from the crawl's so a stopped recording
+// cannot overwrite a capture error the user has not read, or the other way round.
+let authError = null;
+let authResult = null;
+let authSectionOpen = false;
+let authSectionAutoOpened = false;
 
 document.addEventListener('DOMContentLoaded', async () => {
   await loadSettings();
   initializeEventListeners();
   await refreshSessionState();
+  await refreshAuthState();
   await checkFrameworkConnection();
 
   setInterval(async () => {
     await refreshSessionState();
+    await refreshAuthState();
     if (!isConnected) await checkFrameworkConnection();
   }, POLL_INTERVAL_MS);
 });
@@ -61,6 +90,16 @@ function initializeEventListeners() {
       input.value = '';
     });
   });
+
+  document.getElementById('authFlowToggle').addEventListener('click', () => {
+    setAuthSectionOpen(!authSectionOpen);
+  });
+  document.getElementById('startAuthRecordingBtn').addEventListener('click', startAuthRecording);
+  document.getElementById('stopAuthRecordingBtn').addEventListener('click', stopAuthRecording);
+  // Remembered across popup closes: the popup is torn down every time it loses focus, and retyping
+  // the flow name before every recording gets old fast.
+  document.getElementById('authFlowName').addEventListener('change', saveAuthFlowFields);
+  document.getElementById('authFlowCategory').addEventListener('change', saveAuthFlowFields);
 }
 
 async function loadSettings() {
@@ -71,6 +110,8 @@ async function loadSettings() {
     'deepCapture',
     'extraHosts',
     'frameworkUrl',
+    'authFlowName',
+    'authFlowCategory',
   ]);
 
   document.getElementById('includeSubdomains').checked = result.includeSubdomains !== false;
@@ -84,6 +125,16 @@ async function loadSettings() {
   extraHosts = Array.isArray(result.extraHosts) ? result.extraHosts : [];
   frameworkUrl = result.frameworkUrl || DEFAULT_FRAMEWORK_URL;
   document.getElementById('frameworkUrl').value = frameworkUrl;
+
+  document.getElementById('authFlowName').value = result.authFlowName || '';
+  document.getElementById('authFlowCategory').value = result.authFlowCategory || 'login';
+}
+
+async function saveAuthFlowFields() {
+  await chrome.storage.local.set({
+    authFlowName: document.getElementById('authFlowName').value.trim(),
+    authFlowCategory: document.getElementById('authFlowCategory').value || 'login',
+  });
 }
 
 function currentSettings() {
@@ -397,6 +448,14 @@ async function refreshSessionState() {
   updateUI();
 }
 
+async function refreshAuthState() {
+  const response = await sendToWorker({ action: 'getAuthRecordingState' });
+  if (response && response.success && response.state) {
+    authState = response.state;
+  }
+  updateUI();
+}
+
 async function checkFrameworkConnection() {
   const indicator = document.getElementById('connectionIndicator');
 
@@ -464,9 +523,12 @@ async function loadURLTargets() {
     if (previousSelection) targetSelect.value = previousSelection;
 
     // While recording, pin the dropdown to the session's target so the popup cannot imply a
-    // different target is being captured.
+    // different target is being captured. Either session pins it, since either can be running
+    // alone.
     if (sessionState.active && sessionState.scopeTargetId) {
       targetSelect.value = sessionState.scopeTargetId;
+    } else if (authState.active && authState.scopeTargetId) {
+      targetSelect.value = authState.scopeTargetId;
     } else if (!targetSelect.value) {
       await autoSelectTargetForCurrentTab(targetSelect);
     }
@@ -532,6 +594,7 @@ function updateUI() {
 
   renderScope();
   renderDeepCaptureStatus();
+  renderAuthFlow();
 
   if (localError) {
     showError(localError);
@@ -542,9 +605,10 @@ function updateUI() {
   }
 
   // The dropdown is locked while recording so the popup cannot imply a different target is being
-  // captured, and unlocked again as soon as the session ends.
+  // captured, and unlocked again as soon as the session ends. An auth recording locks it too: it is
+  // filed against a scope target just like a crawl is.
   const targetSelect = document.getElementById('targetSelect');
-  targetSelect.disabled = !targetsLoaded || sessionState.active;
+  targetSelect.disabled = !targetsLoaded || sessionState.active || authState.active;
   startBtn.disabled = !isConnected || !targetsLoaded;
 }
 
@@ -599,6 +663,157 @@ async function stopCapture() {
   }
 }
 
+/* ------------------------------------------------------------------ auth flow recording */
+
+function categoryLabel(category) {
+  return AUTH_CATEGORY_LABELS[category] || category || 'Login';
+}
+
+function setAuthSectionOpen(open) {
+  authSectionOpen = open;
+  const body = document.getElementById('authFlowBody');
+  const toggle = document.getElementById('authFlowToggle');
+
+  if (open) {
+    body.classList.remove('d-none');
+    toggle.classList.remove('collapsed');
+  } else {
+    body.classList.add('d-none');
+    toggle.classList.add('collapsed');
+  }
+}
+
+function renderAuthFlow() {
+  const startBtn = document.getElementById('startAuthRecordingBtn');
+  const stopBtn = document.getElementById('stopAuthRecordingBtn');
+  const live = document.getElementById('authFlowLive');
+  const nameInput = document.getElementById('authFlowName');
+  const categorySelect = document.getElementById('authFlowCategory');
+  const stats = authState.stats || {};
+
+  // A recording that is already running has to be visible the moment the popup opens, or the
+  // section reads as idle while traffic is being recorded. Done once, so collapsing it by hand
+  // during a recording sticks.
+  if (authState.active && !authSectionAutoOpened) {
+    authSectionAutoOpened = true;
+    setAuthSectionOpen(true);
+  }
+
+  if (authState.active) {
+    startBtn.classList.add('d-none');
+    stopBtn.classList.remove('d-none');
+    live.classList.remove('d-none');
+    nameInput.disabled = true;
+    categorySelect.disabled = true;
+
+    document.getElementById('authFlowLiveName').textContent = authState.name || 'Untitled flow';
+    document.getElementById('authFlowLiveCategory').textContent = categoryLabel(authState.category);
+    document.getElementById('authFlowCount').textContent = stats.requestCount || 0;
+
+    const queuedRow = document.getElementById('authFlowQueuedRow');
+    if (stats.queuedCount) {
+      queuedRow.classList.remove('d-none');
+      document.getElementById('authFlowQueued').textContent = stats.queuedCount;
+    } else {
+      queuedRow.classList.add('d-none');
+    }
+  } else {
+    startBtn.classList.remove('d-none');
+    stopBtn.classList.add('d-none');
+    live.classList.add('d-none');
+    nameInput.disabled = false;
+    categorySelect.disabled = false;
+    authSectionAutoOpened = false;
+  }
+
+  startBtn.disabled = !isConnected || !targetsLoaded;
+
+  const errorEl = document.getElementById('authFlowError');
+  const message = authError || authState.lastError;
+  if (message) {
+    errorEl.textContent = message;
+    errorEl.classList.remove('d-none');
+  } else {
+    errorEl.classList.add('d-none');
+  }
+
+  const resultEl = document.getElementById('authFlowResult');
+  if (authResult) {
+    resultEl.textContent = authResult;
+    resultEl.classList.remove('d-none');
+  } else {
+    resultEl.classList.add('d-none');
+  }
+}
+
+async function startAuthRecording() {
+  authError = null;
+  authResult = null;
+
+  if (!isConnected) {
+    authError = 'Not connected to framework. Check connection settings.';
+    updateUI();
+    return;
+  }
+
+  const targetSelect = document.getElementById('targetSelect');
+  const selectedOption = targetSelect.options[targetSelect.selectedIndex];
+  const scopeTargetId = targetSelect.value;
+  if (!scopeTargetId) {
+    authError = 'Please select a target from the dropdown';
+    updateUI();
+    return;
+  }
+
+  const name = document.getElementById('authFlowName').value.trim();
+  if (!name) {
+    authError = 'Give the flow a name';
+    updateUI();
+    return;
+  }
+
+  const category = document.getElementById('authFlowCategory').value || 'login';
+  // The flow's base URL is the target's origin, not the tab's: replay resolves every step against
+  // it, and the tab may well be sitting on an identity provider by the time the user stops.
+  const targetUrlObj = normalizeTargetUrl(selectedOption && selectedOption.getAttribute('data-url'));
+
+  await saveAuthFlowFields();
+
+  const response = await sendToWorker({
+    action: 'startAuthRecording',
+    frameworkUrl,
+    recording: {
+      scopeTargetId,
+      name,
+      category,
+      baseUrl: targetUrlObj ? targetUrlObj.origin : '',
+    },
+  });
+
+  if (!response || !response.success) {
+    authError = (response && response.error) || 'Failed to start recording';
+  }
+  await refreshAuthState();
+}
+
+async function stopAuthRecording() {
+  authError = null;
+  const response = await sendToWorker({ action: 'stopAuthRecording' });
+
+  if (response && response.success) {
+    const count = response.requestCount || 0;
+    const plural = count === 1 ? '' : 's';
+    authResult = response.authFlowId
+      ? `Saved as an auth flow. ${count} request${plural} recorded.`
+      : `Recording saved with ${count} request${plural}. Import it from the framework to build the flow.`;
+  } else {
+    authError = (response && response.error) || 'Failed to stop recording';
+  }
+  await refreshAuthState();
+}
+
+/* ------------------------------------------------------------------ */
+
 function openFramework() {
   chrome.tabs.create({ url: frameworkUrl || DEFAULT_FRAMEWORK_URL });
 }
@@ -647,6 +862,10 @@ function hideError() {
 chrome.runtime.onMessage.addListener((message) => {
   if (message && message.action === 'sessionState') {
     sessionState = message.state;
+    updateUI();
+  }
+  if (message && message.action === 'authRecordingState' && message.state) {
+    authState = message.state;
     updateUI();
   }
   return false;

@@ -16,6 +16,33 @@ const { addTargetSchema, addTarget, deleteTargetSchema, deleteTarget, activateTa
 const { runScanSchema, runScan, checkScanStatusSchema, checkScanStatus, getScanHistorySchema, getScanHistory, cancelScanSchema, cancelScan } = require('./tools/scans');
 const { runWildcardWorkflowSchema, runWildcardWorkflow, runCompanyWorkflowSchema, runCompanyWorkflow, runUrlWorkflowSchema, runUrlWorkflow, consolidateDataSchema, consolidateData, startAutoScanSchema, startAutoScan, getAutoScanSessionsSchema, getAutoScanSessions } = require('./tools/workflows');
 const { getAttackSurfaceSchema, getAttackSurface, queryCloudAssetsSchema, queryCloudAssets, queryEndpointsSchema, queryEndpoints, queryParametersSchema, queryParameters, getScopeOverviewSchema, getScopeOverview, queryAttackSurfaceAssetsSchema, queryAttackSurfaceAssets } = require('./tools/recon');
+const { manageManualCrawlSchema, manageManualCrawl, captureManualCrawlSchema, captureManualCrawl } = require('./tools/manualcrawl');
+const { manageParamEnumSchema, manageParamEnum } = require('./tools/paramenum');
+const { manageXSSSchema, manageXSS, manageSQLiSchema, manageSQLi, manageCacheSchema, manageCache, manageCmdiSchema, manageCmdi, manageRedirectSchema, manageRedirect, manageLfiSchema, manageLfi, manageSmugglingSchema, manageSmuggling, manageBypassSchema, manageBypass } = require('./tools/vectortools');
+const { manageFuzzSchema, manageFuzz } = require('./tools/fuzz');
+const { manageToolConfigSchema, manageToolConfig, manageWordlistsSchema, manageWordlists } = require('./tools/toolconfigs');
+const {
+  queryAmassResultsSchema, queryAmassResults,
+  listNucleiTemplatesSchema, listNucleiTemplates,
+  populateBurpSchema, populateBurp,
+  getTargetUrlScreenshotSchema, getTargetUrlScreenshot,
+  manageDatabaseBundleSchema, manageDatabaseBundle,
+  exportScanDataSchema, exportScanData,
+  hackeroneScopeSchema, hackeroneScope,
+  manageMcpConfigSchema, manageMcpConfig,
+} = require('./tools/wildcard');
+const {
+  manageCompanyDomainsSchema, manageCompanyDomains,
+  manageNetworkRangesSchema, manageNetworkRanges,
+  queryCompanyEnumerationSchema, queryCompanyEnumeration,
+  enrichCompanyAssetsSchema, enrichCompanyAssets,
+} = require('./tools/company');
+const { manageThreatModelSchema, manageThreatModel, manageThreatModelNotesSchema, manageThreatModelNotes } = require('./tools/threatmodel');
+const { getDiscoveredEndpointsSchema, getDiscoveredEndpoints, manageAttackSurfaceAssetsSchema, manageAttackSurfaceAssets, manageClientIdentifiersSchema, manageClientIdentifiers } = require('./tools/urlresults');
+const { manageIdentityPatternsSchema, manageIdentityPatterns, managePolicyAccessSchema, managePolicyAccess, manageRoleAccessSchema, manageRoleAccess, manageDiscretionaryAccessSchema, manageDiscretionaryAccess, getAuthzSummarySchema, getAuthzSummary } = require('./tools/authz');
+const { manageAuthFlowsSchema, manageAuthFlows, manageAuthRecordingSchema, manageAuthRecording, manageSessionTokensSchema, manageSessionTokens, checkSessionTokensSchema, checkSessionTokens } = require('./tools/authsessions');
+const { getWafProbeSchemaSchema, getWafProbeSchema, configureWafProbeSchema, configureWafProbe, dryRunWafProbeSchema, dryRunWafProbe, runWafProbeSchema, runWafProbe, getWafProbeStatusSchema, getWafProbeStatus, getWafProbeResultsSchema, getWafProbeResults, manageWafProbeSchema, manageWafProbe } = require('./tools/wafprobe');
+const { consolidateEndpointsSchema, consolidateEndpoints, runEndpointScanSchema, runEndpointScan, getEndpointScanStatusSchema, getEndpointScanStatus, getEndpointScanResultsSchema, getEndpointScanResults, manageEndpointsSchema, manageEndpoints, queryConsolidatedEndpointsSchema, queryConsolidatedEndpoints } = require('./tools/endpoints');
 const { findSubdomainTakeoverSchema, findSubdomainTakeover, findExposedPanelsSchema, findExposedPanels, findApiEndpointsSchema, findApiEndpoints, findInterestingResponsesSchema, findInterestingResponses, findSensitiveFilesSchema, findSensitiveFiles, compareScansSchema, compareScans, getScopeStatsSchema, getScopeStats, findUniqueHostsSchema, findUniqueHosts, queryByCidrSchema, queryByCidr, queryByTechStackSchema, queryByTechStack, searchGlobalSchema, searchGlobal } = require('./tools/bugbounty');
 const { getSettingsSchema, getSettings, updateSettingsSchema, updateSettings, setApiKeySchema, setApiKey, deleteApiKeySchema, deleteApiKey, setAiApiKeySchema, setAiApiKey, deleteAiApiKeySchema, deleteAiApiKey } = require('./tools/settings');
 const { listAuthFlowsSchema, listAuthFlows, createAuthFlowSchema, createAuthFlow, updateAuthFlowSchema, updateAuthFlow, deleteAuthFlowSchema, deleteAuthFlow, getAuthFlowStepsSchema, getAuthFlowSteps, addAuthFlowStepSchema, addAuthFlowStep, updateAuthFlowStepSchema, updateAuthFlowStep, deleteAuthFlowStepSchema, deleteAuthFlowStep, replayAuthFlowStepSchema, replayAuthFlowStep, replayAuthFlowSchema, replayAuthFlow } = require('./tools/authflows');
@@ -175,7 +202,7 @@ function createServer() {
   // ============================================================
   // SCAN EXECUTION (new)
   // ============================================================
-  server.tool('run_scan', 'Run any individual scanning tool against a target. Tools: amass, subfinder, sublist3r, assetfinder, gau, ctl, gospider, subdomainizer, shuffledns, cewl, httpx, amass_intel, metabigor_company, securitytrails_company, censys_company, shodan_company, github_recon, cloud_enum, amass_enum_company, dnsx_company, katana_company, metadata, nuclei_screenshot, nuclei, katana_url, linkfinder_url, waybackurls, gau_url, gospider_url, ffuf_url, arjun, parameth, x8, ip_port_scan', runScanSchema.shape, async (params) => {
+  server.tool('run_scan', 'Run any individual scanning tool against a target. Tools: amass, subfinder, sublist3r, assetfinder, gau, ctl, gospider, subdomainizer, shuffledns, cewl, httpx, amass_intel, metabigor_company, securitytrails_company, censys_company, shodan_company, github_recon, cloud_enum, amass_enum_company, dnsx_company, katana_company, metadata, nuclei_screenshot, nuclei, katana_url, linkfinder_url, waybackurls, gau_url, gospider_url, ffuf_url, arjun, x8, ip_port_scan', runScanSchema.shape, async (params) => {
     const result = await runScan(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
@@ -241,12 +268,286 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('query_endpoints', 'Query discovered endpoints from crawlers (katana, linkfinder, waybackurls, gau, gospider, ffuf)', queryEndpointsSchema.shape, async (params) => {
+  server.tool('query_endpoints', 'Query raw endpoints as the crawlers found them (katana, linkfinder, waybackurls, gau, gospider, ffuf). For the consolidated list with validation verdicts, use query_consolidated_endpoints instead.', queryEndpointsSchema.shape, async (params) => {
     const result = await queryEndpoints(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('query_parameters', 'Query discovered HTTP parameters from arjun, parameth, or x8 scans', queryParametersSchema.shape, async (params) => {
+  // --- The rest of the URL workflow, so nothing a human can do in it is out of reach ----------
+  server.tool('manage_manual_crawl', 'Drive and read the manual crawl: start or stop a recording session, list sessions, and read the captures, the endpoints they produced, and the subset that looks like an authentication exchange. auth_candidates is the input to building an auth flow.', manageManualCrawlSchema.shape, async (params) => {
+    const result = await manageManualCrawl(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('capture_manual_crawl', 'Write observed requests into a manual crawl session, one at a time or in a batch. Separate from manage_manual_crawl because this adds traffic to the corpus that every later scan will act on.', captureManualCrawlSchema.shape, async (params) => {
+    const result = await captureManualCrawl(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_param_enum', 'See and control which endpoints the hidden-parameter tools (Arjun, x8) scan. targets lists the valid endpoints grouped by HTTP verb; the rest select or deselect them per tool. The corpus is endpoints Validate confirmed are real, not every URL known, so read targets before running one of these scans.', manageParamEnumSchema.shape, async (params) => {
+    const result = await manageParamEnum(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_xss', 'Configure and run the XSS scanners (Dalfox, domdig, xssFuzz) against the unique attack vectors of this target. Settings live in the same server-side store the Config modal writes, so a change here is visible there and the other way round. Start with the eligibility action: only Dalfox can reach header, body, cookie and path insertion points, so a clean result from domdig or xssFuzz says nothing about the vectors they never sent.', manageXSSSchema.shape, async (params) => {
+    const result = await manageXSS(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_sqli', 'Configure and run the SQL injection scanners (sqlmap, Ghauri, SQLiDetector) against the unique attack vectors of this target. Settings live in the same server-side store the Config modal writes, so a change here is visible there and the other way round. sqlmap and Ghauri reach all five insertion points; SQLiDetector is query-only and matches database error messages, so what it reports is a lead to confirm rather than a confirmed injection. Start with the eligibility action.', manageSQLiSchema.shape, async (params) => {
+    const result = await manageSQLi(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_cache', 'Configure and run the web cache scanners (Web Cache Vulnerability Scanner, CacheBoom) against this target. These test a URL rather than a parameter, so attack vectors sharing a URL are scanned once between them: read the eligibility action, whose scan_count is the number of URLs a run will actually scan. WCVS confirms poisoning by fetching the poisoned response back from the cache and returns both curl commands. CacheBoom deception is sound, but its poisoning check only proves the header was reflected, so those findings are marked unconfirmed. A WCVS run that reports no_cache_detected tested nothing and is not a clean result.', manageCacheSchema.shape, async (params) => {
+    const result = await manageCache(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_cmdi', 'Configure and run the command injection and server-side template injection scanners (Commix, SSTImap, TInjA) against the unique attack vectors of this target. Coverage differs sharply: SSTImap reaches all five insertion points, TInjA reaches query, body and named headers only, and Commix reaches everything except custom headers, since it tests only user-agent, referer and host. Read the eligibility action first; vectors a tool cannot reach are reported as skipped with the reason rather than scanned and reported clean.', manageCmdiSchema.shape, async (params) => {
+    const result = await manageCmdi(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_redirect', 'Configure and run the open redirect and SSRF tools. Only Nuclei DAST detects anything: REcollapse generates mutations and has no network code, and SSRFmap exploits an SSRF it assumes is already there, so both are gated on a finding and report as ineligible until the detector produces one. Nuclei needs no API key and no callback server, because its response-based SSRF payloads reach cloud metadata, localhost ports and file:// and are matched in the response. It fuzzes the query string and request body only, so header, cookie and path vectors are reported as skipped with the reason.', manageRedirectSchema.shape, async (params) => {
+    const result = await manageRedirect(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_lfi', 'Configure and run the local file inclusion tools (LFImap, LFIHunt). LFImap marks where the payload goes and reaches all five insertion points including a path segment, though a path result depends on the server as much as the application: Apache rejects an encoded slash and a literal ../ before either reaches the code. LFIHunt runs its batch scanner over a URL list and tests query parameters only, so it runs once per URL rather than once per vector. Most of both tools’ checks are PHP wrappers, so a target that is not PHP will correctly report nothing. Vectors a tool cannot reach are reported as skipped with the reason.', manageLfiSchema.shape, async (params) => {
+    const result = await manageLfi(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_smuggling', 'Configure and run the request smuggling and desync scanners (smugglex, http2smugl). Neither tests a parameter: smuggling is a disagreement between the front-end and the back-end about where one request ends, so both scan a URL and every attack vector on a URL collapses into one scan. Read the eligibility action, whose scan_count is the number of URLs a run will actually scan. http2smugl needs an HTTPS target and refuses plain http, because given http it fails every probe, exits 0, and writes a report full of "indistinguishable" that reads exactly like a clean scan. Grade findings by their confidence: a result backed only by a connection timeout usually means the endpoint hangs on a malformed body rather than that it desyncs, and on a lab containing exactly one desync five separate smugglex checks reported it. Treat the check name as the probe that fired, not the class of the bug, and confirm by hand before reporting. smugglex findings of kind scan-incomplete mean checks errored and that URL is untested for them, which is not a clean result.', manageSmugglingSchema.shape, async (params) => {
+    const result = await manageSmuggling(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_access_bypass', 'Configure and run the 403 and access control bypass tools (nomore403, Forbidden). This section does NOT scan attack vectors: its targets are the URLs that already returned 401 or 403 to something an earlier tool sent, consolidated from six tables that record an HTTP status. Build or refresh that list with POST /access-bypass/{scope_target_id}/targets/consolidate and read it with GET /access-bypass/{scope_target_id}/targets before scanning, because that list is what a run will cover. 404 is excluded by default and is opt in: on a real target it is most of the 4xx rows and almost all of it is directory brute force noise. Both tools scan one URL per run. The hard part is false positives: a denial page served under status 200 is not a bypass, so leave nomore403 auto-calibration ON (measured, --no-calibrate took a clean report to three bypasses that did not exist) and leave Forbidden content-length filtering ON. Treat every reported bypass as a lead and confirm the response really contains what the 403 withheld.', manageBypassSchema.shape, async (params) => {
+    const result = await manageBypass(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_tool_config', 'Read or write the saved configuration for any URL-workflow tool: ffuf, arjun, x8, nuclei, katana, gospider or linkfinder. Saves merge over the stored config rather than replacing it, because the underlying handlers full-replace and an omitted field would otherwise be blanked.', manageToolConfigSchema.shape, async (params) => {
+    const result = await manageToolConfig(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_wordlists', 'List, upload and delete the FFUF wordlists available to endpoint, header and cookie fuzzing.', manageWordlistsSchema.shape, async (params) => {
+    const result = await manageWordlists(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_fuzz', 'The live ffuf fuzz flow: review what a run found, change what a step sends, price it, run it and follow it. This is the implementation the URL workflow actually executes; run_scan "ffuf_url" and manage_tool_config "ffuf" drive an older one whose tables are empty, so use this for anything ffuf. Start with action summary, which reports per step whether the findings are discoveries or one response repeated, and the option that would exclude that response.', manageFuzzSchema.shape, async (params) => {
+    const result = await manageFuzz(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_company_domains', 'List, add, prune and consolidate the root domains the Company workflow discovered, per discovery tool. Pruning is the most consequential judgement in this workflow: every promoted Wildcard target and the whole attack surface inherit this list. Google Dorking and Reverse Whois are manual flows, so add is the only way their findings ever enter the system.', manageCompanyDomainsSchema.shape, async (params) => {
+    const result = await manageCompanyDomains(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_network_ranges', 'Read the CIDR ranges and ASN records one Amass Intel or Metabigor scan discovered, and delete ranges before the IP/port scan consumes them. A network range is the most expensive unit of work in the framework: one wrong /16 is a scan that never finishes.', manageNetworkRangesSchema.shape, async (params) => {
+    const result = await manageNetworkRanges(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('query_company_enumeration', 'Read the Company workflow result sets: Amass Enum cloud domains, DNSx records, Katana cloud assets, the on-prem live web servers and discovered IPs, and the Company metadata enrichment, plus the raw per-domain tool output behind them.', queryCompanyEnumerationSchema.shape, async (params) => {
+    const result = await queryCompanyEnumeration(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('enrich_company_assets', 'Enrich the consolidated attack-surface FQDNs with DNS, SSL, whois and HTTP, or build a keyword wordlist from every domain discovered for the target.', enrichCompanyAssetsSchema.shape, async (params) => {
+    const result = await enrichCompanyAssets(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('query_amass_results', 'Read what an Amass scan found beyond the subdomain list: cloud domains (the AWS/Azure/GCP takeover and open-bucket candidates), and the Infrastructure Map tiers (ASN, service provider, subnet) that establish whether a netblock genuinely belongs to the target. Also exposes the per-scan DNS, IP and subdomain sets.', queryAmassResultsSchema.shape, async (params) => {
+    const result = await queryAmassResults(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('list_nuclei_templates', 'Browse the Nuclei template catalogue to find valid template ids before selecting them. manage_tool_config can write template_ids and exclude_ids but an id that does not exist is accepted on save and then silently not run, so read this first.', listNucleiTemplatesSchema.shape, async (params) => {
+    const result = await listNucleiTemplates(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('populate_burp', 'Push discovered live web servers, an arbitrary URL list, or an uploaded API spec through the configured Burp Suite proxy so they land in its sitemap. This is the handoff from automated recon into manual testing.', populateBurpSchema.shape, async (params) => {
+    const result = await populateBurp(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_target_url_screenshot', 'Fetch the screenshot MetaData Reconnaissance captured for one target URL, as an image. Frequently the fastest way to tell a parked domain from a login page from an admin panel.', getTargetUrlScreenshotSchema.shape, async (params) => {
+    const result = await getTargetUrlScreenshot(params);
+    // Returned as a real image block rather than a base64 string in JSON, so the model can see it.
+    if (result && result._image) {
+      return { content: [{ type: 'image', data: result._image.data, mimeType: result._image.mimeType }] };
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_database_bundle', 'List, export and import .rs0n database bundles: a whole scope target with every scan it has accumulated. This is how a target moves between installs.', manageDatabaseBundleSchema.shape, async (params) => {
+    const result = await manageDatabaseBundle(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('export_scan_data', 'Export scan results as CSV bundles, per dataset: amass, httpx, gau, sublist3r, ctl, subfinder, shuffledns, gospider, subdomainizer, cewl, nuclei, subdomains, roi.', exportScanDataSchema.shape, async (params) => {
+    const result = await exportScanData(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('hackerone_scope', 'Read a HackerOne program scope by handle, list the programs the stored key can see, or test that key. This is how an in-scope asset list becomes scope targets.', hackeroneScopeSchema.shape, async (params) => {
+    const result = await hackeroneScope(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_mcp_config', 'Read or change the MCP server own settings: default result caps, truncation length, and (guarded) whether it runs and on which port.', manageMcpConfigSchema.shape, async (params) => {
+    const result = await manageMcpConfig(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_threat_model', 'Create, read, update and delete threat model entries for a target.', manageThreatModelSchema.shape, async (params) => {
+    const result = await manageThreatModel(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_threat_model_notes', 'Create, read, update and delete the four supporting threat-model collections: application question answers, mechanism examples, notable objects and security control notes.', manageThreatModelNotesSchema.shape, async (params) => {
+    const result = await manageThreatModelNotes(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_discovered_endpoints', 'The endpoints one crawler scan found, which is what the Results screen for that tool shows. Give it a target and a tool name and it resolves the newest successful scan itself.', getDiscoveredEndpointsSchema.shape, async (params) => {
+    const result = await getDiscoveredEndpoints(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_attack_surface_assets', 'Read the attack surface asset counts and list, add an asset by hand, or remove one.', manageAttackSurfaceAssetsSchema.shape, async (params) => {
+    const result = await manageAttackSurfaceAssets(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_client_identifiers', 'The identifier values a caller might be able to change, auto-detected from stored traffic or added by hand. These are the candidates that Client Identity Patterns promotes into a documented pattern. auto_detect reads traffic already captured and sends nothing at the target.', manageClientIdentifiersSchema.shape, async (params) => {
+    const result = await manageClientIdentifiers(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // --- Authorization: how the app decides who may do what, so testing knows what to expect ------
+  server.tool('manage_identity_patterns', 'Create, read, update and delete the patterns describing how the server identifies a caller, each backed by one real HTTP request and response, and replay them. The category ranks how much of the identity the attacker controls: parameter is the best IDOR target, signed_token needs a signature failure first, user_context_object leaves the attacker nothing to move.', manageIdentityPatternsSchema.shape, async (params) => {
+    const result = await manageIdentityPatterns(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_policy_access', 'Model an application that grants each permission individually: policy entities, their full permission list, and specific configured instances. Settings are allow, deny or unset, and unset is deliberately not deny because never granted and explicitly revoked can behave differently.', managePolicyAccessSchema.shape, async (params) => {
+    const result = await managePolicyAccess(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_role_access', 'Model role-based access as a matrix of roles by actions. Each cell is can_do, cannot_do or forbidden_to_do; forbidden_to_do means the role must never be able to perform the action under any circumstances, and is the only value whose violation is automatically a finding.', manageRoleAccessSchema.shape, async (params) => {
+    const result = await manageRoleAccess(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_discretionary_access', 'Model access a holder can pass on, up to their own level, such as a shared document where an admin can invite admins but a user can only invite users. Levels carry a rank and a grant ceiling; a level granting above its ceiling is the escalation being modelled.', manageDiscretionaryAccessSchema.shape, async (params) => {
+    const result = await manageDiscretionaryAccess(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_authz_summary', 'Counts across all four authorization sections for a target: identity patterns by category, policy entities and permissions, roles and actions and forbidden cells, and discretionary objects and levels.', getAuthzSummarySchema.shape, async (params) => {
+    const result = await getAuthzSummary(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // --- Authentication: auth flows, extension recording, and the session tokens they produce ----
+  server.tool('manage_auth_flows', 'Create, read, update and delete authentication flows and their ordered steps, and replay a flow against the target. A flow is the sequence of HTTP requests that performs a register, login, MFA, magic link or password reset, and it is what makes a session token refreshable when it expires.', manageAuthFlowsSchema.shape, async (params) => {
+    const result = await manageAuthFlows(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_auth_recording', 'Record an authentication flow as it happens, or inspect and import one the browser extension recorded. Recordings capture every request in order regardless of scope, because an auth flow routinely crosses to an identity provider on another domain.', manageAuthRecordingSchema.shape, async (params) => {
+    const result = await manageAuthRecording(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_session_tokens', 'Create, read, update and delete session tokens, set which are active, and parse a raw Set-Cookie line, Cookie header or Authorization header into properly scoped tokens. Active tokens are what every other scan sends.', manageSessionTokensSchema.shape, async (params) => {
+    const result = await manageSessionTokens(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('check_session_tokens', 'Test whether session tokens are still honoured by the target, and refresh the dead ones by replaying the auth flow they are tied to. Separate from the CRUD tool because these send real traffic.', checkSessionTokensSchema.shape, async (params) => {
+    const result = await checkSessionTokens(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // --- Routing & WAF Probe: the measurement every other request-issuing scan paces against -----
+  server.tool('get_waf_probe_schema', 'What the Routing & WAF Probe can be configured to do: the four presets, the resolved defaults, the individual test registry, and the abort rules.', getWafProbeSchemaSchema.shape, async (params) => {
+    const result = await getWafProbeSchema(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('configure_waf_probe', 'Read or write the saved Routing & WAF Probe configuration for a target. Saving merges over what is already there, so setting one knob does not reset the rest.', configureWafProbeSchema.shape, async (params) => {
+    const result = await configureWafProbe(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('dry_run_waf_probe', 'Price a probe run without sending a single request: how many requests it will make and how many deliberate blocks ("trips") it will spend against the target and this egress address. Run this before authorising a probe.', dryRunWafProbeSchema.shape, async (params) => {
+    const result = await dryRunWafProbe(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('run_waf_probe', 'Run the Routing & WAF Probe. It characterises routing, caching, not-found behaviour, the auth wall and the WAF, and measures the safe request rate that Validate, Investigate and the fuzzers then pace against. Spends deliberate blocks, so price it with dry_run_waf_probe first.', runWafProbeSchema.shape, async (params) => {
+    const result = await runWafProbe(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_waf_probe_status', 'Progress and outcome of a probe run, without the several-hundred-entry transcript.', getWafProbeStatusSchema.shape, async (params) => {
+    const result = await getWafProbeStatus(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_waf_probe_results', 'Results of a probe run. Start with section=verdict: it carries the posture and the safe request rate every later scan inherits. Then findings, recommendations, tests, budget or log.', getWafProbeResultsSchema.shape, async (params) => {
+    const result = await getWafProbeResults(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_waf_probe', 'Abort a running probe, check the 24-hour trip ledger, or list past runs. The probe never writes to a tool config: read what it suggests with get_waf_probe_results section=recommendations, then set those values yourself.', manageWafProbeSchema.shape, async (params) => {
+    const result = await manageWafProbe(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // --- Endpoint Consolidation workflow: Consolidate, Investigate, Results, Manage --------------
+  server.tool('consolidate_endpoints', 'Fold everything the crawlers, the archives and the manual crawl found into one list of unique endpoint and verb combinations. Waits for completion by default and returns the endpoint count.', consolidateEndpointsSchema.shape, async (params) => {
+    const result = await consolidateEndpoints(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('run_endpoint_scan', 'Run the combined endpoint scan: validate each consolidated endpoint against a control taken from its own directory to separate real pages from the target\'s catch-all, then investigate everything validation did not rule out. Only GET, HEAD and OPTIONS are ever sent, never a recorded write verb. Refuses to start while another tool is sending traffic at the target.', runEndpointScanSchema.shape, async (params) => {
+    const result = await runEndpointScan(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_endpoint_scan_status', 'Progress of an endpoint scan: which phase is running and how far through it is.', getEndpointScanStatusSchema.shape, async (params) => {
+    const result = await getEndpointScanStatus(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_endpoint_scan_results', 'Results of the latest endpoint scan. Start with section=summary: it carries the verdict counts, what the run could and could not establish, and which rule produced each block of rows. Then use section=validation or section=findings with filters.', getEndpointScanResultsSchema.shape, async (params) => {
+    const result = await getEndpointScanResults(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('query_consolidated_endpoints', 'The consolidated endpoint list with each row\'s validation verdict, filterable by verdict, testability, content class, discovery source, verb or URL pattern. This is what the Manage Endpoints screen shows.', queryConsolidatedEndpointsSchema.shape, async (params) => {
+    const result = await queryConsolidatedEndpoints(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_endpoints', 'Add endpoints by hand, delete or restore them, sweep the measured rule-outs, or override a verdict. Deletes are soft: restore brings rows back with their verdicts intact.', manageEndpointsSchema.shape, async (params) => {
+    const result = await manageEndpoints(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('query_parameters', 'Query discovered HTTP parameters from arjun or x8 scans', queryParametersSchema.shape, async (params) => {
     const result = await queryParameters(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });

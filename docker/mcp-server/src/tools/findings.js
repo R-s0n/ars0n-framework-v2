@@ -149,7 +149,7 @@ const getScanResultsSchema = z.object({
     'gau', 'ctl', 'gospider', 'shuffledns', 'cewl', 'subdomainizer',
     'katana_url', 'linkfinder_url', 'waybackurls', 'gau_url', 'gospider_url',
     'ffuf_url', 'amass_intel', 'metabigor_company', 'metadata',
-    'arjun', 'parameth', 'x8',
+    'arjun', 'x8',
   ]).describe('The scanner tool to get results for'),
   max_results: z.number().optional().describe('Maximum results to return (default 10)'),
 });

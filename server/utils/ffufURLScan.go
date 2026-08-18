@@ -162,6 +162,11 @@ func resolveWordlist(id, fallback string) (string, error) {
 			path = ffufWordlistDir + "/ffuf-headers.txt"
 		case "builtin-cookies":
 			path = ffufWordlistDir + "/ffuf-cookies.txt"
+		// One word, "rs0n", used to take a baseline: the same request with a value that cannot exist.
+		// A finding only means something if a nonsense value produces a DIFFERENT answer, and the only
+		// way to know that is to send one and look.
+		case "builtin-canary":
+			path = ffufWordlistDir + "/ffuf-canary.txt"
 		default:
 			return "", fmt.Errorf("unknown built-in wordlist %q", id)
 		}

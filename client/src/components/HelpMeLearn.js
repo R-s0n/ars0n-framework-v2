@@ -86,40 +86,6 @@ const HelpMeLearn = ({ section }) => {
         }
       ]
     },
-    urlEndpointBruteForcing: {
-      title: "Help Me Learn!",
-      items: [
-        {
-          question: "What stage of the methodology are we at, and why do we brute-force for hidden endpoints?",
-          lessonKey: "urlBruteForcingMethodology",
-          answers: [
-            "We're in the Endpoint Brute Forcing phase. Crawling and archive mining found the endpoints the app links to or has been seen using; brute forcing finds the ones nobody links to at all — by taking a wordlist of common paths and filenames and asking the server, one by one, 'does /admin exist? does /backup.zip exist? does /api/internal exist?'",
-            "This matters because the most sensitive things are often the least advertised: admin panels, backup files, config files, staging endpoints, debug interfaces, and forgotten API routes. If the server responds to /.git/config or /backup.sql, you've found something no crawler ever would have.",
-            "Brute forcing is active and noisy — you're sending many requests to the target — so it's the phase where you most need to be deliberate: respect the program's rules, avoid hammering the target, and be aware of WAFs and rate limits (which is exactly why the WAF Probe runs first)."
-          ]
-        },
-        {
-          question: "How do WAF Probe and FFUF work together in this step?",
-          lessonKey: "urlBruteForcingTools",
-          answers: [
-            "FFUF (Fuzz Faster U Fool) is the brute-forcer: it takes a wordlist and a target URL with a FUZZ keyword (e.g., https://target/FUZZ), sends a request for every word, and shows you which paths return interesting responses. It's extremely fast and highly configurable — threads, rate limits, matchers, and filters.",
-            "The danger is that fast, aggressive fuzzing against a protected target gets you blocked: a WAF returns 403 to everything, or a rate limiter throttles you, and your results become useless (or your IP gets banned). Tuning FFUF blind is guesswork.",
-            "That's what WAF Probe solves. It probes the target first to detect whether a WAF is present (and which vendor), how the target rate-limits, and what a blocked response looks like — then recommends a safe FFUF configuration (request rate, delay, threads, response filters) and lets you apply it with one click. Run WAF Probe, apply its recommendations, then run FFUF tuned to the target.",
-            "In short: WAF Probe is reconnaissance for your fuzzing, and FFUF is the fuzzing. Using them in that order means you fuzz effectively without tripping defenses — the difference between clean results and a banned IP."
-          ]
-        },
-        {
-          question: "How do I choose wordlists, tune FFUF, and interpret results responsibly?",
-          lessonKey: "urlBruteForcingWorkflow",
-          answers: [
-            "Wordlist choice is everything. Start with a general content-discovery list (like SecLists' common.txt or the raft lists), then get specific: if the app is PHP, add .php extensions; if you found an /api, fuzz it with API-specific wordlists. A targeted wordlist finds more with fewer requests than a giant generic one.",
-            "Tune FFUF to the target: set the request rate and delay based on the WAF Probe's recommendation, pick a sensible thread count, and use matchers/filters so you see signal, not noise. The key skill is filtering out the 'baseline' response — if every missing page returns a 200 with a 1,024-byte 'not found' template, filter that size so real hits stand out.",
-            "Interpret results by looking at status codes and response sizes together. 200 is an obvious hit; 401/403 can mean 'this exists but you're not authorized' (still a lead — maybe it's bypassable); 301/302 redirects reveal structure; and anomalous sizes flag pages that behave differently. Every interesting hit becomes a new endpoint to test manually.",
-            "Above all, hunt responsibly: stay in scope, keep request rates reasonable, prefer smaller targeted wordlists over brute-forcing the entire internet's worth of paths, and stop if you're clearly being blocked rather than escalating. Good hunters are welcome back; ones who knock over targets are not."
-          ]
-        }
-      ]
-    },
     urlTargetEndpoints: {
       title: "Help Me Learn!",
       items: [
@@ -153,7 +119,9 @@ const HelpMeLearn = ({ section }) => {
         }
       ]
     },
-    urlParameterEnumeration: {
+    // Parameter enumeration and endpoint/header/cookie brute forcing are one card row now, so
+    // their lessons are one accordion: the tools differ, the question they answer does not.
+    urlHiddenAttackVectorFuzzingChunking: {
       title: "Help Me Learn!",
       items: [
         {
@@ -166,13 +134,13 @@ const HelpMeLearn = ({ section }) => {
           ]
         },
         {
-          question: "How do Arjun, parameth, and x8 discover hidden parameters differently?",
+          question: "How do Arjun and x8 discover hidden parameters differently?",
           lessonKey: "urlParameterTools",
           answers: [
-            "All three work by the same core idea: send the endpoint many candidate parameter names from a wordlist and watch for a change in the response. If adding ?debug=xyz changes the response — different length, different status, reflected value, different behavior — that parameter is probably real and processed by the backend.",
+            "Both work by the same core idea: send the endpoint many candidate parameter names from a wordlist and watch for a change in the response. If adding ?debug=xyz changes the response — different length, different status, reflected value, different behavior — that parameter is probably real and processed by the backend.",
             "Arjun is a fast, accurate Python tool that's smart about this diffing: it sends parameters in chunks, establishes a stable baseline, and reports the names that genuinely affect the response. It handles GET, POST, JSON, and XML bodies and is a great default choice.",
             "x8 is a high-accuracy Rust tool that excels at precise response comparison and can inject parameters into the query string, body, or headers. It's particularly good at cutting through noise on responses that change slightly on their own, and it verifies its findings to reduce false positives.",
-            "parameth is an older tool that brute-forces GET/POST parameters by monitoring response size and content changes. Running more than one tool is worthwhile because they use different wordlists and diffing strategies, so each can surface parameters the others miss."
+            "Running both is worthwhile because they use different wordlists and diffing strategies, so each can surface parameters the other misses."
           ]
         },
         {
@@ -183,6 +151,44 @@ const HelpMeLearn = ({ section }) => {
             "Match the parameter to a vulnerability class by what it looks like it does. A parameter naming an object (id, user, account, order) invites IDOR — try other users' values. One taking a URL (url, redirect, next, callback) invites SSRF and open redirect. One taking a file or path invites path traversal. One that reflects into the page invites XSS. One in a database-driven feature invites SQL/NoSQL injection.",
             "Also test for behavior-changing parameters, not just injection: debug, test, admin, is_admin, role, preview, and similar names can unlock hidden functionality, verbose errors, or privileged views when set to true/1. These 'magic parameters' are pure logic bugs and often high impact.",
             "Feed confirmed parameters back into your proxy and test them manually and deliberately. Parameter discovery's job is to hand you inputs the application didn't want you to know about; your job is to try each one against the vulnerability class it suggests."
+          ]
+        },
+      ]
+    },
+    // Split where the workflow splits. The first three items are about parameters an endpoint reads
+    // but never advertises, which is what Arjun and x8 chase a batch at a time; these are about
+    // finding things nothing links to at all, one request per word, which is FFUF's job and now its
+    // own section.
+    urlHiddenAttackVectorFuzzingBruteForce: {
+      title: "Help Me Learn!",
+      items: [
+        {
+          question: "Why do we also brute-force for hidden endpoints, headers, and cookies?",
+          lessonKey: "urlBruteForcingMethodology",
+          answers: [
+            "We're in the Endpoint Brute Forcing phase. Crawling and archive mining found the endpoints the app links to or has been seen using; brute forcing finds the ones nobody links to at all — by taking a wordlist of common paths and filenames and asking the server, one by one, 'does /admin exist? does /backup.zip exist? does /api/internal exist?'",
+            "This matters because the most sensitive things are often the least advertised: admin panels, backup files, config files, staging endpoints, debug interfaces, and forgotten API routes. If the server responds to /.git/config or /backup.sql, you've found something no crawler ever would have.",
+            "Brute forcing is active and noisy — you're sending many requests to the target — so it's the phase where you most need to be deliberate: respect the program's rules, avoid hammering the target, and be aware of WAFs and rate limits (which is exactly why the WAF Probe runs first)."
+          ]
+        },
+        {
+          question: "How do WAF Probe and FFUF work together in this step?",
+          lessonKey: "urlBruteForcingTools",
+          answers: [
+            "FFUF (Fuzz Faster U Fool) is the brute-forcer: it takes a wordlist and a target URL with a FUZZ keyword (e.g., https://target/FUZZ), sends a request for every word, and shows you which paths return interesting responses. It's extremely fast and highly configurable — threads, rate limits, matchers, and filters.",
+            "The danger is that fast, aggressive fuzzing against a protected target gets you blocked: a WAF returns 403 to everything, or a rate limiter throttles you, and your results become useless (or your IP gets banned). Tuning FFUF blind is guesswork.",
+            "That's what WAF Probe solves. It probes the target first to detect whether a WAF is present (and which vendor), how the target rate-limits, and what a blocked response looks like — then recommends a safe FFUF configuration (request rate, delay, threads, response filters) and lets you apply it with one click. Run WAF Probe, apply its recommendations, then run FFUF tuned to the target.",
+            "In short: WAF Probe is reconnaissance for your fuzzing, and FFUF is the fuzzing. Using them in that order means you fuzz effectively without tripping defenses — the difference between clean results and a banned IP."
+          ]
+        },
+        {
+          question: "How do I choose wordlists, tune FFUF, and interpret results responsibly?",
+          lessonKey: "urlBruteForcingWorkflow",
+          answers: [
+            "Wordlist choice is everything. Start with a general content-discovery list (like SecLists' common.txt or the raft lists), then get specific: if the app is PHP, add .php extensions; if you found an /api, fuzz it with API-specific wordlists. A targeted wordlist finds more with fewer requests than a giant generic one.",
+            "Tune FFUF to the target: set the request rate and delay based on the WAF Probe's recommendation, pick a sensible thread count, and use matchers/filters so you see signal, not noise. The key skill is filtering out the 'baseline' response — if every missing page returns a 200 with a 1,024-byte 'not found' template, filter that size so real hits stand out.",
+            "Interpret results by looking at status codes and response sizes together. 200 is an obvious hit; 401/403 can mean 'this exists but you're not authorized' (still a lead — maybe it's bypassable); 301/302 redirects reveal structure; and anomalous sizes flag pages that behave differently. Every interesting hit becomes a new endpoint to test manually.",
+            "Above all, hunt responsibly: stay in scope, keep request rates reasonable, prefer smaller targeted wordlists over brute-forcing the entire internet's worth of paths, and stop if you're clearly being blocked rather than escalating. Good hunters are welcome back; ones who knock over targets are not."
           ]
         }
       ]

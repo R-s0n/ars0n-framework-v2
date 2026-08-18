@@ -298,7 +298,7 @@ func ParseKatanaResults(scopeTargetID, domain, result string) []KatanaCloudAsset
 	}
 
 	// Convert maps back to slices and store in database
-	var cloudAssets []KatanaCloudAsset
+	var cloudAssets = []KatanaCloudAsset{}
 
 	for _, asset := range uniqueAssets {
 		// Extract source URL from description
@@ -784,7 +784,7 @@ func GetKatanaCompanyScansForScopeTarget(w http.ResponseWriter, r *http.Request)
 	}
 	defer rows.Close()
 
-	var scans []KatanaCompanyScanStatus
+	var scans = []KatanaCompanyScanStatus{}
 	for rows.Next() {
 		var scan KatanaCompanyScanStatus
 		var domainsJSON string
@@ -839,7 +839,7 @@ func GetKatanaCompanyCloudAssetsByTarget(w http.ResponseWriter, r *http.Request)
 	}
 	defer rows.Close()
 
-	var cloudAssets []map[string]interface{}
+	var cloudAssets = []map[string]interface{}{}
 	for rows.Next() {
 		var id, rootDomain, assetDomain, assetURL, assetType, service, description string
 		var sourceURL *string

@@ -1,56 +1,56 @@
-import { Modal, Button, Form, Table, Badge, InputGroup, ButtonGroup, Spinner } from 'react-bootstrap';
+import { Modal, Button, Form, InputGroup, Spinner } from 'react-bootstrap';
 import { useState, useMemo, useEffect, useCallback } from 'react';
-import { FaSearch, FaTrash, FaCheckCircle, FaTimes, FaExclamationTriangle } from 'react-icons/fa';
+import {
+  FaSearch, FaTrash, FaTimes, FaExclamationTriangle, FaSort, FaSortUp, FaSortDown, FaCheck,
+} from 'react-icons/fa';
 
-async function fetchStatsForTarget(targetId) {
-  const s = { subdomains: 0, webServers: 0, nucleiTotal: 0, nucleiImpactful: 0 };
-  try {
-    const [subRes, httpxRes, nucleiRes] = await Promise.all([
-      fetch(`/api/consolidated-subdomains/${targetId}`).catch(() => null),
-      fetch(`/api/scopetarget/${targetId}/scans/httpx`).catch(() => null),
-      fetch(`/api/scopetarget/${targetId}/scans/nuclei`).catch(() => null),
-    ]);
+// Managing scope targets.
+//
+// The table is per TYPE, not a single list with a type column. The three workflows produce entirely
+// different things, so one set of columns cannot describe them: the old table showed Subs / Live /
+// Nuclei / Impact for every row, which are the Wildcard workflow's outputs, so a Company row read as
+// 0 subdomains while holding 867 live web servers, and every URL row read as four zeros while holding
+// a thousand endpoints. That is why the "All" tab is gone rather than merely unselected by default:
+// there is no honest set of columns for a mixed list.
+//
+// The columns themselves come from the server, along with the numbers, so the labels and the values
+// cannot drift apart. See GetScopeTargetMetrics.
 
-    if (subRes?.ok) {
-      const data = await subRes.json();
-      s.subdomains = data.count || 0;
-    }
+const TYPES = ['Company', 'Wildcard', 'URL'];
 
-    if (httpxRes?.ok) {
-      const data = await httpxRes.json();
-      if (data.scans && data.scans.length > 0) {
-        const latest = data.scans.reduce((a, b) =>
-          new Date(b.created_at) > new Date(a.created_at) ? b : a
-        );
-        if (latest.result) {
-          s.webServers = latest.result.split('\n').filter(l => l.trim()).length;
-        }
-      }
-    }
+// What the workflow behind each type is FOR, shown under the tabs. The counts only mean something if
+// you know which pipeline produced them.
+const TYPE_BLURB = {
+  Company: 'Maps an organisation onto the infrastructure it owns: root domains, ranges, cloud, and what answers HTTP.',
+  Wildcard: 'Expands one domain into subdomains, finds which are live, and scans them.',
+  URL: 'Works a single host in depth: its endpoints, its parameters, and how it responds to them.',
+};
 
-    if (nucleiRes?.ok) {
-      const scans = await nucleiRes.json();
-      if (Array.isArray(scans)) {
-        const successScans = scans.filter(sc => sc.status === 'success' && sc.result);
-        if (successScans.length > 0) {
-          const latest = successScans.reduce((a, b) =>
-            new Date(b.created_at) > new Date(a.created_at) ? b : a
-          );
-          try {
-            const findings = JSON.parse(latest.result);
-            if (Array.isArray(findings)) {
-              s.nucleiTotal = findings.length;
-              s.nucleiImpactful = findings.filter(f =>
-                f.info?.severity && ['critical', 'high', 'medium'].includes(f.info.severity.toLowerCase())
-              ).length;
-            }
-          } catch {}
-        }
-      }
-    }
-  } catch {}
-  return s;
-}
+const TYPE_ICON = {
+  Company: '/images/Company.png',
+  Wildcard: '/images/Wildcard.png',
+  URL: '/images/URL.png',
+};
+
+const ACCENT = '#dc3545';
+
+// A number that was never produced is not zero. "Nothing recorded" and "counted and found none" are
+// different states and the table says so, because four zeros on a target you have worked for a week
+// reads as failure rather than as a column that does not apply.
+const MetricValue = ({ value, emphasis }) => {
+  if (typeof value !== 'number') {
+    return <span style={{ color: 'rgba(255,255,255,0.25)' }}>&mdash;</span>;
+  }
+  if (value === 0) {
+    return <span style={{ color: 'rgba(255,255,255,0.35)' }}>0</span>;
+  }
+  return (
+    <span style={{
+      color: emphasis ? ACCENT : '#f2f2f2',
+      fontWeight: emphasis ? 700 : 500,
+    }}>{value.toLocaleString()}</span>
+  );
+};
 
 function SelectActiveScopeTargetModal({
   showActiveModal,
@@ -64,110 +64,125 @@ function SelectActiveScopeTargetModal({
   const [searchTerm, setSearchTerm] = useState('');
   const [sortColumn, setSortColumn] = useState('scope_target');
   const [sortDirection, setSortDirection] = useState('asc');
-  const [filterType, setFilterType] = useState('all');
+  const [type, setType] = useState(activeTarget?.type || 'Company');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [targetsToDelete, setTargetsToDelete] = useState([]);
-  const [targetStats, setTargetStats] = useState({});
-  const [loadingStats, setLoadingStats] = useState(false);
+  const [metrics, setMetrics] = useState({});
+  const [definitions, setDefinitions] = useState({});
+  const [loading, setLoading] = useState(false);
 
-  const fetchTargetStats = useCallback(async () => {
-    if (!scopeTargets || scopeTargets.length === 0) return;
-    setLoadingStats(true);
-    const stats = {};
+  const countOfType = useCallback(
+    (t) => scopeTargets.filter((s) => s.type === t).length, [scopeTargets]);
 
-    await Promise.all(scopeTargets.map(async (target) => {
-      stats[target.id] = await fetchStatsForTarget(target.id);
-    }));
-
-    setTargetStats(stats);
-    setLoadingStats(false);
-  }, [scopeTargets]);
+  // One request for every target's numbers. This used to be three requests PER TARGET plus parsing
+  // nuclei's entire JSON report in the browser, so eleven targets meant thirty three round trips
+  // before the first row could draw.
+  const loadMetrics = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/scope-target-metrics');
+      if (res.ok) {
+        const data = await res.json();
+        setMetrics(data.metrics || {});
+        setDefinitions(data.definitions || {});
+      }
+    } catch {
+      // The table still lists and deletes targets without its numbers, so a failure here degrades
+      // to em dashes rather than to an empty modal.
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    if (showActiveModal) {
-      fetchTargetStats();
-    }
-  }, [showActiveModal, fetchTargetStats]);
+    if (!showActiveModal) return;
+    loadMetrics();
+    // Open on the type being worked on. Falling back to the first type that HAS targets means a user
+    // with only wildcards never opens onto an empty Company table.
+    const preferred = TYPES.includes(activeTarget?.type)
+      ? activeTarget.type
+      : TYPES.find((t) => countOfType(t) > 0) || 'Company';
+    setType(preferred);
+    setSelectedTargets(new Set());
+    setSearchTerm('');
+  }, [showActiveModal, activeTarget, countOfType, loadMetrics]);
+
+  const columns = useMemo(() => definitions[type] || [], [definitions, type]);
 
   const handleSort = (column) => {
     if (sortColumn === column) {
       setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
     } else {
       setSortColumn(column);
-      setSortDirection('asc');
+      // A metric sorts biggest-first on the first click. Nobody opens this looking for the target
+      // with the fewest findings.
+      setSortDirection(column === 'scope_target' ? 'asc' : 'desc');
     }
   };
 
-  const renderSortIcon = (column) => {
+  const SortIcon = ({ column }) => {
     if (sortColumn !== column) {
-      return <i className="bi bi-arrow-down-up text-muted ms-1"></i>;
+      return <FaSort className="ms-1" style={{ opacity: 0.25, fontSize: '0.7em' }} />;
     }
-    return sortDirection === 'asc' ? 
-      <i className="bi bi-arrow-up text-danger ms-1"></i> : 
-      <i className="bi bi-arrow-down text-danger ms-1"></i>;
+    const Icon = sortDirection === 'asc' ? FaSortUp : FaSortDown;
+    return <Icon className="ms-1" style={{ color: ACCENT, fontSize: '0.7em' }} />;
   };
 
-  const filteredAndSortedTargets = useMemo(() => {
-    let filtered = scopeTargets.filter(target => {
-      const matchesSearch = target.scope_target.toLowerCase().includes(searchTerm.toLowerCase());
-      const matchesType = filterType === 'all' || target.type === filterType;
-      return matchesSearch && matchesType;
-    });
+  const visibleTargets = useMemo(() => {
+    const term = searchTerm.toLowerCase();
+    const filtered = scopeTargets.filter((t) =>
+      t.type === type && t.scope_target.toLowerCase().includes(term));
 
     filtered.sort((a, b) => {
-      let aVal, bVal;
-      
+      let aVal;
+      let bVal;
       if (sortColumn === 'scope_target') {
         aVal = a.scope_target.toLowerCase();
         bVal = b.scope_target.toLowerCase();
-      } else if (sortColumn === 'type') {
-        aVal = a.type;
-        bVal = b.type;
-      } else if (['subdomains', 'webServers', 'nucleiTotal', 'nucleiImpactful'].includes(sortColumn)) {
-        aVal = targetStats[a.id]?.[sortColumn] || 0;
-        bVal = targetStats[b.id]?.[sortColumn] || 0;
+      } else {
+        // A target with nothing recorded sorts as -1 so it lands below a genuine zero rather than
+        // being shuffled among the targets that have actually been counted.
+        aVal = metrics[a.id]?.[sortColumn] ?? -1;
+        bVal = metrics[b.id]?.[sortColumn] ?? -1;
       }
-      
       if (aVal < bVal) return sortDirection === 'asc' ? -1 : 1;
       if (aVal > bVal) return sortDirection === 'asc' ? 1 : -1;
-      return 0;
+      return a.scope_target.localeCompare(b.scope_target);
     });
-
     return filtered;
-  }, [scopeTargets, searchTerm, filterType, sortColumn, sortDirection, targetStats]);
+  }, [scopeTargets, type, searchTerm, sortColumn, sortDirection, metrics]);
+
+  const allVisibleSelected =
+    visibleTargets.length > 0 && visibleTargets.every((t) => selectedTargets.has(t.id));
 
   const toggleTargetSelection = (targetId) => {
-    setSelectedTargets(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(targetId)) {
-        newSet.delete(targetId);
-      } else {
-        newSet.add(targetId);
-      }
-      return newSet;
+    setSelectedTargets((prev) => {
+      const next = new Set(prev);
+      if (next.has(targetId)) next.delete(targetId);
+      else next.add(targetId);
+      return next;
     });
   };
 
-  const toggleAllTargets = () => {
-    if (selectedTargets.size === filteredAndSortedTargets.length && filteredAndSortedTargets.length > 0) {
-      setSelectedTargets(new Set());
-    } else {
-      setSelectedTargets(new Set(filteredAndSortedTargets.map(t => t.id)));
-    }
+  const toggleAllVisible = () => {
+    setSelectedTargets(allVisibleSelected ? new Set() : new Set(visibleTargets.map((t) => t.id)));
+  };
+
+  // Switching type clears the selection. Carrying it across would leave targets selected that are no
+  // longer on screen, and the delete button counts them.
+  const switchType = (next) => {
+    setType(next);
+    setSelectedTargets(new Set());
   };
 
   const handleBulkDelete = () => {
     if (selectedTargets.size === 0) return;
-    
-    const targets = scopeTargets.filter(t => selectedTargets.has(t.id));
-    setTargetsToDelete(targets);
+    setTargetsToDelete(scopeTargets.filter((t) => selectedTargets.has(t.id)));
     setShowDeleteConfirm(true);
   };
 
   const confirmDelete = () => {
-    targetsToDelete.forEach(target => {
-      handleDelete(target.id);
-    });
+    targetsToDelete.forEach((target) => handleDelete(target.id));
     setSelectedTargets(new Set());
     setShowDeleteConfirm(false);
     setTargetsToDelete([]);
@@ -178,330 +193,247 @@ function SelectActiveScopeTargetModal({
     setTargetsToDelete([]);
   };
 
-  const handleRowClick = (target) => {
-    handleActiveSelect(target);
-  };
-
-  const getTypeIcon = (type) => {
-    switch (type) {
-      case 'Company':
-        return '/images/Company.png';
-      case 'Wildcard':
-        return '/images/Wildcard.png';
-      case 'URL':
-        return '/images/URL.png';
-      default:
-        return null;
-    }
-  };
-
   return (
     <>
       <style>
         {`
           .form-check-input:checked {
-            background-color: #dc3545 !important;
-            border-color: #dc3545 !important;
+            background-color: ${ACCENT} !important;
+            border-color: ${ACCENT} !important;
+          }
+          .st-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+          .st-table th {
+            position: sticky; top: 0; z-index: 2;
+            background: #191919;
+            border-bottom: 1px solid rgba(255,255,255,0.10);
+            padding: 0.6rem 0.75rem;
+            font-size: 0.68rem; font-weight: 700;
+            letter-spacing: 0.09em; text-transform: uppercase;
+            color: rgba(255,255,255,0.45);
+            white-space: nowrap; user-select: none;
+          }
+          .st-table th.sortable { cursor: pointer; }
+          .st-table th.sortable:hover { color: rgba(255,255,255,0.8); }
+          .st-table td {
+            padding: 0.6rem 0.75rem;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            vertical-align: middle;
+          }
+          .st-row { cursor: pointer; transition: background-color 0.12s ease; }
+          .st-row:hover { background-color: rgba(220,53,69,0.07); }
+          .st-row.st-active { background-color: rgba(220,53,69,0.13); }
+          .st-row.st-active td:first-child { box-shadow: inset 3px 0 0 ${ACCENT}; }
+          .st-num { text-align: right; font-variant-numeric: tabular-nums; }
+          .st-seg {
+            display: flex; gap: 0.35rem; padding: 0.3rem;
+            background: rgba(255,255,255,0.04); border-radius: 0.6rem;
+          }
+          .st-seg button {
+            flex: 1 1 0; display: flex; align-items: center; justify-content: center; gap: 0.45rem;
+            padding: 0.5rem 0.5rem; border: 0; border-radius: 0.45rem;
+            background: transparent; color: rgba(255,255,255,0.55);
+            font-size: 0.85rem; font-weight: 600; transition: all 0.12s ease;
+          }
+          .st-seg button:hover { color: #fff; background: rgba(255,255,255,0.06); }
+          .st-seg button.active { background: ${ACCENT}; color: #fff; }
+          .st-seg .st-seg-count {
+            font-size: 0.72rem; padding: 0.05rem 0.4rem; border-radius: 0.6rem;
+            background: rgba(0,0,0,0.25); font-variant-numeric: tabular-nums;
+          }
+          .st-pill {
+            font-size: 0.6rem; font-weight: 700; letter-spacing: 0.08em;
+            padding: 0.1rem 0.4rem; border-radius: 0.25rem;
+            background: ${ACCENT}; color: #fff;
           }
         `}
       </style>
 
       <Modal data-bs-theme="dark" show={showActiveModal} onHide={handleActiveModalClose} size="xl">
         <Modal.Header closeButton>
+          <Modal.Title className="text-danger">Manage Scope Targets</Modal.Title>
+        </Modal.Header>
+
+        <Modal.Body>
+          <div className="st-seg mb-2">
+            {TYPES.map((t) => (
+              <button
+                key={t}
+                type="button"
+                className={t === type ? 'active' : ''}
+                onClick={() => switchType(t)}
+              >
+                <img src={TYPE_ICON[t]} alt="" style={{ width: 18, height: 18 }} />
+                {t}
+                <span className="st-seg-count">{countOfType(t)}</span>
+              </button>
+            ))}
+          </div>
+          <div className="text-white-50 mb-3" style={{ fontSize: '0.78rem' }}>
+            {TYPE_BLURB[type]}
+          </div>
+
+          <div className="d-flex gap-2 align-items-center mb-3">
+            <InputGroup style={{ maxWidth: '380px' }}>
+              <InputGroup.Text><FaSearch style={{ opacity: 0.6 }} /></InputGroup.Text>
+              <Form.Control
+                className="custom-input"
+                type="text"
+                placeholder={`Search ${type.toLowerCase()} targets`}
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+              {searchTerm && (
+                <Button variant="outline-secondary" onClick={() => setSearchTerm('')}>
+                  <FaTimes />
+                </Button>
+              )}
+            </InputGroup>
+
+            <div className="ms-auto d-flex align-items-center gap-2">
+              {loading && <Spinner animation="border" size="sm" variant="danger" />}
+              {selectedTargets.size > 0 && (
+                <Button variant="danger" size="sm" onClick={handleBulkDelete}>
+                  <FaTrash className="me-1" />
+                  Delete {selectedTargets.size}
+                </Button>
+              )}
+              <span className="text-white-50" style={{ fontSize: '0.78rem' }}>
+                {visibleTargets.length} of {countOfType(type)}
+              </span>
+            </div>
+          </div>
+
+          <div style={{ maxHeight: '52vh', overflowY: 'auto', borderRadius: '0.5rem' }}>
+            <table className="st-table">
+              <thead>
+                <tr>
+                  <th style={{ width: 42 }}>
+                    <Form.Check
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      onChange={toggleAllVisible}
+                      disabled={visibleTargets.length === 0}
+                    />
+                  </th>
+                  <th className="sortable" onClick={() => handleSort('scope_target')}>
+                    Scope Target <SortIcon column="scope_target" />
+                  </th>
+                  {columns.map((col) => (
+                    <th
+                      key={col.key}
+                      className="sortable st-num"
+                      style={{ width: 130 }}
+                      title={col.hint}
+                      onClick={() => handleSort(col.key)}
+                    >
+                      {col.label} <SortIcon column={col.key} />
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {visibleTargets.length === 0 ? (
+                  <tr>
+                    <td colSpan={2 + columns.length} className="text-center text-white-50 py-5">
+                      {searchTerm
+                        ? `No ${type} target matches "${searchTerm}".`
+                        : `No ${type} targets yet. Add one to start the ${type} workflow.`}
+                    </td>
+                  </tr>
+                ) : (
+                  visibleTargets.map((target) => {
+                    const isActive = activeTarget?.id === target.id;
+                    const values = metrics[target.id] || {};
+                    return (
+                      <tr
+                        key={target.id}
+                        className={`st-row${isActive ? ' st-active' : ''}`}
+                        onClick={() => handleActiveSelect(target)}
+                      >
+                        <td onClick={(e) => e.stopPropagation()}>
+                          <Form.Check
+                            type="checkbox"
+                            checked={selectedTargets.has(target.id)}
+                            onChange={() => toggleTargetSelection(target.id)}
+                          />
+                        </td>
+                        <td>
+                          <div className="d-flex align-items-center gap-2">
+                            <span
+                              className="font-monospace"
+                              style={{ fontSize: '0.85rem', color: isActive ? '#fff' : '#e6e6e6' }}
+                            >
+                              {target.scope_target}
+                            </span>
+                            {isActive && <span className="st-pill">ACTIVE</span>}
+                          </div>
+                        </td>
+                        {columns.map((col) => (
+                          <td key={col.key} className="st-num" title={col.hint}>
+                            <MetricValue value={values[col.key]} emphasis={col.emphasis} />
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-2 text-white-50" style={{ fontSize: '0.72rem' }}>
+            Click a row to make it the active target. A dash means nothing has been recorded for that
+            column yet; a zero means it was counted and there was none.
+          </div>
+        </Modal.Body>
+
+        <Modal.Footer>
+          <Button variant="outline-secondary" onClick={handleActiveModalClose}>Close</Button>
+          {activeTarget && (
+            <Button variant="danger" onClick={handleActiveModalClose}>
+              <FaCheck className="me-2" />
+              Continue with {activeTarget.scope_target}
+            </Button>
+          )}
+        </Modal.Footer>
+      </Modal>
+
+      <Modal data-bs-theme="dark" show={showDeleteConfirm} onHide={cancelDelete} centered>
+        <Modal.Header closeButton>
           <Modal.Title className="text-danger">
-            <FaCheckCircle className="me-2" />
-            Manage Scope Targets
+            <FaExclamationTriangle className="me-2" />
+            Delete {targetsToDelete.length} target{targetsToDelete.length !== 1 ? 's' : ''}
           </Modal.Title>
         </Modal.Header>
-      <Modal.Body>
-        <div className="mb-3">
-          <div className="row g-2">
-            <div className="col-md-6">
-              <InputGroup>
-                <InputGroup.Text>
-                  <FaSearch />
-                </InputGroup.Text>
-                <Form.Control
-                  type="text"
-                  placeholder="Search scope targets..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                />
-                {searchTerm && (
-                  <Button 
-                    variant="outline-secondary" 
-                    onClick={() => setSearchTerm('')}
-                  >
-                    <FaTimes />
-                  </Button>
-                )}
-              </InputGroup>
-            </div>
-            <div className="col-md-6">
-              <ButtonGroup className="w-100">
-                <Button
-                  variant={filterType === 'all' ? 'danger' : 'outline-danger'}
-                  onClick={() => setFilterType('all')}
-                >
-                  All ({scopeTargets.length})
-                </Button>
-                <Button
-                  variant={filterType === 'Company' ? 'danger' : 'outline-danger'}
-                  onClick={() => setFilterType('Company')}
-                >
-                  Company ({scopeTargets.filter(t => t.type === 'Company').length})
-                </Button>
-                <Button
-                  variant={filterType === 'Wildcard' ? 'danger' : 'outline-danger'}
-                  onClick={() => setFilterType('Wildcard')}
-                >
-                  Wildcard ({scopeTargets.filter(t => t.type === 'Wildcard').length})
-                </Button>
-                <Button
-                  variant={filterType === 'URL' ? 'danger' : 'outline-danger'}
-                  onClick={() => setFilterType('URL')}
-                >
-                  URL ({scopeTargets.filter(t => t.type === 'URL').length})
-                </Button>
-              </ButtonGroup>
-            </div>
-          </div>
-        </div>
-
-        <div className="mb-3 d-flex justify-content-between align-items-center">
-          <div className="text-white">
-            <strong>{filteredAndSortedTargets.length}</strong> target{filteredAndSortedTargets.length !== 1 ? 's' : ''} shown
-            {selectedTargets.size > 0 && (
-              <span className="ms-2">
-                | <strong>{selectedTargets.size}</strong> selected
-              </span>
-            )}
-          </div>
-          <div className="d-flex gap-2">
-            {selectedTargets.size > 0 && (
-              <Button 
-                variant="outline-danger" 
-                size="sm"
-                onClick={handleBulkDelete}
-              >
-                <FaTrash className="me-1" />
-                Delete {selectedTargets.size} Selected
-              </Button>
-            )}
-            <Button 
-              variant="outline-secondary" 
-              size="sm"
-              onClick={toggleAllTargets}
-            >
-              {selectedTargets.size === filteredAndSortedTargets.length && filteredAndSortedTargets.length > 0 ? 'Deselect All' : 'Select All'}
-            </Button>
-          </div>
-        </div>
-
-        <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
-          <Table striped bordered hover variant="dark" size="sm">
-            <thead style={{ position: 'sticky', top: 0, backgroundColor: '#212529', zIndex: 1 }}>
-              <tr>
-                <th style={{ width: '40px' }}>
-                  <Form.Check
-                    type="checkbox"
-                    checked={selectedTargets.size === filteredAndSortedTargets.length && filteredAndSortedTargets.length > 0}
-                    onChange={toggleAllTargets}
-                  />
-                </th>
-                <th style={{ width: '50px' }}>Active</th>
-                <th style={{ width: '100px', cursor: 'pointer' }} onClick={() => handleSort('type')}>
-                  Type {renderSortIcon('type')}
-                </th>
-                <th style={{ cursor: 'pointer' }} onClick={() => handleSort('scope_target')}>
-                  Scope Target {renderSortIcon('scope_target')}
-                </th>
-                <th style={{ width: '80px', cursor: 'pointer', textAlign: 'center' }} onClick={() => handleSort('subdomains')}>
-                  Subs {renderSortIcon('subdomains')}
-                </th>
-                <th style={{ width: '80px', cursor: 'pointer', textAlign: 'center' }} onClick={() => handleSort('webServers')}>
-                  Live {renderSortIcon('webServers')}
-                </th>
-                <th style={{ width: '80px', cursor: 'pointer', textAlign: 'center' }} onClick={() => handleSort('nucleiTotal')}>
-                  Nuclei {renderSortIcon('nucleiTotal')}
-                </th>
-                <th style={{ width: '90px', cursor: 'pointer', textAlign: 'center' }} onClick={() => handleSort('nucleiImpactful')}>
-                  Impact {renderSortIcon('nucleiImpactful')}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredAndSortedTargets.length === 0 ? (
-                <tr>
-                  <td colSpan="8" className="text-center text-muted py-4">
-                    {searchTerm || filterType !== 'all' ? 'No scope targets match your filters' : 'No scope targets available'}
-                  </td>
-                </tr>
-              ) : (
-                filteredAndSortedTargets.map((target) => {
-                  const stats = targetStats[target.id];
-                  return (
-                    <tr 
-                      key={target.id}
-                      style={{ cursor: 'pointer' }}
-                      className={activeTarget?.id === target.id ? 'table-danger' : ''}
-                    >
-                      <td onClick={(e) => e.stopPropagation()}>
-                        <Form.Check
-                          type="checkbox"
-                          checked={selectedTargets.has(target.id)}
-                          onChange={() => toggleTargetSelection(target.id)}
-                        />
-                      </td>
-                      <td className="text-center" onClick={() => handleRowClick(target)}>
-                        {activeTarget?.id === target.id && (
-                          <Badge bg="danger">
-                            <FaCheckCircle />
-                          </Badge>
-                        )}
-                      </td>
-                      <td onClick={() => handleRowClick(target)}>
-                        <div className="d-flex align-items-center">
-                          {getTypeIcon(target.type) && (
-                            <img 
-                              src={getTypeIcon(target.type)} 
-                              alt={target.type} 
-                              style={{ width: '20px', height: '20px', marginRight: '8px' }}
-                            />
-                          )}
-                          <span>{target.type}</span>
-                        </div>
-                      </td>
-                      <td className="font-monospace small" onClick={() => handleRowClick(target)}>
-                        {target.scope_target}
-                      </td>
-                      <td className="text-center" onClick={() => handleRowClick(target)}>
-                        {loadingStats ? <Spinner animation="border" size="sm" variant="secondary" /> :
-                          <span className={stats?.subdomains > 0 ? 'text-white' : 'text-muted'}>{stats?.subdomains || 0}</span>
-                        }
-                      </td>
-                      <td className="text-center" onClick={() => handleRowClick(target)}>
-                        {loadingStats ? <Spinner animation="border" size="sm" variant="secondary" /> :
-                          <span className={stats?.webServers > 0 ? 'text-info' : 'text-muted'}>{stats?.webServers || 0}</span>
-                        }
-                      </td>
-                      <td className="text-center" onClick={() => handleRowClick(target)}>
-                        {loadingStats ? <Spinner animation="border" size="sm" variant="secondary" /> :
-                          <span className={stats?.nucleiTotal > 0 ? 'text-warning' : 'text-muted'}>{stats?.nucleiTotal || 0}</span>
-                        }
-                      </td>
-                      <td className="text-center" onClick={() => handleRowClick(target)}>
-                        {loadingStats ? <Spinner animation="border" size="sm" variant="secondary" /> :
-                          <span className={stats?.nucleiImpactful > 0 ? 'text-danger fw-bold' : 'text-muted'}>{stats?.nucleiImpactful || 0}</span>
-                        }
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </Table>
-        </div>
-
-        {filteredAndSortedTargets.length > 0 && (
-          <div className="mt-2 text-muted small">
-            Tip: Click on a row to set it as active, or use checkboxes for bulk operations
-          </div>
-        )}
-      </Modal.Body>
-      <Modal.Footer>
-        <div className="d-flex justify-content-between w-100">
-          <div>
-            {selectedTargets.size > 0 && (
-              <Button 
-                variant="danger" 
-                onClick={handleBulkDelete}
-              >
-                <FaTrash className="me-2" />
-                Delete {selectedTargets.size} Selected
-              </Button>
-            )}
-          </div>
-          <div className="d-flex gap-2">
-            <Button variant="secondary" onClick={handleActiveModalClose}>
-              Close
-            </Button>
-            {activeTarget && (
-              <Button variant="danger" onClick={handleActiveModalClose}>
-                Continue with {activeTarget.scope_target}
-              </Button>
-            )}
-          </div>
-        </div>
-      </Modal.Footer>
-    </Modal>
-
-    <Modal 
-      data-bs-theme="dark" 
-      show={showDeleteConfirm} 
-      onHide={cancelDelete} 
-      centered
-      size="md"
-    >
-      <Modal.Header closeButton>
-        <Modal.Title className="text-danger">
-          <FaExclamationTriangle className="me-2" />
-          Confirm Delete
-        </Modal.Title>
-      </Modal.Header>
-      <Modal.Body>
-        <div className="text-white">
-          <p className="mb-3">
-            Are you sure you want to delete <strong>{targetsToDelete.length}</strong> scope target{targetsToDelete.length !== 1 ? 's' : ''}?
+        <Modal.Body>
+          <p className="text-white mb-3" style={{ fontSize: '0.9rem' }}>
+            Everything these targets have collected goes with them: scans, consolidated results and
+            findings. This cannot be undone.
           </p>
-          
-          {targetsToDelete.length > 0 && targetsToDelete.length <= 5 && (
-            <div className="mb-3">
-              <strong>Targets to be deleted:</strong>
-              <ul className="mt-2">
-                {targetsToDelete.map(target => (
-                  <li key={target.id} className="font-monospace small">
-                    {target.scope_target}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {targetsToDelete.length > 5 && (
-            <div className="mb-3">
-              <strong>First 5 targets to be deleted:</strong>
-              <ul className="mt-2">
-                {targetsToDelete.slice(0, 5).map(target => (
-                  <li key={target.id} className="font-monospace small">
-                    {target.scope_target}
-                  </li>
-                ))}
-                <li className="text-muted">
-                  ... and {targetsToDelete.length - 5} more
-                </li>
-              </ul>
-            </div>
-          )}
-
-          <div className="alert alert-warning mb-0">
-            <small>
-              <FaExclamationTriangle className="me-2" />
-              This action cannot be undone.
-            </small>
+          <div
+            className="p-2 rounded"
+            style={{
+              backgroundColor: 'rgba(220,53,69,0.08)',
+              border: '1px solid rgba(220,53,69,0.35)',
+              maxHeight: '200px',
+              overflowY: 'auto',
+            }}
+          >
+            {targetsToDelete.map((target) => (
+              <div key={target.id} className="font-monospace text-light" style={{ fontSize: '0.8rem' }}>
+                {target.scope_target}
+              </div>
+            ))}
           </div>
-        </div>
-      </Modal.Body>
-      <Modal.Footer>
-        <Button variant="secondary" onClick={cancelDelete}>
-          Cancel
-        </Button>
-        <Button variant="danger" onClick={confirmDelete}>
-          <FaTrash className="me-2" />
-          Delete {targetsToDelete.length} Target{targetsToDelete.length !== 1 ? 's' : ''}
-        </Button>
-      </Modal.Footer>
-    </Modal>
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="outline-secondary" onClick={cancelDelete}>Cancel</Button>
+          <Button variant="danger" onClick={confirmDelete}>
+            <FaTrash className="me-2" />
+            Delete {targetsToDelete.length} target{targetsToDelete.length !== 1 ? 's' : ''}
+          </Button>
+        </Modal.Footer>
+      </Modal>
     </>
   );
 }

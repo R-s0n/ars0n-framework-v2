@@ -691,8 +691,8 @@ export const lessons = {
   },
 
   urlParameterTools: {
-    title: "Parameter Discovery Tools: Arjun, x8, and parameth",
-    overview: "Arjun, x8, and parameth all discover hidden parameters by sending candidates and detecting response changes, but they differ in speed, accuracy, and technique. This lesson explains how each works and why you run more than one.",
+    title: "Parameter Discovery Tools: Arjun and x8",
+    overview: "Arjun and x8 both discover hidden parameters by sending candidates and detecting response changes, but they differ in speed, accuracy, and technique. This lesson explains how each works and why you run both.",
     sections: [
       {
         title: "The Core Idea: Guess, Send, Diff",
@@ -715,12 +715,11 @@ export const lessons = {
         content: [
           "Arjun (Python) is the fast, reliable default. It's smart about baselines and chunked diffing, supports GET/POST/JSON/XML, and is accurate enough to trust for most targets. If you run one parameter tool, run Arjun.",
           "x8 (Rust) is the high-precision option. It does careful response comparison, can inject into query, body, or headers, and verifies findings before reporting them — which makes it strong against endpoints whose responses wobble on their own. Use it when you want to cut false positives or test injection points beyond the query string.",
-          "parameth (Python) is an older brute-forcer that watches response size and content changes across GET and POST. It uses a different wordlist and approach, so even though it's less modern, it can still surface parameters the others miss. Running multiple tools is worthwhile precisely because their wordlists and diffing differ — coverage compounds."
+          "A third tool, parameth, was removed after a live run: it compares every response to a single baseline taken at the start, which holds on a static page but not on a JSON API, where ordinary variation and any throttling make every candidate look like a hit. It reported 94,888 parameters on a corpus where Arjun found 2 and x8 found 0. The lesson generalises: a detector that fires on most of the wordlist has measured its own baseline, not the target."
         ],
         keyPoints: [
           "Arjun: fast, accurate default; GET/POST/JSON/XML",
           "x8: high-precision, verifies findings, injects into query/body/headers",
-          "parameth: older brute-forcer, different wordlist — extra coverage",
           "Run more than one — different tools catch different parameters"
         ],
         examples: [
@@ -730,7 +729,7 @@ export const lessons = {
       }
     ],
     practicalTips: [
-      "Start with Arjun; add x8 for precision and parameth for extra coverage",
+      "Start with Arjun; add x8 for precision",
       "Point tools at endpoints you've prioritized, not the whole inventory",
       "Provide the target's real parameters as context so the baseline is accurate",
       "Re-run against POST/JSON endpoints too, not just GET query strings",

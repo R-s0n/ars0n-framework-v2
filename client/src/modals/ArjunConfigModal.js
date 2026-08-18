@@ -1,259 +1,367 @@
-import { useState, useEffect } from 'react';
-import { Modal, Button, Form, Alert, Spinner } from 'react-bootstrap';
+import { useState, useEffect, useCallback } from 'react';
+import { Modal, Button, Form, Alert, Spinner, Badge, Nav } from 'react-bootstrap';
+
+// Arjun configuration: four mode tabs, the endpoints in each, and what will be sent to the one you
+// have selected.
+//
+// The tabs are Arjun's -m values, NOT HTTP verbs. GET, POST, JSON and XML are request SHAPES: a POST
+// route that only parses a JSON body ignores every form-encoded candidate and answers identically,
+// so testing it in the wrong shape reads as "no parameters" when the pass never spoke its language.
+// Endpoints are categorised automatically from the Content-Type their recorded request carried, and
+// the dropdown on the right is how that gets corrected.
+//
+// Everything on the right comes from /param-enum/{id}/preview, which the server builds with the same
+// argument builders the runner uses. Nothing here reconstructs a command or a request in JavaScript,
+// because a second implementation drifts and then describes a scan that never ran.
+
+const MODE_HELP = {
+  GET: 'Candidates go in the query string. Every GET endpoint lands here.',
+  POST: 'Candidates go in a form-encoded body. Body endpoints land here when nothing said otherwise.',
+  JSON: 'Candidates go in a JSON body, with Content-Type: application/json.',
+  XML: 'Candidates go in an XML body. Arjun cannot run this mode without an --include template, so one is always sent.',
+};
+
+// Settings Arjun reads per invocation, so they can differ per mode.
+const MODE_FIELDS = [
+  { key: 'threads', label: 'Threads', type: 'number' },
+  { key: 'delay', label: 'Delay (s)', type: 'number' },
+  { key: 'timeout', label: 'Timeout (s)', type: 'number' },
+  { key: 'chunkSize', label: 'Chunk size', type: 'number',
+    help: 'Arjun forces 500 for every non-GET mode, so this only affects GET.' },
+  { key: 'wordlist', label: 'Wordlist path', type: 'text', help: 'Inside the arjun container.' },
+  { key: 'stableDetection', label: 'Stable detection', type: 'bool',
+    help: 'Forces one thread and sleeps 3-9s per request. Measured at 5.7s each.' },
+];
 
 export const ArjunConfigModal = ({ show, handleClose, activeTarget }) => {
+  const [config, setConfig] = useState({
+    headers: [], threads: 5, delay: 0, timeout: 10, chunkSize: 500, wordlist: '',
+    stableDetection: false, jsonOutput: true, includeParams: '', excludeParams: '',
+    includeScripts: false, xmlTemplate: '<root>$arjun$</root>', verbs: {},
+  });
+  const [preview, setPreview] = useState(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [mode, setMode] = useState('GET');
+  const [selectedId, setSelectedId] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
 
-  const [config, setConfig] = useState({
-    method: 'GET',
-    headers: [],
-    threads: 5,
-    delay: 0,
-    timeout: 10,
-    chunkSize: 500,
-    wordlist: '',
-    passiveMode: false,
-    stableDetection: true,
-    jsonOutput: true,
-    includeParams: '',
-    excludeParams: ''
-  });
+  const targetId = activeTarget && activeTarget.id;
+
+  const loadPreview = useCallback(async () => {
+    if (!targetId) return;
+    try {
+      const res = await fetch(`/api/param-enum/${targetId}/preview?tool=arjun&all=true`);
+      if (res.ok) setPreview(await res.json());
+    } catch (err) {
+      setError('Could not load the endpoint list: ' + err.message);
+    }
+  }, [targetId]);
 
   useEffect(() => {
-    if (show && activeTarget) {
-      loadConfig();
-    }
-  }, [show, activeTarget]);
-
-  const loadConfig = async () => {
-    if (!activeTarget) return;
-
-    setLoading(true);
-    setError('');
-
-    try {
-      const response = await fetch(`/api/arjun-config/${activeTarget.id}`);
-
-      if (response.ok) {
-        const data = await response.json();
-        if (data && Object.keys(data).length > 0) {
-          setConfig(prev => ({ ...prev, ...data }));
+    if (!show || !targetId) return;
+    (async () => {
+      setLoading(true);
+      setError('');
+      try {
+        const res = await fetch(`/api/arjun-config/${targetId}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && Object.keys(data).length > 0) setConfig((p) => ({ ...p, ...data }));
         }
+        await loadPreview();
+      } finally {
+        setLoading(false);
       }
-    } catch (error) {
-      console.error('Error loading Arjun config:', error);
-      setError('Failed to load configuration');
+    })();
+  }, [show, targetId, loadPreview]);
+
+  const pass = preview ? preview.passes.find((p) => p.mode === mode) : null;
+  const rows = pass ? pass.requests : [];
+  const selected = rows.find((r) => r.endpoint_id === selectedId) || rows[0] || null;
+
+  // GET and the body modes carry separate settings; POST, JSON and XML share one set, because they
+  // are one decision about how hard to hit write routes rather than three.
+  const overrideVerb = mode === 'GET' ? 'GET' : 'POST';
+  const override = (config.verbs && config.verbs[overrideVerb]) || {};
+
+  const setOverride = (key, value) => {
+    setConfig((prev) => {
+      const verbs = { ...(prev.verbs || {}) };
+      const cur = { ...(verbs[overrideVerb] || {}) };
+      if (value === undefined) delete cur[key]; else cur[key] = value;
+      if (Object.keys(cur).length === 0) delete verbs[overrideVerb]; else verbs[overrideVerb] = cur;
+      return { ...prev, verbs };
+    });
+  };
+
+  const post = async (body, okMessage) => {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/param-enum/${targetId}/selection`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool: 'arjun', include_scripts: !!config.includeScripts, ...body }),
+      });
+      if (!res.ok) { setError('That change could not be saved'); return; }
+      await loadPreview();
+      if (okMessage) { setSuccess(okMessage); setTimeout(() => setSuccess(''), 1800); }
+    } catch (err) {
+      setError('That change could not be saved: ' + err.message);
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   };
 
   const handleSave = async () => {
-    if (!activeTarget) return;
-
     setSaving(true);
     setError('');
-    setSuccess('');
-
     try {
-      const response = await fetch(`/api/arjun-config/${activeTarget.id}`, {
+      const res = await fetch(`/api/arjun-config/${targetId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
+        body: JSON.stringify(config),
       });
-
-      if (response.ok) {
-        setSuccess('Configuration saved successfully');
-        setTimeout(() => {
-          setSuccess('');
-          handleClose();
-        }, 1500);
-      } else {
-        setError('Failed to save configuration');
-      }
-    } catch (error) {
-      console.error('Error saving Arjun config:', error);
-      setError('Failed to save configuration');
+      if (!res.ok) { setError('Failed to save configuration'); return; }
+      setSuccess('Configuration saved');
+      await loadPreview();
+      setTimeout(() => setSuccess(''), 1800);
+    } catch (err) {
+      setError('Failed to save configuration: ' + err.message);
     } finally {
       setSaving(false);
     }
   };
 
-  const addHeader = () => {
-    setConfig(prev => ({
-      ...prev,
-      headers: [...prev.headers, { key: '', value: '' }]
-    }));
-  };
-
-  const removeHeader = (index) => {
-    setConfig(prev => ({
-      ...prev,
-      headers: prev.headers.filter((_, i) => i !== index)
-    }));
-  };
-
-  const updateHeader = (index, field, value) => {
-    setConfig(prev => ({
-      ...prev,
-      headers: prev.headers.map((header, i) =>
-        i === index ? { ...header, [field]: value } : header
-      )
-    }));
-  };
-
   return (
-    <Modal show={show} onHide={handleClose} size="lg" data-bs-theme="dark">
+    <Modal show={show} onHide={handleClose} fullscreen data-bs-theme="dark">
       <Modal.Header closeButton>
         <Modal.Title className="text-danger">
-          <i className="bi bi-gear me-2"></i>
+          <i className="bi bi-gear me-2" />
           Arjun Configuration
         </Modal.Title>
       </Modal.Header>
-      <Modal.Body>
+
+      <Modal.Body className="d-flex flex-column" style={{ overflow: 'hidden' }}>
         {loading ? (
-          <div className="text-center py-4">
-            <Spinner animation="border" variant="danger" />
-          </div>
+          <div className="text-center py-5"><Spinner animation="border" variant="danger" /></div>
         ) : (
           <>
-            {error && <Alert variant="danger">{error}</Alert>}
-            {success && <Alert variant="success">{success}</Alert>}
+            {error && (
+              <Alert variant="dark" className="border border-danger text-danger py-2"
+                     onClose={() => setError('')} dismissible>{error}</Alert>
+            )}
+            {success && (
+              <Alert variant="dark" className="border border-secondary text-light py-2">{success}</Alert>
+            )}
 
-            <Form>
-              <Form.Group className="mb-3">
-                <Form.Label className="text-white">HTTP Method</Form.Label>
-                <Form.Select
-                  value={config.method}
-                  onChange={(e) => setConfig({ ...config, method: e.target.value })}
-                  data-bs-theme="dark"
-                >
-                  <option value="GET">GET</option>
-                  <option value="POST">POST</option>
-                  <option value="PUT">PUT</option>
-                  <option value="DELETE">DELETE</option>
-                </Form.Select>
-              </Form.Group>
+            {!preview || !preview.total ? (
+              <Alert variant="dark" className="border border-secondary text-light py-3">
+                No valid endpoints yet. Parameter enumeration runs against endpoints Validate
+                confirmed as real, so run <strong>Consolidate</strong> and then{' '}
+                <strong>Investigate</strong> first.
+              </Alert>
+            ) : (
+              <>
+                <Nav variant="tabs" activeKey={mode}
+                     onSelect={(k) => { setMode(k); setSelectedId(null); }} className="mb-2">
+                  {(preview.passes || []).map((p) => (
+                    <Nav.Item key={p.mode}>
+                      <Nav.Link eventKey={p.mode}
+                                className={mode === p.mode ? 'text-danger' : 'text-white-50'}>
+                        {p.mode}
+                        <Badge bg="dark" className="ms-2 border border-secondary text-white-50"
+                               style={{ fontSize: '0.65rem' }}>
+                          {p.endpoint_count}
+                        </Badge>
+                      </Nav.Link>
+                    </Nav.Item>
+                  ))}
+                </Nav>
 
-              <Form.Group className="mb-3">
-                <Form.Label className="text-white">Threads</Form.Label>
-                <Form.Control
-                  type="number"
-                  value={config.threads}
-                  onChange={(e) => setConfig({ ...config, threads: parseInt(e.target.value) || 5 })}
-                  data-bs-theme="dark"
-                />
-              </Form.Group>
-
-              <Form.Group className="mb-3">
-                <Form.Label className="text-white">Delay (ms)</Form.Label>
-                <Form.Control
-                  type="number"
-                  value={config.delay}
-                  onChange={(e) => setConfig({ ...config, delay: parseInt(e.target.value) || 0 })}
-                  data-bs-theme="dark"
-                />
-              </Form.Group>
-
-              <Form.Group className="mb-3">
-                <Form.Label className="text-white">Timeout (seconds)</Form.Label>
-                <Form.Control
-                  type="number"
-                  value={config.timeout}
-                  onChange={(e) => setConfig({ ...config, timeout: parseInt(e.target.value) || 10 })}
-                  data-bs-theme="dark"
-                />
-              </Form.Group>
-
-              <Form.Group className="mb-3">
-                <Form.Label className="text-white">Chunk Size</Form.Label>
-                <Form.Control
-                  type="number"
-                  value={config.chunkSize}
-                  onChange={(e) => setConfig({ ...config, chunkSize: parseInt(e.target.value) || 500 })}
-                  data-bs-theme="dark"
-                />
-                <Form.Text className="text-muted">
-                  Number of parameters to test at once
-                </Form.Text>
-              </Form.Group>
-
-              <Form.Group className="mb-3">
-                <Form.Check
-                  type="checkbox"
-                  label="Passive Mode"
-                  checked={config.passiveMode}
-                  onChange={(e) => setConfig({ ...config, passiveMode: e.target.checked })}
-                  className="text-white"
-                />
-              </Form.Group>
-
-              <Form.Group className="mb-3">
-                <Form.Check
-                  type="checkbox"
-                  label="Stable Detection"
-                  checked={config.stableDetection}
-                  onChange={(e) => setConfig({ ...config, stableDetection: e.target.checked })}
-                  className="text-white"
-                />
-              </Form.Group>
-
-              <Form.Group className="mb-3">
-                <Form.Label className="text-white">
-                  Custom Headers
-                  <Button
-                    variant="outline-success"
-                    size="sm"
-                    className="ms-2"
-                    onClick={addHeader}
-                  >
-                    Add Header
+                <div className="d-flex justify-content-between align-items-start mb-2">
+                  <div className="text-white-50 small" style={{ maxWidth: '70%' }}>{MODE_HELP[mode]}</div>
+                  <Button size="sm" variant="link" className="p-0 text-danger"
+                          onClick={() => setShowSettings((v) => !v)}>
+                    {showSettings ? 'Hide' : 'Show'} {mode} settings
                   </Button>
-                </Form.Label>
-                {config.headers.map((header, index) => (
-                  <div key={index} className="d-flex gap-2 mb-2">
-                    <Form.Control
-                      type="text"
-                      placeholder="Header Key"
-                      value={header.key}
-                      onChange={(e) => updateHeader(index, 'key', e.target.value)}
-                      data-bs-theme="dark"
-                    />
-                    <Form.Control
-                      type="text"
-                      placeholder="Header Value"
-                      value={header.value}
-                      onChange={(e) => updateHeader(index, 'value', e.target.value)}
-                      data-bs-theme="dark"
-                    />
-                    <Button
-                      variant="outline-danger"
-                      onClick={() => removeHeader(index)}
-                    >
-                      ×
-                    </Button>
+                </div>
+
+                {showSettings && (
+                  <div className="border border-secondary rounded p-2 mb-2">
+                    <div className="text-white-50 small mb-2">
+                      Blank means inherited from the shared settings.
+                      {overrideVerb === 'POST' && ' POST, JSON and XML share these.'}
+                    </div>
+                    <div className="row g-2">
+                      {MODE_FIELDS.map((f) => {
+                        const isSet = override[f.key] !== undefined;
+                        return (
+                          <div className="col-md-2" key={f.key}>
+                            <Form.Label className="text-white small mb-1 d-flex justify-content-between w-100">
+                              <span>{f.label}</span>
+                              {isSet && (
+                                <Button size="sm" variant="link" className="p-0 text-white-50"
+                                        style={{ fontSize: '0.7rem' }}
+                                        onClick={() => setOverride(f.key, undefined)}>reset</Button>
+                              )}
+                            </Form.Label>
+                            {f.type === 'bool' ? (
+                              <Form.Select size="sm" value={isSet ? String(override[f.key]) : ''}
+                                onChange={(e) => setOverride(f.key,
+                                  e.target.value === '' ? undefined : e.target.value === 'true')}
+                                data-bs-theme="dark">
+                                <option value="">inherited ({String(!!config[f.key])})</option>
+                                <option value="true">on</option>
+                                <option value="false">off</option>
+                              </Form.Select>
+                            ) : (
+                              <Form.Control size="sm" type={f.type}
+                                placeholder={`inherited (${config[f.key] === '' ? 'default' : config[f.key]})`}
+                                value={isSet ? override[f.key] : ''}
+                                onChange={(e) => {
+                                  const raw = e.target.value;
+                                  if (raw === '') return setOverride(f.key, undefined);
+                                  setOverride(f.key, f.type === 'number' ? parseInt(raw, 10) || 0 : raw);
+                                }}
+                                data-bs-theme="dark" />
+                            )}
+                            {f.help && (
+                              <Form.Text className="text-muted" style={{ fontSize: '0.7rem' }}>{f.help}</Form.Text>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {mode === 'XML' && (
+                        <div className="col-md-4">
+                          <Form.Label className="text-white small mb-1">XML template</Form.Label>
+                          <Form.Control size="sm" value={config.xmlTemplate || ''}
+                            onChange={(e) => setConfig({ ...config, xmlTemplate: e.target.value })}
+                            data-bs-theme="dark" />
+                          <Form.Text className="text-muted" style={{ fontSize: '0.7rem' }}>
+                            Must contain $arjun$. Anything without it is replaced with the default,
+                            because Arjun crashes on a template it cannot substitute into.
+                          </Form.Text>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                ))}
-              </Form.Group>
-            </Form>
+                )}
+
+                <div className="d-flex flex-grow-1" style={{ minHeight: 0 }}>
+                  {/* Left: the endpoints in this mode. */}
+                  <div className="border border-secondary rounded me-2"
+                       style={{ width: '360px', minWidth: '300px', overflowY: 'auto' }}>
+                    {rows.length === 0 ? (
+                      <div className="text-white-50 small p-3">
+                        Nothing is categorised as {mode}. Move an endpoint here from another tab.
+                      </div>
+                    ) : rows.map((r) => {
+                      const active = selected && r.endpoint_id === selected.endpoint_id;
+                      return (
+                        <div key={r.endpoint_id}
+                             className={`d-flex align-items-center px-2 py-1 border-bottom border-secondary ${active ? 'bg-secondary bg-opacity-25' : ''}`}
+                             style={{ cursor: 'pointer', opacity: r.enabled ? 1 : 0.45 }}
+                             onClick={() => setSelectedId(r.endpoint_id)}>
+                          <Form.Check type="checkbox" checked={r.enabled} disabled={busy}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={() => post({ endpoint_ids: [r.endpoint_id], enabled: !r.enabled })}
+                            className="me-2" />
+                          <div className="flex-grow-1 text-truncate">
+                            <div className="text-truncate">
+                              <Badge bg="dark" className={`border me-1 ${r.method === 'GET'
+                                ? 'border-secondary text-light' : 'border-danger text-danger'}`}
+                                style={{ fontSize: '0.55rem' }}>{r.method}</Badge>
+                              <code className={active ? 'text-light small' : 'text-white-50 small'}>{r.path}</code>
+                            </div>
+                            <div className="text-white-50" style={{ fontSize: '0.7rem' }}>{r.host}</div>
+                          </div>
+                          {r.mode !== r.auto_mode && (
+                            <span className="text-danger ms-1" title={`Moved from ${r.auto_mode}`}>*</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Right: everything about the highlighted endpoint. */}
+                  <div className="flex-grow-1 border border-secondary rounded p-3"
+                       style={{ overflowY: 'auto', minWidth: 0 }}>
+                    {!selected ? (
+                      <div className="text-white-50 small">Select an endpoint on the left.</div>
+                    ) : (
+                      <>
+                        <div className="d-flex justify-content-between align-items-start mb-3">
+                          <div style={{ minWidth: 0 }}>
+                            <code className="text-light">{selected.url}</code>
+                            <div className="text-white-50 small mt-1">
+                              Categorised automatically as <strong>{selected.auto_mode}</strong>
+                              {selected.mode !== selected.auto_mode && (
+                                <>, moved to <strong className="text-danger">{selected.mode}</strong></>
+                              )}
+                              {!selected.enabled && (
+                                <> &middot; <span className="text-danger">not selected for scanning</span></>
+                              )}
+                            </div>
+                          </div>
+                          <div style={{ minWidth: '200px' }} className="ms-3">
+                            <Form.Label className="text-white small mb-1">Mode</Form.Label>
+                            <Form.Select size="sm" value={selected.mode} disabled={busy}
+                              onChange={(e) => post(
+                                { endpoint_ids: [selected.endpoint_id], mode: e.target.value },
+                                `Moved to ${e.target.value || 'automatic'}`)}
+                              data-bs-theme="dark">
+                              {['GET', 'POST', 'JSON', 'XML'].map((m) => (
+                                <option key={m} value={m}>{m}</option>
+                              ))}
+                              <option value="">Automatic ({selected.auto_mode})</option>
+                            </Form.Select>
+                          </div>
+                        </div>
+
+                        <div className="text-white-50 small mb-1">Request Arjun will send</div>
+                        <pre className="text-light small p-2 rounded"
+                             style={{ backgroundColor: '#1e1e1e', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                          {selected.raw}
+                        </pre>
+
+                        {pass && pass.command && (
+                          <>
+                            <div className="text-white-50 small mb-1 mt-3">Command for this pass</div>
+                            <pre className="text-light small p-2 rounded"
+                                 style={{ backgroundColor: '#1e1e1e', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                              {pass.command}
+                            </pre>
+                          </>
+                        )}
+                        {pass && <div className="text-white-50 small">{pass.note}</div>}
+                        <div className="text-white-50 small mt-2">{preview.disclaimer}</div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
           </>
         )}
       </Modal.Body>
+
       <Modal.Footer>
-        <Button variant="secondary" onClick={handleClose}>
-          Cancel
-        </Button>
-        <Button
-          variant="danger"
-          onClick={handleSave}
-          disabled={saving}
-        >
-          {saving ? <Spinner animation="border" size="sm" /> : 'Save Configuration'}
+        <div className="me-auto">
+          <Form.Check type="checkbox" label="Include JavaScript bundles" className="text-white-50"
+            checked={!!config.includeScripts}
+            onChange={(e) => setConfig({ ...config, includeScripts: e.target.checked })} />
+        </div>
+        <Button variant="secondary" onClick={handleClose}>Close</Button>
+        <Button variant="danger" onClick={handleSave} disabled={saving}>
+          {saving ? <Spinner animation="border" size="sm" /> : 'Save Settings'}
         </Button>
       </Modal.Footer>
     </Modal>
   );
 };
+
+export default ArjunConfigModal;

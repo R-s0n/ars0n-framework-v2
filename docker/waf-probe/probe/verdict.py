@@ -300,9 +300,13 @@ def build_recommendations(ctx, rate):
         })
 
     # ---- shared rate/concurrency across every request-issuing tool ---------------------
+    # linkfinder belongs here: it fetches every discovered JavaScript bundle from the target, up to
+    # its maxJsFiles cap, so on an SPA it is frequently the heaviest crawler of the three. It was
+    # omitted, so the Recommendations tab listed a rate for six tools and silently said nothing about
+    # the one that would go on to fetch sixty files back to back with requestDelayMs sitting at 0.
     if safe_rps:
         for tool in ("ffuf", "arjun", "parameth", "x8", "katana", "gospider", "nuclei",
-                     "endpoint_replay"):
+                     "linkfinder", "endpoint_replay"):
             rec(tool, "rate_limit", safe_rps,
                 f"Derived from {rate['chain'][-2]['step'] if len(rate['chain']) > 1 else 'default'}",
                 conf, restrictive=True, finding="rate_limited")

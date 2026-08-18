@@ -377,7 +377,7 @@ func GetShuffleDNSScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan ShuffleDNSScanStatus
 		err := rows.Scan(
@@ -825,7 +825,7 @@ func GetCeWLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan CeWLScanStatus
 		err := rows.Scan(
@@ -899,7 +899,7 @@ func GetShuffleDNSCustomScansForScopeTarget(w http.ResponseWriter, r *http.Reque
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan ShuffleDNSScanStatus
 		err := rows.Scan(

@@ -428,32 +428,6 @@ func extractQueryParameters(urlStr string) []EndpointParameter {
 	return params
 }
 
-func groupSimilarPaths(urls []string) map[string][]string {
-	groups := make(map[string][]string)
-
-	for _, urlStr := range urls {
-		parsedURL, err := url.Parse(urlStr)
-		if err != nil {
-			continue
-		}
-
-		pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
-
-		if len(pathSegments) == 0 {
-			continue
-		}
-
-		basePattern := parsedURL.Hostname()
-		for i := range pathSegments {
-			basePattern += fmt.Sprintf("/[%d]", i)
-		}
-
-		groups[basePattern] = append(groups[basePattern], urlStr)
-	}
-
-	return groups
-}
-
 func detectPathParametersByEntropy(urls []string, minGroupSize int) map[int]bool {
 	if len(urls) < minGroupSize {
 		return nil
@@ -573,36 +547,6 @@ func normalizePathWithDetectedParams(urlStr string, paramPositions map[int]bool)
 	return parsedURL.String()
 }
 
-func extractPathParameters(urlStr string, normalizedPath string) []EndpointParameter {
-	var params []EndpointParameter
-
-	parsedURL, err := url.Parse(urlStr)
-	if err != nil {
-		return params
-	}
-
-	parsedNormalized, err := url.Parse(normalizedPath)
-	if err != nil {
-		return params
-	}
-
-	originalSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
-	normalizedSegments := strings.Split(strings.Trim(parsedNormalized.Path, "/"), "/")
-
-	for i, normalizedSeg := range normalizedSegments {
-		if normalizedSeg == "{id}" && i < len(originalSegments) {
-			params = append(params, EndpointParameter{
-				Type:         "path",
-				Name:         fmt.Sprintf("path_param_%d", i),
-				ExampleValue: originalSegments[i],
-				Position:     i,
-			})
-		}
-	}
-
-	return params
-}
-
 func processURLsWithParameters(urls []string, targetDomain, scanID, scanType, scopeTargetID string) ([]DiscoveredEndpoint, error) {
 	log.Printf("[INFO] Processing %d URLs with parameter detection", len(urls))
 
@@ -634,44 +578,28 @@ func processURLGroup(urls []string, isDirect bool, scanID, scanType, scopeTarget
 	}
 
 	endpoints := make([]DiscoveredEndpoint, 0)
-
-	pathGroups := groupSimilarPaths(urls)
-
 	processedURLs := make(map[string]bool)
 
-	for _, groupURLs := range pathGroups {
-		if len(groupURLs) < 3 {
-			for _, urlStr := range groupURLs {
-				if processedURLs[urlStr] {
-					continue
-				}
-				processedURLs[urlStr] = true
-
-				endpoint := createEndpoint(urlStr, scanID, scanType, scopeTargetID, isDirect)
-				endpoint.NormalizedPath = endpoint.Path
-
-				queryParams := extractQueryParameters(urlStr)
-				endpoint.Parameters = append(endpoint.Parameters, queryParams...)
-
-				endpoints = append(endpoints, endpoint)
-			}
+	// One loop, because there was never more than one behaviour. This used to group URLs by shape
+	// and branch on whether a group held three or more, with the two branches byte-identical: the
+	// grouping was computed and thrown away, extractPathParameters was never called from anywhere,
+	// and normalized_path was assigned endpoint.Path unconditionally. The Katana results modal
+	// showed that value under a "Normalized" heading beside an always-empty parameter list, which
+	// reads as "this tool found no path parameters" rather than "this tool never looked".
+	//
+	// Real path templating is not missing from the framework, it just lives further down: consolidation
+	// derives TemplatedPath and TemplateKey in endpointIdentity.go and groups /api/orders/8842719 and
+	// /api/orders/8842720 there. Discovery stores what it saw, consolidation decides what it means.
+	for _, urlStr := range urls {
+		if processedURLs[urlStr] {
 			continue
 		}
+		processedURLs[urlStr] = true
 
-		for _, urlStr := range groupURLs {
-			if processedURLs[urlStr] {
-				continue
-			}
-			processedURLs[urlStr] = true
-
-			endpoint := createEndpoint(urlStr, scanID, scanType, scopeTargetID, isDirect)
-			endpoint.NormalizedPath = endpoint.Path
-
-			queryParams := extractQueryParameters(urlStr)
-			endpoint.Parameters = append(endpoint.Parameters, queryParams...)
-
-			endpoints = append(endpoints, endpoint)
-		}
+		endpoint := createEndpoint(urlStr, scanID, scanType, scopeTargetID, isDirect)
+		endpoint.NormalizedPath = endpoint.Path
+		endpoint.Parameters = append(endpoint.Parameters, extractQueryParameters(urlStr)...)
+		endpoints = append(endpoints, endpoint)
 	}
 
 	log.Printf("[INFO] Fetching status codes for %d endpoints (isDirect=%v)", len(endpoints), isDirect)
@@ -1058,7 +986,7 @@ func GetKatanaURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan struct {
 			ScanID        string    `json:"scan_id"`
@@ -1342,6 +1270,34 @@ func ExecuteAndParseLinkFinderURLScan(scanID, targetURL, scopeTargetID string) {
 		firstStderr string
 	)
 
+	// linkFinderOutputFailure recognises the ways linkfinder.py reports a problem while still exiting
+	// 0. Deliberately conservative: it matches explicit error text, not merely an empty result, since
+	// a bundle with no endpoints in it is a legitimate outcome.
+	linkFinderOutputFailure := func(out string) string {
+		trimmed := strings.TrimSpace(out)
+		lower := strings.ToLower(trimmed)
+		for _, marker := range []string{
+			"traceback (most recent call last)",
+			"invalid input defined or ssl error",
+			"urlerror", "httperror", "ssl: certificate_verify_failed",
+			"connection refused", "name or service not known",
+			"remote end closed connection", "read timed out",
+		} {
+			if strings.Contains(lower, marker) {
+				// One line is enough for the operator to recognise the class of failure.
+				first := trimmed
+				if i := strings.IndexByte(first, '\n'); i > 0 {
+					first = first[:i]
+				}
+				if len(first) > 200 {
+					first = first[:200]
+				}
+				return first
+			}
+		}
+		return ""
+	}
+
 	for i, in := range inputs {
 		dockerCmd := buildLinkFinderCommand(in, cfg, scopeTargetID)
 		lastCmd = dockerCmd
@@ -1366,6 +1322,18 @@ func ExecuteAndParseLinkFinderURLScan(scanID, targetURL, scopeTargetID string) {
 			continue
 		}
 
+		// linkfinder.py exits 0 whatever happens and writes its fetch errors to stdout, so the exit
+		// code alone could never detect a failure: every input could 404 and the scan would report
+		// success with zero endpoints and failures==0, making the all-failed guard below unreachable.
+		if reason := linkFinderOutputFailure(stdout.String()); reason != "" {
+			failures++
+			if firstStderr == "" {
+				firstStderr = reason
+			}
+			log.Printf("[WARN] LinkFinder could not read %s: %s", in.url, reason)
+			continue
+		}
+
 		cleanURLs = append(cleanURLs, parseLinkFinderOutput(stdout.String(), in.url, scanURL, cfg)...)
 
 		// LinkFinder has no pacing of its own, so scanning many bundles is paced here or not at all.
@@ -1376,10 +1344,20 @@ func ExecuteAndParseLinkFinderURLScan(scanID, targetURL, scopeTargetID string) {
 
 	execTime := time.Since(startTime).String()
 
+	// LinkFinder is invoked once per input, so a single stored command line describes one sixtieth
+	// of the scan and names whichever file happened to be last. An operator reading it to reproduce
+	// the run would re-run one arbitrary bundle, get a handful of endpoints instead of hundreds, and
+	// reasonably conclude the count was fabricated. Record what actually happened.
+	provenance := strings.Join(lastCmd, " ")
+	if len(inputs) > 1 {
+		provenance = fmt.Sprintf("%s   [run once per input over %d inputs, source=%s, %d failed]",
+			provenance, len(inputs), cfg.InputSource, failures)
+	}
+
 	if len(cleanURLs) == 0 && failures == len(inputs) {
 		log.Printf("[ERROR] LinkFinder failed on every input for %s", targetURL)
 		UpdateLinkFinderURLScanStatus(scanID, "error", "", firstStderr,
-			strings.Join(lastCmd, " "), execTime)
+			provenance, execTime)
 		return
 	}
 	if failures > 0 {
@@ -1388,19 +1366,18 @@ func ExecuteAndParseLinkFinderURLScan(scanID, targetURL, scopeTargetID string) {
 
 	cleanURLs = dedupeStrings(cleanURLs)
 	log.Printf("[INFO] Processing %d URLs from %d input(s)", len(cleanURLs), len(inputs))
-	dockerCmd := lastCmd
 
 	endpoints, err := processURLsWithParameters(cleanURLs, targetDomain, scanID, "linkfinder", scopeTargetID)
 	if err != nil {
 		log.Printf("[ERROR] Failed to process URLs with parameters: %v", err)
-		UpdateLinkFinderURLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to process URLs: %v", err), strings.Join(dockerCmd, " "), time.Since(startTime).String())
+		UpdateLinkFinderURLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to process URLs: %v", err), provenance, time.Since(startTime).String())
 		return
 	}
 
 	err = storeDiscoveredEndpoints(endpoints)
 	if err != nil {
 		log.Printf("[ERROR] Failed to store discovered endpoints: %v", err)
-		UpdateLinkFinderURLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to store endpoints: %v", err), strings.Join(dockerCmd, " "), time.Since(startTime).String())
+		UpdateLinkFinderURLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to store endpoints: %v", err), provenance, time.Since(startTime).String())
 		return
 	}
 
@@ -1419,7 +1396,7 @@ func ExecuteAndParseLinkFinderURLScan(scanID, targetURL, scopeTargetID string) {
 	execTime = time.Since(startTime).String()
 	log.Printf("[INFO] LinkFinder URL scan completed in %s for %s", execTime, targetURL)
 
-	UpdateLinkFinderURLScanStatus(scanID, "success", resultSummary, "", strings.Join(dockerCmd, " "), execTime)
+	UpdateLinkFinderURLScanStatus(scanID, "success", resultSummary, "", provenance, execTime)
 }
 
 func UpdateLinkFinderURLScanStatus(scanID, status, result, errorMsg, command, execTime string) {
@@ -1485,7 +1462,7 @@ func GetLinkFinderURLScansForScopeTarget(w http.ResponseWriter, r *http.Request)
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan struct {
 			ScanID        string    `json:"scan_id"`
@@ -1716,7 +1693,7 @@ func GetWaybackURLsScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan struct {
 			ScanID        string    `json:"scan_id"`
@@ -1970,7 +1947,7 @@ func GetGAUURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan struct {
 			ScanID        string    `json:"scan_id"`
@@ -2126,7 +2103,38 @@ func GetDiscoveredEndpoints(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(endpoints)
 }
 
+// RunFFUFURLScan is the RETIRED ffuf runner and now refuses to start.
+//
+// It is kept as a handler rather than deleted so that anything still pointing here gets an answer
+// that says where to go, instead of a 404 that reads like a broken deployment. Its three tables
+// (ffuf_url_scans, ffuf_wordlists and the scan half of ffuf_configs) hold no rows, nothing renders
+// its results, and the URL workflow's Scan button has driven the fuzz flow for some time. What made
+// this worth refusing rather than leaving alone: an agent asked to "run ffuf" through MCP would start
+// THIS, watch it report success, and never learn that the live implementation had not run.
+//
+// ffuf_configs itself is NOT dead and is not touched here: ffufAuthMaterial reads it for the
+// crawlers' session material and the WAF probe reads it too, so /ffuf-config stays exactly as it is.
 func RunFFUFURLScan(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusGone)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": "retired",
+		"message": "This is the old ffuf runner and it no longer runs. The live implementation is the " +
+			"fuzz flow: build steps with POST /fuzz/{scope_target_id}/steps and run them with " +
+			"POST /fuzz/{scope_target_id}/run, or use the manage_fuzz MCP tool. Findings land in " +
+			"fuzz_findings, which is what the UI and the MCP tools read.",
+		"replacement": map[string]string{
+			"run":      "POST /fuzz/{scope_target_id}/run",
+			"findings": "GET /fuzz/{scope_target_id}/findings",
+			"mcp":      "manage_fuzz",
+		},
+	})
+}
+
+// executeLegacyFFUFURLScan is the body of the retired runner, unreferenced and kept only so the
+// preflight, phase and diagnosis logic in ffufURLScan.go remains readable next to the code that used
+// it. That machinery is worth harvesting into the fuzz flow, which is why it is not deleted.
+func executeLegacyFFUFURLScan(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		URL           string `json:"url" binding:"required"`
 		ScopeTargetID string `json:"scope_target_id" binding:"required"`
@@ -2220,7 +2228,7 @@ func GetFFUFURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan struct {
 			ScanID        string    `json:"scan_id"`
@@ -2341,6 +2349,12 @@ func buildGoSpiderCommand(crawlURL string, cfg GoSpiderURLConfig, scopeTargetID 
 	}
 	if cfg.NoRedirect {
 		add("--no-redirect")
+	}
+	// GoSpider's --js defaults to true, so turning the switch off in the UI did nothing at all: the
+	// flag was never emitted in either state and JavaScript was always parsed. Only the disabling
+	// case needs to be sent.
+	if !cfg.JS {
+		add("--js=false")
 	}
 	if cfg.Blacklist != "" {
 		add("--blacklist", cfg.Blacklist)
@@ -2533,7 +2547,7 @@ func GetGoSpiderURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan struct {
 			ScanID        string    `json:"scan_id"`

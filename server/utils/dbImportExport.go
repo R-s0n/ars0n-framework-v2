@@ -1316,7 +1316,7 @@ func GetScopeTargetsForExport(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var targets []map[string]interface{}
+	var targets = []map[string]interface{}{}
 	for rows.Next() {
 		var id, targetType, scopeTarget string
 		var active bool

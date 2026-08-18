@@ -190,7 +190,7 @@ func GetAmassScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var scans []map[string]interface{}
+	var scans = []map[string]interface{}{}
 	for rows.Next() {
 		var scan AmassScanStatus
 		err := rows.Scan(
@@ -255,7 +255,7 @@ func GetServiceProviders(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var providers []ServiceProviderResponse
+	var providers = []ServiceProviderResponse{}
 	for rows.Next() {
 		var provider ServiceProviderResponse
 		if err := rows.Scan(&provider.Provider, &provider.RawData); err != nil {
@@ -341,7 +341,7 @@ func GetASNs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var asns []ASNResponse
+	var asns = []ASNResponse{}
 	for rows.Next() {
 		var asn ASNResponse
 		if err := rows.Scan(&asn.Number, &asn.RawData); err != nil {
@@ -377,7 +377,7 @@ func GetSubnets(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var subnets []SubnetResponse
+	var subnets = []SubnetResponse{}
 	for rows.Next() {
 		var subnet SubnetResponse
 		if err := rows.Scan(&subnet.CIDR, &subnet.RawData); err != nil {
@@ -438,7 +438,7 @@ func GetIPs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var ips []string
+	var ips = []string{}
 	for rows.Next() {
 		var ip string
 		if err := rows.Scan(&ip); err != nil {
@@ -476,7 +476,7 @@ func GetDNSRecords(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var dnsRecords []DNSRecord
+	var dnsRecords = []DNSRecord{}
 	for rows.Next() {
 		var dnsRecord DNSRecord
 		if err := rows.Scan(&dnsRecord.ID, &dnsRecord.ScanID, &dnsRecord.Record, &dnsRecord.Type, &dnsRecord.CreatedAt); err != nil {

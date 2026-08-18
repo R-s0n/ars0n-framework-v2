@@ -42,6 +42,9 @@
   },
   "devDependencies": {
     "bootstrap": "^5.3.3",
-    "@babel/plugin-proposal-private-property-in-object": "^7.21.11"
+    "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/jest-dom": "^6.6.3"
   }
 }
