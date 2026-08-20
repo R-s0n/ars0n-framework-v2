@@ -251,14 +251,22 @@ parsing, source merging) has unit tests that run without a browser:
 
 ```bash
 cd extension
-node lib/scope.test.mjs      # scope, endpoint naming, GraphQL, body parsing, source merging
-node injected.test.mjs       # the page hook, driven against a simulated page
-node popup.test.mjs          # the scope list: row order, DOM identity, striping
+node lib/scope.test.mjs           # scope, endpoint naming, GraphQL, body parsing, source merging
+node lib/captureStages.test.mjs   # the webRequest stage machine, replayed in chrome's event order
+node injected.test.mjs            # the page hook, driven against a simulated page
+node popup.test.mjs               # the scope list: row order, DOM identity, striping
 ```
 
+`node --test extension/` does NOT recurse into `lib/`, so run the four files by path.
+
 `injected.test.mjs` runs the real `injected.js` inside a sandboxed fake page and asserts both that
-it captures bodies and that it does not change what the page observes from `fetch`, `XHR`, and
-`sendBeacon`.
+it captures bodies and that it does not change what the page observes from `fetch`, `XHR`,
+`sendBeacon`, and form submission.
+
+`captureStages.test.mjs` replays the eight events chrome fires for a request that redirects, all
+carrying one `requestId`. That sequence is the point: each stage looks correct on its own, and the
+record was still destroyed by the order, because the redirect destination is a different HTTP
+message writing over the request that caused it.
 
 `popup.test.mjs` runs the real `popup.js` against a minimal DOM and asserts that out-of-scope rows
 never reorder as their hit counts change and that their DOM nodes are reused rather than recreated.

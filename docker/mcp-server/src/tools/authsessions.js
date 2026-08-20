@@ -1,4 +1,5 @@
 const { z } = require('zod');
+const { clip: clipTo, bodyOptions, DEFAULTS } = require('../utils/clip');
 const { apiGet, apiPost, apiPut, apiDelete } = require('../api');
 const { limitResults, clampLimit } = require('../utils/truncate');
 
@@ -57,7 +58,9 @@ const manageAuthFlowsSchema = z.object({
   flow_id: z.string().uuid().optional().describe(
     'The auth flow UUID. Required for get, update, delete, add_step, reorder_steps and replay.'),
   step_id: z.string().uuid().optional().describe(
-    'The step UUID, for update_step, delete_step, and replay of a single step.'),
+    'The step UUID, for update_step, delete_step, and replay of a single step. On get it narrows ' +
+    'the read to that one step and raises the body budget accordingly, which is how you read a ' +
+    'value out of a large recorded response.'),
 
   category: CATEGORY.optional().describe(
     'Which authentication ceremony this documents. Filters the list, and is required on create. ' +
@@ -77,8 +80,36 @@ const manageAuthFlowsSchema = z.object({
 
   raw_request: z.string().optional().describe(
     'add_step / update_step: the complete raw HTTP request. Request line, then headers including ' +
-    'Host, then a blank line, then the body. This is sent verbatim, so it is also where you put ' +
-    'the exact Content-Type and any CSRF header the endpoint insists on.'),
+    'Host, then a blank line, then the body. It is where you put the exact Content-Type and any ' +
+    'CSRF header the endpoint insists on. Placeholders of the form {{af:NAME}} are replaced with ' +
+    'values an EARLIER step captured, and Content-Length is recomputed afterwards so a substituted ' +
+    'body is never truncated. A step with no placeholders is sent byte for byte as stored. The ' +
+    'encoding is chosen from where the placeholder sits and the request Content-Type: a value in a ' +
+    'form body is form-encoded, in a JSON body it is JSON-escaped, in a header it goes verbatim. ' +
+    'Append |raw, |url or |json to force one. A placeholder no earlier step produced means the ' +
+    'step is NOT SENT and says so, rather than firing a blank token at the target.'),
+  extractions: z.array(z.object({
+    name: z.string().describe('What later steps call it: {{af:NAME}}. Letters, digits, underscore.'),
+    source: z.enum(['body', 'header', 'cookie']).describe("Where in THIS step's response to look."),
+    source_key: z.string().optional().describe('For header and cookie: which one. Case insensitive.'),
+    pattern: z.string().optional().describe(
+      'A Go RE2 regular expression whose CAPTURE GROUP 1 is the value. Required for a body ' +
+      'capture, optional for a header or cookie where omitting it takes the whole value. ' +
+      'Handles both an HTML hidden input, name="csrf" value="([^"]+)", and a JSON field, ' +
+      '"access_token":"([^"]+)".'),
+    decode_as: z.enum(['none', 'html', 'url']).optional().describe(
+      'Default none, and leave it there unless you know the value is encoded. html decoding uses ' +
+      'the legacy entity set, which rewrites a bare &param= inside a captured URL, so it corrupts ' +
+      'exactly the OAuth and SAML values most worth capturing.'),
+    optional: z.boolean().optional().describe(
+      'Default false, meaning REQUIRED: if it does not match, the step records why and every later ' +
+      'step needing the value refuses to send. Set true only for a value that is genuinely ' +
+      'sometimes absent.'),
+  })).optional().describe(
+    "add_step / update_step: values to capture out of THIS step's response for later steps to " +
+    'use. This is what makes a per-request CSRF token work: step 1 fetches the form and captures ' +
+    'the token, step 2 refers to it as {{af:csrf}}. On update_step, passing this REPLACES the whole ' +
+    'set, omitting it leaves the rules alone, and passing [] clears them.'),
   step_name: z.string().optional().describe(
     'add_step / update_step: a label for the step, e.g. "Submit credentials".'),
   replay: z.boolean().optional().describe(
@@ -96,6 +127,21 @@ const manageAuthFlowsSchema = z.object({
     `body (${BODY_PREVIEW} chars). full adds the raw request, the complete response headers, and ` +
     `up to ${BODY_LIMIT} chars of body per step.`),
   max_results: z.number().optional().describe('Maximum rows (default 50, max 1000)'),
+
+  max_body_chars: z.number().int().positive().optional().describe(
+    'Raise the per-body character budget for THIS call. Defaults are deliberately small because a ' +
+    'listing multiplies them by its row count, but a value you need can sit past the cut: reading a ' +
+    'CSRF token out of a captured login form is impossible at 2000 chars because the token sits ' +
+    'around character 3500. Reading ONE step (pass step_id) already gets a much larger budget. ' +
+    'Bounded at 200000, and divided by the row count so raising it on a long listing degrades ' +
+    'instead of exploding.'),
+  body_match: z.string().optional().describe(
+    'Return the window of the response body AROUND the first case-insensitive occurrence of this ' +
+    'string, instead of the first N characters. This is the cheap way to pull one value out of a ' +
+    'large body: a body_match of name="csrf" returns the bytes around the token rather than the ' +
+    'page head. Says so plainly when there is no match.'),
+  body_match_window: z.number().int().positive().optional().describe(
+    'How many characters either side of a body_match hit to return. Default 400.'),
 });
 
 async function manageAuthFlows(params) {
@@ -112,8 +158,19 @@ async function manageAuthFlows(params) {
 
     case 'get': {
       if (!params.flow_id) return { error: 'get needs flow_id' };
-      const steps = await apiGet(`/auth-flows/flow/${params.flow_id}/steps`);
-      const rows = (Array.isArray(steps) ? steps : []).map((s) => compactStep(s, full));
+      let steps = await apiGet(`/auth-flows/flow/${params.flow_id}/steps`);
+      steps = Array.isArray(steps) ? steps : [];
+      // Reading ONE step is the case the old flat 2000-char ceiling made impossible: a token can
+      // sit past it in a page that is entirely available in the database. With one row there is no
+      // multiplier, so the budget can be real.
+      if (params.step_id) steps = steps.filter((s) => s.id === params.step_id);
+      const single = Boolean(params.step_id);
+      const body = bodyOptions(
+        params,
+        single ? DEFAULTS.single : (full ? DEFAULTS.record : DEFAULTS.list),
+        single ? 1 : steps.length,
+      );
+      const rows = steps.map((s) => compactStep(s, full || single, body));
       const flow = params.target_id
         ? await findFlow(params.target_id, params.flow_id)
         : undefined;
@@ -167,6 +224,7 @@ async function manageAuthFlows(params) {
         raw_request: params.raw_request,
         name: params.step_name || '',
         replay: params.replay === undefined ? true : params.replay,
+        extractions: params.extractions || [],
       });
       return compactStep(step, full);
     }
@@ -177,8 +235,9 @@ async function manageAuthFlows(params) {
       if (params.raw_request !== undefined) body.raw_request = params.raw_request;
       if (params.step_name !== undefined) body.name = params.step_name;
       if (params.step_order !== undefined) body.step_order = params.step_order;
+      if (params.extractions !== undefined) body.extractions = params.extractions;
       if (!Object.keys(body).length) {
-        return { error: 'update_step needs raw_request, step_name or step_order' };
+        return { error: 'update_step needs raw_request, step_name, step_order or extractions' };
       }
       // Editing raw_request does not re-send it. The stored response still belongs to the old
       // request until a replay overwrites it, which is worth saying out loud because the step will
@@ -230,11 +289,13 @@ async function manageAuthFlows(params) {
     case 'replay': {
       if (params.step_id) {
         const step = await apiPost(`/auth-flows/steps/${params.step_id}/replay`, {});
-        return compactStep(step, full);
+        return compactStep(step, true, bodyOptions(params, DEFAULTS.single, 1));
       }
       if (!params.flow_id) return { error: 'replay needs flow_id, or step_id for a single step' };
       const steps = await apiPost(`/auth-flows/flow/${params.flow_id}/replay`, {});
-      const rows = (Array.isArray(steps) ? steps : []).map((s) => compactStep(s, full));
+      const list = Array.isArray(steps) ? steps : [];
+      const body = bodyOptions(params, full ? DEFAULTS.record : DEFAULTS.list, list.length);
+      const rows = list.map((s) => compactStep(s, full, body));
       return {
         // The status chain is the first thing to look at after a replay: a login that used to end
         // 302 and now ends 200 has started failing while every individual step still "worked".
@@ -524,6 +585,16 @@ const manageSessionTokensSchema = z.object({
     'Authorization header, usually with value_prefix "Bearer ". cookie: set cookie_name and the ' +
     'cookie attributes. api_key: a key header, set header_name. query: a URL parameter, set ' +
     'param_name. Defaults to header.'),
+  token_role: z.enum(['credential', 'companion']).optional().describe(
+    'What the value IS, as opposed to how it travels. credential (default) is the thing that ' +
+    'proves who you are. companion is a value that is not a credential but without which the ' +
+    'credential does not work, which in practice means a load balancer affinity cookie such as ' +
+    'AWSALB. Reach for companion when a token you know is good validates as not_honoured and the ' +
+    'responses carry a varying X-Backend or similar: the session store is per backend, so without ' +
+    'the routing cookie the request lands on a backend that never saw the login and every ' +
+    'authenticated endpoint answers as if anonymous. A companion is sent alongside every ' +
+    'credential on the target AND on the anonymous control arm, so the comparison still isolates ' +
+    'the credential, and it is never graded on its own.'),
   header_name: z.string().optional().describe('header / api_key / bearer: the header name, e.g. X-Auth-Token'),
   cookie_name: z.string().optional().describe('cookie: the cookie name, e.g. sessionid'),
   param_name: z.string().optional().describe('query: the parameter name, e.g. access_token'),
@@ -761,9 +832,10 @@ function compactFlow(f) {
   });
 }
 
-function compactStep(s, full) {
+function compactStep(s, full, opts) {
   if (!s || typeof s !== 'object') return s;
   const headers = s.response_headers || {};
+  const body = opts || { limit: full ? DEFAULTS.record : DEFAULTS.list };
   return clean({
     id: s.id,
     step_order: s.step_order,
@@ -776,10 +848,19 @@ function compactStep(s, full) {
     // Names only in compact form. The values are the session itself, they are long, and refresh
     // already extracts them properly; what a caller needs here is whether the step issued one.
     set_cookie_names: full ? undefined : cookieNames(headers),
-    response_body: clip(s.response_body, full ? BODY_LIMIT : BODY_PREVIEW),
+    response_body: clipTo(s.response_body, body.limit, body),
+
+    // What this step captures for later steps, and what it did on the last replay. Without these
+    // an operator cannot tell a step that filled in a token from one that silently did not.
+    extractions: s.extractions && s.extractions.length ? s.extractions : undefined,
+    captured: s.captured,
+    substituted: s.substituted,
 
     ...(full ? {
-      raw_request: clip(s.raw_request, BODY_LIMIT),
+      // NEVER clipped. This is the field update_step writes back, and the Go handler replaces the
+      // stored request wholesale, so handing back a truncated one means a later write stores a
+      // truncated request and the replay engine sends it at the target as if it were real.
+      raw_request: s.raw_request,
       response_headers: headers,
     } : {}),
   });
@@ -840,6 +921,9 @@ function compactToken(t, withValue) {
     id: t.id,
     name: t.name,
     token_type: type,
+    // Only surfaced when it is not the default, so an ordinary token listing stays unchanged and a
+    // companion is impossible to miss.
+    token_role: t.token_role && t.token_role !== 'credential' ? t.token_role : undefined,
     is_active: t.is_active === true ? true : false,
     auth_flow_id: t.auth_flow_id,
     // The API joins this on. Without it a caller has to fetch every flow just to answer "what can
@@ -924,7 +1008,8 @@ async function fetchTokens(targetID) {
 // to the fields actually passed: sending the whole shape would push empty strings over columns the
 // caller never mentioned and quietly wipe, say, the cookie domain on a partial edit.
 function tokenBody(params, forUpdate = false) {
-  const fields = ['name', 'token_type', 'header_name', 'cookie_name', 'param_name', 'value_prefix',
+  const fields = ['name', 'token_type', 'token_role', 'header_name', 'cookie_name', 'param_name',
+                  'value_prefix',
                   'token_value', 'scope_domains', 'cookie_path', 'cookie_domain', 'cookie_secure',
                   'cookie_httponly', 'cookie_samesite', 'expires_at', 'is_active', 'notes',
                   'auth_flow_id'];

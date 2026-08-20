@@ -399,3 +399,117 @@ func TestAuthCookiesAndHeadersAreSettableNotRefused(t *testing.T) {
 		}
 	}
 }
+
+// A cookie vector marks exactly one of its cookies, so choosing badly is indistinguishable from not
+// scanning. This is the live vector set from ginandjuice.shop: eighteen vectors carried these five
+// names, and because the list is stored sorted, Parameters[0] was AWSALB every time.
+func TestTheMarkerAvoidsTheLoadBalancerCookie(t *testing.T) {
+	v := VectorInput{
+		Method: "GET", Scheme: "https", Domain: "ginandjuice.shop", Path: "/catalog",
+		InsertionPoint: "cookie",
+		Parameters:     []string{"AWSALB", "AWSALBCORS", "TrackingId", "category", "session"},
+		ObservedValues: map[string]string{
+			"AWSALB": "lbopaque", "AWSALBCORS": "lbopaque", "TrackingId": "xyz",
+			"category": "Gifts", "session": "s7KgQ",
+		},
+	}
+	for name, compose := range map[string]VectorComposer{"sqlmap": ComposeSqlmap, "ghauri": ComposeGhauri} {
+		args, _ := compose(v, map[string]any{}, "/tmp/r.json")
+		cookie := argValueAfter(args, "--cookie")
+		if !strings.Contains(cookie, "TrackingId=xyz*") {
+			t.Errorf("%s: expected the application's own cookie to be marked, got --cookie %q", name, cookie)
+		}
+		if strings.Contains(cookie, "AWSALB=") || strings.Contains(cookie, "AWSALBCORS=") {
+			t.Errorf("%s: the marker landed on an ELB stickiness cookie, which no application code "+
+				"reads and whose corruption scatters the run across backends: %q", name, cookie)
+		}
+	}
+}
+
+// Ranking is by name, not by position, so re-sorting the parameter list cannot change the target.
+func TestTheMarkerPrefersAnApplicationParameterFromAnywhereInTheList(t *testing.T) {
+	for _, order := range [][]string{
+		{"AWSALB", "TrackingId"},
+		{"TrackingId", "AWSALB"},
+		{"__cf_bm", "_abck", "BIGipServerpool", "q"},
+	} {
+		got := markableParam(VectorInput{Parameters: order})
+		if paramMarkTier(got) != 0 {
+			t.Errorf("markableParam(%v) = %q, an edge cookie, when an application parameter was present", order, got)
+		}
+	}
+}
+
+// A session cookie IS application read, so it is worth testing when it is all the vector has. The
+// tiering must not turn "test this badly" into "test nothing".
+func TestASessionOnlyVectorIsStillTested(t *testing.T) {
+	v := VectorInput{
+		Method: "GET", Scheme: "https", Domain: "app.example.com", Path: "/dash",
+		InsertionPoint: "cookie", Parameters: []string{"session"},
+		ObservedValues: map[string]string{"session": "abc"},
+	}
+	args, _ := ComposeSqlmap(v, map[string]any{}, "/tmp/r.json")
+	if cookie := argValueAfter(args, "--cookie"); !strings.Contains(cookie, "session=abc*") {
+		t.Errorf("a vector whose only parameter is a session cookie must still be marked: %q", cookie)
+	}
+}
+
+// An edge-only vector likewise still gets tested rather than silently producing no --cookie at all,
+// which would leave the tool scanning a URL with no insertion point and exiting clean.
+func TestAnEdgeOnlyVectorStillProducesAMarkedCookie(t *testing.T) {
+	v := VectorInput{
+		Method: "GET", Scheme: "https", Domain: "app.example.com", Path: "/",
+		InsertionPoint: "cookie", Parameters: []string{"AWSALB", "AWSALBCORS"},
+		ObservedValues: map[string]string{"AWSALB": "aaa", "AWSALBCORS": "bbb"},
+	}
+	args, _ := ComposeSqlmap(v, map[string]any{}, "/tmp/r.json")
+	if cookie := argValueAfter(args, "--cookie"); !strings.Contains(cookie, "*") {
+		t.Errorf("a vector with only edge cookies must still mark one, got %q", cookie)
+	}
+}
+
+// The session the operator supplies must survive the choice, including when the chosen target sits
+// in the middle of their cookie jar.
+func TestTheOperatorsSessionSurvivesTheChosenTarget(t *testing.T) {
+	v := VectorInput{
+		Method: "GET", Scheme: "https", Domain: "ginandjuice.shop", Path: "/catalog",
+		InsertionPoint: "cookie",
+		Parameters:     []string{"AWSALB", "TrackingId", "session"},
+		ObservedValues: map[string]string{"TrackingId": "xyz"},
+	}
+	args, _ := ComposeSqlmap(v, map[string]any{
+		"cookie": "session=live; AWSALB=sticky; TrackingId=stale",
+	}, "/tmp/r.json")
+	cookie := argValueAfter(args, "--cookie")
+	if !strings.Contains(cookie, "session=live") || !strings.Contains(cookie, "AWSALB=sticky") {
+		t.Errorf("the operator's session or stickiness cookie was dropped, so the scan runs logged out: %q", cookie)
+	}
+	if strings.Contains(cookie, "TrackingId=stale") || strings.Count(cookie, "TrackingId=") != 1 {
+		t.Errorf("the stale copy of the marked cookie survived, so which one the app reads is chance: %q", cookie)
+	}
+}
+
+// ghauri caches per HOST, not per URL and parameter, so the first vector's verdict is replayed for
+// all 52 that follow it and the whole scan reports clean. This is the same defect commix has, which
+// was found and fixed there (cmdiTools.go) and never applied here.
+//
+// Measured on ginandjuice.shop: a host ghauri had already seen answered "all tested parameters do
+// not appear to be injectable" in one second having sent nothing, and the identical command with
+// --flush-session reported "category (GET) ... AND boolean-based blind - WHERE or HAVING clause".
+func TestGhauriAlwaysFlushesItsSession(t *testing.T) {
+	v := VectorInput{
+		Method: "GET", Scheme: "https", Domain: "ginandjuice.shop", Path: "/catalog",
+		InsertionPoint: "query", Parameters: []string{"category"},
+		ObservedValues: map[string]string{"category": "Accessories"},
+	}
+	args, _ := ComposeGhauri(v, map[string]any{}, "/tmp/r.json")
+	if !argsContain(args, "--flush-session") {
+		t.Fatal("without --flush-session ghauri replays a stored per-host verdict for every vector " +
+			"after the first, and 52 untested vectors are recorded clean")
+	}
+	tool, _ := VectorToolByKey("ghauri")
+	if _, owned := tool.OwnedFlags["--flush-session"]; !owned {
+		t.Error("--flush-session must be framework owned, or a stored setting can switch off the one " +
+			"flag that makes the scan real")
+	}
+}

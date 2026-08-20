@@ -152,7 +152,14 @@ var authPathPattern = regexp.MustCompile(`(?i)(^|/)(login|signin|sign-in|log-in|
 // login is the normal shape for consumer and fintech applications.
 var authBodyFieldPattern = regexp.MustCompile(`(?i)"(password|passwd|pwd|passcode|pin|username|user_name|email|phone|phone_number|msisdn|otp|code|token|refresh_token|access_token|id_token|client_secret|grant_type|totp|mfa_code|verification_code|device_id)"\s*:`)
 
-var authFormFieldPattern = regexp.MustCompile(`(?i)(^|&)(password|passwd|pwd|passcode|pin|username|user|email|phone|phone_number|otp|code|token|grant_type)=`)
+// The same field list as authBodyFieldPattern, and it has to stay that way.
+//
+// Until the capture bug was fixed, a form-urlencoded login was stored as JSON, so it matched the
+// JSON pattern above and this one never fired at all. Now that a form body is recorded as
+// username=x&password=y, this pattern is the ONLY thing that can classify one, and every field
+// missing from it is an auth exchange that silently stops being detected. The (^|&) anchor is what
+// keeps code= from matching inside zipcode=, so it must survive any edit.
+var authFormFieldPattern = regexp.MustCompile(`(?i)(^|&)(password|passwd|pwd|passcode|pin|username|user_name|user|email|phone|phone_number|msisdn|otp|code|token|refresh_token|access_token|id_token|client_secret|grant_type|totp|mfa_code|verification_code|device_id)=`)
 
 // AuthFlowCandidate is a recorded request that looks like part of an auth exchange.
 type AuthFlowCandidate struct {
@@ -168,6 +175,9 @@ type AuthFlowCandidate struct {
 	SetsCookie   bool      `json:"sets_cookie"`
 	SuggestedCat string    `json:"suggested_category"`
 	RawRequest   string    `json:"raw_request"`
+	// Set when the capture itself looks incomplete, as opposed to the application being unusual.
+	// Empty on a healthy candidate, so a client can show it only when it means something.
+	CaptureWarning string `json:"capture_warning,omitempty"`
 }
 
 // GetAuthFlowCandidates handles GET /manual-crawl/captures/target/{scope_target_id}/auth-candidates.
@@ -218,8 +228,9 @@ func GetAuthFlowCandidates(w http.ResponseWriter, r *http.Request) {
 			Reason:       reason,
 			HasBody:      postData != "",
 			SetsCookie:   headerString(responseHeaders, "set-cookie") != "",
-			SuggestedCat: category,
-			RawRequest:   BuildRawHTTPRequest(method, urlStr, headers, postData),
+			SuggestedCat:   category,
+			RawRequest:     BuildRawHTTPRequest(method, urlStr, headers, postData),
+			CaptureWarning: authCaptureWarning(method, postData),
 		}
 		if statusCode != nil {
 			candidate.StatusCode = *statusCode
@@ -229,6 +240,49 @@ func GetAuthFlowCandidates(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(candidates)
+}
+
+// A body that names the account but never names a secret is the signature of a LOSSY CAPTURE, not
+// of an application that authenticates without one. Kept separate from authBodyFieldPattern and
+// authFormFieldPattern, which deliberately match either half because their job is to decide whether
+// a request is auth-related at all; this pair has to tell the two halves apart.
+var authIdentityFieldPattern = regexp.MustCompile(
+	`(?i)((^|&)(username|user_name|user|email|login|phone|phone_number|msisdn)=` +
+		`|"(username|user_name|user|email|login|phone|phone_number|msisdn)"\s*:)`)
+
+var authSecretFieldPattern = regexp.MustCompile(
+	`(?i)((^|&)(password|passwd|pwd|passcode|pin|secret|otp|totp|code|mfa_code|verification_code|client_secret|assertion|credential)=` +
+		`|"(password|passwd|pwd|passcode|pin|secret|otp|totp|code|mfa_code|verification_code|client_secret|assertion|credential)"\s*:)`)
+
+// authCaptureWarning names the ways a recorded auth request can be unusable before anyone tries to
+// build a flow out of it.
+//
+// This exists because both failures are silent and look identical to a healthy capture in every
+// summary view. On a real run the login POST recorded csrf, redirect and username and no password:
+// chrome's webRequest.requestBody.formData had dropped the type=password input, the row still said
+// 200 with a plausible body, and the only way to notice was to read the raw request field by field.
+// Every flow built from it failed to authenticate, and the time went into suspecting the
+// credentials, the CSRF handling and the target before the capture.
+func authCaptureWarning(method, body string) string {
+	switch strings.ToUpper(method) {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+	default:
+		return ""
+	}
+
+	if strings.TrimSpace(body) == "" {
+		return "This request recorded NO body. A submission with an empty body cannot be replayed, " +
+			"and an application that genuinely posts nothing to an auth endpoint is rare, so treat " +
+			"this as a capture problem first: reload the browser extension and record again."
+	}
+
+	if authIdentityFieldPattern.MatchString(body) && !authSecretFieldPattern.MatchString(body) {
+		return "The body names the account but carries no password or one-time code. If this really " +
+			"is the request that authenticates, the secret was lost in capture and a flow built from " +
+			"it will not log in: supply the credential by hand in the step's raw request."
+	}
+
+	return ""
 }
 
 // classifyAuthCapture returns why a request looks auth-related and which flow category it most
@@ -449,8 +503,94 @@ var (
 
 	// Names that mark a value as something a client uses to reach one specific object. These are
 	// exactly the values worth swapping for another user's in an IDOR test.
+	//
+	// Always matched through keyLooksLikeIdentifier, never directly: the noun has to be bounded by a
+	// separator, and camelCase has none.
 	identifierKeyPattern = regexp.MustCompile(`(?i)(^|[_.-])(id|ids|uid|guid|uuid|gid|pk|key|ref|slug|handle|num|no|code|token|sid|session|account|acct|user|userid|customer|client|member|profile|org|organi[sz]ation|team|group|tenant|workspace|project|company|order|invoice|payment|transaction|subscription|booking|ticket|document|doc|file|folder|record|entity|resource|item|node|post|message|thread|conversation|channel|report|job|task|device|asset)($|[_.-])`)
+
+	// Splits a camelCase boundary so postId reads as post_Id.
+	camelBoundaryPattern = regexp.MustCompile(`([a-z0-9])([A-Z])`)
 )
+
+// keyLooksLikeIdentifier asks whether a parameter, claim or cookie NAME says it points at one
+// specific object.
+//
+// The separator normalization is the whole point. identifierKeyPattern requires each noun to be
+// bounded by ^, $, _, . or -, and camelCase supplies none of those, so the single most common
+// spelling in JSON and JavaScript APIs was invisible: measured, postId, productId, orderRef and
+// accountNumber all returned false, and userId returned true only by accident because the literal
+// "userid" happens to be one of the alternatives. On a real target that meant the two canonical IDOR
+// parameters, postId and productId, were never offered while the AWS load balancer cookie was
+// offered sixty times.
+func keyLooksLikeIdentifier(key string) bool {
+	if key == "" {
+		return false
+	}
+	if identifierKeyPattern.MatchString(key) {
+		return true
+	}
+	return identifierKeyPattern.MatchString(camelBoundaryPattern.ReplaceAllString(key, "${1}_${2}"))
+}
+
+// Cookie and header names that are transport or analytics machinery, never an application object
+// reference. They pass the shape gates easily, because a load balancer cookie is a long base64 blob
+// with digits and letters in it, and they ride EVERY request, so without this they crowd out the
+// values the feature exists to surface. Several also rotate per response, so they produce a fresh
+// crop of candidates on every re-scan.
+var infrastructureIdentifierNames = map[string]bool{
+	"awsalb": true, "awsalbcors": true, "awsalbtg": true, "awsalbtgcors": true,
+	"__cflb": true, "__cf_bm": true, "cf_clearance": true, "cf_use_ob": true,
+	"_ga": true, "_gid": true, "_gat": true, "_gcl_au": true, "_fbp": true, "_fbc": true,
+	"__utma": true, "__utmb": true, "__utmc": true, "__utmz": true,
+	"ai_user": true, "ai_session": true, "optimizelyenduserid": true,
+	"x-amzn-trace-id": true, "x-request-id": true, "x-correlation-id": true,
+	"x-amz-cf-id": true, "x-datadog-trace-id": true, "traceparent": true,
+}
+
+// Prefixes for the same, where the name carries a pool or site id.
+var infrastructureIdentifierPrefixes = []string{
+	"bigipserver", "incap_ses", "visid_incap", "nlbi_", "ak_bmsc", "bm_sv", "_abck",
+}
+
+// Field names holding an anti-forgery nonce, which is never an object reference.
+//
+// These sail through the value-shape gate, because a CSRF token is exactly the 32-character
+// alphanumeric blob looksLikeIdentifier is looking for, and they are worthless as IDOR candidates:
+// the value is single-use, it is reissued on every response, and swapping it moves the caller to no
+// other object. It cannot be excluded by shape, only by name. Measured on a real crawl: 5 of 14
+// auto-detected candidates were CSRF tokens from /login, /catalog/cart/coupon and
+// /catalog/cart/checkout, and each re-scan of the same corpus would mint fresh ones.
+var antiForgeryFieldNames = map[string]bool{
+	"csrf": true, "csrftoken": true, "csrf_token": true, "csrfmiddlewaretoken": true,
+	"xsrf": true, "xsrftoken": true, "xsrf_token": true,
+	"_csrf": true, "_xsrf": true, "_token": true,
+	"authenticity_token": true, "requestverificationtoken": true,
+	"__requestverificationtoken": true, "anti_forgery_token": true, "antiforgerytoken": true,
+	"nonce": true,
+}
+
+// isAntiForgeryField reports whether a parameter name holds a CSRF-style nonce.
+func isAntiForgeryField(name string) bool {
+	return antiForgeryFieldNames[strings.ToLower(strings.TrimSpace(name))]
+}
+
+// isInfrastructureIdentifier keeps load balancer stickiness, CDN bot cookies and analytics ids out
+// of a list whose entire purpose is "values worth swapping for another account's".
+func isInfrastructureIdentifier(name string) bool {
+	clean := strings.ToLower(strings.TrimSpace(name))
+	if clean == "" {
+		return false
+	}
+	if infrastructureIdentifierNames[clean] {
+		return true
+	}
+	for _, prefix := range infrastructureIdentifierPrefixes {
+		if strings.HasPrefix(clean, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // looksLikeIdentifier decides whether a value is shaped like a durable object reference rather
 // than free text. Being strict here matters: the point of auto-detection is a short list worth
@@ -517,6 +657,21 @@ type detectedIdentifier struct {
 	Label       string
 }
 
+// ridesEveryRequest says whether a value is ambient rather than tied to the endpoint it was seen on.
+//
+// A cookie, an Authorization header and the claims inside it are sent with every request the client
+// makes, so recording one per endpoint says nothing new sixty-eight times over. A path segment, a
+// query parameter or a body field belongs to the request it appeared in, and the same id on two
+// different endpoints really is two things to test, because the access check around each may differ.
+func ridesEveryRequest(label string) bool {
+	for _, prefix := range []string{"cookie ", "jwt claim ", "authorization token", "bearer token"} {
+		if strings.HasPrefix(label, prefix) {
+			return true
+		}
+	}
+	return strings.HasSuffix(label, " token")
+}
+
 // AutoDetectClientIdentifiers handles POST /authz/client-identifiers/{scope_target_id}/auto-detect.
 //
 // Walks recorded traffic (path segments, query values, request bodies, response bodies, cookies,
@@ -561,7 +716,15 @@ func AutoDetectClientIdentifiers(w http.ResponseWriter, r *http.Request) {
 			if value == "" || len(value) > 512 {
 				return
 			}
+			// The dedupe key decides how much noise this produces, and including the endpoint in it
+			// for a value that rides EVERY request is what turned four cookies into roughly 280
+			// candidates on a 294 capture corpus. A session cookie seen on 69 endpoints is one thing
+			// to attack, not 69; a postId seen on two endpoints genuinely is two testing
+			// opportunities, because the access check around it may differ.
 			key := normalizedURL + "|" + method + "|" + value
+			if ridesEveryRequest(label) {
+				key = "target|" + label + "|" + value
+			}
 			if _, exists := found[key]; exists {
 				return
 			}
@@ -630,14 +793,28 @@ func collectIdentifiersFromURL(rawURL string, add func(value, label string)) {
 	}
 
 	for _, segment := range strings.Split(strings.Trim(parsed.Path, "/"), "/") {
-		if segment != "" && looksLikeIdentifier(segment) {
+		if segment == "" {
+			continue
+		}
+		// An all-digit path segment is an object reference whatever its length. The three character
+		// floor in looksLikeIdentifier meant /api/users/123 was detected and /api/users/12 was not,
+		// which is an arbitrary line straight through the middle of the case this exists for.
+		if looksLikeIdentifier(segment) || digitsPattern.MatchString(segment) {
 			add(segment, "path segment")
 		}
 	}
 
 	for key, values := range parsed.Query() {
+		// A CSRF token in the query string is the same nonce as one in the body, and just as
+		// worthless to move.
+		if isAntiForgeryField(key) {
+			continue
+		}
 		for _, value := range values {
-			if looksLikeIdentifier(value) || (identifierKeyPattern.MatchString(key) && value != "") {
+			// A name that says "id" is stronger evidence than any value shape. looksLikeIdentifier
+			// has a three character floor, so the short integers that are the whole point of IDOR
+			// enumeration (postId=1, productId=3) fail it; the name is what rescues them.
+			if looksLikeIdentifier(value) || (keyLooksLikeIdentifier(key) && value != "") {
 				add(value, "query param "+key)
 			}
 		}
@@ -666,7 +843,7 @@ func collectIdentifiersFromHeaders(headers map[string]interface{}, add func(valu
 				if claimValue == "" || len(claimValue) > 256 {
 					continue
 				}
-				if jwtIdentityClaims[strings.ToLower(claimKey)] || identifierKeyPattern.MatchString(claimKey) ||
+				if jwtIdentityClaims[strings.ToLower(claimKey)] || keyLooksLikeIdentifier(claimKey) ||
 					looksLikeIdentifier(claimValue) {
 					add(claimValue, "jwt claim "+claimKey)
 				}
@@ -681,7 +858,14 @@ func collectIdentifiersFromHeaders(headers map[string]interface{}, add func(valu
 				continue
 			}
 			name, value := bits[0], bits[1]
-			if value != "" && (looksLikeIdentifier(value) || identifierKeyPattern.MatchString(name)) {
+			// A load balancer stickiness cookie is a long base64 blob with digits and letters in it,
+			// so it sails through every shape gate, rides every single request, and rotates on each
+			// response. Left in, AWSALB alone accounted for dozens of the candidates on a real
+			// target while the actual object references were missing.
+			if isInfrastructureIdentifier(name) {
+				continue
+			}
+			if value != "" && (looksLikeIdentifier(value) || keyLooksLikeIdentifier(name)) {
 				add(value, "cookie "+name)
 			}
 		}
@@ -731,6 +915,9 @@ func collectIdentifiersFromBody(body, label string, add func(value, label string
 	// Form-encoded fallback.
 	if values, err := url.ParseQuery(trimmed); err == nil {
 		for key, list := range values {
+			if isAntiForgeryField(key) {
+				continue
+			}
 			for _, value := range list {
 				if identifierKeyPattern.MatchString(key) && value != "" && len(value) <= 512 {
 					add(value, label+" field "+key)
@@ -768,6 +955,9 @@ func walkJSONForIdentifiers(node interface{}, keyPath, label string, depth int, 
 		}
 	case string:
 		leaf := leafKey(keyPath)
+		if isAntiForgeryField(leaf) {
+			return
+		}
 		if identifierKeyPattern.MatchString(leaf) && typed != "" && len(typed) <= 512 {
 			add(typed, label+" "+keyPath)
 		} else if looksLikeIdentifier(typed) {

@@ -122,6 +122,178 @@ func TestClassifyAuthCapture(t *testing.T) {
 	}
 }
 
+// A form-urlencoded login must classify on its body alone, on a path that gives nothing away.
+//
+// This could not have been detected before the capture fix: the extension recorded a form body as
+// JSON, so a real form login arrived looking like {"username":"a"} and matched the JSON pattern.
+// Now that it is recorded as username=a&password=b, authFormFieldPattern is the only thing that can
+// classify it, and any field missing from that list is an auth exchange nobody is offered.
+func TestClassifyAuthCaptureReadsRealFormBodies(t *testing.T) {
+	// Deliberately a path authPathPattern does not match, so only the body can carry the verdict.
+	const neutralPath = "https://x.com/api/v2/submit"
+
+	forms := []string{
+		"username=carlos&password=montoya",
+		"csrf=abc&username=carlos&password=montoya",
+		"user_name=carlos&pwd=x",
+		"email=a%40b.com&passcode=1234",
+		"msisdn=447700900000&otp=123456",
+		"grant_type=authorization_code&client_secret=s",
+		"refresh_token=abc",
+		"access_token=abc",
+		"id_token=abc",
+		"totp=123456",
+		"mfa_code=123456",
+		"verification_code=123456",
+		"device_id=abc",
+	}
+	for _, body := range forms {
+		if reason, _ := classifyAuthCapture(neutralPath, "POST", body); reason == "" {
+			t.Errorf("form body %q was not recognised as an auth exchange", body)
+		}
+	}
+
+	// The (^|&) anchor is load bearing: without it every one of these matches on a substring.
+	notAuth := []string{
+		"zipcode=90210",
+		"promocode=SUMMER",
+		"barcode=12345",
+		"discount_code=X",
+		"username_hint=carlos",
+	}
+	for _, body := range notAuth {
+		if reason, _ := classifyAuthCapture(neutralPath, "POST", body); reason != "" {
+			t.Errorf("body %q must not be read as an auth exchange (matched: %s)", body, reason)
+		}
+	}
+}
+
+// Measured on a real target: 294 captures produced 286 candidates, of which roughly 280 were the
+// same four cookies re-recorded once per endpoint, and NOT ONE query-string identifier was found.
+// The target had /blog/post?postId=1 and /catalog/product?productId=1, which are the two canonical
+// IDOR candidates on the whole application.
+func TestCamelCaseIdentifierNamesAreRecognised(t *testing.T) {
+	// identifierKeyPattern requires each noun to be bounded by ^, $, _, . or -, and camelCase has
+	// none of those. Every one of these returned false before the normalization went in; userId was
+	// the sole accidental pass, because the literal "userid" is one of the alternatives.
+	shouldMatch := []string{
+		"postId", "productId", "userId", "orderId", "accountId", "customerId", "invoiceId",
+		"orderRef", "documentKey", "sessionToken", "tenantId", "workspaceId", "projectId",
+		"post_id", "product_id", "user-id", "id", "uuid",
+	}
+	for _, key := range shouldMatch {
+		if !keyLooksLikeIdentifier(key) {
+			t.Errorf("%q names an object reference and must be detected", key)
+		}
+	}
+
+	// The gate still has to mean something, or every parameter becomes a candidate.
+	shouldNot := []string{
+		"query", "search", "searchTerm", "page", "sort", "filter", "limit", "offset",
+		"category", "colour", "lang", "format", "callback", "",
+	}
+	for _, key := range shouldNot {
+		if keyLooksLikeIdentifier(key) {
+			t.Errorf("%q is not an object reference and must not be offered", key)
+		}
+	}
+}
+
+// looksLikeIdentifier refuses anything under three characters, so postId=1 failed BOTH gates: the
+// name gate for being camelCase and the value gate for being one digit. Either alone would have
+// suppressed it.
+func TestShortObjectReferencesAreDetected(t *testing.T) {
+	found := map[string]string{}
+	collectIdentifiersFromURL("https://x.test/blog/post?postId=1", func(value, label string) {
+		found[label] = value
+	})
+	if found["query param postId"] != "1" {
+		t.Errorf("postId=1 was not detected; got %v", found)
+	}
+
+	found = map[string]string{}
+	collectIdentifiersFromURL("https://x.test/catalog/product?productId=3&category=Gifts", func(value, label string) {
+		found[label] = value
+	})
+	if found["query param productId"] != "3" {
+		t.Errorf("productId=3 was not detected; got %v", found)
+	}
+	if _, offered := found["query param category"]; offered {
+		t.Error("category is a filter, not an object reference, and must not be offered")
+	}
+
+	// A numeric path segment is an object reference at any length. The three character floor meant
+	// /api/users/123 was detected and /api/users/12 was not, which is an arbitrary line through the
+	// middle of the case this feature exists for.
+	for _, path := range []string{"https://x.test/api/users/12", "https://x.test/api/users/123"} {
+		hit := false
+		collectIdentifiersFromURL(path, func(value, label string) {
+			if label == "path segment" {
+				hit = true
+			}
+		})
+		if !hit {
+			t.Errorf("no path identifier found in %s", path)
+		}
+	}
+}
+
+// The four highest-frequency strings in a capture set are load balancer and analytics cookies. They
+// pass every shape gate, ride every request, and rotate per response, so they crowd out the values
+// the feature exists to surface and come back fresh on each re-scan.
+func TestInfrastructureCookiesAreNotOfferedAsIDORCandidates(t *testing.T) {
+	infra := []string{
+		"AWSALB", "AWSALBCORS", "awsalb", "BIGipServerpool_web", "__cf_bm", "cf_clearance",
+		"incap_ses_123_456", "visid_incap_1234", "_ga", "_gid", "_gcl_au", "_fbp", "__utma",
+	}
+	for _, name := range infra {
+		if !isInfrastructureIdentifier(name) {
+			t.Errorf("%q is transport or analytics machinery and must not be an IDOR candidate", name)
+		}
+	}
+
+	// And it must not swallow the application's own cookies, which are the interesting ones.
+	for _, name := range []string{"session", "TrackingId", "user_id", "account", "JSESSIONID", "auth_token"} {
+		if isInfrastructureIdentifier(name) {
+			t.Errorf("%q is an application cookie and must still be offered", name)
+		}
+	}
+
+	// End to end through the cookie branch: the application cookie survives, the balancer does not.
+	found := map[string]string{}
+	collectIdentifiersFromHeaders(map[string]interface{}{
+		"cookie": "AWSALB=bDYxHj7Ahbtorf4L53sKJ4CCBjJ61HB/cQGthuBHK5ElS6STq31XSkWzkIuYGLcM; " +
+			"session=iDSBOd1s94bkT11r6iZFC1MzLzOqN5Zo",
+	}, func(value, label string) { found[label] = value })
+
+	if _, offered := found["cookie AWSALB"]; offered {
+		t.Error("the AWS load balancer cookie was still offered")
+	}
+	if found["cookie session"] == "" {
+		t.Error("the application session cookie must still be detected")
+	}
+}
+
+// One value that rides every request is ONE thing to attack. Keying the dedupe on the endpoint made
+// a single session cookie seen on 69 endpoints into 69 candidates, which is how 294 captures became
+// 286 rows of almost nothing.
+func TestAmbientValuesAreCountedOncePerTargetNotOncePerEndpoint(t *testing.T) {
+	ambient := []string{"cookie session", "jwt claim sub", "bearer token", "authorization token"}
+	for _, label := range ambient {
+		if !ridesEveryRequest(label) {
+			t.Errorf("%q is sent with every request and must be deduplicated target-wide", label)
+		}
+	}
+	// These belong to the request they appeared in: the same id on two endpoints is two testing
+	// opportunities, because the access check around each may differ.
+	perEndpoint := []string{"query param postId", "path segment", "request body", "response body"}
+	for _, label := range perEndpoint {
+		if ridesEveryRequest(label) {
+			t.Errorf("%q belongs to its endpoint and must not be collapsed target-wide", label)
+		}
+	}
+}
+
 func TestLooksLikeIdentifier(t *testing.T) {
 	shouldMatch := []string{
 		"3f2504e0-4f89-11d3-9a0c-0305e82c3301",      // uuid
@@ -381,5 +553,126 @@ func TestSanitizeJSONMapCleansNestedValues(t *testing.T) {
 func TestSanitizeJSONMapHandlesNil(t *testing.T) {
 	if got := sanitizeJSONMap(nil); got == nil || len(got) != 0 {
 		t.Errorf("nil map should sanitize to an empty map, got %v", got)
+	}
+}
+
+// authCaptureWarning exists because both of these failures are invisible in every summary view: the
+// row still says 200 with a plausible body, and only a field-by-field read of the raw request shows
+// the credential is missing. Measured on ginandjuice.shop 2026-08-19.
+
+func TestAuthCaptureWarningFlagsALoginBodyWithNoSecret(t *testing.T) {
+	// The exact body that was stored: csrf, redirect and username, no password. chrome's
+	// requestBody.formData had dropped the type=password input.
+	body := "csrf=bBn9PVhe0CkI40JPomzRNYGxf2IRZ6Um&redirect=cart&username=carlos"
+	warning := authCaptureWarning("POST", body)
+	if warning == "" {
+		t.Fatal("a login body naming the account but no secret must be flagged")
+	}
+	if !strings.Contains(warning, "no password") {
+		t.Errorf("the warning has to name what is missing, got %q", warning)
+	}
+}
+
+func TestAuthCaptureWarningFlagsABodylessSubmission(t *testing.T) {
+	// The other half of the same defect: the successful login redirected, and the redirect
+	// destination's bodyless leg overwrote the POST's body entirely.
+	if got := authCaptureWarning("POST", ""); got == "" {
+		t.Fatal("a POST that recorded no body at all must be flagged")
+	}
+	if got := authCaptureWarning("POST", "   "); got == "" {
+		t.Fatal("whitespace is not a body")
+	}
+}
+
+func TestAuthCaptureWarningStaysQuietOnAHealthyCapture(t *testing.T) {
+	// A false warning on every good login would train the operator to ignore the field.
+	cases := []struct{ name, method, body string }{
+		{"form login with both halves", "POST", "csrf=abc&username=carlos&password=hunter2"},
+		{"json login", "POST", `{"username":"carlos","password":"hunter2"}`},
+		{"otp step", "POST", "code=483920"},
+		{"oauth token exchange", "POST", "grant_type=authorization_code&client_secret=s&code=x"},
+		// A GET carries its parameters in the URL, so an empty body is normal and says nothing.
+		{"get has no body by design", "GET", ""},
+		{"delete has no body by design", "DELETE", ""},
+		// No identity field either, so there is nothing to claim went missing.
+		{"opaque body", "POST", "eyJhbGciOiJIUzI1NiJ9.e30.abc"},
+	}
+	for _, c := range cases {
+		if got := authCaptureWarning(c.method, c.body); got != "" {
+			t.Errorf("%s should not warn, got %q", c.name, got)
+		}
+	}
+}
+
+func TestAuthCaptureWarningIsCaseInsensitiveAndCoversWriteVerbs(t *testing.T) {
+	if got := authCaptureWarning("post", "Username=carlos"); got == "" {
+		t.Error("lowercase verb and capitalised field name must still be recognised")
+	}
+	for _, verb := range []string{"PUT", "PATCH"} {
+		if got := authCaptureWarning(verb, "email=a@b.c"); got == "" {
+			t.Errorf("%s carries a body and must be checked too", verb)
+		}
+	}
+}
+
+// A CSRF token is exactly the 32-character alphanumeric blob looksLikeIdentifier looks for, so it
+// can only be excluded by NAME. Measured on a real crawl: 5 of 14 auto-detected candidates were
+// CSRF tokens, and every re-scan would mint fresh ones because the value rotates per response.
+
+func TestCSRFTokensAreNotOfferedAsIDORCandidates(t *testing.T) {
+	found := map[string]string{}
+	add := func(value, label string) { found[value] = label }
+
+	// The exact login body from the crawl, with a real 32-char token.
+	collectIdentifiersFromBody(
+		"csrf=ioye2g336e1nY8JO7llF8I5v3zTHMA4b&redirect=cart&username=carlos&password=hunter2",
+		"request body", add)
+
+	if label, ok := found["ioye2g336e1nY8JO7llF8I5v3zTHMA4b"]; ok {
+		t.Errorf("the CSRF token must not be an IDOR candidate, was offered as %q", label)
+	}
+}
+
+func TestCSRFExclusionCoversTheOtherSpellingsAndPlaces(t *testing.T) {
+	const token = "AbC123XyZ789PqRsAbC123XyZ789PqRs"
+
+	for _, field := range []string{
+		"csrf", "CSRF", "_csrf", "csrf_token", "csrfmiddlewaretoken", "xsrf",
+		"_token", "authenticity_token", "__RequestVerificationToken", "nonce",
+	} {
+		found := map[string]string{}
+		add := func(value, label string) { found[value] = label }
+		collectIdentifiersFromBody(field+"="+token, "request body", add)
+		if label, ok := found[token]; ok {
+			t.Errorf("%s should be excluded, was offered as %q", field, label)
+		}
+	}
+
+	// Same nonce in a JSON body.
+	jsonFound := map[string]string{}
+	collectIdentifiersFromBody(`{"csrf":"`+token+`","orderId":"0254791"}`, "request body",
+		func(value, label string) { jsonFound[value] = label })
+	if _, ok := jsonFound[token]; ok {
+		t.Error("a CSRF token in a JSON body should be excluded too")
+	}
+	// And the real identifier beside it must survive, or the exclusion is too broad.
+	if _, ok := jsonFound["0254791"]; !ok {
+		t.Error("orderId must still be offered; the exclusion must not swallow real identifiers")
+	}
+}
+
+func TestCSRFExclusionDoesNotSwallowRealIdentifiers(t *testing.T) {
+	found := map[string]string{}
+	add := func(value, label string) { found[value] = label }
+
+	// Names that merely CONTAIN "token" are not anti-forgery fields: an access_token or a
+	// device_token identifies something and is worth moving.
+	collectIdentifiersFromBody("access_token=AbC123XyZ789PqRs&user_id=8821", "request body", add)
+
+	if _, ok := found["AbC123XyZ789PqRs"]; !ok {
+		t.Error("access_token is a credential-shaped identifier, not a CSRF nonce; it must survive")
+	}
+	if _, ok := found["8821"]; !ok {
+		t.Error("user_id must survive")
 	}
 }

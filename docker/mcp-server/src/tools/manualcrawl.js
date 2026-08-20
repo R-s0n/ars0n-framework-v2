@@ -381,8 +381,14 @@ async function manageManualCrawl(params) {
         // the GET on the same path is the form it was typed into.
         submissions: rows.filter((c) => c.has_body).length,
         set_cookie: rows.filter((c) => c.sets_cookie).length,
+        // Counted at the top level as well as per row, because the number is the headline: if the
+        // login is one of these, no flow built from this corpus can authenticate and that is worth
+        // knowing before anything else is attempted.
+        capture_warnings: rows.filter((c) => c.capture_warning).length,
         note: 'capture_id is the handle: the auth flow import builds a flow from a chosen set of ' +
-              'them, in recorded order. Use detail:"full" for the rebuilt raw HTTP request.',
+              'them, in recorded order. Use detail:"full" for the rebuilt raw HTTP request. ' +
+              'A capture_warning on a row means the RECORDING looks incomplete, not that the ' +
+              'application is unusual: read it before building a flow from that request.',
         ...limitResults(projected, clampLimit(params.max_results)),
       };
     }
@@ -745,6 +751,10 @@ function compactAuthCandidate(c, full) {
     suggested_category: c.suggested_category,
     has_body: c.has_body === true,
     sets_cookie: c.sets_cookie === true,
+    // Present only when the capture itself looks incomplete, which is a different thing from the
+    // application being unusual. Never behind `full`: the whole point is that it reaches the reader
+    // BEFORE they spend an hour building a flow that cannot possibly authenticate.
+    capture_warning: c.capture_warning || undefined,
     // The rebuilt HTTP/1.1 request, already stripped of pseudo-headers and framing headers, in the
     // exact form an auth flow step stores. Behind full because a login request with a full cookie
     // jar is a kilobyte on its own and there are usually dozens of candidates.

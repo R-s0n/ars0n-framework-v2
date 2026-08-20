@@ -128,10 +128,21 @@ func TestTemplateDeclaresTheFuzzablePartsOnly(t *testing.T) {
 		t.Error("the template must read the generated payload list")
 	}
 	// The matchers that make a response-visible SSRF provable without any callback.
-	for _, want := range []string{"root:", "ami-id", "SSH-", "Location: http"} {
+	//
+	// "Location: http" is deliberately NOT in this list any more. It was, and as a lone word matcher
+	// it fired on every absolute redirect the application makes of its own accord: 42 high severity
+	// findings out of 53 vectors, each with an empty parameter, URL and payload. The redirect matcher
+	// is now pinned to the operator's webhook host and is asserted by
+	// TestOpenRedirectMatcherRequiresOurOwnHost against the RENDERED template, because the constant
+	// on its own still carries the placeholder.
+	for _, want := range []string{"root:", "ami-id", "SSH-", "location: http"} {
 		if !strings.Contains(NucleiPayloadTemplate, want) {
 			t.Errorf("the template lost the matcher for %q", want)
 		}
+	}
+	if !strings.Contains(NucleiPayloadTemplate, nucleiWebhookHostPlaceholder) {
+		t.Error("the redirect matcher must carry the host placeholder, or it goes back to matching " +
+			"every redirect the application makes on its own")
 	}
 }
 
@@ -336,5 +347,116 @@ func TestSSRFmapParserIgnoresProgressChatter(t *testing.T) {
 	}
 	if !strings.Contains(findings[0].Evidence, "8000") {
 		t.Errorf("the open port was not captured: %q", findings[0].Evidence)
+	}
+}
+
+// The open-redirect matcher used to be the single word "Location: http", which tests that the
+// response redirects SOMEWHERE, not that the payload chose where. Every ordinary absolute redirect
+// matched it: a 53 vector run against ginandjuice.shop produced 42 high severity findings with an
+// empty parameter, an empty URL and an empty payload, one per vector that happened to redirect.
+// That is worse than finding nothing, because a real open redirect would be indistinguishable from
+// the other 41.
+func TestOpenRedirectMatcherRequiresOurOwnHost(t *testing.T) {
+	v := VectorInput{
+		Method: "GET", Scheme: "https", Domain: "ginandjuice.shop", Path: "/blog",
+		InsertionPoint: "query", Parameters: []string{"back"}, Token: "tok123",
+		Section: map[string]any{
+			"listeningWebhookURL": "https://webhook.site/66aa3ab4-5ce0-41c8-94e2-82f5b8986118",
+			"resultsWebhookURL":   "https://webhook.site/token/66aa3ab4/requests",
+		},
+	}
+	rendered := NucleiPayloadTemplateFor(v)
+
+	if !strings.Contains(rendered, "webhook.site") {
+		t.Error("the matcher does not name the host we control, so it cannot tell an attacker " +
+			"controlled redirect from the application's own")
+	}
+	if !strings.Contains(rendered, "condition: and") {
+		t.Error("without condition: and the two words are ORed and 'location: http' alone matches " +
+			"every redirect again")
+	}
+	if strings.Contains(rendered, nucleiWebhookHostPlaceholder) {
+		t.Error("the placeholder survived into the template nuclei will run")
+	}
+	// The host, not the whole URL: a Location header carrying a mutated path still proves the point,
+	// and requiring the full URL would miss every bypass form REcollapse generates.
+	if strings.Contains(rendered, "https://webhook.site/66aa3ab4") {
+		t.Error("the matcher pins the full URL rather than the host, so any mutation of the path " +
+			"stops it matching")
+	}
+}
+
+// With no webhook the matcher is REMOVED rather than left matching everything. The tool is gated on
+// the webhook being configured so this should be unreachable, but "unreachable" and "produces 42
+// false highs if reached" is a bad pairing.
+func TestWithNoWebhookTheOpenRedirectMatcherIsDroppedNotLeftWildcarded(t *testing.T) {
+	rendered := NucleiPayloadTemplateFor(VectorInput{Token: "tok123"})
+	if strings.Contains(rendered, "name: open-redirect") {
+		t.Error("the open-redirect matcher survived with no host to pin it to")
+	}
+	if strings.Contains(rendered, nucleiWebhookHostPlaceholder) {
+		t.Error("an unsubstituted placeholder was left in the template")
+	}
+	// The response-based matchers need no webhook and must survive, or a target that hands back
+	// /etc/passwd stops being detected.
+	for _, keep := range []string{"local-file-read", "cloud-metadata", "internal-service"} {
+		if !strings.Contains(rendered, keep) {
+			t.Errorf("the %s matcher needs no callback and must not be dropped", keep)
+		}
+	}
+}
+
+func TestWebhookHostExtraction(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://webhook.site/66aa3ab4-5ce0-41c8-94e2-82f5b8986118": "webhook.site",
+		"http://Example.COM:8080/path":                              "example.com",
+		"":                                                          "",
+		"not a url":                                                 "",
+	} {
+		if got := webhookHost(raw); got != want {
+			t.Errorf("webhookHost(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+// The Show matcher status setting (-ms) makes nuclei emit a jsonl line for EVERY probe, including
+// every one that matched nothing. Those lines carry a template id like any other, so the parser
+// turned each into a high severity finding: a 53 vector run against ginandjuice.shop produced 53,
+// all with an empty parameter, URL and payload, because a non-match has none of those to report.
+func TestANucleiNonMatchIsNotAFinding(t *testing.T) {
+	report := strings.Join([]string{
+		`{"template-id":"framework-redirect-ssrf","type":"http","matcher-status":false,` +
+			`"info":{"name":"Framework open redirect and SSRF sweep","severity":"high"}}`,
+		`{"template-id":"framework-redirect-ssrf","type":"http","matcher-status":false,` +
+			`"info":{"name":"Framework open redirect and SSRF sweep","severity":"high"}}`,
+	}, "\n")
+
+	if got := parseNucleiDastReport("", report, vectorRow{InsertionPoint: "query"}); len(got) != 0 {
+		t.Errorf("a probe that matched nothing was reported as %d finding(s): %+v", len(got), got)
+	}
+}
+
+// A real match must still come through, whether or not -ms is set. With -ms it carries
+// matcher-status true; without it the field is absent entirely, and absent must not read as false or
+// every ordinary run would report nothing at all.
+func TestARealNucleiMatchSurvivesWithAndWithoutMatcherStatus(t *testing.T) {
+	for name, line := range map[string]string{
+		"with -ms": `{"template-id":"open-redirect","type":"http","matcher-status":true,` +
+			`"matcher-name":"open-redirect","matched-at":"https://ginandjuice.shop/blog?back=x",` +
+			`"fuzzing_parameter":"back","fuzzing_position":"query","fuzzing_method":"GET",` +
+			`"info":{"name":"Open redirect","severity":"high"}}`,
+		"without -ms": `{"template-id":"open-redirect","type":"http",` +
+			`"matched-at":"https://ginandjuice.shop/blog?back=x",` +
+			`"fuzzing_parameter":"back","fuzzing_position":"query","fuzzing_method":"GET",` +
+			`"info":{"name":"Open redirect","severity":"high"}}`,
+	} {
+		got := parseNucleiDastReport("", line, vectorRow{InsertionPoint: "query"})
+		if len(got) != 1 {
+			t.Errorf("%s: expected the match to be kept, got %d findings", name, len(got))
+			continue
+		}
+		if got[0].Param != "back" {
+			t.Errorf("%s: the fuzzed parameter was lost: %+v", name, got[0])
+		}
 	}
 }

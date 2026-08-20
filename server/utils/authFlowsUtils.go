@@ -48,6 +48,16 @@ type AuthFlowStep struct {
 	Error           string              `json:"error"`
 	CreatedAt       time.Time           `json:"created_at"`
 	UpdatedAt       time.Time           `json:"updated_at"`
+
+	// Values this step captures out of its own response, for a later step to refer to as
+	// {{af:NAME}}. See authFlowsVariables.go.
+	Extractions []AuthFlowExtraction `json:"extractions"`
+
+	// Filled by a replay, never stored: what each rule actually did, and which placeholders this
+	// step's request had filled in. Reported so the wiring is visible rather than inferred from a
+	// step that mysteriously worked or mysteriously did not.
+	Captured    []ExtractionOutcome `json:"captured,omitempty"`
+	Substituted []string            `json:"substituted,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -249,9 +259,10 @@ func AddAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 	flowID := mux.Vars(r)["flow_id"]
 
 	var payload struct {
-		Name       string `json:"name"`
-		RawRequest string `json:"raw_request"`
-		Replay     *bool  `json:"replay"`
+		Name        string               `json:"name"`
+		RawRequest  string               `json:"raw_request"`
+		Replay      *bool                `json:"replay"`
+		Extractions []AuthFlowExtraction `json:"extractions"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -266,6 +277,13 @@ func AddAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, problem, http.StatusBadRequest)
 		return
 	}
+	// Refused here rather than at replay: a rule that cannot work is far cheaper to explain while
+	// the operator is still looking at the step they just wrote.
+	if problem := validateExtractionSet(payload.Extractions); problem != "" {
+		http.Error(w, problem, http.StatusBadRequest)
+		return
+	}
+	extractionsJSON, _ := json.Marshal(orEmptyExtractions(payload.Extractions))
 
 	// Order is chosen and claimed in one statement. Reading MAX and then inserting let two concurrent
 	// appends pick the same number, and with no uniqueness on (auth_flow_id, step_order) both
@@ -274,11 +292,11 @@ func AddAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 	stepID := uuid.New().String()
 	var nextOrder int
 	if err := dbPool.QueryRow(context.Background(),
-		`INSERT INTO auth_flow_steps (id, auth_flow_id, step_order, name, raw_request)
-		 SELECT $1, $2, COALESCE(MAX(step_order),0)+1, $3, $4
+		`INSERT INTO auth_flow_steps (id, auth_flow_id, step_order, name, raw_request, extractions)
+		 SELECT $1, $2, COALESCE(MAX(step_order),0)+1, $3, $4, $5
 		 FROM auth_flow_steps WHERE auth_flow_id = $2
 		 RETURNING step_order`,
-		stepID, flowID, payload.Name, payload.RawRequest).Scan(&nextOrder); err != nil {
+		stepID, flowID, payload.Name, payload.RawRequest, extractionsJSON).Scan(&nextOrder); err != nil {
 		log.Printf("[ERROR] Failed to insert auth flow step: %v", err)
 		http.Error(w, "Failed to add step", http.StatusInternalServerError)
 		return
@@ -306,6 +324,8 @@ func UpdateAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 		Name       *string `json:"name"`
 		RawRequest *string `json:"raw_request"`
 		StepOrder  *int    `json:"step_order"`
+		// Omitted leaves the rules alone; [] clears them.
+		Extractions *[]AuthFlowExtraction `json:"extractions"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -322,14 +342,24 @@ func UpdateAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 		payload.RawRequest = &normalized
 	}
 
+	var extractionsJSON []byte
+	if payload.Extractions != nil {
+		if problem := validateExtractionSet(*payload.Extractions); problem != "" {
+			http.Error(w, problem, http.StatusBadRequest)
+			return
+		}
+		extractionsJSON, _ = json.Marshal(orEmptyExtractions(*payload.Extractions))
+	}
+
 	if _, err := dbPool.Exec(context.Background(),
 		`UPDATE auth_flow_steps SET
 		   name = COALESCE($1, name),
 		   raw_request = COALESCE($2, raw_request),
 		   step_order = COALESCE($3, step_order),
+		   extractions = COALESCE($5, extractions),
 		   updated_at = NOW()
 		 WHERE id = $4`,
-		payload.Name, payload.RawRequest, payload.StepOrder, stepID); err != nil {
+		payload.Name, payload.RawRequest, payload.StepOrder, stepID, extractionsJSON); err != nil {
 		log.Printf("[ERROR] Failed to update auth flow step: %v", err)
 		http.Error(w, "Failed to update step", http.StatusInternalServerError)
 		return
@@ -410,21 +440,106 @@ func ReplayAuthFlow(w http.ResponseWriter, r *http.Request) {
 	// One shared cookie jar across the whole flow, so Set-Cookie from earlier steps
 	// is sent on later steps (session/token carry-over).
 	jar, _ := cookiejar.New(nil)
-	for _, step := range steps {
-		effBase := resolveBaseURL(step.RawRequest, baseURL)
-		status, headers, body, ms, sendErr := sendRawRequest(step.RawRequest, effBase, jar)
-		errStr := ""
-		if sendErr != nil {
-			errStr = sendErr.Error()
-		}
-		if uErr := updateStepResponse(step.ID, status, headers, body, ms, errStr); uErr != nil {
-			log.Printf("[ERROR] Failed to persist replay for step %s: %v", step.ID, uErr)
+	outcomes := replayFlowSteps(steps, baseURL, jar)
+
+	updated, _ := getStepsByFlow(flowID)
+	// The replay-time detail is not persisted, so fold it back onto the rows being returned:
+	// without it the caller cannot tell a step that filled in a token from one that did not.
+	for i := range updated {
+		if outcome, ok := outcomes[updated[i].ID]; ok {
+			updated[i].Captured = outcome.Captured
+			updated[i].Substituted = outcome.Substituted
 		}
 	}
 
-	updated, _ := getStepsByFlow(flowID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(updated)
+}
+
+// validateExtractionSet refuses a whole set, naming the rule that is wrong.
+func validateExtractionSet(rules []AuthFlowExtraction) string {
+	seen := map[string]bool{}
+	for i, rule := range rules {
+		if problem := validateAuthFlowExtraction(rule); problem != "" {
+			return fmt.Sprintf("capture %d: %s", i+1, problem)
+		}
+		if seen[rule.Name] {
+			return fmt.Sprintf("two captures on this step are both called %q, so one would silently "+
+				"win over the other", rule.Name)
+		}
+		seen[rule.Name] = true
+	}
+	return ""
+}
+
+// orEmptyExtractions keeps the column as [] rather than null, so scanStep never has to care.
+func orEmptyExtractions(rules []AuthFlowExtraction) []AuthFlowExtraction {
+	if rules == nil {
+		return []AuthFlowExtraction{}
+	}
+	return rules
+}
+
+// stepReplayOutcome is the per-step detail a replay produces but does not store.
+type stepReplayOutcome struct {
+	Captured    []ExtractionOutcome
+	Substituted []string
+}
+
+// replayFlowSteps runs the ordered steps against one cookie jar AND one variable map.
+//
+// The jar was already here and carries the session. The map is what makes a per-request CSRF token
+// work: each step captures values out of its own response, and a later step refers to them as
+// {{af:NAME}}. Measured against ginandjuice.shop, without this a login step is answered
+// 400 "Invalid CSRF token" because the token is bound to the session that issued it.
+//
+// A step whose placeholder has no value is NOT sent. It records why, and the loop continues rather
+// than aborting: every step still gets a row, each failure lands on the step it belongs to, and no
+// stale response is left behind looking like a success.
+func replayFlowSteps(steps []AuthFlowStep, baseURL string, jar http.CookieJar) map[string]stepReplayOutcome {
+	outcomes := make(map[string]stepReplayOutcome, len(steps))
+	vars := map[string]string{}
+
+	for _, step := range steps {
+		request, substituted, refusal := prepareStepRequest(step.RawRequest, vars)
+		if refusal != "" {
+			// Clear the previous response rather than leaving a stale 200 next to the reason this
+			// run did not happen.
+			if uErr := updateStepResponse(step.ID, 0, nil, "", 0, refusal); uErr != nil {
+				log.Printf("[ERROR] Failed to persist refusal for step %s: %v", step.ID, uErr)
+			}
+			outcomes[step.ID] = stepReplayOutcome{Substituted: substituted}
+			continue
+		}
+
+		// Resolved from the SUBSTITUTED text: a placeholder can sit in the Host header.
+		effBase := resolveBaseURL(request, baseURL)
+		status, headers, body, ms, sendErr := sendRawRequest(request, effBase, jar)
+
+		captured, outcomeList := runAuthFlowExtractions(step.Extractions, headers, body)
+		for name, value := range captured {
+			vars[name] = value
+		}
+
+		problems := []string{}
+		if sendErr != nil {
+			problems = append(problems, sendErr.Error())
+		}
+		for i, outcome := range outcomeList {
+			// A rule marked optional may legitimately find nothing; a required one that misses is
+			// the reason every later step is about to refuse, so it has to be said here.
+			if !outcome.Matched && !step.Extractions[i].Optional {
+				problems = append(problems, "capture "+outcome.Name+": "+outcome.Problem)
+			}
+		}
+
+		if uErr := updateStepResponse(step.ID, status, headers, body, ms, strings.Join(problems, "; ")); uErr != nil {
+			log.Printf("[ERROR] Failed to persist replay for step %s: %v", step.ID, uErr)
+		}
+		outcomes[step.ID] = stepReplayOutcome{Captured: outcomeList, Substituted: substituted}
+	}
+
+	return outcomes
 }
 
 // replayStepByID re-sends a single step's request, seeding cookies from the responses of
@@ -441,12 +556,32 @@ func replayStepByID(stepID string) error {
 	effBase := resolveBaseURL(step.RawRequest, baseURL)
 
 	jar, _ := cookiejar.New(nil)
+	// Values every earlier step captured, re-read from the responses already recorded rather than by
+	// re-sending them. Replaying one step must not fire the whole flow at the target again, but the
+	// step still needs the token an earlier step produced or it cannot be sent at all.
+	vars := map[string]string{}
 	prior, err := getPriorSteps(step.AuthFlowID, step.StepOrder)
 	if err == nil {
 		seedJar(jar, effBase, prior)
+		for _, earlier := range prior {
+			captured, _ := runAuthFlowExtractions(earlier.Extractions, earlier.ResponseHeaders, earlier.ResponseBody)
+			for name, value := range captured {
+				vars[name] = value
+			}
+		}
 	}
 
-	status, headers, body, ms, sendErr := sendRawRequest(step.RawRequest, effBase, jar)
+	request, _, refusal := prepareStepRequest(step.RawRequest, vars)
+	if refusal != "" {
+		// Recorded on the step rather than returned as an error, so the reason is visible where the
+		// operator is looking instead of only in a toast.
+		return updateStepResponse(stepID, 0, nil, "", 0, refusal+
+			" Replay the whole flow, or run the earlier step first, so its captures are recorded.")
+	}
+	// Recomputed from the substituted text: a placeholder can sit in the Host header.
+	effBase = resolveBaseURL(request, baseURL)
+
+	status, headers, body, ms, sendErr := sendRawRequest(request, effBase, jar)
 	errStr := ""
 	if sendErr != nil {
 		errStr = sendErr.Error()
@@ -697,17 +832,22 @@ func sanitizeForTextColumn(s string) string {
 
 const stepSelectCols = `id, auth_flow_id, step_order, name, raw_request, response_status,
 	response_headers, COALESCE(response_body,''), response_time_ms, COALESCE(error,''),
-	created_at, updated_at`
+	created_at, updated_at, COALESCE(extractions,'[]'::jsonb)`
 
 func scanStep(row interface{ Scan(...interface{}) error }) (AuthFlowStep, error) {
 	var s AuthFlowStep
 	var headersJSON []byte
+	var extractionsJSON []byte
 	if err := row.Scan(&s.ID, &s.AuthFlowID, &s.StepOrder, &s.Name, &s.RawRequest, &s.ResponseStatus,
-		&headersJSON, &s.ResponseBody, &s.ResponseTimeMs, &s.Error, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		&headersJSON, &s.ResponseBody, &s.ResponseTimeMs, &s.Error, &s.CreatedAt, &s.UpdatedAt,
+		&extractionsJSON); err != nil {
 		return s, err
 	}
 	if len(headersJSON) > 0 {
 		_ = json.Unmarshal(headersJSON, &s.ResponseHeaders)
+	}
+	if len(extractionsJSON) > 0 {
+		_ = json.Unmarshal(extractionsJSON, &s.Extractions)
 	}
 	return s, nil
 }

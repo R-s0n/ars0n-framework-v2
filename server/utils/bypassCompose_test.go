@@ -56,49 +56,42 @@ func TestBypassTargetsAreRecordedAgainstTheirOwnColumn(t *testing.T) {
 	}
 }
 
-// 401 and 403 are the section. 404 is deliberately excluded by default.
-//
-// Measured on the live database: for one scope target the list is 29 URLs with 401 and 403, and 179
-// once 404 is added, of which 146 are 404s from directory brute forcing against paths that never
-// existed. Defaulting to that would bury the real access controls six deep in imaginary ones.
-func TestBypassStatusCodePolicy(t *testing.T) {
-	if len(bypassStatusCodes.Default) != 2 {
-		t.Fatalf("the default is 401 and 403, got %v", bypassStatusCodes.Default)
-	}
-	has := map[int]bool{}
-	for _, code := range bypassStatusCodes.Default {
-		has[code] = true
-	}
-	if !has[401] || !has[403] {
-		t.Errorf("401 and 403 are what this section is for: %v", bypassStatusCodes.Default)
-	}
-	if has[404] {
-		t.Error("404 must be opt in: it is most of the 4xx rows and almost all of it is brute force noise")
-	}
-	if _, ok := bypassStatusCodes.Optional["include404"]; !ok {
-		t.Error("404 must still be reachable, because a 404 can hide a resource that exists")
-	}
-	if _, ok := bypassStatusCodes.Optional["include405"]; !ok {
-		t.Error("405 must be offered: verb tampering is one of the techniques these tools implement")
+// The bypass tools take a hand-picked endpoint list on a Targets tab, like every other section that
+// scans URLs. The derived list they used to have is gone at the operator's direction.
+func TestBypassToolsTakeHandPickedEndpoints(t *testing.T) {
+	for _, key := range []string{"nomore403", "forbidden"} {
+		tool, ok := VectorToolByKey(key)
+		if !ok {
+			t.Fatalf("%s is not registered", key)
+		}
+		if tool.RowSource == nil {
+			t.Errorf("%s must take its targets from its own endpoint list", key)
+		}
+		meta, ok := tool.Options[graphqlEndpointsSetting]
+		if !ok {
+			t.Fatalf("%s has no endpoints setting, so it can never be given a target", key)
+		}
+		if meta.Group != "Targets" {
+			t.Errorf("%s must put its endpoints on a Targets tab, got %q", key, meta.Group)
+		}
+		if tool.Groups[0] != "Targets" {
+			t.Errorf("%s should open on the tab that decides what gets scanned, got %q", key, tool.Groups[0])
+		}
 	}
 }
 
-// Every source of a 4xx has to be in the list, and none of them may be a SCAN status column.
-//
-// The database has around forty columns called "status" and almost all of them hold 'running' or
-// 'completed'. Treating one as an HTTP status would produce an empty target list and a section that
-// silently has nothing to do.
-func TestBypassTargetSourcesAreHTTPStatusColumns(t *testing.T) {
-	if len(bypassTargetSources) < 6 {
-		t.Errorf("six tables record an HTTP status alongside a URL, got %d", len(bypassTargetSources))
+// The endpoints worth bypassing are the ones that already denied something, and the picker offers
+// those first. 401, 403 and 407 are an access control decision on a resource that exists; 404 and
+// 405 are offered but are not what the section is for, and on a real target 404 outnumbered the rest
+// five to one.
+func TestDeniedStatusSourcesAreHTTPStatusColumns(t *testing.T) {
+	if len(deniedStatusSources) < 6 {
+		t.Errorf("six tables record an HTTP status alongside a URL, got %d", len(deniedStatusSources))
 	}
-	for _, source := range bypassTargetSources {
+	for _, source := range deniedStatusSources {
 		if source.StatusColumn != "status_code" && source.StatusColumn != "http_status" {
-			t.Errorf("%s.%s does not look like an HTTP status column; a scan status column would "+
-				"produce an empty target list", source.Table, source.StatusColumn)
-		}
-		if source.Name == "" || source.Table == "" {
-			t.Errorf("every source needs a name so a target can say where it came from: %+v", source)
+			t.Errorf("%s.%s does not look like an HTTP status column; a scan status column holds "+
+				"'running' and would produce an empty list", source.Table, source.StatusColumn)
 		}
 	}
 }
@@ -348,5 +341,66 @@ func TestBypassScanStaysInScope(t *testing.T) {
 	// silently misses something, which is worse than one that asks.
 	if !bypassHostInScope("https://anything.example.com/x", "") {
 		t.Error("with no scope host known the target must still be scanned")
+	}
+}
+
+// A target that no longer denies anything has nothing to bypass.
+//
+// The list is built from 4xx responses recorded EARLIER by other tools, and sites change: an endpoint
+// is opened up, a login expires, a WAF rule is withdrawn. When the unmodified request already
+// succeeds, every variation of it succeeds too, and a status-only comparison reports all of them as
+// bypasses of an access control that is not there.
+func TestNomore403ReportsAStaleTargetRatherThanBypasses(t *testing.T) {
+	row := vectorRow{ID: "t1", InsertionPoint: "path", Method: "GET",
+		EvidenceURL: "http://x.example.com/admin", IsBypassTarget: true, BaselineStatus: 403}
+
+	report := strings.Join([]string{
+		`{"status_code":200,"content_length":500,"technique":"default","body_hash":"aaaa"}`,
+		`{"status_code":200,"content_length":500,"technique":"path-case","score":100,"likelihood":"high","body_hash":"bbbb"}`,
+		`{"status_code":200,"content_length":512,"technique":"headers","score":100,"likelihood":"high","body_hash":"cccc"}`,
+	}, "\n")
+
+	findings := parseNomore403Report("", report, row)
+	if len(findings) != 1 {
+		t.Fatalf("a target that no longer denies anything is one note, not a pile of bypasses, got %d", len(findings))
+	}
+	if findings[0].Kind != "stale-target" || findings[0].Severity != "info" {
+		t.Errorf("this is not a vulnerability: %+v", findings[0])
+	}
+	if !strings.Contains(findings[0].Evidence, "403") || !strings.Contains(findings[0].Evidence, "200") {
+		t.Errorf("the evidence must contrast what was recorded with what is true now: %q", findings[0].Evidence)
+	}
+}
+
+// --raw-http is inert and must not be offered as though it enabled something.
+//
+// Verified in nomore403's source: rawHTTP is declared once and read once, where it appends the string
+// "raw-http" to a list of flag names printed in verbose mode. It gates no technique, and
+// raw-duplicates, raw-authority and raw-desync are in the default -k set and run either way.
+func TestNomore403DoesNotOfferTheInertRawHTTPFlag(t *testing.T) {
+	tool, _ := VectorToolByKey("nomore403")
+	for key, meta := range tool.Options {
+		if meta.Flag == "--raw-http" {
+			t.Errorf("%s offers --raw-http, which gates nothing: it would tell an operator they had "+
+				"enabled something", key)
+		}
+	}
+	if _, owned := tool.OwnedFlags["--raw-http"]; !owned {
+		t.Error("--raw-http must be recorded as owned, with the reason, so it is not re-added later")
+	}
+}
+
+// The payload directory is passed explicitly.
+//
+// nomore403's --help says the folder defaults to "the same directory as the executable". Its source
+// says otherwise: the default is the literal relative path "payloads", resolved against the process
+// working directory. Anything that changes the working directory leaves it with no header, endpath or
+// midpath payloads, and the run completes having tried a fraction of what the report implies.
+func TestNomore403AlwaysPointsAtItsPayloadDirectory(t *testing.T) {
+	v := VectorInput{EvidenceURL: "http://x.example.com/admin"}
+	args, _ := ComposeNomore403(v, map[string]any{}, "/tmp/rep")
+
+	if !argsContainPair(args, "-f", nomore403PayloadDir) {
+		t.Errorf("the payload directory must be explicit, not inherited from the working directory: %v", args)
 	}
 }

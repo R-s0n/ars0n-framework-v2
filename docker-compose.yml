@@ -599,6 +599,149 @@ services:
     networks:
       - ars0n-network
 
+  graphql-cop:
+    container_name: ars0n-framework-v2-graphql-cop-1
+    build: ./docker/graphql-cop
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  clairvoyance:
+    container_name: ars0n-framework-v2-clairvoyance-1
+    build: ./docker/clairvoyance
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  graphw00f:
+    container_name: ars0n-framework-v2-graphw00f-1
+    build: ./docker/graphw00f
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  git-dumper:
+    container_name: ars0n-framework-v2-git-dumper-1
+    build: ./docker/git-dumper
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  gittools:
+    container_name: ars0n-framework-v2-gittools-1
+    build: ./docker/gittools
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  snallygaster:
+    container_name: ars0n-framework-v2-snallygaster-1
+    build: ./docker/snallygaster
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  mantra:
+    container_name: ars0n-framework-v2-mantra-1
+    build: ./docker/mantra
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  trufflehog:
+    container_name: ars0n-framework-v2-trufflehog-1
+    build: ./docker/trufflehog
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  upload-bypass:
+    container_name: ars0n-framework-v2-upload-bypass-1
+    build: ./docker/upload-bypass
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  jwt-tool:
+    container_name: ars0n-framework-v2-jwt-tool-1
+    build: ./docker/jwt-tool
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
+  pphack:
+    container_name: ars0n-framework-v2-pphack-1
+    build: ./docker/pphack
+    depends_on:
+      - api
+    volumes:
+      - ./wordlists:/app/wordlists
+      - temp_data:/tmp
+    entrypoint: ["sleep", "infinity"]
+    restart: "no"
+    networks:
+      - ars0n-network
+
 volumes:
   postgres_data:
   temp_data:

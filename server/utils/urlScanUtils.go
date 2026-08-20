@@ -146,23 +146,38 @@ func fetchStatusCode(urlStr string) int {
 		},
 	}
 
-	req, err := http.NewRequest("HEAD", urlStr, nil)
-	if err != nil {
-		req, err = http.NewRequest("GET", urlStr, nil)
+	send := func(method string) (int, error) {
+		req, err := http.NewRequest(method, urlStr, nil)
 		if err != nil {
-			return 0
+			return 0, err
 		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+		resp, err := client.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode, nil
 	}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-
-	resp, err := client.Do(req)
+	status, err := send(http.MethodHead)
 	if err != nil {
 		return 0
 	}
-	defer resp.Body.Close()
 
-	return resp.StatusCode
+	// Fall back to GET when the server REFUSES the verb, not merely when the request could not be
+	// built. The old fallback was on http.NewRequest failing, which for a URL that already parsed
+	// never happens, so a target that answers 405 to HEAD had every application route recorded as
+	// 405 while its static files recorded 200. Measured on ginandjuice.shop 2026-08-19: /, /about,
+	// /login and /catalog/product?productId=N all read 405, which is not the status a GET returns
+	// and is not what the operator is being shown the column for.
+	if status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented {
+		if getStatus, getErr := send(http.MethodGet); getErr == nil {
+			return getStatus
+		}
+	}
+
+	return status
 }
 
 func enrichURLsWithStatusCodes(urls []string) map[string]int {
@@ -1547,11 +1562,14 @@ func ExecuteAndParseWaybackURLsScan(scanID, targetURL, scopeTargetID string) {
 	}
 	log.Printf("[INFO] Target domain for filtering: %s", targetDomain)
 
+	// The BARE DOMAIN, not targetURL. waybackurls interpolates its argument straight into a CDX
+	// query as url=*.<arg>/*, so a scheme-bearing value produces url=*.https://host/*, which is not
+	// the host it was meant to ask about. targetDomain was already computed above and then not used.
 	dockerCmd := []string{
 		"docker", "exec",
 		"ars0n-framework-v2-waybackurls-1",
 		"waybackurls",
-		targetURL,
+		targetDomain,
 	}
 
 	// Bound the run so a hung provider (or an enormous archive) cannot leave the
@@ -1787,15 +1805,21 @@ func ExecuteAndParseGAUURLScan(scanID, targetURL, scopeTargetID string) {
 		domain = host
 	}
 
-	// Providers: intentionally omit "wayback" because the WaybackURLs scan
-	// already covers the Wayback Machine. commoncrawl + otx + urlscan give the
-	// broadest additional coverage. Providers are flaky and rate limited, so we
-	// add retries and a per-request timeout.
+	// "wayback" IS included, despite the WaybackURLs scan nominally covering it.
+	//
+	// That split assumed waybackurls always delivers, and it does not. Measured on
+	// ginandjuice.shop 2026-08-19: the CDX API returns 178 URLs for the host and is reachable from
+	// the container, while the waybackurls binary emits a single newline and exits 0 with nothing on
+	// stderr, reproducibly. The whole run therefore saw 29 archive URLs instead of 187, an 85% loss,
+	// and nothing reported a problem because an empty result is a successful scan.
+	//
+	// Overlapping the two costs a few duplicate URLs, which consolidation folds away anyway. Relying
+	// on a single tool for the largest archive costs the archive.
 	dockerCmd := []string{
 		"docker", "run", "--rm",
 		"sxcurity/gau:latest",
 		domain,
-		"--providers", "commoncrawl,otx,urlscan",
+		"--providers", "wayback,commoncrawl,otx,urlscan",
 		"--json",
 		"--threads", "10",
 		"--retries", "3",

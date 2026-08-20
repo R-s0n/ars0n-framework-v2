@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -58,6 +59,11 @@ type EndpointInvestigationResult struct {
 	// Set when the row recorded a write verb. That verb is characterised with GET, never sent, so
 	// the result must not read as though the write surface was exercised.
 	VerbNotReplayed string `json:"verb_not_replayed,omitempty"`
+
+	// What was actually requested, when that differs from URL because observed parameters were
+	// supplied. URL stays the canonical endpoint so the row still lines up with the consolidated
+	// list; this says what the application was really asked.
+	ProbedURL string `json:"probed_url,omitempty"`
 
 	// The Tier 0 catalogue, plus the score that orders the list. Without the score, five thousand
 	// endpoints arrive equally loud and the operator reads the first twenty alphabetically.
@@ -254,12 +260,32 @@ func ExecuteEndpointInvestigation(scanID, scopeTargetID string) {
 	// canary or an extra request.
 	observed := loadObservedParams(scopeTargetID)
 
+	// The work list is rewritten to the URL that will actually be requested, so BOTH the Tier 0
+	// catalogue and the Tier 1 differential ask a parameterised route with a parameter. The Tier 1
+	// authorization comparison is worth nothing when both arms fetch a bare route that answers 400
+	// either way. The canonical URL is kept aside so each result still names the endpoint the
+	// consolidated list knows.
+	observedQuery := loadObservedQueryParams(scopeTargetID)
+	canonicalURL := make(map[string]string, len(endpoints))
+	parameterised := 0
+	for i := range endpoints {
+		canonicalURL[endpoints[i].ID] = endpoints[i].URL
+		probe := probeURLWithObservedParams(endpoints[i].URL, observedQuery[endpoints[i].ID])
+		if probe != endpoints[i].URL {
+			parameterised++
+			endpoints[i].URL = probe
+		}
+	}
+	if parameterised > 0 {
+		log.Printf("[INFO] %d endpoint(s) probed with parameter values the crawl observed", parameterised)
+	}
+
 	var results []EndpointInvestigationResult
 	perEndpoint := map[string][]Signal{}
 	for i, ep := range endpoints {
 		log.Printf("[INFO] Investigating endpoint %d/%d: %s", i+1, len(endpoints), ep.URL)
 
-		result := investigateEndpoint(ep.ID, ep.URL, ep.Method, authCtx, observed[ep.ID], scope)
+		result := investigateEndpoint(ep.ID, canonicalURL[ep.ID], ep.URL, ep.Method, authCtx, observed[ep.ID], scope)
 		results = append(results, result)
 		if len(result.Signals) > 0 {
 			perEndpoint[ep.ID] = result.Signals
@@ -323,16 +349,28 @@ func ExecuteEndpointInvestigation(scanID, scopeTargetID string) {
 	log.Printf("[INFO] Endpoint investigation completed for scope target %s", scopeTargetID)
 }
 
-func investigateEndpoint(endpointID, urlStr, method string, authCtx *ScopedAuthContext,
+// investigateEndpoint catalogues one endpoint. canonicalURL identifies it and is what the result
+// reports; probeURL is what actually gets requested, and differs when observed parameters were
+// supplied. Everything on the wire uses probeURL, including the scope check: the canonical URL is a
+// label, not a destination.
+func investigateEndpoint(endpointID, canonicalURL, probeURL, method string, authCtx *ScopedAuthContext,
 	observedParams map[string]string, scope *ScanScope) EndpointInvestigationResult {
+	urlStr := probeURL
+
 	// Resolved per endpoint, because credentials are host-bound. Authenticated now means "this
 	// request carried a credential", not "the target had one somewhere", which is what made every
 	// row read authenticated even when nothing was attached to it.
 	material, _ := authCtx.For(hostOf(urlStr))
 
+	probed := ""
+	if probeURL != canonicalURL {
+		probed = probeURL
+	}
+
 	result := EndpointInvestigationResult{
 		EndpointID:    endpointID,
-		URL:           urlStr,
+		URL:           canonicalURL,
+		ProbedURL:     probed,
 		Method:        method,
 		Authenticated: material != nil,
 		AuthSource:    authMaterialSource(material),
@@ -766,6 +804,86 @@ func GetEndpointInvestigationResults(w http.ResponseWriter, r *http.Request) {
 // injected and no extra request is sent: this only reports that a value the application was
 // genuinely given comes back in its own response, which is the precondition for injection rather
 // than evidence of it.
+// probeURLWithObservedParams gives a parameterised endpoint a value to answer with.
+//
+// Consolidation stores /catalog/product?productId=8 as the endpoint /catalog/product with productId
+// recorded as a parameter. That is right for identity and wrong for probing: fetched bare the route
+// answers 400 with an empty error page, so it yields no forms, no reflections, no framework
+// fingerprint and no cookies, and scores 0.
+//
+// Measured on ginandjuice.shop 2026-08-19: /order/details, /catalog/product and /blog/post all
+// scored 0 while third-party JavaScript bundles scored 160, so the three endpoints carrying the
+// enumerable identifiers ranked below every copy of React in the corpus. interest_score is what the
+// list is ordered by and what a capped run would keep, so the ordering was inverted exactly where it
+// mattered.
+//
+// A URL that already carries a query string is left alone: what the crawl recorded beats anything
+// reconstructed from it. The values come from the crawl too, so this sends what the application
+// itself sent rather than a guess.
+func probeURLWithObservedParams(rawURL string, queryParams map[string]string) string {
+	if len(queryParams) == 0 {
+		return rawURL
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.RawQuery != "" {
+		return rawURL
+	}
+
+	// Sorted, so one endpoint produces the same request on every run and two scans stay comparable.
+	names := make([]string, 0, len(queryParams))
+	for name := range queryParams {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	query := parsed.Query()
+	for _, name := range names {
+		query.Set(name, queryParams[name])
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+// loadObservedQueryParams is loadObservedParams narrowed to values that travel in the QUERY STRING.
+//
+// Separate because the two feed different things. loadObservedParams feeds reflection checking and
+// wants every parameter whatever it rode in; this one builds a URL and must not put a body field
+// there. /catalog/product/stock records storeId and productId as BODY parameters, and appending
+// those to the query would fabricate a request the application never receives.
+func loadObservedQueryParams(scopeTargetID string) map[string]map[string]string {
+	out := map[string]map[string]string{}
+
+	rows, err := dbPool.Query(context.Background(), `
+		SELECT p.endpoint_id, p.param_name, p.example_values
+		FROM consolidated_url_parameters p
+		JOIN consolidated_url_endpoints e ON e.id = p.endpoint_id
+		WHERE e.scope_target_id = $1 AND p.param_type = 'query'`, scopeTargetID)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var endpointID, name string
+		var valuesJSON []byte
+		if rows.Scan(&endpointID, &name, &valuesJSON) != nil {
+			continue
+		}
+		var values []string
+		if json.Unmarshal(valuesJSON, &values) != nil || len(values) == 0 {
+			continue
+		}
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(values[0]) == "" {
+			continue
+		}
+		if out[endpointID] == nil {
+			out[endpointID] = map[string]string{}
+		}
+		out[endpointID][name] = values[0]
+	}
+	return out
+}
+
 func loadObservedParams(scopeTargetID string) map[string]map[string]string {
 	out := map[string]map[string]string{}
 

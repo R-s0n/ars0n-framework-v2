@@ -52,6 +52,10 @@ import {
   truncateBody,
   isTextualMime,
   mergeKey,
+  EXTRA_HOSTS_BY_TARGET_KEY,
+  normalizeFormData,
+  encodeFormBody,
+  extractWebRequestBody,
 } from './lib/scope.js';
 
 import {
@@ -60,6 +64,12 @@ import {
   detachAll,
   detachFromTab,
 } from './lib/deepcapture.js';
+
+import {
+  applyRequestBodyStage,
+  applyRequestHeadersStage,
+  applyRedirectStage,
+} from './lib/captureStages.js';
 
 const KEEPALIVE_ALARM = 'ars0n-crawl-keepalive';
 const FLUSH_BATCH_SIZE = 40;
@@ -166,7 +176,19 @@ async function submitCapture(raw, source) {
   }
 
   const limit = maxBodyBytes(state);
-  const requestBody = truncateBody(raw.postData || '', limit);
+
+  // The content type has to be resolved BEFORE the body is encoded. webRequest gives the parsed
+  // form at onBeforeRequest, where no headers exist yet; by the time a capture is submitted,
+  // onSendHeaders has run and the header is in hand, so this is the first place the right wire
+  // format can be chosen. Encoding earlier is what recorded every form POST as JSON.
+  const requestContentType = headerValue(raw.headers, 'content-type') || raw.bodyType || '';
+  const responseContentType = headerValue(raw.responseHeaders, 'content-type') || raw.mimeType || '';
+
+  const rawRequestBody = raw.formData
+    ? encodeFormBody(raw.formData, requestContentType)
+    : raw.postData || '';
+
+  const requestBody = truncateBody(rawRequestBody, limit);
   const responseBody = truncateBody(raw.responseBody || '', limit);
 
   const method = String(raw.method || 'GET').toUpperCase();
@@ -175,9 +197,6 @@ async function submitCapture(raw, source) {
 
   const endpointKey = `${method}:${endpoint}`;
   if (!seenEndpoints.has(endpointKey)) seenEndpoints.add(endpointKey);
-
-  const requestContentType = headerValue(raw.headers, 'content-type') || raw.bodyType || '';
-  const responseContentType = headerValue(raw.responseHeaders, 'content-type') || raw.mimeType || '';
 
   const capture = {
     _mergeKey: mergeKey(method, raw.url),
@@ -193,7 +212,12 @@ async function submitCapture(raw, source) {
     responseBody: responseBody.body,
     responseBodyTruncated: Boolean(raw.responseBodyTruncated) || responseBody.truncated,
     getParams: parseQueryParams(raw.url),
-    postParams: parseParams(requestBody.body, requestContentType),
+    // Taken from the structured form when there is one, rather than re-parsed out of the encoded
+    // string. That is not just tidier: a body clipped at the size limit would otherwise clip the
+    // PARAMETER LIST with it, and the parameter list is what attack vector discovery reads.
+    postParams: raw.formData
+      ? normalizeFormData(raw.formData)
+      : parseParams(requestBody.body, requestContentType),
     bodyType: requestContentType,
     mimeType: responseContentType || 'unknown',
     graphqlOperation: graphqlOperation || '',
@@ -500,6 +524,19 @@ async function stopCaptureSession(options) {
 }
 
 // Recomputes scope from current settings and pushes it everywhere it is enforced.
+// Extra scope hosts are stored against the target they were added for, so the next recording on a
+// different target starts from that target's own host alone. Writing a flat list here was what let
+// a host added during one engagement stay in scope for the next one.
+async function persistExtraHostsForTarget(scopeTargetId, extraHosts) {
+  if (!scopeTargetId) return;
+  const stored = await chrome.storage.local.get([EXTRA_HOSTS_BY_TARGET_KEY]);
+  const raw = stored[EXTRA_HOSTS_BY_TARGET_KEY];
+  const byTarget = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  await chrome.storage.local.set({
+    [EXTRA_HOSTS_BY_TARGET_KEY]: { ...byTarget, [scopeTargetId]: extraHosts },
+  });
+}
+
 async function applyScopeChange(settingsPatch) {
   const state = await getState();
   const settings = { ...(state.settings || {}), ...settingsPatch };
@@ -572,41 +609,22 @@ function touchPending(details) {
       tabId: typeof details.tabId === 'number' ? details.tabId : null,
       timestamp: Date.now(),
       postData: '',
+      // The parsed form, kept structured until the content type is known. See extractWebRequestBody.
+      formData: null,
       headers: {},
       responseHeaders: {},
       statusCode: 0,
       resourceType: details.type || '',
       redirectChain: [],
+      // Set once this request has been redirected. A redirect REUSES the requestId, so every
+      // request-side stage fires a second time for the destination, and this record is keyed on
+      // the ORIGINAL url and method. Without a seal the destination's (bodyless, differently
+      // headered) leg overwrites the request we actually care about. See onBeforeRedirect.
+      requestSealed: false,
     };
     pending.set(details.requestId, record);
   }
   return record;
-}
-
-function parseWebRequestBody(requestBody) {
-  if (!requestBody) return '';
-
-  if (requestBody.formData) {
-    const formData = {};
-    for (const [key, values] of Object.entries(requestBody.formData)) {
-      formData[key] = values.length === 1 ? values[0] : values;
-    }
-    return JSON.stringify(formData);
-  }
-
-  if (requestBody.raw && requestBody.raw.length > 0) {
-    try {
-      const decoder = new TextDecoder('utf-8');
-      // A body can arrive split across several elements.
-      return requestBody.raw
-        .map((chunk) => (chunk && chunk.bytes ? decoder.decode(new Uint8Array(chunk.bytes)) : ''))
-        .join('');
-    } catch (error) {
-      console.error('[MANUAL-CRAWL] Error decoding raw request body:', error);
-    }
-  }
-
-  return '';
 }
 
 async function guardedStage(details, mutate, noteRejection) {
@@ -631,7 +649,7 @@ chrome.webRequest.onBeforeRequest.addListener(
       await guardedStage(
         details,
         (record) => {
-          record.postData = parseWebRequestBody(details.requestBody);
+          applyRequestBodyStage(record, extractWebRequestBody(details.requestBody));
         },
         true
       );
@@ -645,7 +663,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 chrome.webRequest.onSendHeaders.addListener(
   (details) => {
     void guardedStage(details, (record) => {
-      record.headers = lowerHeaderMap(details.requestHeaders);
+      applyRequestHeadersStage(record, lowerHeaderMap(details.requestHeaders));
     });
   },
   { urls: ['<all_urls>'] },
@@ -668,8 +686,7 @@ chrome.webRequest.onHeadersReceived.addListener(
 chrome.webRequest.onBeforeRedirect.addListener(
   (details) => {
     void guardedStage(details, (record) => {
-      record.redirectChain = record.redirectChain || [];
-      record.redirectChain.push({
+      applyRedirectStage(record, {
         location: details.redirectUrl,
         statusCode: details.statusCode,
         from: details.url,
@@ -723,6 +740,7 @@ function toRawRecord(record) {
     headers: record.headers,
     responseHeaders: record.responseHeaders,
     postData: record.postData,
+    formData: record.formData || null,
     responseBody: '',
     mimeType: headerValue(record.responseHeaders, 'content-type'),
     resourceType: record.resourceType,
@@ -1149,7 +1167,15 @@ function buildAuthRow(record) {
     if (!record.postData) record.postData = stashed.postData || '';
   }
 
-  const requestBody = truncateBody(record.postData || '', AUTH_MAX_BODY_BYTES);
+  // Encoded HERE rather than at onBeforeRequest, because this is the first point the content type
+  // is known: onSendHeaders is registered with 'extraHeaders' and has already written record.headers
+  // by now. A login form is the request this matters most for, and serializing it as JSON produced
+  // a raw_request the application answers with 400.
+  const authContentType = headerValue(record.headers, 'content-type') || '';
+  const rawRequestBody = record.formData
+    ? encodeFormBody(record.formData, authContentType)
+    : record.postData || '';
+  const requestBody = truncateBody(rawRequestBody, AUTH_MAX_BODY_BYTES);
   const responseBody = truncateBody(record.responseBody || '', AUTH_MAX_BODY_BYTES);
 
   let host = '';
@@ -1321,8 +1347,9 @@ chrome.webRequest.onBeforeRequest.addListener(
     void (async () => {
       sweepAuthPending();
       await authStage(details, (record) => {
-        const body = parseWebRequestBody(details.requestBody);
-        if (body) record.postData = body;
+        const parsed = extractWebRequestBody(details.requestBody);
+        if (parsed.text) record.postData = parsed.text;
+        if (parsed.formData) record.formData = parsed.formData;
       });
     })();
   },
@@ -1990,7 +2017,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
         const extraHosts = [...existing, host];
-        await chrome.storage.local.set({ extraHosts });
+        await persistExtraHostsForTarget(state.scopeTargetId, extraHosts);
         const scopeHosts = await applyScopeChange({ extraHosts });
         sendResponse({ success: true, scopeHosts });
       })
@@ -2004,7 +2031,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const host = normalizeHostEntry(message.host);
         const existing = (state.settings && state.settings.extraHosts) || [];
         const extraHosts = existing.filter((h) => h !== host);
-        await chrome.storage.local.set({ extraHosts });
+        await persistExtraHostsForTarget(state.scopeTargetId, extraHosts);
         const scopeHosts = await applyScopeChange({ extraHosts });
         sendResponse({ success: true, scopeHosts });
       })

@@ -2,7 +2,6 @@ package utils
 
 import (
 	"encoding/json"
-	"net/url"
 	"strings"
 )
 
@@ -38,7 +37,7 @@ func ComposeSqlmap(v VectorInput, settings map[string]any, reportPath string) ([
 		args = append(args, "--method", method)
 	}
 	if v.InsertionPoint == "body" {
-		args = append(args, "--data", sqliBodyFor(v))
+		args = append(args, "--data", vectorBodyFor(v))
 	}
 
 	// -p names the parameter to test, which stops sqlmap wandering into every other parameter on the
@@ -52,10 +51,10 @@ func ComposeSqlmap(v VectorInput, settings map[string]any, reportPath string) ([
 
 	switch v.InsertionPoint {
 	case "cookie":
-		name := firstParam(v)
+		name := markableParam(v)
 		args = append(args, "--cookie", mergeCookieHeader(authCookies, name, v.valueFor(name)))
 	case "header":
-		name := firstParam(v)
+		name := markableParam(v)
 		suppressedHeader = strings.ToLower(name)
 		args = append(args, "-H", name+": "+sqliMarkedValue(v.valueFor(name)))
 		if authCookies != "" {
@@ -72,7 +71,7 @@ func ComposeSqlmap(v VectorInput, settings map[string]any, reportPath string) ([
 
 	// Framework owned, appended last so a stored setting cannot displace them.
 	args = append(args,
-		"--batch",           // no terminal to answer prompts from
+		"--batch",            // no terminal to answer prompts from
 		"--disable-coloring", // escape codes corrupt stored evidence
 		"--report-json", reportPath,
 		"--output-dir", "/tmp/sqlmap-out",
@@ -90,7 +89,7 @@ func ComposeGhauri(v VectorInput, settings map[string]any, reportPath string) ([
 	args := []string{"-u", sqliTargetURL(v)}
 
 	if v.InsertionPoint == "body" {
-		args = append(args, "--data", sqliBodyFor(v))
+		args = append(args, "--data", vectorBodyFor(v))
 	}
 	if v.InsertionPoint == "query" && len(v.Parameters) > 0 {
 		args = append(args, "-p", strings.Join(v.Parameters, ","))
@@ -101,10 +100,10 @@ func ComposeGhauri(v VectorInput, settings map[string]any, reportPath string) ([
 
 	switch v.InsertionPoint {
 	case "cookie":
-		name := firstParam(v)
+		name := markableParam(v)
 		args = append(args, "--cookie", mergeCookieHeader(authCookies, name, v.valueFor(name)))
 	case "header":
-		name := firstParam(v)
+		name := markableParam(v)
 		suppressedHeader = strings.ToLower(name)
 		args = append(args, "-H", name+": "+sqliMarkedValue(v.valueFor(name)))
 		if authCookies != "" {
@@ -121,7 +120,13 @@ func ComposeGhauri(v VectorInput, settings map[string]any, reportPath string) ([
 
 	// ghauri has no machine-readable report, so findings are read from stdout. --batch is what stops
 	// it prompting "keep testing the others?" and blocking forever.
-	args = append(args, "--batch")
+	//
+	// --flush-session is not optional. ghauri's session is keyed by HOST rather than by URL and
+	// parameter, so once it has recorded a verdict for ginandjuice.shop it replays that verdict for
+	// every remaining vector on the host without sending a request. Measured: 53 vectors, 53 clean;
+	// the same command with this flag reports
+	// "category (GET) ... AND boolean-based blind - WHERE or HAVING clause".
+	args = append(args, "--batch", "--flush-session")
 	_ = reportPath
 	return args, warnings
 }
@@ -186,29 +191,6 @@ func sqliTargetURL(v VectorInput) string {
 		out += "?" + queryPart
 	}
 	return out
-}
-
-// sqliBodyFor returns the body to send, marking the target parameter when the recorded body did not
-// contain it. sqlmap and ghauri both test every parameter in --data by default, so an ordinary body
-// needs no marker.
-func sqliBodyFor(v VectorInput) string {
-	if strings.TrimSpace(v.Body) != "" {
-		return v.Body
-	}
-	// No body was recorded, so one is built from the parameter names the vector claims. Without this
-	// the tool is handed --data "" and tests nothing, silently.
-	values := url.Values{}
-	for _, name := range v.Parameters {
-		values.Set(name, v.valueFor(name))
-	}
-	return values.Encode()
-}
-
-func firstParam(v VectorInput) string {
-	if len(v.Parameters) > 0 {
-		return v.Parameters[0]
-	}
-	return ""
 }
 
 // parseSqlmapReport reads sqlmap's --report-json.

@@ -17,15 +17,21 @@ type nucleiDastFinding struct {
 		Severity string   `json:"severity"`
 		Tags     []string `json:"tags"`
 	} `json:"info"`
-	Host             string `json:"host"`
-	MatchedAt        string `json:"matched-at"`
+	Host             string   `json:"host"`
+	MatchedAt        string   `json:"matched-at"`
 	ExtractedResults []string `json:"extracted-results"`
-	Request          string `json:"request"`
-	Response         string `json:"response"`
-	CurlCommand      string `json:"curl-command"`
-	FuzzingParameter string `json:"fuzzing_parameter"`
-	FuzzingPosition  string `json:"fuzzing_position"`
-	FuzzingMethod    string `json:"fuzzing_method"`
+	Request          string   `json:"request"`
+	Response         string   `json:"response"`
+	CurlCommand      string   `json:"curl-command"`
+	FuzzingParameter string   `json:"fuzzing_parameter"`
+	FuzzingPosition  string   `json:"fuzzing_position"`
+	FuzzingMethod    string   `json:"fuzzing_method"`
+
+	// MatcherName and MatcherStatus are only emitted when -ms is set, and MatcherStatus is FALSE for
+	// a probe that matched NOTHING. A pointer rather than a bool so that "absent", which is what an
+	// ordinary run produces because it reports only matches, is not read as false.
+	MatcherName   string `json:"matcher-name"`
+	MatcherStatus *bool  `json:"matcher-status"`
 }
 
 // parseNucleiDastReport turns nuclei's jsonl into findings.
@@ -43,6 +49,18 @@ func parseNucleiDastReport(stdout, report string, row vectorRow) []VectorFinding
 		}
 		var doc nucleiDastFinding
 		if json.Unmarshal([]byte(line), &doc) != nil || doc.TemplateID == "" {
+			continue
+		}
+
+		// A NON-MATCH is not a finding. The Show matcher status setting (-ms) makes nuclei emit a
+		// line for every probe it sends, including every one that matched nothing, and those lines
+		// carry a template id like any other. Without this check each one became a high severity
+		// finding: a 53 vector run produced 53 of them, all with an empty parameter, an empty URL and
+		// an empty payload, because a non-match has no parameter, URL or payload to report.
+		//
+		// That is the mirror image of a silent clean and it is worse: a real open redirect would have
+		// been one indistinguishable row among 52 fabricated ones.
+		if doc.MatcherStatus != nil && !*doc.MatcherStatus {
 			continue
 		}
 
@@ -124,11 +142,11 @@ func parseREcollapseOutput(stdout, report string, row vectorRow) []VectorFinding
 			continue
 		}
 		findings = append(findings, VectorFinding{
-			VectorID:   row.ID,
-			Tool:       "recollapse",
-			Kind:       "validation-bypass",
-			Severity:   "medium",
-			Confidence: "confirmed: the mutated value was accepted and the redirect landed on the canary host",
+			VectorID:       row.ID,
+			Tool:           "recollapse",
+			Kind:           "validation-bypass",
+			Severity:       "medium",
+			Confidence:     "confirmed: the mutated value was accepted and the redirect landed on the canary host",
 			InsertionPoint: row.InsertionPoint,
 			Param:          doc.Param,
 			Payload:        doc.Mutation,

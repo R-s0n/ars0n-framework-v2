@@ -316,29 +316,6 @@ const URLToolCard = ({ tool }) => (
   </Col>
 );
 
-const WAF_PROBE_EMPTY_STATE = {
-  none: 'Not yet run',
-  error: 'Last run failed, see Results',
-  noresult: 'Ran, but stored no result',
-  unreadable: 'Stored result could not be read',
-  legacy: 'Result predates the probe rewrite, run again',
-};
-
-// Age matters more here than on most cards: a probe from last month describes both a target and an
-// egress reputation that have since moved, and neither is visible from the numbers.
-function formatProbeAge(at) {
-  if (!at) return null;
-  const ms = Date.now() - new Date(at).getTime();
-  if (Number.isNaN(ms) || ms < 0) return null;
-  const mins = Math.floor(ms / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return days === 1 ? 'yesterday' : `${days}d ago`;
-}
-
 function App() {
   const [showScanHistoryModal, setShowScanHistoryModal] = useState(false);
   const [showRawResultsModal, setShowRawResultsModal] = useState(false);
@@ -772,7 +749,6 @@ function App() {
   const [showFFUFURLResultsModal, setShowFFUFURLResultsModal] = useState(false);
   const [showWAFProbeResultsModal, setShowWAFProbeResultsModal] = useState(false);
   const [showWAFProbeConfigModal, setShowWAFProbeConfigModal] = useState(false);
-  const [wafProbeRecCount, setWAFProbeRecCount] = useState(null);
   // Which crawler's config modal is open, or null. One piece of state for all three, since only
   // one can be open at a time.
   const [crawlerConfigTool, setCrawlerConfigTool] = useState(null);
@@ -4855,30 +4831,6 @@ function App() {
     }
   }, [activeTarget]);
 
-  // How many settings the probe has to suggest. The probe does not change any tool config itself,
-  // so this is the card's way of saying there is something waiting to be read and acted on.
-  const refreshWAFProbeRecCount = useCallback(async () => {
-    if (!activeTarget || activeTarget.type !== 'URL') return;
-    try {
-      const res = await fetch(`/api/waf-probe/recommendations/${activeTarget.id}`);
-      const data = res.ok ? await res.json() : null;
-      setWAFProbeRecCount(
-        data?.status === 'ok'
-          ? (data.tools || []).reduce((n, t) => n + (t.settings || []).length, 0)
-          : null,
-      );
-    } catch (e) {
-      setWAFProbeRecCount(null);
-    }
-  }, [activeTarget]);
-
-  useEffect(() => { refreshWAFProbeRecCount(); }, [refreshWAFProbeRecCount]);
-  // Re-read once a run finishes, so a scan that lands while the card is open stops showing the
-  // previous run's count.
-  useEffect(() => {
-    if (!isWAFProbeScanning) refreshWAFProbeRecCount();
-  }, [isWAFProbeScanning, refreshWAFProbeRecCount]);
-
   // Katana Company scans useEffect
   useEffect(() => {
     if (activeTarget) {
@@ -5468,36 +5420,6 @@ function App() {
     }
     return 'Starting...';
   }, [isEndpointScanRunning, endpointScanRun]);
-
-  // What the last validation actually established, including what it had to assume. An operator
-  // reading "412 valid" needs to know whether that rested on a measured probe or on a default.
-  const endpointWorkflowSummary = useMemo(() => {
-    if (isEndpointScanRunning) {
-      return endpointScanRun?.phase === 'investigate'
-        ? 'Enriching the endpoints validation did not rule out.'
-        : 'Validating. Each endpoint is measured against a control from its own directory.';
-    }
-    if (isConsolidatingEndpoints) return 'Folding the six discovery sources into unique endpoint and verb combinations.';
-    if (!endpointValidation || endpointValidation.status === 'not_run') {
-      return consolidatedEndpointCount > 0
-        ? 'Not yet investigated. Investigate validates first, then enriches whatever survives.'
-        : 'Not yet consolidated.';
-    }
-
-    const parts = [];
-    if (endpointValidation.status !== 'success') parts.push(endpointValidation.status);
-    if (endpointValidation.requests_sent) parts.push(`${endpointValidation.requests_sent} requests`);
-    if (endpointValidation.abort_reason) parts.push(`stopped: ${endpointValidation.abort_reason}`);
-    // A skipped phase 2 is the single most useful thing this run can report, so it outranks the
-    // request count rather than sitting behind a modal.
-    if (endpointScanRun?.note) parts.push(endpointScanRun.note.split('.')[0]);
-    const assumptions = endpointValidation.assumptions || [];
-    if (assumptions.length > 0) {
-      parts.push(`${assumptions.length} assumption${assumptions.length === 1 ? '' : 's'}, see Results`);
-    }
-    return parts.length > 0 ? parts.join(' · ') : 'Validated and investigated. Every verdict is measured.';
-  }, [endpointValidation, endpointScanRun, isEndpointScanRunning, isConsolidatingEndpoints,
-      consolidatedEndpointCount]);
 
   const loadEndpointValidationSummary = useCallback(async () => {
     if (!activeTarget) return;
@@ -8827,17 +8749,7 @@ function App() {
                               <i className="bi bi-exclamation-triangle-fill me-2" style={{ fontSize: '0.8rem' }}></i>
                               <strong>{wafProbeCard.blockers} finding(s) will break your scans</strong>
                             </div>
-                          ) : wafProbeCard.state === 'ok' ? (
-                            <div className="text-muted">
-                              <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
-                              Nothing found that will corrupt your scans
-                            </div>
-                          ) : (
-                            <div className="text-muted">
-                              <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
-                              {WAF_PROBE_EMPTY_STATE[wafProbeCard.state] || 'Not yet run'}
-                            </div>
-                          )}
+                          ) : null}
                         </div>
 
                         <div className="my-3 py-3">
@@ -8877,16 +8789,6 @@ function App() {
                         </div>
 
                         <div className="mt-auto">
-                          <Card.Text className="text-muted mb-3" style={{ fontSize: '0.72rem' }}>
-                            {wafProbeCard.state === 'ok' ? [
-                              (wafProbeCard.posture || '').replace(/_/g, ' ').toLowerCase(),
-                              wafProbeCard.runStatus === 'complete' ? 'complete' : wafProbeCard.runStatus,
-                              formatProbeAge(wafProbeCard.at),
-                              wafProbeRecCount === null ? null
-                                : wafProbeRecCount === 0 ? 'no settings to change'
-                                : `${wafProbeRecCount} recommendation${wafProbeRecCount === 1 ? '' : 's'}`,
-                            ].filter(Boolean).join(' · ') : ' '}
-                          </Card.Text>
                           <div className="d-flex justify-content-center gap-2">
                             <Button
                               variant="outline-danger"
@@ -9206,9 +9108,6 @@ function App() {
                         </div>
 
                         <div className="mt-auto">
-                          <Card.Text className="text-muted mb-3" style={{ fontSize: '0.72rem' }}>
-                            {endpointWorkflowSummary}
-                          </Card.Text>
                           <div className="d-flex gap-2">
                             <Button
                               variant="outline-danger"
@@ -9599,15 +9498,9 @@ function App() {
                             </Col>
                             <Col>
                               <div className="text-danger fw-bold fs-4">
-                                {attackVectorCounts.hosts ?? '-'}
+                                {attackVectorCounts.with_notes ?? '-'}
                               </div>
-                              <div className="text-muted small">Hosts</div>
-                            </Col>
-                            <Col>
-                              <div className="text-danger fw-bold fs-4">
-                                {attackVectorCounts.manual ?? '-'}
-                              </div>
-                              <div className="text-muted small">Added by Hand</div>
+                              <div className="text-muted small">Unique Attack Vectors w/ Notes</div>
                             </Col>
                           </Row>
                         </div>

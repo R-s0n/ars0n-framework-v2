@@ -4,7 +4,8 @@
   "description": "MCP server for Ars0n Framework - scan execution, workflows, data queries, and bug bounty analysis",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

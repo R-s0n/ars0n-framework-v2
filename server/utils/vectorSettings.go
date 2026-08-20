@@ -56,7 +56,7 @@ func GetVectorSettings(w http.ResponseWriter, r *http.Request) {
 	var report VectorEligibilityReport
 	if vectors, err := loadRowsFor(ctx, tool, scopeTargetID); err == nil {
 		report = BuildVectorEligibility(tool, vectors, settings,
-			loadFoundVectorIDs(ctx, scopeTargetID, tool.Category),
+			loadFoundVectorIDs(ctx, scopeTargetID, findingCategoryFor(tool)),
 			loadVectorSectionSettings(ctx, scopeTargetID, tool.Category))
 		report.Vectors = nil // The per-vector list is for the scan, not for the settings form.
 	}
@@ -157,7 +157,7 @@ func SaveVectorSettings(w http.ResponseWriter, r *http.Request) {
 		var notes []string
 		for point, keys := range blinded {
 			if point == "all" {
-				notes = append(notes, joinAnd(keys)+" stops this tool sending payloads at all")
+				notes = append(notes, joinAnd(keys)+" stops this tool reporting anything at all")
 				continue
 			}
 			notes = append(notes, joinAnd(keys)+" makes every "+point+" vector untestable")

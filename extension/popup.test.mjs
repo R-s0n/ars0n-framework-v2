@@ -87,7 +87,7 @@ function makeElement(tag = 'div') {
   return el;
 }
 
-function buildContext(sendMessageImpl) {
+function buildContext(sendMessageImpl, initialStorage) {
   const elements = new Map();
   const getElementById = (id) => {
     if (!elements.has(id)) elements.set(id, makeElement('div'));
@@ -105,7 +105,7 @@ function buildContext(sendMessageImpl) {
     },
   };
 
-  const storage = { extraHosts: [] };
+  const storage = { ...(initialStorage || {}) };
 
   const context = {
     document: documentStub,
@@ -135,13 +135,26 @@ function buildContext(sendMessageImpl) {
       },
       storage: {
         local: {
-          get: async () => ({ ...storage }),
+          // Chrome returns ONLY the requested keys. This stub used to return the whole store,
+          // which hid a whole class of bug: code that forgot to ask for a key still saw it here
+          // and read undefined in the browser, so a test could be green while the feature was
+          // dead in production.
+          get: async (keys) => {
+            if (keys === null || keys === undefined) return { ...storage };
+            const wanted = Array.isArray(keys) ? keys : [keys];
+            const out = {};
+            wanted.forEach((key) => {
+              if (Object.prototype.hasOwnProperty.call(storage, key)) out[key] = storage[key];
+            });
+            return out;
+          },
           set: async (patch) => Object.assign(storage, patch),
         },
       },
       tabs: { query: async () => [], create() {} },
     },
     elements,
+    storage,
   };
   context.globalThis = context;
   context.window = context;
@@ -300,6 +313,113 @@ section('the list is hidden when there is nothing out of scope');
   await withState(context, baseState({}));
   check('block hidden when empty', context.elements.get('outOfScopeBlock').classList.contains('d-none'), true);
   check('rows cleared', rowsOf(context).length, 0);
+}
+
+/* ------------------------------------------------------ per-target extra scope hosts */
+
+// Extra scope hosts used to live in one flat `extraHosts` array shared by every target, so a host
+// added while testing one application was still in scope when the next recording started against a
+// different one. That was not cosmetic: currentSettings() feeds startCapture, so the stale hosts
+// became the new target's real capture boundary, traffic to them was uploaded under the new
+// target's session, and the server then treats an observed host as one the operator authorized
+// scanners to contact (server/utils/crawlScopeHosts.go: "Observed means admitted").
+
+section('extra scope hosts belong to one target, not to the browser');
+{
+  const context = buildContext(
+    async (msg) => {
+      if (msg.action === 'getSessionState') return { success: true, state: { active: false } };
+      return { success: true };
+    },
+    { extraHostsByTarget: { 'target-a': ['api.a.example.com'] } },
+  );
+
+  const select = context.document.getElementById('targetSelect');
+  await context.loadSettings();
+
+  select.value = 'target-a';
+  check('the target that added the host still sees it', context.currentSettings().extraHosts, [
+    'api.a.example.com',
+  ]);
+  check('and it is in that target"s preview scope', context.buildPreviewScope(), ['api.a.example.com']);
+
+  // The reported bug, as an assertion.
+  select.value = 'target-b';
+  check('a different target starts from a clean scope', context.currentSettings().extraHosts, []);
+  check('nothing leaks into its preview scope', context.buildPreviewScope(), []);
+
+  // Adding for B must not touch A.
+  await context.addHost('api.b.example.com');
+  check('B now has its own host', context.currentSettings().extraHosts, ['api.b.example.com']);
+  select.value = 'target-a';
+  check('A is untouched by B"s addition', context.currentSettings().extraHosts, ['api.a.example.com']);
+  check('storage is keyed by target', context.storage.extraHostsByTarget, {
+    'target-a': ['api.a.example.com'],
+    'target-b': ['api.b.example.com'],
+  });
+}
+
+section('a host cannot be staged with no target to own it');
+{
+  const context = buildContext(async () => ({ success: true }), {});
+  context.document.getElementById('targetSelect').value = '';
+  await context.loadSettings();
+
+  await context.addHost('orphan.example.com');
+  // Nothing is written, because there is no target to own it. Silently keeping it somewhere
+  // global is exactly the behaviour being removed.
+  check('nothing is stored', context.storage.extraHostsByTarget, undefined);
+  check('and it is not in scope anywhere', context.currentSettings().extraHosts, []);
+}
+
+section('the retired global host list is not adopted by any target');
+{
+  const context = buildContext(async () => ({ success: true }), {
+    extraHosts: ['leftover.previous-engagement.com'],
+  });
+  const select = context.document.getElementById('targetSelect');
+  await context.loadSettings();
+
+  // There is no record of which target those hosts were typed for, because the session state that
+  // knew lives in chrome.storage.session and does not survive a browser restart. Adopting them
+  // would recreate the exact leak this shape removes.
+  select.value = 'fresh-target';
+  check('a fresh target does not inherit them', context.currentSettings().extraHosts, []);
+  check('the old global key stops being scope', context.storage.extraHosts, []);
+  // Moved aside rather than deleted: nothing the operator typed is destroyed.
+  check('but the hosts are preserved', context.storage.extraHostsLegacy, [
+    'leftover.previous-engagement.com',
+  ]);
+}
+
+section('a settings toggle mid-recording cannot narrow the live capture scope');
+{
+  const sent = [];
+  const context = buildContext(
+    async (msg) => {
+      sent.push(msg);
+      if (msg.action === 'getSessionState') return { success: true, state: context.__state };
+      return { success: true };
+    },
+    { extraHostsByTarget: { 'target-a': ['api.a.example.com'] } },
+  );
+
+  await context.loadSettings();
+  context.document.getElementById('targetSelect').value = 'target-a';
+  await withState(context, baseState({}));
+
+  await context.saveSettings();
+
+  // Once recording starts the worker owns the session's scope. If the popup sent its own copy, a
+  // click on any settings checkbox would overwrite the live boundary with whatever the popup last
+  // read, silently dropping the target's cross-domain traffic for the rest of the recording.
+  const update = sent.find((m) => m.action === 'updateSettings');
+  check('an updateSettings patch was sent', Boolean(update), true);
+  check(
+    'and it carries no scope for the worker to overwrite with',
+    Object.prototype.hasOwnProperty.call(update.settings, 'extraHosts'),
+    false,
+  );
 }
 
 /* ------------------------------------------------------------------ */

@@ -60,7 +60,7 @@ func StartVectorScan(ctx context.Context, scopeTargetID, toolKey string) (string
 	settings := loadVectorSettings(ctx, scopeTargetID, toolKey)
 	sectionSettings := loadVectorSectionSettings(ctx, scopeTargetID, tool.Category)
 	report := BuildVectorEligibility(tool, vectors, settings,
-		loadFoundVectorIDs(ctx, scopeTargetID, tool.Category),
+		loadFoundVectorIDs(ctx, scopeTargetID, findingCategoryFor(tool)),
 		sectionSettings)
 
 	scanID := uuid.New().String()
@@ -81,8 +81,9 @@ func StartVectorScan(ctx context.Context, scopeTargetID, toolKey string) (string
 		if verdict.Eligible {
 			continue
 		}
-		if err := recordScanTarget(ctx, scanID, verdict.VectorID, verdict.IsBypassTarget,
-			"skipped", verdict.Reason, 0); err != nil {
+		if err := recordScanTargetIdentity(ctx, scanID,
+			identityFor(verdict.VectorID, verdict.IsBypassTarget, verdict.IsGraphQLTarget,
+				verdict.IsLeakTarget, verdict.TargetURL), "skipped", verdict.Reason, 0); err != nil {
 			log.Printf("[VECTOR] recording skip for vector %s: %v", verdict.VectorID, err)
 		}
 	}
@@ -142,6 +143,20 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 
 		findings, warnings, err := runVectorOnce(ctx, scanID, scopeTargetID, tool, vector, settings,
 			sectionSettings, targetHeaderWords, targetParamWords)
+
+		// A FLAKY detector gets more than one go before its silence is believed. Findings end the
+		// retries, so a tool that works pays nothing for this. See AttemptsWhenEmpty: pphack hit 3
+		// times in 6 identical runs against a URL it demonstrably detects, so at one run per vector
+		// half of everything it could find was being recorded clean.
+		for attempt := 2; attempt <= tool.AttemptsWhenEmpty && err == nil && len(findings) == 0; attempt++ {
+			findings, warnings, err = runVectorOnce(ctx, scanID, scopeTargetID, tool, vector, settings,
+				sectionSettings, targetHeaderWords, targetParamWords)
+			if len(findings) > 0 {
+				warnings = append(warnings, fmt.Sprintf("Found on attempt %d of %d; this detector is "+
+					"not deterministic, so a single clean run of it means little.",
+					attempt, tool.AttemptsWhenEmpty))
+			}
+		}
 		completed++
 
 		status, reason := "clean", strings.Join(warnings, " ")
@@ -155,8 +170,9 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 
 		// Every vector behind this scan gets the same verdict, so none of them reads as untested.
 		for _, id := range siblings {
-			if dbErr := recordScanTarget(ctx, scanID, id, vector.IsBypassTarget, status, reason,
-				len(findings)); dbErr != nil {
+			if dbErr := recordScanTargetIdentity(ctx, scanID,
+				identityFor(id, vector.IsBypassTarget, vector.IsGraphQLTarget, vector.IsLeakTarget,
+					vector.EvidenceURL), status, reason, len(findings)); dbErr != nil {
 				log.Printf("[VECTOR] recording vector %s: %v", id, dbErr)
 			}
 		}
@@ -234,11 +250,11 @@ func collectWebhookFindings(ctx context.Context, scanID string, tool VectorTool,
 			Confidence: "confirmed out of band: the target made a request to the configured webhook " +
 				"carrying this vector's token, so the callback belongs to this parameter rather than " +
 				"to the host in general",
-			InsertionPoint:  vector.InsertionPoint,
-			Param:           strings.Join(vector.Parameters, ","),
-			Payload:         hit.Token,
-			Method:          vector.Method,
-			URL:             vector.EvidenceURL,
+			InsertionPoint: vector.InsertionPoint,
+			Param:          strings.Join(vector.Parameters, ","),
+			Payload:        hit.Token,
+			Method:         vector.Method,
+			URL:            vector.EvidenceURL,
 			Evidence: "The webhook results URL reported an interaction containing " + hit.Token +
 				", which was sent only in the payloads aimed at this vector.",
 			DetectionMethod: "out-of-band callback",
@@ -336,8 +352,22 @@ func runVectorOnce(ctx context.Context, scanID, scopeTargetID string, tool Vecto
 			return nil, warnings, fmt.Errorf("writing the payload list: %w", err)
 		}
 		if err := writeContainerFile(ctx, tool.Container, reportPath+".tpl/template.yaml",
-			NucleiPayloadTemplate); err != nil {
+			NucleiPayloadTemplateFor(input)); err != nil {
 			return nil, warnings, fmt.Errorf("writing the template: %w", err)
+		}
+	}
+
+	// Upload_Bypass reads a saved request from -r, and that request must carry its *filename*, *data*
+	// and *mimetype* markers. An unmarked request is not a weaker scan, it is a false one: the tool
+	// re-sends the original bytes unchanged and matches them against the success message, which the
+	// original upload satisfies by definition. Composing refuses the same request for the same reason,
+	// so a failure here is reported rather than silently producing an empty file.
+	if tool.Key == "upload-bypass" {
+		marked, err := MarkUploadRequest(input.RawRequestOverride)
+		if err != nil {
+			warnings = append(warnings, "This request cannot be tested: "+err.Error())
+		} else if err := writeContainerFile(ctx, tool.Container, reportPath+".req", marked); err != nil {
+			return nil, warnings, fmt.Errorf("writing the request file: %w", err)
 		}
 	}
 
@@ -432,11 +462,45 @@ func runVectorOnce(ctx context.Context, scanID, scopeTargetID string, tool Vecto
 				return all, warnings, fmt.Errorf("%v: %s", err, tailOf(string(output)))
 			}
 		}
+		// A tool that REFUSED ITS OWN COMMAND LINE never sent a request, and must never be filed as
+		// clean. The exit code used to be consulted only inside the UsesReportFile branch above, so
+		// every tool that reports on stdout had its exit code discarded completely: ghauri exited 2
+		// with "argument --delay: invalid int value: '0.5'" and all fifty three vectors were recorded
+		// clean in forty seconds, which reads exactly like "there is no SQL injection here".
+		//
+		// Only a refusal is promoted to an error, not any non-zero exit, because several of these
+		// tools exit non-zero as their ordinary way of saying they found nothing. Failing those would
+		// trade one silent clean for a wall of false errors, and an operator who learns to ignore
+		// errors is back where they started.
+		if err != nil && !timedOut && refusedItsCommandLine(string(output)) {
+			return all, warnings, fmt.Errorf("%s rejected the command line it was given, so nothing "+
+				"was tested: %s", tool.Key, tailOf(string(output)))
+		}
+
+		// A tool that says its own run was INCOMPLETE is not a clean result. Checked before parsing so
+		// that an abort cannot be mistaken for "nothing here", and the findings gathered before the
+		// abort are still returned alongside the error.
+		if tool.Incomplete != nil {
+			if why := tool.Incomplete(string(output), report); why != "" {
+				all = append(all, tool.Parse(string(output), report, vector)...)
+				return all, warnings, fmt.Errorf("%s stopped before it finished, so this vector is "+
+					"UNTESTED rather than clean: %s", tool.Key, why)
+			}
+		}
+
 		// Stamped here rather than in each parser, so a new tool cannot forget it and have every one
 		// of its findings rejected by the foreign key on the way into the database.
 		parsed := tool.Parse(string(output), report, vector)
 		for i := range parsed {
+			// ALL of the identity flags, stamped from the row rather than trusted from the parser.
+			//
+			// A parser that sets two of the three leaves the finding looking like an ordinary attack
+			// vector, whose id then fails the foreign key. That failure is logged and the scan carries
+			// on, so the per-target row reports findings the findings table does not contain. This has
+			// now happened three times; stamping centrally is what stops a fourth.
 			parsed[i].IsBypassTarget = vector.IsBypassTarget
+			parsed[i].IsLeakTarget = vector.IsLeakTarget
+			parsed[i].IsGraphQLTarget = vector.IsGraphQLTarget
 		}
 		all = append(all, parsed...)
 	}
@@ -465,7 +529,6 @@ func countVectorScans(tool VectorTool, vectors []vectorRow, report VectorEligibi
 	}
 	return len(seen)
 }
-
 
 // readContainerFile reads a report back out of a tool container.
 func readContainerFile(ctx context.Context, container, path string) (string, error) {
@@ -500,13 +563,13 @@ func writeContainerFile(ctx context.Context, container, path, content string) er
 func storeVectorFindings(ctx context.Context, scanID string, findings []VectorFinding) int {
 	stored := 0
 	for _, f := range findings {
-		vectorID, bypassID := vectorIdentityColumns(f.VectorID, f.IsBypassTarget)
+		vectorID, bypassID := vectorFindingIdentity(f)
 		if _, err := dbPool.Exec(ctx, `
-			INSERT INTO vector_findings (scan_id, vector_id, bypass_target_id, tool, kind, severity,
-			    confidence, insertion_point, param, payload, method, url, evidence, detection_method,
-			    inject_type, raw_request, raw_response, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())`,
-			scanID, vectorID, bypassID, f.Tool, f.Kind, f.Severity, f.Confidence, f.InsertionPoint,
+			INSERT INTO vector_findings (scan_id, vector_id, bypass_target_id, leak_target_id, tool,
+			    kind, severity, confidence, insertion_point, param, payload, method, url, evidence,
+			    detection_method, inject_type, raw_request, raw_response, created_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW())`,
+			scanID, vectorID, bypassID, vectorFindingLeakID(f), f.Tool, f.Kind, f.Severity, f.Confidence, f.InsertionPoint,
 			f.Param, f.Payload, f.Method, f.URL, sanitizeForTextColumn(f.Evidence),
 			f.DetectionMethod, f.InjectType,
 			sanitizeForTextColumn(f.RawRequest), sanitizeForTextColumn(f.RawResponse)); err != nil {
@@ -562,4 +625,33 @@ func lastURLIn(line string) string {
 		}
 	}
 	return ""
+}
+
+// refusedItsCommandLine reports whether output is a command line tool complaining about its own
+// arguments rather than reporting the result of a scan.
+//
+// The markers are the ones argparse, optparse, Go's flag package, cobra and clap print between them,
+// which covers every tool this framework drives. Matching on the message rather than on the exit
+// code is deliberate: exit 2 means "bad usage" to argparse and "found something" to other tools, so
+// the code alone cannot tell the two apart, and the caller pairs this with a non-zero exit anyway.
+func refusedItsCommandLine(output string) bool {
+	lower := strings.ToLower(output)
+	for _, marker := range []string{
+		"error: argument",               // argparse, rejecting a value
+		"unrecognized arguments",        // argparse, rejecting a flag
+		"invalid int value",             // argparse
+		"invalid float value",           // argparse
+		"invalid choice",                // argparse
+		"no such option",                // optparse
+		"flag provided but not defined", // go flag
+		"flag needs an argument",        // go flag
+		"unknown flag",                  // cobra, clap
+		"unexpected argument",           // clap
+		"unknown option",                // getopt, commander
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }

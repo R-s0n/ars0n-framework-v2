@@ -11,6 +11,9 @@ import (
 // the false positive controls, because on a real site the default behaviour of either tool is to
 // report every variation whose response differs at all, and most differences are not bypasses.
 
+// nomore403PayloadDir is where the cloned repository's payload wordlists live in the image.
+const nomore403PayloadDir = "/opt/nomore403/payloads"
+
 // ComposeNomore403 builds the nomore403 argv for one target URL.
 func ComposeNomore403(v VectorInput, settings map[string]any, reportPath string) ([]string, []string) {
 	tool, _ := VectorToolByKey("nomore403")
@@ -27,9 +30,9 @@ func ComposeNomore403(v VectorInput, settings map[string]any, reportPath string)
 	if len(techniques) > 0 {
 		args = append(args, "-k", strings.Join(techniques, ","))
 	} else {
-		// Omitted rather than passed empty: nomore403's own default is all twenty-two, and an empty
+		// Omitted rather than passed empty: nomore403's own default is all twenty-three, and an empty
 		// -k would be a list of nothing.
-		warnings = append(warnings, "No techniques were selected, so this run used all twenty-two.")
+		warnings = append(warnings, "No techniques were selected, so this run used all twenty-three.")
 	}
 
 	// Calibration is what separates a usable report from an unusable one, so turning it off is
@@ -43,10 +46,12 @@ func ComposeNomore403(v VectorInput, settings map[string]any, reportPath string)
 
 	args = append(args, composeVectorSettings(tool, settings, "", nil, &warnings)...)
 
-	// Framework owned. The payload wordlists live beside the binary in the image and nomore403 looks
-	// for them relative to the working directory, which the container sets; -f is owned so a stored
-	// setting cannot point it somewhere empty, where the run would complete having tried nothing.
-	args = append(args, "--jsonl", "-o", reportPath, "--no-banner")
+	// Framework owned. -f is emitted explicitly rather than relying on the container's working directory. nomore403's
+	// --help says the payload folder defaults to "the same directory as the executable"; the source
+	// says otherwise, defaulting to the literal relative path "payloads" resolved against the process
+	// CWD. Anything that changes the working directory therefore leaves it with no header, endpath or
+	// midpath payloads, and the run completes having tried a fraction of what it reported.
+	args = append(args, "-f", nomore403PayloadDir, "--jsonl", "-o", reportPath, "--no-banner")
 	return args, warnings
 }
 
@@ -90,6 +95,12 @@ func ComposeForbidden(v VectorInput, settings map[string]any, reportPath string)
 		warnings = append(warnings, "Results whose length matches the original denial response are "+
 			"filtered out, which is what stops a page that says \"Access Denied\" under a 200 from "+
 			"being reported as a bypass. Set your own content lengths to change this.")
+	}
+
+	if strings.TrimSpace(stringifySetting(settings["force"])) != "" {
+		warnings = append(warnings, "Forcing a method also skips the OPTIONS probe Forbidden uses to "+
+			"discover which methods the endpoint allows, so the whole verb axis collapses to the one "+
+			"method you forced.")
 	}
 
 	args = append(args, composeVectorSettings(tool, settings, "", skip, &warnings)...)

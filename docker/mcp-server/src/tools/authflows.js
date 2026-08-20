@@ -1,5 +1,6 @@
 const { z } = require('zod');
 const { apiGet, apiPost, apiPut, apiDelete } = require('../api');
+const { clip, bodyOptions, DEFAULTS } = require('../utils/clip');
 
 // Auth Flows tools let an MCP client document & replay a target's HTTP authentication flows
 // (register / login / mfa_otp / reset). Each flow is an ordered list of steps; a step holds a raw
@@ -14,17 +15,22 @@ const CATEGORY = z.enum(['register', 'login', 'mfa_otp', 'magic_link', 'reset'])
 
 // A recorded response body can be up to 2MB; trim it before returning to an MCP client so it
 // doesn't blow up the model's context. The full body stays available in the web UI / DB.
-const BODY_LIMIT = 2000;
-function trimStep(step) {
+// The budget is no longer a fixed 2000. A value worth reading can sit past it: pulling a CSRF token
+// out of a captured login form was impossible because the token sat around character 3500 of a 7492
+// character page. Reading ONE step, or asking for the window around a match, costs a fraction of the
+// page and answers the question.
+//
+// raw_request is deliberately NOT clipped here. It round-trips into update_auth_flow_step, where the
+// server replaces the stored request wholesale, so handing back a truncated one means a later write
+// stores a truncated request and the replay engine fires it at the target as if it were real.
+function trimStep(step, opts) {
   if (!step || typeof step !== 'object') return step;
   const body = step.response_body;
-  if (typeof body === 'string' && body.length > BODY_LIMIT) {
-    return { ...step, response_body: body.slice(0, BODY_LIMIT) + `\n…[truncated ${body.length - BODY_LIMIT} chars]` };
-  }
-  return step;
+  if (typeof body !== 'string') return step;
+  return { ...step, response_body: clip(body, (opts && opts.limit) || DEFAULTS.record, opts || {}) };
 }
-function trimSteps(steps) {
-  return Array.isArray(steps) ? steps.map(trimStep) : steps;
+function trimSteps(steps, opts) {
+  return Array.isArray(steps) ? steps.map((s) => trimStep(s, opts)) : steps;
 }
 
 // === List flows for a target ===
@@ -85,23 +91,51 @@ async function deleteAuthFlow(params) {
 // === List a flow's steps (with recorded responses) ===
 const getAuthFlowStepsSchema = z.object({
   flow_id: z.string().uuid().describe('The auth flow UUID.'),
+  step_id: z.string().uuid().optional().describe(
+    'Read only this step, at a much larger body budget. With one row there is no row multiplier, ' +
+    'so this is how you read a value out of a large recorded response.'),
+  max_body_chars: z.number().int().positive().optional().describe(
+    'Raise the per-body character budget for this call. Bounded at 200000, and divided by the row ' +
+    'count so raising it on a long flow degrades instead of exploding.'),
+  body_match: z.string().optional().describe(
+    'Return the window of the body AROUND the first case-insensitive occurrence of this string ' +
+    'rather than the first N characters. The cheap way to pull one value out of a large page.'),
+  body_match_window: z.number().int().positive().optional().describe(
+    'Characters either side of a body_match hit. Default 400.'),
 });
 async function getAuthFlowSteps(params) {
-  return trimSteps(await apiGet(`/auth-flows/flow/${params.flow_id}/steps`));
+  let steps = await apiGet(`/auth-flows/flow/${params.flow_id}/steps`);
+  steps = Array.isArray(steps) ? steps : [];
+  if (params.step_id) steps = steps.filter((s) => s.id === params.step_id);
+  const single = Boolean(params.step_id);
+  return trimSteps(steps, bodyOptions(
+    params,
+    single ? DEFAULTS.single : DEFAULTS.record,
+    single ? 1 : steps.length,
+  ));
 }
 
 // === Add a step (app sends the request and records the response) ===
 const addAuthFlowStepSchema = z.object({
   flow_id: z.string().uuid().describe('The auth flow UUID.'),
-  raw_request: z.string().describe('The full raw HTTP request: request line (e.g. "POST /login HTTP/1.1"), headers (including Host), a blank line, then the body. The app sends this to the target and records the live response.'),
+  raw_request: z.string().describe('The full raw HTTP request: request line (e.g. "POST /login HTTP/1.1"), headers (including Host), a blank line, then the body. The app sends this to the target and records the live response. Placeholders of the form {{af:NAME}} are replaced with values an EARLIER step captured, and Content-Length is recomputed afterwards; a step with no placeholders is sent byte for byte as stored.'),
   name: z.string().optional().describe('Optional label for the step, e.g. "Submit credentials".'),
   replay: z.boolean().optional().describe('Send the request and record the response now (default true). Set false to store the request without sending.'),
+  extractions: z.array(z.object({
+    name: z.string(),
+    source: z.enum(['body', 'header', 'cookie']),
+    source_key: z.string().optional(),
+    pattern: z.string().optional(),
+    decode_as: z.enum(['none', 'html', 'url']).optional(),
+    optional: z.boolean().optional(),
+  })).optional().describe("Values to capture out of THIS step's response for later steps to refer to as {{af:NAME}}. This is what makes a per-request CSRF token work: step 1 captures the token, step 2 uses it. pattern is a Go RE2 regex whose capture group 1 is the value, e.g. name=\"csrf\" value=\"([^\"]+)\". A required capture that does not match stops every later step that needs it, rather than sending a blank token."),
 });
 async function addAuthFlowStep(params) {
   return trimStep(await apiPost(`/auth-flows/flow/${params.flow_id}/steps`, {
     raw_request: params.raw_request,
     name: params.name || '',
     replay: params.replay === undefined ? true : params.replay,
+    extractions: params.extractions || [],
   }));
 }
 

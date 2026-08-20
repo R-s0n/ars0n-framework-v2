@@ -172,3 +172,56 @@ func parseXSSFuzzOutput(stdout, report string, vector vectorRow) []VectorFinding
 	}
 	return findings
 }
+
+// dalfoxIncomplete reads the meta line that parseDalfoxJSONL deliberately skips, and reports whether
+// dalfox says it gave up.
+//
+// The meta line is a summary rather than a finding, which is why the finding parser ignores it. But
+// it is also the ONLY place dalfox records that a run was abandoned:
+//
+//	{"meta":{"findings_count":0,"incomplete":true,"target_summary":[{"status":"incomplete",
+//	  "error_code":"SESSION_LOST","error_message":"--session-check pattern did not match ..."}]}}
+//
+// Skipping the line meant skipping that, and 53 abandoned vectors were recorded as clean against an
+// application that documents four separate XSS on its own /vulnerabilities page. dalfox was not
+// wrong and it was not silent. Nobody was reading it.
+func dalfoxIncomplete(stdout, report string) string {
+	scanner := bufio.NewScanner(strings.NewReader(report))
+	scanner.Buffer(make([]byte, 0, 1024*1024), 8*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var row struct {
+			Meta *struct {
+				Incomplete    bool `json:"incomplete"`
+				TargetSummary []struct {
+					Status       string `json:"status"`
+					ErrorCode    string `json:"error_code"`
+					ErrorMessage string `json:"error_message"`
+				} `json:"target_summary"`
+			} `json:"meta"`
+		}
+		if json.Unmarshal([]byte(line), &row) != nil || row.Meta == nil || !row.Meta.Incomplete {
+			continue
+		}
+		// The per-target reason is the useful one. "incomplete" on its own tells an operator that
+		// something went wrong but not what to change, and SESSION_LOST tells them to refresh the
+		// token before believing any of it.
+		for _, target := range row.Meta.TargetSummary {
+			if target.ErrorCode != "" || target.ErrorMessage != "" {
+				reason := target.ErrorCode
+				if target.ErrorMessage != "" {
+					if reason != "" {
+						reason += ": "
+					}
+					reason += target.ErrorMessage
+				}
+				return reason
+			}
+		}
+		return "dalfox reported the run incomplete without naming a reason"
+	}
+	return ""
+}

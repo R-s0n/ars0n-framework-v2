@@ -26,6 +26,9 @@ function statusVariant(status) {
   const s = String(status || '').toLowerCase();
   if (!s) return 'secondary';
   if (s === 'valid' || s === 'ok' || s === 'active' || s === 'refreshed' || s === 'success') return 'success';
+  // Deliberately not in REJECTED_STATUSES above: a companion is a routing cookie, never graded on
+  // its own, so "Refresh all expired" must not replay a login flow on its account.
+  if (s === 'companion') return 'info';
   if (REJECTED_STATUSES.has(s)) return 'danger';
   if (s === 'error' || s === 'unknown' || s === 'inconclusive') return 'warning';
   return 'secondary';

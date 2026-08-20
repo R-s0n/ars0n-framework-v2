@@ -69,6 +69,30 @@ func parseNomore403Report(stdout, report string, row vectorRow) []VectorFinding 
 		}
 	}
 
+	// The target does not deny anything any more, so nothing found here is a bypass.
+	//
+	// The list is built from 4xx responses recorded EARLIER by other tools, and a site changes between
+	// then and now: an endpoint is opened up, a login expires, a WAF rule is withdrawn. When the
+	// unmodified request already succeeds, every variation of it also succeeds, and a status-only
+	// comparison reports all of them as bypasses of an access control that is no longer there.
+	if baselineStatus > 0 && baselineStatus < 400 {
+		return []VectorFinding{{
+			VectorID:       row.ID,
+			Tool:           "nomore403",
+			Kind:           "stale-target",
+			Severity:       "info",
+			Confidence:     "not a vulnerability: this URL no longer denies the request at all",
+			InsertionPoint: row.InsertionPoint,
+			Method:         row.Method,
+			URL:            row.EvidenceURL,
+			Evidence: "This target was recorded returning " + strconv.Itoa(row.BaselineStatus) +
+				", but the unmodified request now answers " + strconv.Itoa(baselineStatus) +
+				". There is no access control left to bypass, so the variations that also succeeded " +
+				"are not findings. Re-run the consolidation to refresh the target list.",
+			DetectionMethod: "nomore403 baseline",
+		}}
+	}
+
 	var findings []VectorFinding
 	seen := map[string]bool{}
 	for _, result := range results {

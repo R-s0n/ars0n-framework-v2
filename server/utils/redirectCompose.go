@@ -3,6 +3,7 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -141,10 +142,64 @@ http:
       - type: word
         part: header
         name: open-redirect
+        condition: and
         words:
-          - "Location: http"
+          - "location: http"
+          - "__WEBHOOK_HOST__"
         case-insensitive: true
 `
+
+// nucleiWebhookHostPlaceholder is substituted per vector by NucleiPayloadTemplateFor.
+const nucleiWebhookHostPlaceholder = "__WEBHOOK_HOST__"
+
+// NucleiPayloadTemplateFor renders the template for ONE vector, pinning the open-redirect matcher to
+// the operator's own webhook host.
+//
+// The matcher used to be the single word "Location: http", which tests that the response redirects
+// somewhere, not that the PAYLOAD decided where. Every ordinary absolute redirect matched it, so a
+// 53 vector run produced 42 high severity findings with an empty parameter, an empty URL and an
+// empty payload: one per vector that happened to redirect at all. That is worse than finding
+// nothing, because a real open redirect would have been indistinguishable from the other 41.
+//
+// Requiring the host we control means a match says the target sent the user somewhere we chose,
+// which is what the finding claims.
+//
+// With no webhook configured the matcher is REMOVED rather than left matching everything. This tool
+// is gated on the webhook being set so that should be unreachable, but "unreachable" and "produces
+// 42 false highs if reached" is a bad pairing.
+func NucleiPayloadTemplateFor(v VectorInput) string {
+	host := webhookHost(stringifySetting(v.Section["listeningWebhookURL"]))
+	if host == "" {
+		return removeOpenRedirectMatcher(NucleiPayloadTemplate)
+	}
+	return strings.ReplaceAll(NucleiPayloadTemplate, nucleiWebhookHostPlaceholder, host)
+}
+
+// webhookHost reduces a webhook URL to the host that will appear in a Location header.
+func webhookHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	return strings.ToLower(parsed.Hostname())
+}
+
+func removeOpenRedirectMatcher(template string) string {
+	idx := strings.Index(template, "        name: open-redirect")
+	if idx < 0 {
+		return template
+	}
+	// Trim back to the start of that matcher's list item, so the YAML stays valid.
+	idx = strings.LastIndex(template[:idx], "      - type: word")
+	if idx < 0 {
+		return template
+	}
+	return template[:idx]
+}
 
 // BuildVectorPayloadList renders the payload file for ONE vector.
 //

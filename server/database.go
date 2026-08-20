@@ -2113,6 +2113,14 @@ func createTables() {
 		    UNIQUE (scope_target_id, url)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_access_bypass_targets_target ON access_bypass_targets(scope_target_id) WHERE deleted_at IS NULL;`,
+		// The operator's own judgement about scope, which beats any heuristic the framework can apply.
+		//
+		// Guessing from the hostname is not good enough and it was measured not being good enough: on a
+		// real target the guess held back 27 of 29 URLs, including the company's own S3 bucket and its
+		// own API on a second domain, while correctly holding back Vimeo and TransUnion. Only the
+		// person who read the programme's scope knows which is which, so NULL means "use the guess"
+		// and true/false is the operator overruling it.
+		`ALTER TABLE access_bypass_targets ADD COLUMN IF NOT EXISTS in_scope_override BOOLEAN;`,
 
 		// A scan row and a finding point at EITHER an attack vector or a bypass target, never both.
 		// Added as columns rather than a parallel set of tables so the runner, the progress display
@@ -2123,6 +2131,43 @@ func createTables() {
 		// does not stop a bypass target being recorded twice: its vector_id is always NULL. This is
 		// the equivalent guard for the other identity.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_vector_scan_vectors_bypass ON vector_scan_vectors(scan_id, bypass_target_id) WHERE bypass_target_id IS NOT NULL;`,
+
+		// A target that exists in NO table needs somewhere to be named.
+		//
+		// The GraphQL section is why. Its endpoints are not rows anywhere: the list IS the tool's
+		// settings, because the operator marks endpoints by hand in each tool's own config. So neither
+		// foreign key applies, and without this column the per-endpoint progress rows would all be
+		// (NULL, NULL) and the screen could not say which endpoint it was on.
+		`ALTER TABLE vector_scan_vectors ADD COLUMN IF NOT EXISTS target_url TEXT;`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_vector_scan_vectors_url ON vector_scan_vectors(scan_id, target_url) WHERE target_url IS NOT NULL;`,
+
+		// The sensitive data leak section scans DIRECTORIES, not endpoints.
+		//
+		// An exposed .git, .env or backup sits wherever the application was deployed, which is usually
+		// a subdirectory, so scanning only the site root misses most of them. Every URL the framework
+		// knows contributes the directories that contain it: /app/admin/users.php contributes
+		// /app/admin/, /app/ and /.
+		//
+		// A table rather than a query at scan time because the cost has to be visible first. Measured:
+		// snallygaster sends 189 requests per directory, and one real scope target's 1232 known URLs
+		// expand to 1378 directories. That is a quarter of a million requests, which is a decision
+		// rather than a default.
+		`CREATE TABLE IF NOT EXISTS leak_targets (
+		    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		    scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+		    url TEXT NOT NULL,
+		    depth INT NOT NULL DEFAULT 0,
+		    sources TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+		    notes TEXT NOT NULL DEFAULT '',
+		    deleted_at TIMESTAMP,
+		    first_seen TIMESTAMP DEFAULT NOW(),
+		    last_seen TIMESTAMP DEFAULT NOW(),
+		    UNIQUE (scope_target_id, url)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_leak_targets_target ON leak_targets(scope_target_id) WHERE deleted_at IS NULL;`,
+		`ALTER TABLE vector_scan_vectors ADD COLUMN IF NOT EXISTS leak_target_id UUID REFERENCES leak_targets(id) ON DELETE CASCADE;`,
+		`ALTER TABLE vector_findings ADD COLUMN IF NOT EXISTS leak_target_id UUID REFERENCES leak_targets(id) ON DELETE CASCADE;`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_vector_scan_vectors_leak ON vector_scan_vectors(scan_id, leak_target_id) WHERE leak_target_id IS NOT NULL;`,
 
 		// Settings that belong to a SECTION rather than to one tool.
 		//
@@ -2208,6 +2253,15 @@ func createTables() {
 			created_at TIMESTAMP DEFAULT NOW(),
 			updated_at TIMESTAMP DEFAULT NOW()
 		);`,
+		// What this step captures out of its own response for a later step to use.
+		//
+		// An auth flow could not log into anything with a per-request CSRF token without it, which is
+		// most applications: the shared cookie jar carries the session, but the token lives in the
+		// response body and a step is otherwise sent verbatim. A JSONB column rather than its own
+		// table because the rules are only ever read, written and deleted with the step they belong
+		// to, and a separate table would buy a foreign key nobody needs at the cost of a join on
+		// every step read.
+		`ALTER TABLE auth_flow_steps ADD COLUMN IF NOT EXISTS extractions JSONB NOT NULL DEFAULT '[]'::jsonb;`,
 		`CREATE INDEX IF NOT EXISTS idx_auth_flows_scope_target ON auth_flows(scope_target_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_auth_flow_steps_flow ON auth_flow_steps(auth_flow_id);`,
 
@@ -2326,6 +2380,31 @@ func createTables() {
 			created_at TIMESTAMP DEFAULT NOW(),
 			updated_at TIMESTAMP DEFAULT NOW()
 		);`,
+		// What the value IS, as opposed to how it travels.
+		//
+		// credential: the thing that proves who you are. companion: a value that is not a credential
+		// but without which the credential does not work, which in practice means a load balancer
+		// affinity cookie. Measured on a real target: GET /my-account with a valid session cookie
+		// returned 302 to the login page, and the identical request carrying the AWSALB cookie from
+		// the same login response returned 200. The session store was per backend, so without the
+		// routing cookie the request reached a backend that had never seen the login.
+		//
+		// The failure that makes this worth a column is silent and inverts a whole scan: every
+		// authenticated endpoint answers as if anonymous and the scanner fingerprints the login wall
+		// as the application. Registering the routing cookie as an ordinary token was the only way to
+		// get it onto the wire, and it then reported not_honoured forever, because on its own it
+		// changes nothing.
+		`ALTER TABLE session_tokens ADD COLUMN IF NOT EXISTS token_role VARCHAR(16)
+		   NOT NULL DEFAULT 'credential';`,
+		`DO $$
+		 BEGIN
+		   IF NOT EXISTS (
+		     SELECT 1 FROM pg_constraint WHERE conname = 'session_tokens_token_role_check'
+		   ) THEN
+		     ALTER TABLE session_tokens ADD CONSTRAINT session_tokens_token_role_check
+		       CHECK (token_role IN ('credential','companion'));
+		   END IF;
+		 END $$;`,
 		`CREATE INDEX IF NOT EXISTS idx_session_tokens_target
 		   ON session_tokens(scope_target_id, is_active);`,
 		`CREATE TABLE IF NOT EXISTS session_token_events (

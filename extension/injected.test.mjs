@@ -84,9 +84,32 @@ function buildPage({ fetchImpl, xhrBehaviour } = {}) {
 
   const beaconCalls = [];
 
+  // Reads the fields off the form the way the real FormData constructor does. Node's own FormData
+  // only accepts a real HTMLFormElement, so the fake page has to supply this one; what is under
+  // test is the hook's handling of the entries (repeats, files, the submitter), not FormData.
+  class FakeFormData {
+    constructor(form, submitter) {
+      if (!form || !Array.isArray(form._fields)) throw new TypeError('not a form');
+      this._entries = form._fields.map(([key, value]) => [key, value]);
+      if (submitter && submitter.name) this._entries.push([submitter.name, submitter.value]);
+    }
+    forEach(fn) {
+      this._entries.forEach(([key, value]) => fn(value, key));
+    }
+  }
+
+  const nativeFormSubmitCalls = [];
+  class FakeHTMLFormElement {}
+  FakeHTMLFormElement.prototype.submit = function nativeSubmit() {
+    nativeFormSubmitCalls.push(this);
+  };
+
+  const submitListeners = [];
+
   const windowStub = {
     fetch: fetchImpl || defaultFetch,
     XMLHttpRequest: FakeXHR,
+    FormData: FakeFormData,
     Request,
     location: { href: 'https://app.example.com/' },
     performance: { now: () => Date.now() },
@@ -104,7 +127,14 @@ function buildPage({ fetchImpl, xhrBehaviour } = {}) {
 
   const context = {
     window: windowStub,
-    document: { baseURI: 'https://app.example.com/' },
+    document: {
+      baseURI: 'https://app.example.com/',
+      addEventListener: (type, fn) => {
+        if (type === 'submit') submitListeners.push(fn);
+      },
+    },
+    HTMLFormElement: FakeHTMLFormElement,
+    TypeError,
     navigator: { sendBeacon: (url, data) => { beaconCalls.push({ url, data }); return true; } },
     URL,
     URLSearchParams,
@@ -140,7 +170,34 @@ function buildPage({ fetchImpl, xhrBehaviour } = {}) {
   const configure = (config) =>
     windowStub.postMessage({ __ars0n: '__ars0n_control__', config });
 
-  return { context, windowStub, captured, configure, nativeFetchCalls, beaconCalls, FakeXHR };
+  // A form element as the hook sees it: attributes readable by getAttribute (never by the DOM
+  // properties, which a field named "action" would shadow) and a field list FakeFormData reads.
+  function makeForm(attrs, fields) {
+    const form = Object.create(FakeHTMLFormElement.prototype);
+    form.nodeType = 1;
+    form._fields = fields || [];
+    form._attrs = attrs || {};
+    form.getAttribute = (name) =>
+      form._attrs[name] === undefined ? null : form._attrs[name];
+    return form;
+  }
+
+  const submitForm = (form, submitter) =>
+    submitListeners.forEach((fn) => fn({ target: form, submitter: submitter || null }));
+
+  return {
+    context,
+    windowStub,
+    captured,
+    configure,
+    nativeFetchCalls,
+    beaconCalls,
+    FakeXHR,
+    makeForm,
+    submitForm,
+    nativeFormSubmitCalls,
+    submitListeners,
+  };
 }
 
 const ACTIVE = {
@@ -368,6 +425,193 @@ section('sendBeacon: captured and still delivered');
   check('captured', page.captured.length, 1);
   check('recorded as POST', (page.captured[0] || {}).method, 'POST');
   check('body recorded', (page.captured[0] || {}).postData, 'bye');
+}
+
+/* ------------------------------------------------------------------ form submissions */
+
+// The defect these exist for, measured on ginandjuice.shop 2026-08-19: a real login POST was
+// stored with post_param_names [csrf, redirect, username] and request_size 67. The password, the
+// last field in the form, was absent from chrome.webRequest's requestBody.formData, and no other
+// hook can see a plain <form> navigation submit. An auth flow imported from that capture could
+// never authenticate.
+
+section('form: a login submit is captured WITH the password');
+{
+  const page = buildPage();
+  page.configure(ACTIVE);
+  await tick();
+
+  page.submitForm(
+    page.makeForm({ action: '/login', method: 'post' }, [
+      ['csrf', 'bBn9PVhe0CkI40JPomzRNYGxf2IRZ6Um'],
+      ['redirect', 'cart'],
+      ['username', 'carlos'],
+      ['password', 'hunter2'],
+    ])
+  );
+  await tick();
+
+  check('one record captured', page.captured.length, 1);
+  const record = page.captured[0] || {};
+  check('method', record.method, 'POST');
+  check('action resolved against the page', record.url, 'https://app.example.com/login');
+  // Structured on purpose: the background encodes it with the same encodeFormBody the webRequest
+  // path uses, so the two sources cannot drift into different wire formats.
+  check('every field present, password included', record.formData, {
+    csrf: 'bBn9PVhe0CkI40JPomzRNYGxf2IRZ6Um',
+    redirect: 'cart',
+    username: 'carlos',
+    password: 'hunter2',
+  });
+  check('enctype recorded', record.bodyType, 'application/x-www-form-urlencoded');
+  check('no response claimed', record.statusCode, 0);
+  // webRequest classifies the navigation as main_frame and outranks nothing on merge, so claiming
+  // a type here would overwrite a correct classification with a redundant one.
+  check('resource type left to webRequest', record.resourceType, '');
+}
+
+section('form: an empty action posts back to the current page');
+{
+  const page = buildPage();
+  page.configure(ACTIVE);
+  await tick();
+
+  page.submitForm(page.makeForm({ method: 'POST' }, [['q', '1']]));
+  await tick();
+
+  check('falls back to location', (page.captured[0] || {}).url, 'https://app.example.com/');
+}
+
+section('form: a field named "action" cannot redirect the capture');
+{
+  // DOM clobbering. form.action would return the input element, not the attribute, and the
+  // capture would be filed against whatever the page put in that field.
+  const page = buildPage();
+  page.configure(ACTIVE);
+  await tick();
+
+  page.submitForm(
+    page.makeForm({ action: '/real-endpoint', method: 'POST' }, [
+      ['action', 'https://evil.example/collect'],
+      ['method', 'GET'],
+      ['secret', 's3cret'],
+    ])
+  );
+  await tick();
+
+  check('one record', page.captured.length, 1);
+  check('url from the attribute', (page.captured[0] || {}).url, 'https://app.example.com/real-endpoint');
+  check('clobbering field still recorded as a field', (page.captured[0] || {}).formData, {
+    action: 'https://evil.example/collect',
+    method: 'GET',
+    secret: 's3cret',
+  });
+}
+
+section('form: GET submissions are left to webRequest');
+{
+  const page = buildPage();
+  page.configure(ACTIVE);
+  await tick();
+
+  // A GET form puts its fields in the query string, which webRequest records in full. Reporting
+  // it here would file a body against a URL that never carried one.
+  page.submitForm(page.makeForm({ action: '/search', method: 'get' }, [['q', 'gin']]));
+  page.submitForm(page.makeForm({ action: '/search' }, [['q', 'juice']])); // no method = GET
+  await tick();
+
+  check('nothing captured', page.captured.length, 0);
+}
+
+section('form: out of scope and inactive are both ignored');
+{
+  const page = buildPage();
+  page.configure(ACTIVE);
+  await tick();
+  page.submitForm(page.makeForm({ action: 'https://evil.test/steal', method: 'POST' }, [['a', '1']]));
+  await tick();
+  check('out-of-scope host ignored', page.captured.length, 0);
+
+  const idle = buildPage();
+  await tick();
+  idle.submitForm(idle.makeForm({ action: '/login', method: 'POST' }, [['password', 'p']]));
+  await tick();
+  check('nothing captured while inactive', idle.captured.length, 0);
+}
+
+section('form: repeated names, files and the submitter');
+{
+  const page = buildPage();
+  page.configure(ACTIVE);
+  await tick();
+
+  page.submitForm(
+    page.makeForm({ action: '/upload', method: 'POST', enctype: 'multipart/form-data' }, [
+      ['tag', 'a'],
+      ['tag', 'b'],
+      ['tag', 'c'],
+      ['avatar', { name: 'photo.png' }],
+    ]),
+    { name: 'op', value: 'publish' }
+  );
+  await tick();
+
+  const record = page.captured[0] || {};
+  check('repeats collapse to an array, not a last-wins scalar', record.formData, {
+    tag: ['a', 'b', 'c'],
+    // A file arrives as a File object with no readable bytes. Naming it records that a part was
+    // there; contributing nothing made the body silently short with no sign anything was missing.
+    avatar: '[file:photo.png]',
+    // The pressed button is how a multi-submit form tells the server which action was taken.
+    op: 'publish',
+  });
+  check('multipart enctype recorded', record.bodyType, 'multipart/form-data');
+}
+
+section('form: form.submit() is captured and still submits');
+{
+  // form.submit() fires no submit event, by specification, so the listener alone would miss every
+  // programmatic submission.
+  const page = buildPage();
+  page.configure(ACTIVE);
+  await tick();
+
+  const form = page.makeForm({ action: '/login', method: 'POST' }, [['password', 'hunter2']]);
+  form.submit();
+  await tick();
+
+  check('captured', page.captured.length, 1);
+  check('password captured', (page.captured[0] || {}).formData, { password: 'hunter2' });
+  check('the page still gets its submit', page.nativeFormSubmitCalls.length, 1);
+  check('and on the right form', page.nativeFormSubmitCalls[0], form);
+}
+
+section('form: the patched submit is indistinguishable from the native one');
+{
+  const page = buildPage();
+  check('name preserved', page.context.HTMLFormElement.prototype.submit.name, 'submit');
+}
+
+section('form: a submit that throws internally never reaches the page');
+{
+  const page = buildPage();
+  page.configure(ACTIVE);
+  await tick();
+
+  // A form whose fields cannot be read at all. The hook must swallow it: breaking a login form is
+  // far worse than failing to record one.
+  const broken = page.makeForm({ action: '/login', method: 'POST' }, null);
+  broken._fields = undefined;
+  let threw = false;
+  try {
+    page.submitForm(broken);
+  } catch (error) {
+    threw = true;
+  }
+  await tick();
+
+  check('did not throw into the page', threw, false);
+  check('and captured nothing', page.captured.length, 0);
 }
 
 /* ------------------------------------------------------------------ */

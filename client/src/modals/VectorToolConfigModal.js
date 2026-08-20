@@ -1,5 +1,6 @@
 import { Modal, Button, Form, Spinner, Alert, Nav, Badge } from 'react-bootstrap';
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import GraphQLEndpointHelper, { appendEndpoints } from './GraphQLEndpointHelper';
 
 // One XSS tool's settings, for one target.
 //
@@ -35,6 +36,9 @@ function VectorToolConfigModal({ show, handleClose, activeTarget, tool, category
   // this form saves with replace, so without it, opening the modal and pressing Save would DELETE a
   // key set through manage_xss simply because the modal never drew it.
   const [carried, setCarried] = useState({});
+  // What jwt_tool found for itself. No other tool in the framework picks its own targets, so this is
+  // the only place an operator can see what a run is about to attack.
+  const [foundTokens, setFoundTokens] = useState(null);
 
   const toolKey = tool?.key;
 
@@ -76,6 +80,18 @@ function VectorToolConfigModal({ show, handleClose, activeTarget, tool, category
   }, [activeTarget, toolKey, tool, category]);
 
   useEffect(() => { if (show) load(); }, [show, load]);
+
+  useEffect(() => {
+    if (!show || toolKey !== 'jwt-tool' || !activeTarget) return;
+    (async () => {
+      try {
+        const res = await fetch(`/api/misc/${activeTarget.id}/found-jwts`);
+        if (res.ok) setFoundTokens(await res.json());
+      } catch {
+        // The list is explanatory; the settings form works without it.
+      }
+    })();
+  }, [show, toolKey, activeTarget]);
 
   const setValue = (key, v) => setValues((prev) => ({ ...prev, [key]: v }));
 
@@ -154,7 +170,7 @@ function VectorToolConfigModal({ show, handleClose, activeTarget, tool, category
           {(m.choices || []).map((c) => <option key={c} value={c}>{c}</option>)}
         </Form.Select>
       );
-    } else if (m.repeatable) {
+    } else if (m.repeatable || m.kind === 'csv') {
       control = (
         <Form.Control
           className="custom-input"
@@ -192,6 +208,16 @@ function VectorToolConfigModal({ show, handleClose, activeTarget, tool, category
           <code style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.25)' }}>{key}</code>
         </div>
         {control}
+        {key === 'endpoints' && (
+          <GraphQLEndpointHelper
+            activeTarget={activeTarget}
+            current={values[key] ?? ''}
+            onAppend={(found) => setValue(key, appendEndpoints(values[key] ?? '', found))}
+            onSet={(next) => setValue(key, next)}
+            category={category}
+            tool={toolKey}
+          />
+        )}
         {m.choices && m.kind === 'csv' && (
           <div className="text-white-50 mt-1" style={{ fontSize: '0.7rem' }}>
             Comma separated. Options: {m.choices.join(', ')}
@@ -261,6 +287,32 @@ function VectorToolConfigModal({ show, handleClose, activeTarget, tool, category
                     ))}
                   </Alert>
                 )}
+              </div>
+            )}
+
+            {/* jwt_tool is the one tool here with no target list to configure: a token is
+                recognisable on sight, so the framework finds them. Showing what it found is what
+                makes the vector count on the card explainable rather than a number to be trusted. */}
+            {toolKey === 'jwt-tool' && foundTokens && (
+              <div className="border rounded p-2 mb-3" style={{ borderColor: 'rgba(255,255,255,0.1)' }}>
+                <div className="text-white mb-1" style={{ fontSize: '0.8rem', fontWeight: 600 }}>
+                  {foundTokens.count} token{foundTokens.count === 1 ? '' : 's'} found in this
+                  target&apos;s captured traffic
+                </div>
+                <div className="text-white-50 mb-2" style={{ fontSize: '0.7rem' }}>
+                  Deduplicated by token: the same token on many endpoints is one thing to attack.
+                  Nothing needs picking. Reading a token proves nothing, so set a target URL and a
+                  canary value on the Request tab to find out whether the server accepts a forgery.
+                </div>
+                {(foundTokens.tokens || []).slice(0, 8).map((t, i) => (
+                  <div key={i} className="text-break" style={{ fontSize: '0.72rem' }}>
+                    <Badge bg={t.alg && t.alg.toLowerCase() === 'none' ? 'danger' : 'secondary'}>
+                      {t.alg || 'unknown alg'}
+                    </Badge>{' '}
+                    <code style={{ color: 'rgba(255,255,255,0.6)' }}>{t.preview}</code>
+                    {t.issuer && <span className="text-white-50"> from {t.issuer}</span>}
+                  </div>
+                ))}
               </div>
             )}
 

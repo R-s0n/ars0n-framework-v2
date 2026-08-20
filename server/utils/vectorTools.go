@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -59,6 +60,11 @@ type VectorFinding struct {
 	// IsBypassTarget says whether VectorID names an attack vector or an access bypass target. The two
 	// live in different tables with different foreign keys.
 	IsBypassTarget bool
+	// IsGraphQLTarget says the id names an endpoint from a tool's own settings list, which exists in
+	// no table at all, so it is stored against neither foreign key.
+	IsGraphQLTarget bool
+	// IsLeakTarget marks a directory from the sensitive data leak list, which has its own table.
+	IsLeakTarget bool
 }
 
 // VectorComposer turns one attack vector plus the stored settings into one command line. Returning
@@ -93,6 +99,30 @@ type VectorTool struct {
 	Compose    VectorComposer      `json:"-"`
 	Parse      VectorParser        `json:"-"`
 	SkipReason func(string) string `json:"-"`
+
+	// AttemptsWhenEmpty is how many times to run a FLAKY detector on one vector before believing it
+	// found nothing. Findings stop the retries immediately, so a working tool pays nothing.
+	//
+	// pphack is why. It drives headless Chrome and watches whether the page's own JavaScript merges
+	// the payload into Object.prototype, and whether that happens depends on script load timing.
+	// Measured against ginandjuice.shop/blog, which is definitively vulnerable and which pphack
+	// reports on demand from the command line: 3 hits in 6 identical runs. One run per vector is a
+	// coin flip, and the framework ran each vector exactly once, so 24 vectors came back clean on a
+	// target whose prototype pollution the tool finds in seconds when asked twice.
+	//
+	// Left at 0 for every deterministic tool, where a retry would only double the traffic.
+	AttemptsWhenEmpty int `json:"-"`
+
+	// Incomplete reports, from the tool's own output, that the run DID NOT FINISH, and why. A
+	// non-empty return marks the vector as an error rather than clean, while any findings already
+	// parsed are still kept.
+	//
+	// This exists because a tool can tell you it gave up and the runner can still file the result as
+	// clean. dalfox aborted every one of 53 vectors on --on-session-loss abort, writing
+	// {"meta":{"findings_count":0,"incomplete":true,...,"error_code":"SESSION_LOST"}}, and the parser
+	// skips meta lines, so the reason was read and thrown away. The operator saw 53 clean vectors on
+	// an application whose own /vulnerabilities page lists four separate XSS.
+	Incomplete func(stdout, report string) string `json:"-"`
 
 	// VectorEligible refuses an INDIVIDUAL vector, with a reason, where the insertion point alone is
 	// not the whole story.
@@ -234,6 +264,21 @@ func UnrecognisedVectorOptions(tool VectorTool, settings map[string]any) []strin
 	return unknown
 }
 
+// vectorSettingEngaged reports whether a setting is actually in force.
+//
+// A switch is engaged when it is true. A setting that carries a VALUE is engaged when it has any
+// value at all, which is the whole reason this function exists: dalfox's userAgent blinds the entire
+// tool, and truthySetting("Mozilla/5.0 ...") is false, so a value-carrying blinder was invisible to
+// the one check whose job is to catch blinders.
+func vectorSettingEngaged(tool VectorTool, key string, value any) bool {
+	switch tool.Options[key].Kind {
+	case "string", "csv", "path", "enum":
+		return strings.TrimSpace(stringifySetting(value)) != ""
+	default:
+		return truthySetting(value)
+	}
+}
+
 // VectorBlindedPoints reports which insertion points a settings map would silently make untestable.
 func VectorBlindedPoints(toolKey string, settings map[string]any) map[string][]string {
 	tool, ok := VectorToolByKey(toolKey)
@@ -242,7 +287,7 @@ func VectorBlindedPoints(toolKey string, settings map[string]any) map[string][]s
 	}
 	blinded := map[string][]string{}
 	for key, point := range tool.Blinding {
-		if !truthySetting(settings[key]) {
+		if !vectorSettingEngaged(tool, key, settings[key]) {
 			continue
 		}
 		blinded[point] = append(blinded[point], key)

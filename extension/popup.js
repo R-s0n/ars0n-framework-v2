@@ -41,7 +41,14 @@ let frameworkUrl = DEFAULT_FRAMEWORK_URL;
 let availableTargets = [];
 let isConnected = false;
 let targetsLoaded = false;
-let extraHosts = [];
+// Extra scope hosts, keyed by scope target id. Never a flat list: a host added while testing one
+// target must not still be in scope when the next recording starts against a different one, which
+// is what a single shared array used to do. popup.js keeps its own copy of this shape rather than
+// importing lib/scope.js because popup.html loads it as a classic script and it cannot use ES
+// imports; lib/scope.js holds the canonical helpers for the service worker and both are tested.
+let extraHostsByTarget = {};
+// The retired global list. Parked, not adopted, and not read as scope. See loadSettings.
+let legacyExtraHosts = [];
 // Errors raised by a user action stay visible until the next action, so the 2s state poll cannot
 // wipe a message the user has not read yet.
 let localError = null;
@@ -77,6 +84,13 @@ function initializeEventListeners() {
   document.getElementById('captureStatic').addEventListener('change', saveSettings);
   document.getElementById('captureResponseBodies').addEventListener('change', saveSettings);
   document.getElementById('deepCapture').addEventListener('change', toggleDeepCapture);
+  // Scope belongs to a target, so changing the target changes which extra hosts apply. Without
+  // this the list keeps showing the previous target's hosts, which is the thing that made the old
+  // global list look correct while it was quietly widening scope.
+  document.getElementById('targetSelect').addEventListener('change', () => {
+    lastScopeSignature = null;
+    updateUI();
+  });
   document.getElementById('addHostBtn').addEventListener('click', () => {
     const input = document.getElementById('addHostInput');
     void addHost(input.value).then(() => {
@@ -102,13 +116,29 @@ function initializeEventListeners() {
   document.getElementById('authFlowCategory').addEventListener('change', saveAuthFlowFields);
 }
 
+// The scope target the popup is acting on. Extra hosts hang off this, so with nothing selected
+// there is no bucket to read and the scope is the target's own host alone.
+function selectedTargetId() {
+  const el = document.getElementById('targetSelect');
+  return (el && el.value) || null;
+}
+
+function currentExtraHosts() {
+  const targetId = selectedTargetId();
+  if (!targetId) return [];
+  const hosts = extraHostsByTarget[targetId];
+  return Array.isArray(hosts) ? hosts : [];
+}
+
 async function loadSettings() {
   const result = await chrome.storage.local.get([
     'includeSubdomains',
     'captureStatic',
     'captureResponseBodies',
     'deepCapture',
+    'extraHostsByTarget',
     'extraHosts',
+    'extraHostsLegacy',
     'frameworkUrl',
     'authFlowName',
     'authFlowCategory',
@@ -122,7 +152,22 @@ async function loadSettings() {
   document.getElementById('captureResponseBodies').checked = result.captureResponseBodies !== false;
   document.getElementById('deepCapture').checked = Boolean(result.deepCapture);
 
-  extraHosts = Array.isArray(result.extraHosts) ? result.extraHosts : [];
+  const storedMap = result.extraHostsByTarget;
+  extraHostsByTarget =
+    storedMap && typeof storedMap === 'object' && !Array.isArray(storedMap) ? storedMap : {};
+
+  // One-time retirement of the old global list. The legacy hosts are NOT adopted by any target:
+  // there is no record of which target they were typed for, because the recording state that knew
+  // lives in chrome.storage.session and does not survive a browser restart. Attaching them to
+  // whichever target happens to be selected would recreate exactly the leak this shape removes.
+  // They are moved aside rather than deleted, so nothing an operator typed is destroyed.
+  legacyExtraHosts = Array.isArray(result.extraHostsLegacy) ? result.extraHostsLegacy : [];
+  const orphaned = Array.isArray(result.extraHosts) ? result.extraHosts : [];
+  if (orphaned.length) {
+    legacyExtraHosts = Array.from(new Set([...legacyExtraHosts, ...orphaned]));
+    await chrome.storage.local.set({ extraHosts: [], extraHostsLegacy: legacyExtraHosts });
+  }
+
   frameworkUrl = result.frameworkUrl || DEFAULT_FRAMEWORK_URL;
   document.getElementById('frameworkUrl').value = frameworkUrl;
 
@@ -143,7 +188,7 @@ function currentSettings() {
     captureStatic: document.getElementById('captureStatic').checked,
     captureResponseBodies: document.getElementById('captureResponseBodies').checked,
     deepCapture: document.getElementById('deepCapture').checked,
-    extraHosts,
+    extraHosts: currentExtraHosts(),
   };
 }
 
@@ -156,7 +201,15 @@ async function saveSettings() {
   });
 
   if (sessionState.active) {
-    await sendToWorker({ action: 'updateSettings', settings });
+    // Deliberately WITHOUT extraHosts. Once recording has started the worker owns the session's
+    // scope: addScopeHost and removeScopeHost maintain it in state.settings, and the worker's
+    // handler spreads whatever patch it is given over that. Sending the popup's copy would let a
+    // click on any of these three checkboxes overwrite the live capture boundary with whatever the
+    // popup happened to have read, which narrows scope mid-recording and silently drops the
+    // target's cross-domain traffic. The popup's list is for building the NEXT session, not
+    // steering the running one.
+    const { extraHosts, ...withoutScope } = settings;
+    await sendToWorker({ action: 'updateSettings', settings: withoutScope });
     await refreshSessionState();
   }
 }
@@ -180,8 +233,8 @@ async function addHost(host) {
     const response = await sendToWorker({ action: 'addScopeHost', host: value });
     if (response && response.success) {
       localError = null;
-      const stored = await chrome.storage.local.get(['extraHosts']);
-      extraHosts = stored.extraHosts || [];
+      const stored = await chrome.storage.local.get(['extraHostsByTarget']);
+      extraHostsByTarget = stored.extraHostsByTarget || {};
     } else {
       localError = (response && response.error) || 'Could not add host';
     }
@@ -189,16 +242,24 @@ async function addHost(host) {
     return;
   }
 
-  // Not recording: just remember it for the next session.
+  // Not recording: remember it against THIS target for the next session.
+  const targetId = selectedTargetId();
+  if (!targetId) {
+    localError = 'Select a target first: extra scope hosts belong to one target.';
+    updateUI();
+    return;
+  }
+
   const normalized = value.replace(/^https?:\/\//i, '').replace(/^\*\./, '').split('/')[0].split(':')[0].toLowerCase();
   if (!normalized.includes('.')) {
     localError = 'Not a usable hostname';
     updateUI();
     return;
   }
-  if (!extraHosts.includes(normalized)) {
-    extraHosts = [...extraHosts, normalized];
-    await chrome.storage.local.set({ extraHosts });
+  const current = currentExtraHosts();
+  if (!current.includes(normalized)) {
+    extraHostsByTarget = { ...extraHostsByTarget, [targetId]: [...current, normalized] };
+    await chrome.storage.local.set({ extraHostsByTarget });
   }
   localError = null;
   updateUI();
@@ -207,13 +268,19 @@ async function addHost(host) {
 async function removeHost(host) {
   if (sessionState.active) {
     await sendToWorker({ action: 'removeScopeHost', host });
-    const stored = await chrome.storage.local.get(['extraHosts']);
-    extraHosts = stored.extraHosts || [];
+    const stored = await chrome.storage.local.get(['extraHostsByTarget']);
+    extraHostsByTarget = stored.extraHostsByTarget || {};
     await refreshSessionState();
     return;
   }
-  extraHosts = extraHosts.filter((h) => h !== host);
-  await chrome.storage.local.set({ extraHosts });
+  const targetId = selectedTargetId();
+  if (!targetId) return;
+
+  extraHostsByTarget = {
+    ...extraHostsByTarget,
+    [targetId]: currentExtraHosts().filter((h) => h !== host),
+  };
+  await chrome.storage.local.set({ extraHostsByTarget });
   updateUI();
 }
 
@@ -262,7 +329,7 @@ function renderScope() {
   const hosts = sessionState.active
     ? sessionState.scopeHosts || []
     : buildPreviewScope();
-  const sessionExtras = sessionState.active ? sessionState.extraHosts || [] : extraHosts;
+  const sessionExtras = sessionState.active ? sessionState.extraHosts || [] : currentExtraHosts();
 
   // Only rebuild the chips when they actually changed; otherwise the poll re-creates identical
   // nodes twice a second for no reason.
@@ -401,7 +468,7 @@ function buildPreviewScope() {
       if (labels.length > 2) hosts.push(labels.slice(-2).join('.'));
     }
   }
-  extraHosts.forEach((h) => {
+  currentExtraHosts().forEach((h) => {
     if (!hosts.includes(h)) hosts.push(h);
   });
   return hosts;

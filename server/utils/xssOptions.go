@@ -17,7 +17,6 @@ package utils
 //     body, -f file input, -d crawl domain) are present in the source but COMMENTED OUT, so they are
 //     not options, and anything built on them would fail as an unrecognised flag.
 
-
 // ---------------------------------------------------------------------------------------------
 // dalfox
 // ---------------------------------------------------------------------------------------------
@@ -29,27 +28,27 @@ var dalfoxGroups = []string{"Scanning", "Payloads", "Blind XSS", "Discovery", "M
 // setting that is stored and then overwritten is how an operator comes to believe a scan did
 // something it did not.
 var dalfoxOwned = map[string]string{
-	"-i": "The runner picks the input type per vector.",
-	"--input-type": "The runner picks the input type per vector.",
-	"-f":           "Output is read back as jsonl. Another format cannot be parsed.",
-	"--format":     "Output is read back as jsonl. Another format cannot be parsed.",
-	"-o":           "The report path is per scan and per vector.",
-	"--output":     "The report path is per scan and per vector.",
-	"--include-all": "Always set, so every finding carries the request and response that produced it.",
+	"-i":                 "The runner picks the input type per vector.",
+	"--input-type":       "The runner picks the input type per vector.",
+	"-f":                 "Output is read back as jsonl. Another format cannot be parsed.",
+	"--format":           "Output is read back as jsonl. Another format cannot be parsed.",
+	"-o":                 "The report path is per scan and per vector.",
+	"--output":           "The report path is per scan and per vector.",
+	"--include-all":      "Always set, so every finding carries the request and response that produced it.",
 	"--include-request":  "Always set, so every finding carries the request that produced it.",
 	"--include-response": "Always set, so every finding carries the response that produced it.",
-	"-p":       "Set from the vector's insertion point and parameter names. This is what aims the scan.",
-	"--param":  "Set from the vector's insertion point and parameter names. This is what aims the scan.",
-	"-d":       "Set from the vector's recorded body.",
-	"--data":   "Set from the vector's recorded body.",
-	"-X":       "Set from the vector's method.",
-	"--method": "Set from the vector's method.",
-	"-S":          "Always set. Log lines interleaved with jsonl cannot be parsed.",
-	"--silence":   "Always set. Log lines interleaved with jsonl cannot be parsed.",
-	"--no-color":  "Always set. Escape codes corrupt the stored evidence.",
-	"--dry-run":   "Used by the eligibility preview, which reports what a scan would do without sending payloads.",
-	"--state-file": "The framework tracks which vectors completed, in the database.",
-	"--config":    "Settings come from this store, not from a file inside the container.",
+	"-p":                 "Set from the vector's insertion point and parameter names. This is what aims the scan.",
+	"--param":            "Set from the vector's insertion point and parameter names. This is what aims the scan.",
+	"-d":                 "Set from the vector's recorded body.",
+	"--data":             "Set from the vector's recorded body.",
+	"-X":                 "Set from the vector's method.",
+	"--method":           "Set from the vector's method.",
+	"-S":                 "Always set. Log lines interleaved with jsonl cannot be parsed.",
+	"--silence":          "Always set. Log lines interleaved with jsonl cannot be parsed.",
+	"--no-color":         "Always set. Escape codes corrupt the stored evidence.",
+	"--dry-run":          "Used by the eligibility preview, which reports what a scan would do without sending payloads.",
+	"--state-file":       "The framework tracks which vectors completed, in the database.",
+	"--config":           "Settings come from this store, not from a file inside the container.",
 }
 
 var dalfoxOptions = map[string]VectorOptionMeta{
@@ -67,13 +66,13 @@ var dalfoxOptions = map[string]VectorOptionMeta{
 	"sxssRetries":         {Kind: "int", Group: "Scanning", Label: "Stored XSS re-checks", Flag: "--sxss-retries", Placeholder: "3"},
 
 	// Payloads
-	"encoders":           {Kind: "csv", Group: "Payloads", Label: "Encoders", Flag: "-e", Placeholder: "url,html", Choices: []string{"none", "url", "2url", "3url", "4url", "html", "htmlpad", "base64", "unicode", "zwsp"}},
-	"customPayload":      {Kind: "path", Group: "Payloads", Label: "Custom payload file", Flag: "--custom-payload", Placeholder: "/app/wordlists/..."},
-	"onlyCustomPayload":  {Kind: "bool", Group: "Payloads", Label: "Only custom payloads", Flag: "--only-custom-payload", Placeholder: "the built in catalog is used as well"},
-	"remotePayloads":     {Kind: "csv", Group: "Payloads", Label: "Remote payload sets", Flag: "--remote-payloads", Placeholder: "none fetched", Choices: []string{"portswigger", "payloadbox"}},
-	"customAlertValue":   {Kind: "string", Group: "Payloads", Label: "Alert value", Flag: "--custom-alert-value", Placeholder: "1"},
-	"customAlertType":    {Kind: "enum", Group: "Payloads", Label: "Alert value type", Flag: "--custom-alert-type", Choices: []string{"none", "str"}, Placeholder: "none, meaning the value is used as written"},
-	"injectMarker":       {Kind: "string", Group: "Payloads", Label: "Injection marker", Flag: "--inject-marker", Placeholder: "unset. Works in query, body and headers. It does NOT work for a path segment; path is covered by dalfox's own path_segment discovery instead"},
+	"encoders":          {Kind: "csv", Group: "Payloads", Label: "Encoders", Flag: "-e", Placeholder: "url,html", Choices: []string{"none", "url", "2url", "3url", "4url", "html", "htmlpad", "base64", "unicode", "zwsp"}},
+	"customPayload":     {Kind: "path", Group: "Payloads", Label: "Custom payload file", Flag: "--custom-payload", Placeholder: "/app/wordlists/..."},
+	"onlyCustomPayload": {Kind: "bool", Group: "Payloads", Label: "Only custom payloads", Flag: "--only-custom-payload", Placeholder: "the built in catalog is used as well"},
+	"remotePayloads":    {Kind: "csv", Group: "Payloads", Label: "Remote payload sets", Flag: "--remote-payloads", Placeholder: "none fetched", Choices: []string{"portswigger", "payloadbox"}},
+	"customAlertValue":  {Kind: "string", Group: "Payloads", Label: "Alert value", Flag: "--custom-alert-value", Placeholder: "1"},
+	"customAlertType":   {Kind: "enum", Group: "Payloads", Label: "Alert value type", Flag: "--custom-alert-type", Choices: []string{"none", "str"}, Placeholder: "none, meaning the value is used as written"},
+	"injectMarker":      {Kind: "string", Group: "Payloads", Label: "Injection marker", Flag: "--inject-marker", Placeholder: "unset. Works in query, body and headers. It does NOT work for a path segment; path is covered by dalfox's own path_segment discovery instead"},
 
 	// Blind XSS
 	"blind":                 {Kind: "string", Group: "Blind XSS", Label: "Blind callback URL", Flag: "-b", Placeholder: "no blind payloads sent"},
@@ -123,13 +122,13 @@ var dalfoxOptions = map[string]VectorOptionMeta{
 	"wafMinConfidence": {Kind: "float", Group: "WAF", Label: "Minimum fingerprint confidence", Flag: "--waf-min-confidence", Placeholder: "0.3"},
 
 	// Session
-	"cookies":        {Kind: "string", Group: "Session", Label: "Cookies", Flag: "--cookies", Repeatable: true, Placeholder: "name=value. A cookie vector's own cookie is added alongside these"},
-	"headers":        {Kind: "string", Group: "Session", Label: "Headers", Flag: "-H", Repeatable: true, Placeholder: "Name: value. A header vector's own header is added alongside these"},
-	"userAgent":      {Kind: "string", Group: "Session", Label: "User agent", Flag: "--user-agent"},
-	"cookieFromRaw":  {Kind: "path", Group: "Session", Label: "Cookies from raw request file", Flag: "--cookie-from-raw"},
-	"sessionCheck":   {Kind: "string", Group: "Session", Label: "Session alive regex", Flag: "--session-check", Placeholder: "unset. Supplying credentials enables the built in heuristics on their own"},
+	"cookies":         {Kind: "string", Group: "Session", Label: "Cookies", Flag: "--cookies", Repeatable: true, Placeholder: "name=value. A cookie vector's own cookie is added alongside these"},
+	"headers":         {Kind: "string", Group: "Session", Label: "Headers", Flag: "-H", Repeatable: true, Placeholder: "Name: value. A header vector's own header is added alongside these"},
+	"userAgent":       {Kind: "string", Group: "Session", Label: "User agent", Flag: "--user-agent"},
+	"cookieFromRaw":   {Kind: "path", Group: "Session", Label: "Cookies from raw request file", Flag: "--cookie-from-raw"},
+	"sessionCheck":    {Kind: "string", Group: "Session", Label: "Session alive regex", Flag: "--session-check", Placeholder: "unset. Supplying credentials enables the built in heuristics on their own"},
 	"sessionCheckUrl": {Kind: "string", Group: "Session", Label: "Session check URL", Flag: "--session-check-url", Placeholder: "the scan target is probed"},
-	"onSessionLoss":  {Kind: "enum", Group: "Session", Label: "On session loss", Flag: "--on-session-loss", Choices: []string{"abort", "continue"}, Placeholder: "abort, and the target is reported incomplete rather than clean"},
+	"onSessionLoss":   {Kind: "enum", Group: "Session", Label: "On session loss", Flag: "--on-session-loss", Choices: []string{"abort", "continue"}, Placeholder: "abort, and the target is reported incomplete rather than clean"},
 
 	// Scope
 	"includeUrl":     {Kind: "string", Group: "Scope", Label: "Include URLs matching", Flag: "--include-url", Repeatable: true, Placeholder: "regex"},
@@ -243,6 +242,7 @@ func init() {
 			UsesReportFile:  true,
 			Compose:         ComposeDalfox,
 			Parse:           parseDalfoxJSONL,
+			Incomplete:      dalfoxIncomplete,
 			Blinding: map[string]string{
 				// Measured: a path vector reports 2 Path findings normally and 0 with either of these
 				// set, while the scan still exits 0. Path has no explicit -p form, so dalfox's own
@@ -251,6 +251,18 @@ func init() {
 				"skipReflectionPath": "path",
 				"skipXssScanning":    "all",
 				"onlyDiscovery":      "all",
+				// dalfox 3.2.1 finds the reflection and then verifies NOTHING when a custom
+				// user agent is set. Measured, one flag changed and nothing else:
+				//
+				//	without --user-agent : "found reflected 1 params" -> "XSS found 1 XSS" + POC
+				//	with    --user-agent : "found reflected 1 params" -> "XSS found 0 XSS"
+				//
+				// Any value does it, including "Mozilla/5.0". The requests are still sent, so
+				// this looks like a working scan from every angle except the result. It cost two
+				// full runs against a target with four documented XSS: 53 vectors, 48,859
+				// requests, zero findings, and the baseline request for --session-check also
+				// comes back HTTP 400, which surfaced as SESSION_LOST and hid the real cause.
+				"userAgent": "all",
 			},
 			SkipReason: func(string) string { return "" },
 		},

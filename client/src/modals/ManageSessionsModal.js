@@ -133,6 +133,10 @@ function validationVariant(status) {
   const s = String(status || '').toLowerCase();
   if (!s) return 'secondary';
   if (s === 'valid' || s === 'ok' || s === 'active') return 'success';
+  // A companion is a routing cookie, not a credential, so it is never graded honoured or not. It
+  // gets its own colour because the grey fallback reads as "nobody has checked this yet", and this
+  // one has been checked: the answer is that the question does not apply.
+  if (s === 'companion') return 'info';
   // not_honoured is one of the four verdicts the server actually emits, and it is the most
   // actionable of them: the target answered identically with and without the credential. Leaving it
   // out made it fall through to the same grey badge as a token nobody has checked yet.

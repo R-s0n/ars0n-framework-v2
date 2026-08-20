@@ -147,7 +147,7 @@ func main() {
 	// /{category}/tools and /{category}/finding/... go FIRST, or "tools" and "finding" are swallowed
 	// by the {scope_target_id} pattern and every one of those calls 404s against a target that does
 	// not exist.
-	for _, category := range []string{"xss", "sqli", "cmdi", "redirect-ssrf", "lfi", "cache", "smuggling", "access-bypass"} {
+	for _, category := range []string{"xss", "sqli", "cmdi", "redirect-ssrf", "lfi", "cache", "smuggling", "access-bypass", "graphql", "sensitive-leak", "exposed-git", "misc"} {
 		prefix := "/" + category
 		r.HandleFunc(prefix+"/tools", utils.GetVectorTools(category)).Methods("GET", "OPTIONS")
 		r.HandleFunc(prefix+"/{scope_target_id}/section-settings", utils.GetVectorSectionSettings(category)).Methods("GET", "OPTIONS")
@@ -159,11 +159,31 @@ func main() {
 		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/status", utils.GetVectorScanStatus).Methods("GET", "OPTIONS")
 		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/results", utils.GetVectorResults).Methods("GET", "OPTIONS")
 	}
-	// The access control bypass section scans URLs that already returned 401 or 403, not attack
-	// vectors, so it has its own target list with its own consolidate/review/prune cycle.
-	r.HandleFunc("/access-bypass/{scope_target_id}/targets", utils.GetBypassTargets).Methods("GET", "OPTIONS")
-	r.HandleFunc("/access-bypass/{scope_target_id}/targets/consolidate", utils.RunBypassTargetConsolidation).Methods("POST", "OPTIONS")
-	r.HandleFunc("/access-bypass/target/{id}", utils.DeleteBypassTarget).Methods("DELETE", "OPTIONS")
+	// Four sections take a hand-picked endpoint list rather than the attack vector table, and they all
+	// share one picker component. That picker asks for /{category}/{id}/candidate-endpoints, so the
+	// route has to exist under EVERY category it is mounted on: registered under one of them, the
+	// other three answer 404 and the picker renders "could not load targets" with no way to choose
+	// anything, which reads as a target that has no endpoints rather than a missing route.
+	for _, category := range []string{"graphql", "sensitive-leak", "exposed-git", "access-bypass"} {
+		r.HandleFunc("/"+category+"/{scope_target_id}/candidate-endpoints",
+			utils.GraphQLCandidateEndpoints).Methods("GET", "OPTIONS")
+	}
+
+	// The endpoints that ALREADY answered 401 or 403, which are the interesting ones for a bypass.
+	r.HandleFunc("/access-bypass/{scope_target_id}/denied-endpoints", utils.DeniedEndpoints).Methods("GET", "OPTIONS")
+	// Endpoints marked as GraphQL on one tool but not this one, so an operator can see what a tool is
+	// about to skip, plus the detection button that offers a candidate without committing it.
+	r.HandleFunc("/graphql/{scope_target_id}/known-endpoints", utils.GraphQLKnownEndpoints).Methods("GET", "OPTIONS")
+	r.HandleFunc("/graphql/detect-endpoints", utils.DetectGraphQLEndpoints).Methods("POST", "OPTIONS")
+	// The handover from discovery to exploitation: where snallygaster already found a .git.
+	r.HandleFunc("/exposed-git/{scope_target_id}/git-endpoints", utils.GitCandidateEndpoints).Methods("GET", "OPTIONS")
+
+	// The Miscellaneous tools each take a different kind of target, so each needs its own list.
+	// Upload_Bypass is given the requests an operator marked as file uploads, because only a person
+	// can say which request uploads a file. jwt_tool needs no picking at all: a token is recognisable
+	// on sight, so the framework finds them and this endpoint explains what it found.
+	r.HandleFunc("/misc/{scope_target_id}/upload-candidates", utils.GetUploadCandidates).Methods("GET", "OPTIONS")
+	r.HandleFunc("/misc/{scope_target_id}/found-jwts", utils.GetFoundJWTs).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/consolidate-company-domains/{id}", utils.HandleConsolidateCompanyDomains).Methods("GET", "OPTIONS")
 	r.HandleFunc("/consolidated-company-domains/{id}", utils.GetConsolidatedCompanyDomains).Methods("GET", "OPTIONS")

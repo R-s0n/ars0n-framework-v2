@@ -1,7 +1,8 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import VectorToolResultsModal from './VectorToolResultsModal';
 import VectorToolConfigModal from './VectorToolConfigModal';
 import AttackToolCard from '../components/AttackToolCard';
+import GraphQLEndpointHelper, { appendEndpoints } from './GraphQLEndpointHelper';
 import { ATTACK_TOOL_SECTIONS } from '../data/attackTools';
 import { WIRED_CATEGORIES } from '../data/wiredCategories';
 
@@ -161,4 +162,100 @@ test('every wired section has at least one tool to draw', () => {
     const section = ATTACK_TOOL_SECTIONS.find((s) => s.key === category);
     expect(section.tools.length).toBeGreaterThan(0);
   });
+});
+
+// The GraphQL section keeps its endpoint list in each tool's own config, by the operator's choice.
+// That makes two things easy to get wrong and invisible when you do: an endpoint marked in one tool
+// is silently skipped by the other two, and the operator has to know the endpoint's path by hand.
+// This is the helper that addresses both, mounted for real because a modal that compiles and then
+// throws on mount is how this file came to exist.
+test('the graphql endpoint helper lets you PICK an endpoint rather than type it', async () => {
+  global.fetch = jest.fn((url) => {
+    if (String(url).includes('candidate-endpoints')) {
+      return jsonResponse({
+        count: 2,
+        truncated: false,
+        candidates: [
+          { url: 'https://x.test/graphql', sources: ['manual-crawl'], likely: true, in_scope: true },
+          { url: 'https://x.test/login', sources: ['manual-crawl'], likely: false, in_scope: true },
+        ],
+      });
+    }
+    if (String(url).includes('known-endpoints')) {
+      return jsonResponse({ endpoints: [{ url: 'https://x.test/api/gql', tools: ['graphw00f'] }] });
+    }
+    return jsonResponse({ found: [], output: '' });
+  });
+
+  const onAppend = jest.fn();
+  render(
+    <GraphQLEndpointHelper
+      activeTarget={{ id: TARGET.id, scope_target: 'https://x.test' }}
+      current={''}
+      onAppend={onAppend}
+      onSet={() => {}}
+      category="graphql"
+    />,
+  );
+
+  // The endpoints this target already has are listed, so nothing has to be retyped.
+  await waitFor(() => expect(screen.getByText('https://x.test/graphql')).toBeInTheDocument());
+  expect(screen.getByText('https://x.test/login')).toBeInTheDocument();
+  // The one that looks like GraphQL is flagged, as an ordering hint rather than a filter.
+  expect(screen.getByText('likely')).toBeInTheDocument();
+
+  // Ticking one marks it for this tool.
+  fireEvent.click(screen.getAllByRole('checkbox')[0]);
+  expect(onAppend).toHaveBeenCalledWith(['https://x.test/graphql']);
+
+  // And an endpoint another tool holds is surfaced, because this tool would otherwise skip it.
+  expect(screen.getByText(/api\/gql/)).toBeInTheDocument();
+});
+
+// Accepting detected endpoints must not duplicate what is already listed.
+test('appending endpoints keeps the list unique', () => {
+  const current = 'https://x.test/graphql';
+  expect(appendEndpoints(current, ['https://x.test/graphql'])).toBe(current);
+  expect(appendEndpoints(current, ['https://x.test/api/gql']))
+    .toBe('https://x.test/graphql\nhttps://x.test/api/gql');
+  expect(appendEndpoints('', ['https://x.test/a'])).toBe('https://x.test/a');
+});
+
+// The access control bypass section used to have its own derived target list and a Manage Targets
+// screen. The operator replaced both with a per-tool Targets tab, like every other section that
+// scans URLs, so the picker is what covers it now. This asserts the piece unique to that section:
+// the endpoints that ALREADY answered 401 or 403 are offered, because those are the ones where
+// something is actually being denied.
+test('the picker offers endpoints that already denied us, for the bypass section', async () => {
+  global.fetch = jest.fn((url) => {
+    if (String(url).includes('denied-endpoints')) {
+      return jsonResponse({
+        count: 2,
+        by_status: [{ status_code: 403, count: 2 }],
+        denied: [
+          { url: 'https://x.test/admin', status_code: 403, sources: ['manual-crawl'], in_scope: true, primary: true },
+          { url: 'https://www.transunion.com/x', status_code: 403, sources: ['manual-crawl'], in_scope: false, primary: true },
+        ],
+      });
+    }
+    if (String(url).includes('candidate-endpoints')) {
+      return jsonResponse({ count: 0, truncated: false, candidates: [] });
+    }
+    return jsonResponse({ endpoints: [] });
+  });
+
+  render(
+    <GraphQLEndpointHelper
+      activeTarget={{ id: TARGET.id, scope_target: 'https://x.test' }}
+      current={''}
+      onAppend={() => {}}
+      onSet={() => {}}
+      category="access-bypass"
+    />,
+  );
+
+  // The in-scope denial is offered.
+  await waitFor(() => expect(screen.getByText(/403 https:\/\/x\.test\/admin/)).toBeInTheDocument());
+  // A third party's 403 is not this operator's business, so it is not offered for one-click adding.
+  expect(screen.queryByText(/transunion/)).not.toBeInTheDocument();
 });

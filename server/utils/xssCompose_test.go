@@ -253,3 +253,99 @@ func TestBlindingGuardReadsEveryJSONBooleanShape(t *testing.T) {
 		}
 	}
 }
+
+// A body vector whose raw_request was never captured must still carry a body. Guarding on
+// `v.Body != ""` meant dalfox emitted `-X POST -p username:body` with NO -d: it posted an empty
+// body, tested nothing, and the vector was recorded clean. All 10 POST vectors on ginandjuice.shop
+// have a NULL raw_request, so this was every body vector on the target.
+func TestDalfoxAlwaysSendsABodyForABodyVector(t *testing.T) {
+	v := VectorInput{
+		Method: "POST", Scheme: "https", Domain: "ginandjuice.shop", Path: "/login",
+		InsertionPoint: "body", Parameters: []string{"csrf", "password", "username"},
+		// No Body and no ObservedValues, which is the state every body vector is in here.
+	}
+	args, _ := ComposeDalfox(v, map[string]any{}, "/tmp/r.jsonl")
+	body := argValueAfter(args, "-d")
+	if body == "" {
+		t.Fatal("dalfox was given no -d, so it posted nothing and the vector reads as a tested negative")
+	}
+	for _, name := range v.Parameters {
+		if !strings.Contains(body, name+"=") {
+			t.Errorf("body %q does not carry %q, so that parameter cannot be reached", body, name)
+		}
+	}
+}
+
+// A recorded body is preferred over a synthesised one: it carries the real csrf token and the real
+// values, and replacing them changes the request being tested.
+func TestARecordedBodyIsPreferredOverASynthesisedOne(t *testing.T) {
+	v := VectorInput{
+		Method: "POST", Scheme: "https", Domain: "ginandjuice.shop", Path: "/login",
+		InsertionPoint: "body", Parameters: []string{"csrf", "username"},
+		Body: "csrf=REAL0TOKEN&username=carlos",
+	}
+	args, _ := ComposeDalfox(v, map[string]any{}, "/tmp/r.jsonl")
+	if got := argValueAfter(args, "-d"); got != "csrf=REAL0TOKEN&username=carlos" {
+		t.Errorf("the recorded body was discarded, got %q", got)
+	}
+}
+
+// A JSON endpoint rejects a urlencoded body before it ever reaches the parameter under test, so the
+// synthesised body has to match the vector's content type.
+func TestASynthesisedJSONBodyIsJSON(t *testing.T) {
+	v := VectorInput{
+		Method: "POST", Scheme: "https", Domain: "ginandjuice.shop", Path: "/catalog/subscribe",
+		InsertionPoint: "body", Parameters: []string{"email"},
+		ContentType: "application/json;charset=UTF-8",
+	}
+	args, _ := ComposeDalfox(v, map[string]any{}, "/tmp/r.jsonl")
+	body := argValueAfter(args, "-d")
+	if !strings.HasPrefix(strings.TrimSpace(body), "{") || !strings.Contains(body, `"email"`) {
+		t.Errorf("a JSON vector was sent a urlencoded body, which the endpoint rejects: %q", body)
+	}
+}
+
+// dalfox 3.2.1 finds the reflection and then verifies nothing when a custom user agent is set.
+// Measured with one flag changed and nothing else:
+//
+//	without --user-agent : "found reflected 1 params" -> "XSS found 1 XSS" + POC
+//	with    --user-agent : "found reflected 1 params" -> "XSS found 0 XSS"
+//
+// The requests are still sent, so it looks like a working scan from every angle except the result.
+// Two full runs against a target with four documented XSS produced 53 vectors, 48,859 requests and
+// zero findings because of it.
+func TestADalfoxUserAgentIsReportedAsBlindingTheWholeTool(t *testing.T) {
+	blinded := VectorBlindedPoints("dalfox", map[string]any{
+		"userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/151.0.0.0",
+	})
+	if len(blinded["all"]) == 0 {
+		t.Fatal("setting a user agent on dalfox silently zeroes every finding and nothing says so")
+	}
+	found := false
+	for _, key := range blinded["all"] {
+		if key == "userAgent" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected userAgent among the blinders, got %v", blinded["all"])
+	}
+}
+
+// The bug that hid it: blinding was tested with truthySetting, which is false for every real user
+// agent string, so a value-carrying blinder could never be reported by the check built to report
+// blinders. Switches must keep working exactly as before.
+func TestValueCarryingAndSwitchBlindersAreBothDetected(t *testing.T) {
+	if b := VectorBlindedPoints("dalfox", map[string]any{"userAgent": ""}); len(b["all"]) != 0 {
+		t.Errorf("an empty user agent is not set and must not be reported as blinding: %v", b["all"])
+	}
+	if b := VectorBlindedPoints("dalfox", map[string]any{"skipXssScanning": true}); len(b["all"]) == 0 {
+		t.Error("a boolean blinder stopped being detected")
+	}
+	if b := VectorBlindedPoints("dalfox", map[string]any{"skipXssScanning": false}); len(b["all"]) != 0 {
+		t.Errorf("a boolean blinder set to false must not be reported: %v", b["all"])
+	}
+	if b := VectorBlindedPoints("dalfox", map[string]any{"skipReflectionPath": true}); len(b["path"]) == 0 {
+		t.Error("the path blinders stopped being detected")
+	}
+}

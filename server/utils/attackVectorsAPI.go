@@ -24,9 +24,9 @@ import (
 // GetAttackVectorSummary answers GET /attack-vectors/{scope_target_id}/summary. The card reads it.
 func GetAttackVectorSummary(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	total, hosts, manual := attackVectorTotals(context.Background(), mux.Vars(r)["scope_target_id"])
+	total, hosts, manual, withNotes := attackVectorTotals(context.Background(), mux.Vars(r)["scope_target_id"])
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total": total, "hosts": hosts, "manual": manual,
+		"total": total, "hosts": hosts, "manual": manual, "with_notes": withNotes,
 	})
 }
 
@@ -115,10 +115,10 @@ func GetAttackVectors(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	total, hosts, manual := attackVectorTotals(ctx, scopeTargetID)
+	total, hosts, manual, withNotes := attackVectorTotals(ctx, scopeTargetID)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"vectors": out, "returned": len(out),
-		"total": total, "hosts": hosts, "manual": manual,
+		"total": total, "hosts": hosts, "manual": manual, "with_notes": withNotes,
 		"insertion_points": attackVectorInsertionPoints,
 		"note": "method_confidence 'implied' means no tool observed the verb and GET was assumed. " +
 			"parameters_origin 'union' means the parameter set is every name ever seen on that " +
@@ -189,10 +189,10 @@ func CreateAttackVector(w http.ResponseWriter, r *http.Request) {
 			WHERE scope_target_id = $1`, scopeTargetID, v.key())
 	}
 
-	total, hosts, manual := attackVectorTotals(ctx, scopeTargetID)
+	total, hosts, manual, withNotes := attackVectorTotals(ctx, scopeTargetID)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"added": added, "already_present": existing, "vectors": len(candidates),
-		"total": total, "hosts": hosts, "manual": manual,
+		"total": total, "hosts": hosts, "manual": manual, "with_notes": withNotes,
 		"summary": fmt.Sprintf("%d vector(s) added, %d already present.", added, existing),
 	})
 }

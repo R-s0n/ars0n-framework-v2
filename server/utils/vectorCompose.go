@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"sort"
@@ -118,6 +119,126 @@ func (v VectorInput) mergeMissingParams() (string, bool) {
 	}
 	parsed.RawQuery = q.Encode()
 	return parsed.String(), true
+}
+
+// vectorBodyFor returns the body to send for a body vector.
+//
+// When the vector recorded a real body, that body is used. When it did not, one is BUILT from the
+// parameter names the vector claims, because the alternative is handing the tool an empty body and
+// having it test nothing while reporting clean.
+//
+// Shared rather than per tool because the same omission has now been made twice. sqlmap and ghauri
+// synthesise a body here; ComposeDalfox guarded on `v.Body != ""` and so emitted no -d at all, and
+// on this target every one of the 10 POST vectors has a NULL raw_request. The live command line was
+//
+//	dalfox scan https://ginandjuice.shop/catalog/cart -X POST -p productId:body      (no -d)
+//
+// which posts nothing, tests nothing, and is recorded as clean.
+//
+// Content type is honoured: a JSON vector gets a JSON object, because a urlencoded body sent to an
+// endpoint that parses JSON is rejected before it reaches the parameter under test.
+func vectorBodyFor(v VectorInput) string {
+	if strings.TrimSpace(v.Body) != "" {
+		return v.Body
+	}
+	if strings.Contains(strings.ToLower(v.ContentType), "json") {
+		fields := make(map[string]string, len(v.Parameters))
+		for _, name := range v.Parameters {
+			fields[name] = v.valueFor(name)
+		}
+		if encoded, err := json.Marshal(fields); err == nil {
+			return string(encoded)
+		}
+	}
+	values := url.Values{}
+	for _, name := range v.Parameters {
+		values.Set(name, v.valueFor(name))
+	}
+	return values.Encode()
+}
+
+func firstParam(v VectorInput) string {
+	if len(v.Parameters) > 0 {
+		return v.Parameters[0]
+	}
+	return ""
+}
+
+// markableParam chooses WHICH of a vector's parameters gets the injection marker.
+//
+// Cookie and header vectors get exactly one marked parameter, so this choice IS what the scan tests.
+// Taking Parameters[0] took the alphabetically first name, and the parameter list is stored sorted,
+// so on a load balanced target that is AWSALB. One line, wrong three ways: the marker landed on the
+// ELB stickiness cookie, the application's own TrackingId was never tested, and corrupting the
+// stickiness value scattered every request across backends so the session did not hold either.
+//
+// Ties keep the vector's own order, so the choice stays deterministic across runs and a re-scan of
+// the same vector is comparable to the last one.
+func markableParam(v VectorInput) string {
+	best, bestTier := "", -1
+	for _, name := range v.Parameters {
+		if tier := paramMarkTier(name); bestTier == -1 || tier < bestTier {
+			best, bestTier = name, tier
+		}
+	}
+	return best
+}
+
+// paramMarkTier ranks a name by how much sense it makes to inject into. Lower is better.
+//
+// The tiers exist because "can I inject here" and "does injecting here cost me the rest of the run"
+// are different questions, and only the second one is knowable from the name alone.
+func paramMarkTier(name string) int {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch {
+	// Set by the edge, read by the edge. No application code ever sees these, so a finding is
+	// impossible while the damage to the run is certain.
+	case hasAnyPrefix(name, edgeParamPrefixes):
+		return 2
+	// Genuinely application read and worth testing, but marking one breaks every request after it:
+	// a marked session cookie logs the scan out, a marked CSRF token turns every response into a
+	// rejection, a marked Authorization header turns every response into a 401. Each of those
+	// produces a uniform response the tools read as "not injectable". Chosen only when the vector
+	// offers nothing else, where testing it badly still beats not testing at all.
+	case credentialParamNames[name]:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// Load balancer, CDN and WAF cookie names, matched as prefixes because the families number their
+// members (AWSALB, AWSALBCORS, AWSALBTG) and the suffix carries no meaning worth matching on.
+var edgeParamPrefixes = []string{
+	"awsalb",       // AWS application load balancer stickiness
+	"awselb",       // AWS classic load balancer
+	"bigipserver",  // F5
+	"__cf",         // Cloudflare __cfduid, __cf_bm
+	"cf_clearance", // Cloudflare
+	"incap_ses_",   // Imperva
+	"visid_incap_", // Imperva
+	"citrix_ns_id", // Citrix NetScaler
+	"ak_bmsc",      // Akamai
+	"bm_s",         // Akamai bot manager bm_sv, bm_sz
+	"_abck",        // Akamai
+	"ts01",         // F5 ASM
+}
+
+var credentialParamNames = map[string]bool{
+	"session": true, "sessionid": true, "session_id": true, "_session_id": true,
+	"sess": true, "sid": true, "phpsessid": true, "jsessionid": true,
+	"asp.net_sessionid": true, "aspsessionid": true, "connect.sid": true,
+	"csrf": true, "_csrf": true, "csrftoken": true, "csrf_token": true, "xsrf-token": true,
+	"authorization": true, "auth_token": true,
+}
+
+func hasAnyPrefix(name string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (v VectorInput) valueFor(name string) string {
@@ -318,7 +439,6 @@ func observedQueryValues(rawURL string) map[string]string {
 	}
 	return out
 }
-
 
 // observedRequestValues reads the value of a cookie or header out of the recorded raw request.
 //

@@ -26,29 +26,34 @@ type VectorEligibility struct {
 	// IsBypassTarget says which table VectorID belongs to, so a skipped row is recorded against the
 	// column whose foreign key will accept it.
 	IsBypassTarget bool `json:"is_bypass_target,omitempty"`
+	// IsGraphQLTarget and TargetURL are for a target that exists in no table, where the URL is the
+	// only identity there is.
+	IsGraphQLTarget bool   `json:"is_graphql_target,omitempty"`
+	IsLeakTarget    bool   `json:"is_leak_target,omitempty"`
+	TargetURL       string `json:"target_url,omitempty"`
 }
 
 // VectorEligibilityReport is the whole picture for one tool: enough to draw the card, and enough for
 // an operator to challenge it.
 type VectorEligibilityReport struct {
-	Tool           string              `json:"tool"`
-	ToolName       string              `json:"tool_name"`
-	Category       string              `json:"category"`
-	Total          int                 `json:"total"`
-	Eligible       int                 `json:"eligible"`
-	ByPoint        map[string]int      `json:"by_point"`
-	SkippedByPoint map[string]int      `json:"skipped_by_point"`
-	Reachable      []string            `json:"reachable"`
-	Unreachable    []string            `json:"unreachable"`
-	Limitation     string              `json:"limitation,omitempty"`
+	Tool           string         `json:"tool"`
+	ToolName       string         `json:"tool_name"`
+	Category       string         `json:"category"`
+	Total          int            `json:"total"`
+	Eligible       int            `json:"eligible"`
+	ByPoint        map[string]int `json:"by_point"`
+	SkippedByPoint map[string]int `json:"skipped_by_point"`
+	Reachable      []string       `json:"reachable"`
+	Unreachable    []string       `json:"unreachable"`
+	Limitation     string         `json:"limitation,omitempty"`
 	// ScanCount is how many invocations a run will actually make. For the cache tools, whose unit of
 	// work is a URL rather than a parameter, it is far smaller than Eligible, and it is the number
 	// the progress bar counts against. Equal to Eligible for everything else.
 	ScanCount int `json:"scan_count"`
 	// ScanUnit names what ScanCount counts, so a card can say "34 URLs" rather than "34".
-	ScanUnit string `json:"scan_unit"`
-	Blinded        map[string][]string `json:"blinded,omitempty"`
-	Vectors        []VectorEligibility `json:"vectors,omitempty"`
+	ScanUnit string              `json:"scan_unit"`
+	Blinded  map[string][]string `json:"blinded,omitempty"`
+	Vectors  []VectorEligibility `json:"vectors,omitempty"`
 }
 
 // vectorSkipReason says, in the operator's terms, why this tool cannot test this insertion point.
@@ -91,7 +96,8 @@ func BuildVectorEligibility(tool VectorTool, vectors []vectorRow, settings map[s
 
 	for _, v := range vectors {
 		verdict := VectorEligibility{VectorID: v.ID, InsertionPoint: v.InsertionPoint,
-			IsBypassTarget: v.IsBypassTarget}
+			IsBypassTarget: v.IsBypassTarget, IsGraphQLTarget: v.IsGraphQLTarget,
+			IsLeakTarget: v.IsLeakTarget, TargetURL: v.EvidenceURL}
 		perVectorOK, perVectorWhy := true, ""
 		if tool.VectorEligible != nil {
 			perVectorOK, perVectorWhy = tool.VectorEligible(v.toInput())
@@ -229,6 +235,12 @@ type vectorRow struct {
 	// onto attack_vectors, so writing a bypass target's id there fails the insert and the scan
 	// records nothing at all for a target it really did scan.
 	IsBypassTarget bool
+	// IsGraphQLTarget marks a row that came from a tool's own endpoint list rather than from any
+	// table. Those endpoints are not rows anywhere: the list IS the tool's settings, so there is no
+	// id to reference and the scan records them by URL.
+	IsGraphQLTarget bool
+	// IsLeakTarget marks a directory from the sensitive data leak list, which has its own table.
+	IsLeakTarget bool
 	// BaselineStatus is the 4xx the target was originally seen returning. It is the control every
 	// reported bypass is judged against, so a result that merely reproduces the original denial can
 	// be told apart from one that got past it.
@@ -272,13 +284,35 @@ func (v vectorRow) toInput() VectorInput {
 // loadFoundVectorIDs returns the vectors that any completed scan in this category has produced a
 // finding for. It is what makes an exploitation tool eligible: not "this vector exists" but "the
 // detector already showed this one is vulnerable".
+// findingCategoryFor is the category whose findings gate this tool.
+//
+// RequiresFinding is documented as "the category whose findings count, so a tool is gated on
+// another tool's work", but every caller used to pass tool.Category instead, and nothing noticed
+// because the only tool that declares it (ssrfmap) has the same string for both. The first genuine
+// cross-category gate anybody wrote would have read the WRONG category's findings, found none, and
+// left the tool permanently ineligible with no error anywhere.
+func findingCategoryFor(tool VectorTool) string {
+	if tool.RequiresFinding != "" {
+		return tool.RequiresFinding
+	}
+	return tool.Category
+}
+
 func loadFoundVectorIDs(ctx context.Context, scopeTargetID, category string) map[string]bool {
 	found := map[string]bool{}
+	// COALESCE across every identity a finding can carry, not just vector_id.
+	//
+	// A target is an attack vector, an access bypass target or a sensitive leak directory depending on
+	// the section, and only one of those columns is ever populated. Reading vector_id alone made this
+	// return nothing for the sections that use the others, which does not fail: it silently marks
+	// every gated tool ineligible, so git-dumper would refuse to run on a repository the detector had
+	// just found.
 	rows, err := dbPool.Query(ctx, `
-		SELECT DISTINCT f.vector_id::text
+		SELECT DISTINCT COALESCE(f.vector_id, f.bypass_target_id, f.leak_target_id)::text
 		FROM vector_findings f
 		JOIN vector_scans s ON s.id = f.scan_id
-		WHERE s.scope_target_id = $1 AND s.category = $2 AND f.vector_id IS NOT NULL
+		WHERE s.scope_target_id = $1 AND s.category = $2
+		  AND COALESCE(f.vector_id, f.bypass_target_id, f.leak_target_id) IS NOT NULL
 		  AND f.triage <> 'dismissed'`, scopeTargetID, category)
 	if err != nil {
 		return found

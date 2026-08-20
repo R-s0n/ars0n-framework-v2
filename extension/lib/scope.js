@@ -95,6 +95,79 @@ export function hostInScope(hostname, scopeHosts) {
   return (scopeHosts || []).some((scope) => host === scope || host.endsWith('.' + scope));
 }
 
+/* ------------------------------------------------------------------ per-target extra scope */
+
+// Extra scope hosts belong to ONE scope target, never to the browser.
+//
+// They used to live in a single flat `extraHosts` array shared by every target, so an adjacent host
+// added while recording one application was still in scope when the next recording started against
+// a completely different one. The expected starting point for testing a single URL is that target's
+// own host and nothing else, and a leftover entry silently widens what the capturer will record:
+// traffic gets attributed to a target it has nothing to do with, and nothing on screen says why.
+export const EXTRA_HOSTS_BY_TARGET_KEY = 'extraHostsByTarget';
+
+// Where the old global list is parked once it stops being read. See migrateExtraHostStorage.
+export const LEGACY_EXTRA_HOSTS_KEY = 'extraHostsLegacy';
+
+export function hostsForTarget(byTarget, targetId) {
+  if (!byTarget || !targetId) return [];
+  const hosts = byTarget[targetId];
+  return Array.isArray(hosts) ? hosts : [];
+}
+
+// Returns a NEW map with the host added. Returns the map unchanged (same reference) when there is
+// nothing to do, which is how callers know a write is not needed.
+export function withHostForTarget(byTarget, targetId, host) {
+  const base = byTarget || {};
+  const cleaned = normalizeHostEntry(host);
+  if (!cleaned || !targetId) return base;
+
+  const current = hostsForTarget(base, targetId);
+  if (current.includes(cleaned)) return base;
+  return { ...base, [targetId]: [...current, cleaned] };
+}
+
+export function withoutHostForTarget(byTarget, targetId, host) {
+  const base = byTarget || {};
+  if (!targetId) return base;
+
+  // Stored entries are already normalized, but a host arriving from a rendered chip is matched
+  // literally as well so a value that cannot be re-normalized is still removable.
+  const cleaned = normalizeHostEntry(host);
+  const literal = String(host || '').trim().toLowerCase();
+  const current = hostsForTarget(base, targetId);
+  const next = current.filter((h) => h !== cleaned && h !== literal);
+  if (next.length === current.length) return base;
+  return { ...base, [targetId]: next };
+}
+
+// Reads the stored shape and, on first run after the upgrade, retires the old global list.
+//
+// The legacy hosts are deliberately NOT adopted by any target. There is no way to tell which target
+// they were typed for: the recording state that knew it lives in chrome.storage.session, which does
+// not survive a browser restart. Attaching them to whichever target happens to be selected would
+// recreate the exact leak this change exists to remove. They are moved to their own key rather than
+// deleted, so an operator who wants them back has not lost anything, and simply stop counting as
+// scope.
+export function migrateExtraHostStorage(stored) {
+  const source = stored || {};
+  const raw = source[EXTRA_HOSTS_BY_TARGET_KEY];
+  const byTarget = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const legacy = Array.isArray(source.extraHosts) ? source.extraHosts : [];
+
+  if (!legacy.length) return { byTarget, writes: null };
+
+  const alreadyParked = Array.isArray(source[LEGACY_EXTRA_HOSTS_KEY])
+    ? source[LEGACY_EXTRA_HOSTS_KEY]
+    : [];
+  const parked = Array.from(new Set([...alreadyParked, ...legacy]));
+
+  return {
+    byTarget,
+    writes: { extraHosts: [], [LEGACY_EXTRA_HOSTS_KEY]: parked },
+  };
+}
+
 export function isStaticMedia(pathname) {
   const lower = String(pathname).toLowerCase();
   return STATIC_MEDIA_EXTENSIONS.some((ext) => lower.endsWith(ext));
@@ -270,6 +343,106 @@ export function parseMultipartBody(rawBody) {
     result[match[1]] = match[2] !== undefined ? `[file:${match[2]}]` : '';
   }
   return Object.keys(result).length ? result : null;
+}
+
+/* ------------------------------------------------------------------ webRequest bodies */
+
+// chrome.webRequest hands over a PARSED form (details.requestBody.formData) rather than the bytes
+// that were on the wire, and it does so for BOTH application/x-www-form-urlencoded and
+// multipart/form-data. It hands it over at onBeforeRequest, the one stage where the request headers
+// are not yet available, so the content type is genuinely unknown at that moment.
+//
+// The old code resolved that ambiguity by picking a format: JSON.stringify(formData). The result
+// was a body that was never sent. A urlencoded login POST was recorded as
+// {"csrf":"...","username":"rs0n"}, and parseParams then ran URLSearchParams over that string,
+// which contains no '&' and whose only '=' is inside a quoted value, so it returned exactly ONE
+// parameter whose NAME was the entire JSON blob and whose value was empty. Every form POST was
+// stored wrong, no body parameter was ever discovered from one, and rebuilding the request for an
+// auth flow produced something the application rejects.
+//
+// The fix is to keep the structure and encode it LATER, at the point the content type is known.
+// These helpers are pure so both the popup-facing tests and the worker can exercise them.
+
+export function normalizeFormData(formData) {
+  if (!formData || typeof formData !== 'object') return null;
+
+  const out = {};
+  Object.keys(formData).forEach((key) => {
+    const values = formData[key];
+    const clean = (value) => (value === undefined || value === null ? '' : String(value));
+    if (!Array.isArray(values)) {
+      out[key] = clean(values);
+      return;
+    }
+    const mapped = values.map(clean);
+    // Collapse the single-value case so the shape matches what parseParams' urlencoded branch
+    // produces, keeping the two paths interchangeable downstream.
+    out[key] = mapped.length === 1 ? mapped[0] : mapped;
+  });
+
+  return Object.keys(out).length ? out : null;
+}
+
+// Encodes a parsed form back into the body the application actually expects.
+//
+// URLSearchParams.toString() is the browser's own x-www-form-urlencoded serializer, so '&', '=',
+// '+', '%', spaces and unicode are escaped exactly the way a real form submission escapes them.
+// Hand-rolling it with encodeURIComponent is subtly different: that emits %20 for a space where a
+// form sends '+', and leaves ! and ' unescaped.
+//
+// A multipart body cannot be rebuilt at all, because chrome gives neither the boundary nor the file
+// bytes. It keeps the JSON shape, which is what the page hook already produces for a FormData body
+// and what parseParams' multipart branch already reads.
+export function encodeFormBody(formData, contentType) {
+  const normalized = normalizeFormData(formData);
+  if (!normalized) return '';
+
+  if (String(contentType || '').toLowerCase().includes('multipart/form-data')) {
+    return JSON.stringify(normalized);
+  }
+
+  const params = new URLSearchParams();
+  Object.keys(normalized).forEach((key) => {
+    const value = normalized[key];
+    // Repeated keys are appended separately so tag=a&tag=b round trips as a repeated key rather
+    // than collapsing to tag=a,b.
+    if (Array.isArray(value)) value.forEach((entry) => params.append(key, entry));
+    else params.append(key, value);
+  });
+  return params.toString();
+}
+
+// Pulls out what chrome gave us WITHOUT deciding a wire format yet. Returns the structured form
+// when there is one, so the caller can encode it once the content type is in hand.
+export function extractWebRequestBody(requestBody) {
+  const empty = { text: '', formData: null };
+  if (!requestBody) return empty;
+
+  if (requestBody.formData) {
+    return { text: '', formData: normalizeFormData(requestBody.formData) };
+  }
+
+  if (Array.isArray(requestBody.raw) && requestBody.raw.length > 0) {
+    try {
+      const decoder = new TextDecoder('utf-8');
+      const text = requestBody.raw
+        .map((chunk) => {
+          if (!chunk) return '';
+          if (chunk.bytes) return decoder.decode(new Uint8Array(chunk.bytes));
+          // An uploaded file arrives as a PATH, never as bytes. Contributing nothing for it made
+          // the recorded body silently short with no sign a part was missing; naming it at least
+          // records that a file part was there.
+          if (chunk.file) return `[file:${chunk.file}]`;
+          return '';
+        })
+        .join('');
+      return { text, formData: null };
+    } catch (error) {
+      return empty;
+    }
+  }
+
+  return empty;
 }
 
 export function parseQueryParams(url) {

@@ -198,14 +198,15 @@ func ConsolidateAttackVectors(w http.ResponseWriter, r *http.Request) {
 		results = append(results, res)
 	}
 
-	total, hosts, manual := attackVectorTotals(ctx, scopeTargetID)
+	total, hosts, manual, withNotes := attackVectorTotals(ctx, scopeTargetID)
 	added := 0
 	for _, r := range results {
 		added += r.Added
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total": total, "hosts": hosts, "manual": manual, "added": added,
+		"total": total, "hosts": hosts, "manual": manual, "with_notes": withNotes,
+		"added": added,
 		"by_source": results,
 		"summary": fmt.Sprintf("%d unique vectors across %d host(s); %d new this run.",
 			total, hosts, added),
@@ -686,12 +687,15 @@ func jsonObjectKeys(blob string) []string {
 	return out
 }
 
-func attackVectorTotals(ctx context.Context, scopeTargetID string) (total, hosts, manual int) {
+// withNotes counts the vectors an operator has written something against, which is the closest
+// thing the list has to "looked at": a note is only ever there because somebody typed it.
+func attackVectorTotals(ctx context.Context, scopeTargetID string) (total, hosts, manual, withNotes int) {
 	_ = dbPool.QueryRow(ctx, `
-		SELECT count(*), count(DISTINCT domain), count(*) FILTER (WHERE manual_added)
+		SELECT count(*), count(DISTINCT domain), count(*) FILTER (WHERE manual_added),
+		       count(*) FILTER (WHERE COALESCE(TRIM(notes),'') <> '')
 		FROM attack_vectors WHERE scope_target_id = $1 AND deleted_at IS NULL`,
-		scopeTargetID).Scan(&total, &hosts, &manual)
-	return total, hosts, manual
+		scopeTargetID).Scan(&total, &hosts, &manual, &withNotes)
+	return total, hosts, manual, withNotes
 }
 
 // usefulParameterNames drops names that are not parameters an application reads.

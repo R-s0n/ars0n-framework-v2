@@ -19,6 +19,13 @@ import {
   truncateBody,
   isTextualMime,
   mergeKey,
+  normalizeFormData,
+  encodeFormBody,
+  extractWebRequestBody,
+  hostsForTarget,
+  withHostForTarget,
+  withoutHostForTarget,
+  migrateExtraHostStorage,
 } from './scope.js';
 
 import {
@@ -317,6 +324,132 @@ section('out-of-scope list: trimming keeps the busiest but preserves order');
   const ascending = indexes.every((v, i) => i === 0 || indexes[i - 1] < v);
   check('survivors stay in first-seen order, not count order', ascending, true);
   check('trim only fires above the limit', OBSERVED_HOST_LIMIT > OBSERVED_HOST_KEEP, true);
+}
+
+section('webRequest bodies: a parsed form is re-encoded, never JSON-stringified');
+{
+  // THE regression. chrome gives details.requestBody.formData for BOTH urlencoded and multipart, at
+  // the one stage where the content type is unknown. The old code answered that by JSON-stringifying
+  // it, so a login POST was recorded as {"csrf":"...","username":"rs0n"} and parseParams read that
+  // back as a single parameter whose NAME was the whole blob. Measured against ginandjuice.shop: the
+  // stored row claimed 79 bytes of JSON where 65 bytes of form had gone out on the wire.
+  const login = { csrf: ['eGT0Vogl'], username: ['rs0n'], password: ['rs0n'] };
+
+  const encoded = encodeFormBody(login, 'application/x-www-form-urlencoded');
+  check('encodes as a real form body', encoded, 'csrf=eGT0Vogl&username=rs0n&password=rs0n');
+  check('and is not JSON', encoded.startsWith('{'), false);
+
+  // The round trip is the proof: parsing the encoded body must give the fields back, which is
+  // precisely what failed before.
+  check('round trips through parseParams', parseParams(encoded, 'application/x-www-form-urlencoded'), {
+    csrf: 'eGT0Vogl',
+    username: 'rs0n',
+    password: 'rs0n',
+  });
+
+  check(
+    'reserved characters are escaped the way a form escapes them',
+    encodeFormBody({ q: ['a b&c=d+e%f'], 'we ird': ['x'] }, 'application/x-www-form-urlencoded'),
+    'q=a+b%26c%3Dd%2Be%25f&we+ird=x'
+  );
+  check(
+    'and survive the round trip intact',
+    parseParams(
+      encodeFormBody({ q: ['a b&c=d+e%f'] }, 'application/x-www-form-urlencoded'),
+      'application/x-www-form-urlencoded'
+    ),
+    { q: 'a b&c=d+e%f' }
+  );
+  check(
+    'a repeated key stays repeated rather than collapsing to a comma list',
+    encodeFormBody({ tag: ['a', 'b'] }, 'application/x-www-form-urlencoded'),
+    'tag=a&tag=b'
+  );
+  check('unicode is percent encoded', encodeFormBody({ n: ['café'] }, ''), 'n=caf%C3%A9');
+  check('an empty form encodes to an empty body', encodeFormBody({}, ''), '');
+  check('and a missing form too', encodeFormBody(null, ''), '');
+
+  // multipart genuinely cannot be rebuilt: chrome hands over neither the boundary nor the file
+  // bytes. It keeps the JSON shape, which parseParams' multipart branch already reads.
+  const multipart = encodeFormBody({ title: ['hello'] }, 'multipart/form-data; boundary=X');
+  check('multipart keeps the JSON shape', multipart, '{"title":"hello"}');
+  check('which parseParams still understands', parseParams(multipart, 'multipart/form-data; boundary=X'), {
+    title: 'hello',
+  });
+}
+
+section('webRequest bodies: extraction keeps the structure and loses nothing');
+{
+  check('a form is returned structured, not serialized', extractWebRequestBody({ formData: { a: ['1'] } }), {
+    text: '',
+    formData: { a: '1' },
+  });
+
+  const bytes = new TextEncoder().encode('{"a":1}').buffer;
+  check('a raw body is decoded as text', extractWebRequestBody({ raw: [{ bytes }] }), {
+    text: '{"a":1}',
+    formData: null,
+  });
+
+  // An uploaded file arrives as a PATH, never as bytes. Contributing nothing for it left the body
+  // silently short with no sign a part was missing.
+  check(
+    'an uploaded file part is named rather than dropped',
+    extractWebRequestBody({ raw: [{ file: '/tmp/report.pdf' }] }),
+    { text: '[file:/tmp/report.pdf]', formData: null }
+  );
+  check('nothing at all is empty', extractWebRequestBody(null), { text: '', formData: null });
+
+  check('single values are unwrapped', normalizeFormData({ a: ['1'], b: ['2', '3'] }), {
+    a: '1',
+    b: ['2', '3'],
+  });
+  check('an empty form is null rather than an empty object', normalizeFormData({}), null);
+}
+
+section('extra scope hosts belong to a target, not to the browser');
+{
+  // A host added while testing one application must not be in scope when the next recording starts
+  // against a different one. This is not cosmetic: the popup ships this list as the capture
+  // boundary, and the server then treats an observed host as one the operator authorized its
+  // scanners to contact.
+  let byTarget = {};
+  byTarget = withHostForTarget(byTarget, 'target-a', 'api.a.example.com');
+  byTarget = withHostForTarget(byTarget, 'target-b', 'api.b.example.com');
+
+  check('each target keeps its own', hostsForTarget(byTarget, 'target-a'), ['api.a.example.com']);
+  check('and cannot see the other one', hostsForTarget(byTarget, 'target-b'), ['api.b.example.com']);
+  check('an unknown target starts clean', hostsForTarget(byTarget, 'target-c'), []);
+
+  check('a full URL is normalized to a host', hostsForTarget(withHostForTarget({}, 't', 'https://api.x.com/p'), 't'), [
+    'api.x.com',
+  ]);
+  check('a wildcard is normalized too', hostsForTarget(withHostForTarget({}, 't', '*.x.com'), 't'), ['x.com']);
+  check('an unusable value is refused', withHostForTarget({}, 't', 'not a host'), {});
+  check('and so is one with no target to own it', withHostForTarget({}, '', 'api.x.com'), {});
+
+  // Returning the same reference is how a caller knows no write is needed.
+  check('adding a duplicate is a no-op', withHostForTarget(byTarget, 'target-a', 'api.a.example.com') === byTarget, true);
+
+  const removed = withoutHostForTarget(byTarget, 'target-a', 'api.a.example.com');
+  check('removal only touches its own target', hostsForTarget(removed, 'target-a'), []);
+  check('leaving the other alone', hostsForTarget(removed, 'target-b'), ['api.b.example.com']);
+}
+
+section('the retired global host list is parked, not adopted');
+{
+  // There is no record of which target the old flat list was typed for: the session state that knew
+  // lives in chrome.storage.session and does not survive a browser restart. Adopting it would
+  // recreate the very leak this shape removes, so it is moved aside and stops counting as scope.
+  const migrated = migrateExtraHostStorage({ extraHosts: ['leftover.example.com'] });
+  check('no target inherits it', migrated.byTarget, {});
+  check('the old key stops being scope', migrated.writes.extraHosts, []);
+  check('but nothing an operator typed is destroyed', migrated.writes.extraHostsLegacy, ['leftover.example.com']);
+
+  const clean = migrateExtraHostStorage({ extraHostsByTarget: { t: ['api.x.com'] } });
+  check('an already-migrated store needs no write', clean.writes, null);
+  check('and keeps its buckets', clean.byTarget, { t: ['api.x.com'] });
+  check('a legacy array is never mistaken for the map', migrateExtraHostStorage({ extraHostsByTarget: ['bad'] }).byTarget, {});
 }
 
 /* ------------------------------------------------------------------ */

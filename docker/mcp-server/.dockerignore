@@ -1,0 +1,5 @@
+# The Dockerfile does COPY src/ ./src/, a whole-directory copy, so anything that should not ship has
+# to be excluded here rather than by narrowing the COPY.
+test/
+**/*.test.js
+node_modules/

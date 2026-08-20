@@ -5,7 +5,6 @@ import "strings"
 // Composing the three XSS scanners. The generic machinery is in vectorCompose.go; what lives here is
 // the part that is specific to dalfox, domdig and xssFuzz.
 
-
 // dalfoxLocationFor maps our insertion point onto dalfox's -p location token.
 //
 // Verified token by token. query, body, json, multipart and header all work and self-label in the
@@ -55,8 +54,12 @@ func ComposeDalfox(v VectorInput, settings map[string]any, reportPath string) ([
 	if method != "" && method != "GET" {
 		args = append(args, "-X", method)
 	}
-	if v.InsertionPoint == "body" && v.Body != "" {
-		args = append(args, "-d", v.Body)
+	// vectorBodyFor, not v.Body. Guarding on a recorded body meant that a body vector whose
+	// raw_request was never captured produced `-X POST -p name:body` with no -d, so dalfox posted an
+	// empty body, tested nothing, and the vector was recorded clean. All 10 POST vectors on
+	// ginandjuice.shop are in exactly that state.
+	if v.InsertionPoint == "body" {
+		args = append(args, "-d", vectorBodyFor(v))
 	}
 
 	// The target header, lower-cased, so it can be removed from the user's -H list regardless of how

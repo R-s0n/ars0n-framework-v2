@@ -45,7 +45,7 @@ func GetVectorScanStatus(w http.ResponseWriter, r *http.Request) {
 	settings := loadVectorSettings(ctx, scopeTargetID, toolKey)
 	if vectors, err := loadRowsFor(ctx, tool, scopeTargetID); err == nil {
 		report := BuildVectorEligibility(tool, vectors, settings,
-			loadFoundVectorIDs(ctx, scopeTargetID, tool.Category),
+			loadFoundVectorIDs(ctx, scopeTargetID, findingCategoryFor(tool)),
 			loadVectorSectionSettings(ctx, scopeTargetID, tool.Category))
 		report.Vectors = nil
 		out["eligibility"] = report
@@ -98,7 +98,7 @@ func GetVectorResults(w http.ResponseWriter, r *http.Request) {
 
 	findings := []map[string]any{}
 	rows, err := dbPool.Query(ctx, `
-		SELECT f.id::text, f.vector_id::text, f.tool, f.kind, f.severity, f.confidence,
+		SELECT f.id::text, COALESCE(f.vector_id::text,''), f.tool, f.kind, f.severity, f.confidence,
 		       f.insertion_point, f.param, f.payload, f.method, f.url, f.evidence,
 		       f.detection_method, f.inject_type, f.raw_request, f.raw_response, f.triage,
 		       COALESCE(v.domain,''), COALESCE(v.path,'')
@@ -137,7 +137,7 @@ func GetVectorResults(w http.ResponseWriter, r *http.Request) {
 
 	skipped := []map[string]any{}
 	skipRows, err := dbPool.Query(ctx, `
-		SELECT sv.vector_id::text, sv.reason, COALESCE(v.insertion_point,''),
+		SELECT COALESCE(sv.vector_id::text,''), sv.reason, COALESCE(v.insertion_point,''),
 		       COALESCE(v.method,''), COALESCE(v.domain,''), COALESCE(v.path,'')
 		FROM vector_scan_vectors sv
 		LEFT JOIN attack_vectors v ON v.id = sv.vector_id

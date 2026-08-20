@@ -454,6 +454,15 @@ func (r *validationRun) calibrate() bool {
 	if better := authRequiredProbeURL(r.scopeTargetID); better != "" {
 		probeURL = better
 		discriminating = true
+	} else if better := sessionFlowProbeURL(r.scopeTargetID); better != "" {
+		// authRequiredProbeURL reads PRIOR validation results, so on a first run it has nothing to
+		// offer and the base URL was all that was left. The session manager already knows a better
+		// one: the page the login flow redirects to, which by construction only an authenticated
+		// caller sees. Measured on ginandjuice.shop 2026-08-19, where the root differs by 87 bytes
+		// signed in versus out: the run reported credentials_honoured=false for a session that had
+		// just validated as active, and every authenticated endpoint fell to unverified.login_wall.
+		probeURL = better
+		discriminating = true
 	}
 	r.credsProbeURL = probeURL
 

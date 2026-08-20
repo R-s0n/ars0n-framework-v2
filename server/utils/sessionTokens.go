@@ -45,6 +45,33 @@ var validSessionTokenTypes = map[string]bool{
 	tokenTypeQuery:  true,
 }
 
+// What a stored value IS, as opposed to how it travels. See the database.go migration for the
+// measurement that made this necessary.
+const (
+	tokenRoleCredential = "credential"
+	tokenRoleCompanion  = "companion"
+)
+
+var validSessionTokenRoles = map[string]bool{
+	tokenRoleCredential: true,
+	tokenRoleCompanion:  true,
+}
+
+// normalizeTokenRole defaults an unset role to credential and refuses anything it does not know.
+//
+// Defaulting matters as much as validating: every token that existed before this column did has an
+// empty role, and treating those as anything but a credential would stop them being graded.
+func normalizeTokenRole(role string) (string, error) {
+	role = strings.ToLower(strings.TrimSpace(role))
+	if role == "" {
+		return tokenRoleCredential, nil
+	}
+	if !validSessionTokenRoles[role] {
+		return "", fmt.Errorf("token_role must be credential or companion")
+	}
+	return role, nil
+}
+
 // Validation verdicts. These are stored in last_validation_status, so they stay short and stable:
 // the client renders them as badges and a renamed value silently stops matching.
 const (
@@ -52,6 +79,10 @@ const (
 	tokenStatusExpired     = "expired"
 	tokenStatusNotHonoured = "not_honoured"
 	tokenStatusError       = "error"
+	// A companion is not a credential and cannot be graded like one: sending a routing cookie on its
+	// own changes nothing, so the honoured/not-honoured comparison is meaningless for it and
+	// reporting not_honoured reads as "dead credential" for a value that is working perfectly.
+	tokenStatusCompanion = "companion"
 )
 
 // SessionToken mirrors a session_tokens row, with the linked flow's name joined on for display.
@@ -62,6 +93,7 @@ type SessionToken struct {
 	AuthFlowName         string     `json:"auth_flow_name"`
 	Name                 string     `json:"name"`
 	TokenType            string     `json:"token_type"`
+	TokenRole            string     `json:"token_role"`
 	HeaderName           string     `json:"header_name"`
 	CookieName           string     `json:"cookie_name"`
 	ParamName            string     `json:"param_name"`
@@ -91,6 +123,7 @@ type sessionTokenPayload struct {
 	AuthFlowID     *string    `json:"auth_flow_id"`
 	Name           *string    `json:"name"`
 	TokenType      *string    `json:"token_type"`
+	TokenRole      *string    `json:"token_role"`
 	HeaderName     *string    `json:"header_name"`
 	CookieName     *string    `json:"cookie_name"`
 	ParamName      *string    `json:"param_name"`
@@ -108,7 +141,8 @@ type sessionTokenPayload struct {
 }
 
 const sessionTokenCols = `t.id::text, t.scope_target_id::text, COALESCE(t.auth_flow_id::text,''),
-	COALESCE(f.name,''), t.name, t.token_type, COALESCE(t.header_name,''),
+	COALESCE(f.name,''), t.name, t.token_type, COALESCE(t.token_role,'credential'),
+	COALESCE(t.header_name,''),
 	COALESCE(t.cookie_name,''), COALESCE(t.param_name,''), COALESCE(t.value_prefix,''),
 	COALESCE(t.token_value,''), COALESCE(t.scope_domains,'{}'), COALESCE(t.cookie_path,'/'),
 	COALESCE(t.cookie_domain,''), COALESCE(t.cookie_secure,false), COALESCE(t.cookie_httponly,false),
@@ -267,13 +301,14 @@ func UpdateSessionToken(w http.ResponseWriter, r *http.Request) {
 		  param_name = $6, value_prefix = $7, token_value = $8, scope_domains = $9,
 		  cookie_path = $10, cookie_domain = $11, cookie_secure = $12, cookie_httponly = $13,
 		  cookie_samesite = $14, expires_at = $15, is_active = $16, notes = $17,
-		  last_validation_status = $18, last_validation_detail = $19, updated_at = NOW()
+		  last_validation_status = $18, last_validation_detail = $19, token_role = $21,
+		  updated_at = NOW()
 		WHERE id = $20`,
 		nullUUID(token.AuthFlowID), token.Name, token.TokenType, token.HeaderName, token.CookieName,
 		token.ParamName, token.ValuePrefix, token.TokenValue, token.ScopeDomains, token.CookiePath,
 		token.CookieDomain, token.CookieSecure, token.CookieHTTPOnly, token.CookieSameSite,
 		DeriveSessionTokenExpiry(token.TokenValue, token.ExpiresAt),
-		token.IsActive, token.Notes, validationStatus, validationDetail, tokenID)
+		token.IsActive, token.Notes, validationStatus, validationDetail, tokenID, token.TokenRole)
 	if err != nil {
 		log.Printf("[SESSION-TOKEN] Failed to update token %s: %v", tokenID, err)
 		http.Error(w, "Failed to update session token", http.StatusInternalServerError)
@@ -722,6 +757,18 @@ func runSessionTokenValidation(token SessionToken) (string, string, map[string]i
 			"No value is stored for this token, so there was nothing to send.", evidence
 	}
 
+	// A companion is not a credential, so the honoured/not-honoured comparison cannot say anything
+	// about it: sending a load balancer affinity cookie on its own changes no response, and grading
+	// it against a control would report not_honoured forever for a value that is doing its job.
+	// It is checked by being attached to every other token's validation on this target instead.
+	if token.TokenRole == tokenRoleCompanion {
+		evidence["role"] = tokenRoleCompanion
+		return tokenStatusCompanion,
+			"This is a companion value, not a credential, so it is not graded on its own. It is " +
+				"sent alongside every credential validated on this target, and on the control arm " +
+				"too, so the comparison isolates the credential.", evidence
+	}
+
 	_, host, base := ScopeTargetBase(token.ScopeTargetID)
 	if host == "" || base == "" {
 		return tokenStatusError,
@@ -778,13 +825,30 @@ func runSessionTokenValidation(token SessionToken) (string, string, map[string]i
 	// URL, which it builds itself, so there is nothing for a host boundary to protect against.
 	client := NewScanClient(budget, 20*time.Second, "", nil)
 
+	// Companions go on BOTH arms, which is the whole point of separating them from credentials.
+	//
+	// A routing cookie is not a credential, so including it in the control keeps the two arms
+	// differing by exactly one thing: the credential. Leaving it off the control would let backend
+	// affinity vary between the arms and produce a difference that has nothing to do with the
+	// session, which is a false "active" verdict. Leaving it off the authenticated arm is what
+	// produced the false not_honoured that this whole mechanism exists to stop.
+	companions, companionNames := loadCompanionMaterial(token.ScopeTargetID, host, token.ID)
+	if len(companionNames) > 0 {
+		evidence["companion_cookies"] = companionNames
+	}
+
 	authed := client.Do(ctx, ScanRequest{
 		URL:      token.ApplyToURL(target),
 		Method:   http.MethodGet,
-		Auth:     token.AuthMaterial(host),
+		Auth:     withCompanions(token.AuthMaterial(host), companions, host),
 		ReadBody: true,
 	})
-	anon := client.Do(ctx, ScanRequest{URL: target, Method: http.MethodGet, ReadBody: true})
+	anon := client.Do(ctx, ScanRequest{
+		URL:      target,
+		Method:   http.MethodGet,
+		Auth:     companions,
+		ReadBody: true,
+	})
 
 	if authed.Err != nil {
 		return tokenStatusError,
@@ -870,7 +934,8 @@ func RefreshSessionToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	value, expires, evidence, err := replayFlowForToken(token)
+	var issuedCookies []string
+	value, expires, evidence, err := replayFlowForToken(token, &issuedCookies)
 	if err != nil {
 		detail := "The auth flow could not be replayed: " + truncateReason(err.Error())
 		recordSessionTokenEvent(tokenID, "refresh", "replay_failed", detail, evidence)
@@ -911,11 +976,74 @@ func RefreshSessionToken(w http.ResponseWriter, r *http.Request) {
 
 	detail := fmt.Sprintf("Replayed the linked auth flow and took a new value for %s from %s.",
 		sessionTokenIdentity(token), evidence["source"])
+
+	// Companions come from the same login response, so they are taken from it at the same time.
+	// Refreshing a credential and leaving its companion behind is worse than not refreshing at all:
+	// the new session is genuine, the routing cookie still points at the backend the OLD session
+	// lived on, and every authenticated request lands somewhere that has never seen this login.
+	if names := refreshCompanionCookies(token.ScopeTargetID, tokenID, issuedCookies); len(names) > 0 {
+		evidence["companions_refreshed"] = names
+		detail += fmt.Sprintf(" Also refreshed the companion value(s) %s from the same response.",
+			strings.Join(names, ", "))
+	}
+
 	recordSessionTokenEvent(tokenID, "refresh", "refreshed", detail, evidence)
 
 	writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{
 		"status": "refreshed", "detail": detail, "new_value_set": true,
 	})
+}
+
+// refreshCompanionCookies updates the active companion cookies on a target from the Set-Cookie
+// headers one flow replay produced, and returns the names it actually updated.
+//
+// Values are matched by cookie name, so a companion whose name the flow never issued is left
+// alone rather than blanked.
+func refreshCompanionCookies(scopeTargetID, excludeTokenID string, setCookies []string) []string {
+	if len(setCookies) == 0 {
+		return nil
+	}
+
+	type companion struct{ id, name string }
+	companions := []companion{}
+
+	rows, err := dbPool.Query(context.Background(), `
+		SELECT id::text, COALESCE(cookie_name,'')
+		FROM session_tokens
+		WHERE scope_target_id = $1
+		  AND COALESCE(token_role,'credential') = 'companion'
+		  AND COALESCE(is_active,false)
+		  AND token_type = 'cookie'
+		  AND id <> $2::uuid`, scopeTargetID, excludeTokenID)
+	if err != nil {
+		return nil
+	}
+	for rows.Next() {
+		var c companion
+		if rows.Scan(&c.id, &c.name) == nil && strings.TrimSpace(c.name) != "" {
+			companions = append(companions, c)
+		}
+	}
+	// Closed before any write, rather than updating inside the iteration: holding the read open
+	// while writing on the same pool is how a deadlock gets written by accident.
+	rows.Close()
+
+	updated := []string{}
+	for _, c := range companions {
+		value, expires := cookieValueFromSetCookies(setCookies, c.name)
+		if value == "" {
+			continue
+		}
+		if _, err := dbPool.Exec(context.Background(), `
+			UPDATE session_tokens
+			SET token_value = $1, expires_at = $2, last_refreshed_at = NOW(), updated_at = NOW()
+			WHERE id = $3`, value, expires, c.id); err != nil {
+			log.Printf("[SESSION-TOKEN] Failed to refresh companion %s: %v", c.id, err)
+			continue
+		}
+		updated = append(updated, c.name)
+	}
+	return updated
 }
 
 // replayFlowForToken runs the linked auth flow and pulls a new value out of the result.
@@ -925,7 +1053,9 @@ func RefreshSessionToken(w http.ResponseWriter, r *http.Request) {
 // written back onto its step so the operator can open the flow afterwards and see what happened. A
 // second implementation of that loop would drift from the one the Auth Flows tab exercises, and the
 // refresh path would quietly stop matching the flow the operator tested by hand.
-func replayFlowForToken(token SessionToken) (string, *time.Time, map[string]interface{}, error) {
+// The Set-Cookie lines the replay produced are written to issuedCookies when it is non-nil, so the
+// caller can refresh companion values out of the same login response that issued the credential.
+func replayFlowForToken(token SessionToken, issuedCookies *[]string) (string, *time.Time, map[string]interface{}, error) {
 	evidence := map[string]interface{}{"auth_flow_id": token.AuthFlowID}
 
 	baseURL, err := getFlowBaseURL(token.AuthFlowID)
@@ -945,9 +1075,27 @@ func replayFlowForToken(token SessionToken) (string, *time.Time, map[string]inte
 	var bodies []string
 	failed := 0
 
+	// The same variable map the interactive replay uses. Without it a token whose login carries a
+	// per-request CSRF token could never be reissued: every refresh would re-send a stale token and
+	// be refused, and the operator would see a flow that works by hand and not on a refresh.
+	vars := map[string]string{}
+
 	for _, step := range steps {
-		effBase := resolveBaseURL(step.RawRequest, baseURL)
-		status, headers, body, ms, sendErr := sendRawRequest(step.RawRequest, effBase, jar)
+		request, _, refusal := prepareStepRequest(step.RawRequest, vars)
+		if refusal != "" {
+			failed++
+			if uErr := updateStepResponse(step.ID, 0, nil, "", 0, refusal); uErr != nil {
+				log.Printf("[SESSION-TOKEN] Failed to persist refusal of step %s: %v", step.ID, uErr)
+			}
+			// Named on the token's own event, so the reason is "step N needs a value nothing
+			// captured" rather than the far less useful "every step failed to send".
+			evidence["refused_step"] = step.StepOrder
+			evidence["refused_reason"] = refusal
+			continue
+		}
+
+		effBase := resolveBaseURL(request, baseURL)
+		status, headers, body, ms, sendErr := sendRawRequest(request, effBase, jar)
 
 		errStr := ""
 		if sendErr != nil {
@@ -961,6 +1109,11 @@ func replayFlowForToken(token SessionToken) (string, *time.Time, map[string]inte
 			continue
 		}
 
+		captured, _ := runAuthFlowExtractions(step.Extractions, headers, body)
+		for name, value := range captured {
+			vars[name] = value
+		}
+
 		// Set-Cookie is read off the raw response headers rather than out of the jar. The jar drops
 		// anything whose Domain does not match the URL it was set from, which is precisely what
 		// happens when a flow authenticates against an SSO host and hands the session back, and that
@@ -969,6 +1122,10 @@ func replayFlowForToken(token SessionToken) (string, *time.Time, map[string]inte
 		if strings.TrimSpace(body) != "" {
 			bodies = append(bodies, body)
 		}
+	}
+
+	if issuedCookies != nil {
+		*issuedCookies = setCookies
 	}
 
 	evidence["steps_replayed"] = len(steps)
@@ -1199,6 +1356,12 @@ func normalizeSessionTokenWiring(t *SessionToken) error {
 		return fmt.Errorf("token_type must be one of header, cookie, api_key, bearer or query")
 	}
 
+	role, err := normalizeTokenRole(t.TokenRole)
+	if err != nil {
+		return err
+	}
+	t.TokenRole = role
+
 	t.Name = strings.TrimSpace(t.Name)
 	t.HeaderName = strings.TrimSpace(t.HeaderName)
 	t.CookieName = strings.TrimSpace(t.CookieName)
@@ -1260,6 +1423,9 @@ func applySessionTokenPayload(t *SessionToken, p sessionTokenPayload) {
 	if p.TokenType != nil {
 		t.TokenType = *p.TokenType
 	}
+	if p.TokenRole != nil {
+		t.TokenRole = *p.TokenRole
+	}
 	if p.HeaderName != nil {
 		t.HeaderName = *p.HeaderName
 	}
@@ -1308,10 +1474,11 @@ func insertSessionToken(t SessionToken) (string, error) {
 	var id string
 	err := dbPool.QueryRow(context.Background(), `
 		INSERT INTO session_tokens
-		  (scope_target_id, auth_flow_id, name, token_type, header_name, cookie_name, param_name,
+		  (scope_target_id, auth_flow_id, name, token_type, token_role, header_name, cookie_name,
+		   param_name,
 		   value_prefix, token_value, scope_domains, cookie_path, cookie_domain, cookie_secure,
 		   cookie_httponly, cookie_samesite, expires_at, is_active, notes)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+		VALUES ($1,$2,$3,$4,$19,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		RETURNING id::text`,
 		t.ScopeTargetID, nullUUID(t.AuthFlowID), t.Name, t.TokenType, t.HeaderName, t.CookieName,
 		t.ParamName, t.ValuePrefix, t.TokenValue, t.ScopeDomains, t.CookiePath, t.CookieDomain,
@@ -1319,7 +1486,7 @@ func insertSessionToken(t SessionToken) (string, error) {
 		// A bearer token that states its own exp should not be stored as "never expires", which is
 		// how a credential dead for eleven days went on passing every expiry check in the framework.
 		DeriveSessionTokenExpiry(t.TokenValue, t.ExpiresAt), t.IsActive,
-		t.Notes).Scan(&id)
+		t.Notes, t.TokenRole).Scan(&id)
 	return id, err
 }
 
@@ -1332,6 +1499,7 @@ func loadSessionToken(tokenID string) (SessionToken, error) {
 func scanSessionToken(row interface{ Scan(...interface{}) error }) (SessionToken, error) {
 	var t SessionToken
 	err := row.Scan(&t.ID, &t.ScopeTargetID, &t.AuthFlowID, &t.AuthFlowName, &t.Name, &t.TokenType,
+		&t.TokenRole,
 		&t.HeaderName, &t.CookieName, &t.ParamName, &t.ValuePrefix, &t.TokenValue, &t.ScopeDomains,
 		&t.CookiePath, &t.CookieDomain, &t.CookieSecure, &t.CookieHTTPOnly, &t.CookieSameSite,
 		&t.ExpiresAt, &t.IsActive, &t.Notes, &t.LastValidatedAt, &t.LastValidationStatus,
@@ -1459,27 +1627,214 @@ func authFlowProbeURL(authFlowID string) string {
 	}
 
 	rows, err := dbPool.Query(context.Background(), `
-		SELECT raw_request FROM auth_flow_steps
+		SELECT raw_request, COALESCE(response_headers, '{}'::jsonb)
+		FROM auth_flow_steps
 		WHERE auth_flow_id = $1 ORDER BY step_order DESC`, authFlowID)
 	if err != nil {
 		return ""
 	}
 	defer rows.Close()
 
+	type recordedStep struct {
+		raw     string
+		headers []byte
+	}
+	steps := []recordedStep{}
 	for rows.Next() {
-		var raw string
-		if rows.Scan(&raw) != nil {
+		var s recordedStep
+		if rows.Scan(&s.raw, &s.headers) != nil {
 			continue
 		}
-		if u := rawRequestURL(raw); u != "" {
+		steps = append(steps, s)
+	}
+
+	// Preferred: the place the flow ended up. A password login answers 302 and sends the browser to
+	// the account page, and that page is by construction something only an authenticated caller
+	// sees. The placeholder guard below deliberately does NOT apply here: a recorded Location is a
+	// fact from the last replay, so it is usable even though the step that produced it is not.
+	for _, s := range steps {
+		// rawRequestBaseURL, not rawRequestURL: the step that redirects is the login POST, and
+		// rawRequestURL refuses a POST by design. Its URL is wanted only as the base to resolve the
+		// Location against, and the resolved URL is then probed with GET like any other.
+		if dest := recordedRedirectTarget(s.headers, rawRequestBaseURL(s.raw)); dest != "" {
+			return dest
+		}
+	}
+
+	for _, s := range steps {
+		// A step whose request line or Host still holds a {{af:NAME}} placeholder cannot be probed:
+		// the URL would contain literal braces, the request would fail for a reason that has nothing
+		// to do with the session, and the token would be graded not_honoured on the strength of it.
+		// Fall through to an earlier step instead.
+		if len(authFlowVarNames(s.raw)) > 0 {
+			continue
+		}
+		if u := rawRequestURL(s.raw); u != "" {
 			return u
 		}
 	}
 	return ""
 }
 
-// rawRequestURL rebuilds an absolute URL from a raw HTTP request.
+// loadCompanionMaterial gathers the active companion cookies on a target into auth material, and
+// returns their names for the evidence record.
+//
+// Cookies only: a companion is by definition a routing or affinity value, and every real example
+// of one travels as a cookie. Returning nil rather than empty material when there are none keeps
+// the control arm genuinely bare on the ordinary target that has no companions at all.
+func loadCompanionMaterial(scopeTargetID, host, excludeTokenID string) (*ScopedAuthMaterial, []string) {
+	rows, err := dbPool.Query(context.Background(), `
+		SELECT COALESCE(cookie_name,''), COALESCE(token_value,'')
+		FROM session_tokens
+		WHERE scope_target_id = $1
+		  AND COALESCE(token_role,'credential') = 'companion'
+		  AND COALESCE(is_active,false)
+		  AND token_type = 'cookie'
+		  AND id <> $2::uuid
+		ORDER BY name`, scopeTargetID, excludeTokenID)
+	if err != nil {
+		return nil, nil
+	}
+	defer rows.Close()
+
+	pairs := []string{}
+	names := []string{}
+	for rows.Next() {
+		var name, value string
+		if rows.Scan(&name, &value) != nil {
+			continue
+		}
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		pairs = append(pairs, name+"="+value)
+		names = append(names, name)
+	}
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+
+	return &ScopedAuthMaterial{
+		Host:    strings.ToLower(host),
+		Headers: map[string]string{},
+		Cookies: strings.Join(pairs, "; "),
+		Source:  "session_token_companion",
+	}, names
+}
+
+// withCompanions folds the companion cookies into a credential's material.
+func withCompanions(material, companions *ScopedAuthMaterial, host string) *ScopedAuthMaterial {
+	if companions == nil {
+		return material
+	}
+	if material == nil {
+		return companions
+	}
+
+	merged := *material
+	if merged.Cookies == "" {
+		merged.Cookies = companions.Cookies
+	} else {
+		merged.Cookies = merged.Cookies + "; " + companions.Cookies
+	}
+	return &merged
+}
+
+// sessionFlowProbeURL returns an auth-flow-derived probe URL for any active credential on a target.
+//
+// This is what lets a FIRST endpoint-scan run ask the credential question somewhere that can answer
+// it. Companions are excluded: a routing cookie has a flow but proves nothing about authentication.
+func sessionFlowProbeURL(scopeTargetID string) string {
+	rows, err := dbPool.Query(context.Background(), `
+		SELECT DISTINCT auth_flow_id::text
+		FROM session_tokens
+		WHERE scope_target_id = $1
+		  AND auth_flow_id IS NOT NULL
+		  AND COALESCE(is_active,false)
+		  AND COALESCE(token_role,'credential') = 'credential'`, scopeTargetID)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+
+	flowIDs := []string{}
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil && strings.TrimSpace(id) != "" {
+			flowIDs = append(flowIDs, id)
+		}
+	}
+
+	for _, id := range flowIDs {
+		if u := authFlowProbeURL(id); u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
+// recordedRedirectTarget resolves the Location a step's stored response carried, against that
+// step's own URL.
+//
+// Same host only, on purpose. A flow that bounces through an identity provider would otherwise
+// hand back a third party's URL, and validation would attach the application's session cookie to a
+// request going somewhere it was never issued for.
+func recordedRedirectTarget(headersJSON []byte, stepURL string) string {
+	if len(headersJSON) == 0 || stepURL == "" {
+		return ""
+	}
+
+	var headers map[string][]string
+	if json.Unmarshal(headersJSON, &headers) != nil {
+		return ""
+	}
+
+	location := ""
+	for name, values := range headers {
+		if strings.EqualFold(name, "Location") && len(values) > 0 {
+			location = strings.TrimSpace(values[0])
+			break
+		}
+	}
+	if location == "" {
+		return ""
+	}
+
+	base, err := url.Parse(stepURL)
+	if err != nil {
+		return ""
+	}
+	resolved, err := base.Parse(location)
+	if err != nil || resolved.Host == "" {
+		return ""
+	}
+	if !strings.EqualFold(resolved.Host, base.Host) {
+		return ""
+	}
+	return resolved.String()
+}
+
+// rawRequestURL rebuilds an absolute URL from a raw HTTP request, for use as a probe target.
+//
+// Only safe verbs are worth probing with. A flow ending in POST /login would re-submit the login
+// on every validation, which is a write and would burn rate limits and lockout counters.
 func rawRequestURL(raw string) string {
+	parts := strings.Fields(strings.TrimSpace(strings.SplitN(
+		strings.ReplaceAll(raw, "\r\n", "\n"), "\n", 2)[0]))
+	if len(parts) < 2 || strings.ToUpper(parts[0]) != http.MethodGet {
+		return ""
+	}
+	return rawRequestBaseURL(raw)
+}
+
+// rawRequestBaseURL rebuilds the absolute URL a raw request was aimed at, whatever its verb.
+//
+// Split out from rawRequestURL because the two answer different questions. rawRequestURL asks
+// "may I send this again", and refuses anything but GET. This asks "where was this sent", which is
+// needed to resolve a relative Location out of the recorded response of a step that must never be
+// replayed: the login POST is exactly that step, and its Location is the one worth probing.
+// Resolving is not sending, and what finally gets probed is still fetched with GET.
+func rawRequestBaseURL(raw string) string {
 	raw = strings.ReplaceAll(raw, "\r\n", "\n")
 	lines := strings.Split(raw, "\n")
 	if len(lines) == 0 {
@@ -1488,11 +1843,6 @@ func rawRequestURL(raw string) string {
 
 	parts := strings.Fields(strings.TrimSpace(lines[0]))
 	if len(parts) < 2 {
-		return ""
-	}
-	// Only safe verbs are worth probing with. A flow ending in POST /login would re-submit the
-	// login on every validation, which is a write and would burn rate limits and lockout counters.
-	if strings.ToUpper(parts[0]) != http.MethodGet {
 		return ""
 	}
 	path := parts[1]

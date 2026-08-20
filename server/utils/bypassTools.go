@@ -17,9 +17,9 @@ import (
 // Measured against a decoy that answers 200 to every variation with an "Access Denied" body,
 // nomore403 with calibration disabled reported three separate bypasses of it.
 
-var nomore403Groups = []string{"Techniques", "Request", "Calibration", "Output"}
+var nomore403Groups = []string{"Targets", "Techniques", "Request", "Calibration", "Output"}
 
-// The 22 techniques nomore403 ships, taken from the default list in its own --help. Each is a switch
+// The 23 techniques nomore403 ships, taken from the default list in its own --help. Each is a switch
 // so the framework can only ever emit a name the binary accepts.
 var nomore403Techniques = []struct {
 	Key   string
@@ -52,6 +52,8 @@ var nomore403Techniques = []struct {
 }
 
 var nomore403Options = map[string]VectorOptionMeta{
+	"endpoints": {Kind: "csv", Group: "Targets", Label: "URLs to test (one per line)",
+		Placeholder: "https://target/admin"},
 	"bypassIp":      {Kind: "string", Group: "Request", Label: "IP to inject into headers", Flag: "-i", Placeholder: "127.0.0.1"},
 	"httpMethod":    {Kind: "string", Group: "Request", Label: "HTTP method", Flag: "-t", Placeholder: "GET"},
 	"headers":       {Kind: "string", Group: "Request", Label: "Extra header", Flag: "-H", Repeatable: true, Placeholder: "Authorization: Bearer ..."},
@@ -66,7 +68,6 @@ var nomore403Options = map[string]VectorOptionMeta{
 	"rateLimit":     {Kind: "bool", Group: "Request", Label: "Stop on 429", Flag: "-l"},
 	"retryCount":    {Kind: "int", Group: "Request", Label: "Retries", Flag: "--retry-count", Placeholder: "2"},
 	"retryBackoff":  {Kind: "int", Group: "Request", Label: "Retry backoff (ms)", Flag: "--retry-backoff-ms", Placeholder: "500"},
-	"rawHttp":       {Kind: "bool", Group: "Request", Label: "Raw HTTP (skip Go request normalisation)", Flag: "--raw-http"},
 
 	// The false positive controls, and the reason this section is usable at all.
 	"noCalibrate":     {Kind: "bool", Group: "Calibration", Label: "Disable auto-calibration (NOT recommended)", Flag: "--no-calibrate"},
@@ -79,6 +80,11 @@ var nomore403Options = map[string]VectorOptionMeta{
 }
 
 var nomore403Owned = map[string]string{
+	// Verified in the source rather than taken from --help: rawHTTP is declared once and read once,
+	// where it appends the string "raw-http" to a list of flag names printed in verbose mode. It
+	// gates no technique. raw-duplicates, raw-authority and raw-desync are in the default -k set and
+	// run with or without it, so offering this would tell an operator they had enabled something.
+	"--raw-http": "Inert: it gates nothing. The raw techniques run either way.",
 	"-u":             "The target is one URL from the consolidated 4xx list, so a finding can be attributed to it.",
 	"--uri":          "The target is one URL from the consolidated 4xx list, so a finding can be attributed to it.",
 	"-o":             "The report path is per scan, and is how findings are read back.",
@@ -88,8 +94,8 @@ var nomore403Owned = map[string]string{
 	"--no-banner":    "The banner is noise in a captured report.",
 	"-k":             "Built from the individual technique switches.",
 	"--technique":    "Built from the individual technique switches.",
-	"-f":             "The payload wordlists ship inside the container and the working directory is set to them.",
-	"--folder":       "The payload wordlists ship inside the container and the working directory is set to them.",
+	"-f":             "Pointed at the payload directory in the image explicitly; the tool's own default is relative to the working directory and an empty one makes it test almost nothing.",
+	"--folder":       "Pointed at the payload directory in the image explicitly; the tool's own default is relative to the working directory and an empty one makes it test almost nothing.",
 	"--request-file": "The framework drives nomore403 from a URL, not a saved request.",
 	"--http":         "Only applies to a request file, which the framework does not use.",
 	"-p":             "The payload marker is for hand-built URLs; the framework scans the URL as recorded.",
@@ -98,7 +104,7 @@ var nomore403Owned = map[string]string{
 	"--version":      "Version only.",
 }
 
-var forbiddenGroups = []string{"Tests", "Request", "False positives", "Output"}
+var forbiddenGroups = []string{"Targets", "Tests", "Request", "False positives", "Output"}
 
 // Forbidden's test modes, from its own --help. Switches for the same reason nomore403's are.
 var forbiddenTests = []struct {
@@ -128,6 +134,8 @@ var forbiddenTests = []struct {
 }
 
 var forbiddenOptions = map[string]VectorOptionMeta{
+	"endpoints": {Kind: "csv", Group: "Targets", Label: "URLs to test (one per line)",
+		Placeholder: "https://target/admin"},
 	"force":            {Kind: "string", Group: "Request", Label: "Force HTTP method", Flag: "-f", Placeholder: "GET"},
 	"headers":          {Kind: "string", Group: "Request", Label: "Extra header", Flag: "-H", Repeatable: true},
 	"cookies":          {Kind: "string", Group: "Request", Label: "Cookie", Flag: "-b", Repeatable: true},
@@ -172,7 +180,7 @@ func init() {
 			Groups: nomore403Groups, Options: nomore403OptionsWithTechniques(), OwnedFlags: nomore403Owned,
 			InsertionPoints: VectorInsertionPoints,
 			UsesReportFile:  true,
-			RowSource:       loadBypassTargetRows,
+			RowSource:       graphqlRowSource("nomore403"),
 			DedupeKey:       func(v VectorInput) string { return v.EvidenceURL },
 			ScanUnit:        "URL",
 			Compose:         ComposeNomore403,
@@ -180,13 +188,18 @@ func init() {
 			// Measured at eight to eleven seconds for one URL with the default 22 techniques and fifty
 			// goroutines, so a few hundred targets is an hour rather than a minute.
 			Timeout: 15 * time.Minute,
-			Limitation: "nomore403 tries twenty-two families of bypass against one URL and reports the " +
+			Limitation: "nomore403 tries twenty-three families of bypass against one URL and reports the " +
 				"variations whose response differs from a baseline it establishes first. Leave " +
-				"auto-calibration on: measured against a decoy that answers 200 to every variation with " +
-				"an \"Access Denied\" body, calibration on reported thirteen results and none of the " +
-				"decoy's, while --no-calibrate reported sixty including three bypasses of it that do " +
-				"not exist. A reported bypass is a lead: confirm the response really contains something " +
-				"the original 403 withheld.",
+				"auto-calibration on for most targets: measured against a decoy that answers 200 to " +
+				"every variation with an \"Access Denied\" body, calibration on reported thirteen " +
+				"results and none of the decoy's, while --no-calibrate reported sixty including three " +
+				"bypasses of it that do not exist. There is a counter-case worth knowing: calibration " +
+				"builds its baseline by requesting a random segment UNDER the target path, so on a " +
+				"target whose origin routes on the first path segment that baseline IS the protected " +
+				"page, and real bypasses then look identical to it and are suppressed. If a path you " +
+				"believe is bypassable reports nothing, re-run with calibration off; the framework " +
+				"compares body hashes itself either way. A reported bypass is a lead: confirm the " +
+				"response really contains something the original 403 withheld.",
 		},
 		VectorTool{
 			Key: "forbidden", Name: "Forbidden", Category: "access-bypass",
@@ -194,7 +207,7 @@ func init() {
 			Groups: forbiddenGroups, Options: forbiddenOptionsWithTests(), OwnedFlags: forbiddenOwned,
 			InsertionPoints: VectorInsertionPoints,
 			UsesReportFile:  true,
-			RowSource:       loadBypassTargetRows,
+			RowSource:       graphqlRowSource("forbidden"),
 			DedupeKey:       func(v VectorInput) string { return v.EvidenceURL },
 			ScanUnit:        "URL",
 			Compose:         ComposeForbidden,

@@ -424,4 +424,133 @@
       return nativeBeacon(url, data);
     };
   }
+
+  /* ------------------------------------------------------------------ form submissions */
+
+  // A plain <form> submit is invisible to every hook above: it is not fetch, not XHR and not
+  // sendBeacon. webRequest sees the navigation, but on a real login its requestBody.formData did
+  // NOT carry the <input type=password> value, so the single most valuable request in a crawl
+  // arrived with its credential missing and an imported auth flow could never authenticate.
+  //
+  // Reading the fields off the form element is the only place the full set is reliably available.
+  // The STRUCTURED form is reported and the background encodes it, so the wire format is chosen by
+  // the same encoder the webRequest path already uses rather than a second one that can drift.
+  //
+  // This records credentials on purpose. That is the point: without the password the flow cannot
+  // be replayed. It is no more sensitive than the session cookies and bearer tokens the capture
+  // already stores, and it goes to the same place.
+
+  const NativeFormData = window.FormData;
+
+  function formEnctype(form) {
+    const raw = String(form.getAttribute('enctype') || '').toLowerCase();
+    if (raw.indexOf('multipart/form-data') !== -1) return 'multipart/form-data';
+    if (raw.indexOf('text/plain') !== -1) return 'text/plain';
+    return 'application/x-www-form-urlencoded';
+  }
+
+  function readFormFields(form, submitter) {
+    let entries;
+    try {
+      // The submitter overload adds the pressed button's own name and value, which is how a form
+      // with several submit buttons tells the server which one was used.
+      entries = submitter ? new NativeFormData(form, submitter) : new NativeFormData(form);
+    } catch (error) {
+      try {
+        entries = new NativeFormData(form);
+      } catch (inner) {
+        return null;
+      }
+    }
+
+    const out = {};
+    entries.forEach((value, key) => {
+      const text =
+        typeof value === 'string' ? value : `[file:${(value && value.name) || 'blob'}]`;
+      if (out[key] === undefined) out[key] = text;
+      else if (Array.isArray(out[key])) out[key].push(text);
+      else out[key] = [out[key], text];
+    });
+    return Object.keys(out).length ? out : null;
+  }
+
+  function reportFormSubmission(form, submitter) {
+    try {
+      if (!config.active || !form || form.nodeType !== 1) return;
+
+      // Attributes, not the DOM properties. A form containing an input named "action" or "method"
+      // shadows form.action and form.method (DOM clobbering), which is common on real targets and
+      // would silently send the capture to the wrong URL.
+      const method = String(form.getAttribute('method') || 'GET').toUpperCase();
+      // A GET form puts its fields in the query string, where webRequest already records them in
+      // full. Only a body-carrying submit is missing anything.
+      if (method !== 'POST') return;
+
+      // An empty or absent action submits to the document's own URL. Read off window rather than
+      // the bare global so the hook does not depend on `location` being reachable unqualified.
+      const action = form.getAttribute('action');
+      const self = (window.location && window.location.href) || document.baseURI || '';
+      const url = absolute(action === null || action === '' ? self : action);
+      if (!inScope(url)) return;
+
+      const formData = readFormFields(form, submitter);
+      if (!formData) return;
+
+      report({
+        url,
+        method,
+        statusCode: 0,
+        headers: {},
+        responseHeaders: {},
+        formData,
+        bodyType: formEnctype(form),
+        postData: '',
+        responseBody: '',
+        mimeType: '',
+        // Deliberately empty. webRequest classifies this navigation as main_frame, which is
+        // accurate, and the page hook outranks it on merge, so naming a type here would overwrite
+        // a correct classification with a redundant one. `sources` already records the hook.
+        resourceType: '',
+        durationMs: 0,
+      });
+    } catch (error) {
+      /* never let capture interfere with a submit */
+    }
+  }
+
+  // Capture phase, so a page handler calling stopPropagation cannot hide the submit. Never
+  // preventDefault and never throw: the form has to submit exactly as it would have.
+  //
+  // Wrapped because this runs at document_start in whatever context the page provides. An
+  // exception escaping here would abort the whole IIFE and take the fetch and XHR hooks down with
+  // it, trading a missing form body for a completely blind capture.
+  try {
+    document.addEventListener(
+      'submit',
+      (event) => {
+        reportFormSubmission(event.target, event.submitter || null);
+      },
+      true
+    );
+  } catch (error) {
+    /* non-fatal */
+  }
+
+  // form.submit() does not fire the submit event, by specification, so it needs its own wrapper.
+  // requestSubmit() DOES fire the event and is therefore deliberately left alone; wrapping both
+  // would record the same submission twice.
+  try {
+    const nativeFormSubmit = HTMLFormElement.prototype.submit;
+    HTMLFormElement.prototype.submit = function patchedSubmit() {
+      reportFormSubmission(this, null);
+      return nativeFormSubmit.apply(this, arguments);
+    };
+    Object.defineProperty(HTMLFormElement.prototype.submit, 'name', {
+      value: 'submit',
+      configurable: true,
+    });
+    HTMLFormElement.prototype.submit.toString = () => nativeFormSubmit.toString();
+  } catch (error) {
+    /* non-fatal: the submit listener still covers every user-driven submission */
+  }
 })();
