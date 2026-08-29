@@ -5,5 +5,5 @@ python-multipart==0.0.6
 requests==2.31.0
 numpy==1.25.1
 transformers==4.31.0
-torch==2.0.1
+torch==2.7.0
 accelerate==0.20.3 
