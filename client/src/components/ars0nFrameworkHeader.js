@@ -37,7 +37,7 @@ function Ars0nFrameworkHeader({ onSettingsClick, onExportClick, onImportClick, o
           onClick={onImportClick}
           title="Import Database"
         >
-          <i className="bi bi-upload" style={{ fontSize: '1.5rem' }}></i>
+          <i className="bi bi-download" style={{ fontSize: '1.5rem' }}></i>
         </Button>
         <Button 
           variant="link" 
@@ -45,7 +45,7 @@ function Ars0nFrameworkHeader({ onSettingsClick, onExportClick, onImportClick, o
           onClick={onExportClick}
           title="Export Data"
         >
-          <i className="bi bi-download" style={{ fontSize: '1.5rem' }}></i>
+          <i className="bi bi-upload" style={{ fontSize: '1.5rem' }}></i>
         </Button>
         <Button 
           variant="link" 
