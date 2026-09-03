@@ -207,8 +207,21 @@ func parseTInjAReport(stdout, report string, row vectorRow) []VectorFinding {
 					" parameter " + p.Name + context + ".",
 				DetectionMethod: "tinja polyglot",
 				InjectType:      engine,
-				RawRequest:      doc.Default.Request,
-				RawResponse:     doc.Default.Response,
+				// doc.Default is TInjA's UNPAYLOADED BASELINE PROBE, not the request that found this.
+				// Storing it made every TInjA finding classify as CAPTURED, the strongest evidence
+				// class, while carrying bytes that prove nothing. A real stored row: a POST-body
+				// finding on parameter "email" carried
+				//   raw_request  "GET /api/Users HTTP/1.1 / User-Agent: TInjA v1.2.0"
+				// with no body, no payload and no credentials, and raw_response "HTTP/1.1 400 Bad
+				// Request". Because RawRequest was non-empty, withFindingEvidence returned early and
+				// no reconstruction was ever composed, so the finding could not be triaged at all.
+				//
+				// TInjA's report carries no per-finding request, so the honest answer is to store
+				// NOTHING here and let the framework compose a request from the vector and mark it
+				// COMPOSED. A composed request an operator can send beats a captured one that is
+				// about a different request.
+				RawRequest:  "",
+				RawResponse: "",
 			})
 		}
 	}

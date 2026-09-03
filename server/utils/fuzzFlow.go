@@ -22,13 +22,116 @@ import (
 // other way means they eventually disagree, and the disagreement is invisible until a scan runs.
 
 // ensureFuzzFlow returns the flow for a target, creating it on first use so the UI never has to.
+// ensureFuzzFlow returns the target's DEFAULT flow, creating it if the target has none.
+//
+// A target can now hold several named flows, because ffuf is used for several unrelated jobs and
+// they want different wordlists, insertion points, filters and pacing. Callers that do not name one
+// get the default, so everything that worked against the single-flow model still works.
 func ensureFuzzFlow(ctx context.Context, scopeTargetID string) (string, error) {
 	var id string
+	if err := dbPool.QueryRow(ctx, `
+		SELECT id FROM fuzz_flows WHERE scope_target_id = $1 AND is_default
+		LIMIT 1`, scopeTargetID).Scan(&id); err == nil {
+		return id, nil
+	}
+	// No default yet. Adopt the oldest existing flow rather than creating a second one, so a database
+	// written before flows had names does not silently gain an empty flow beside its real one.
+	if err := dbPool.QueryRow(ctx, `
+		UPDATE fuzz_flows SET is_default = TRUE, updated_at = NOW()
+		WHERE id = (SELECT id FROM fuzz_flows WHERE scope_target_id = $1
+		            ORDER BY created_at LIMIT 1)
+		RETURNING id`, scopeTargetID).Scan(&id); err == nil {
+		return id, nil
+	}
 	err := dbPool.QueryRow(ctx, `
-		INSERT INTO fuzz_flows (scope_target_id) VALUES ($1)
-		ON CONFLICT (scope_target_id) DO UPDATE SET updated_at = NOW()
+		INSERT INTO fuzz_flows (scope_target_id, name, purpose, is_default)
+		VALUES ($1, 'Default flow', 'custom', TRUE)
 		RETURNING id`, scopeTargetID).Scan(&id)
 	return id, err
+}
+
+// FuzzFlowPurpose is one of the jobs ffuf actually gets used for.
+//
+// Named rather than free text because the purpose decides which template to offer, which guidance to
+// attach, and what a sensible wordlist looks like. This taxonomy is Burp Intruder's, which is the
+// right frame: ffuf is Intruder, and Intruder is not one thing.
+type FuzzFlowPurpose struct {
+	Key   string `json:"key"`
+	Title string `json:"title"`
+	// What is being fuzzed: the NAME of an input, its VALUE, or a path.
+	Fuzzes string `json:"fuzzes"`
+	Why    string `json:"why"`
+	// The Intruder attack type this most resembles, for anyone who learned it there first.
+	IntruderAnalogue string   `json:"intruder_analogue"`
+	Wordlists        string   `json:"wordlists"`
+	Watch            string   `json:"watch_for"`
+	Examples         []string `json:"examples,omitempty"`
+}
+
+// FuzzFlowPurposes is the catalogue. Ordered as they are actually run.
+var FuzzFlowPurposes = []FuzzFlowPurpose{
+	{
+		Key: "content-discovery", Title: "Content discovery", Fuzzes: "the PATH",
+		Why: "Finds what nothing links to: admin panels, staging routes, old API versions, backups " +
+			"and configuration left in the web root. This is the first thing to run against a new " +
+			"target and the step whose absence leaves the access-control sections with no targets.",
+		IntruderAnalogue: "Sniper over a single position in the URL path",
+		Wordlists: "Start with common.txt or quickhits.txt to set filters, then raft-medium-" +
+			"directories and raft-medium-files, then extensions matched to the stack.",
+		Watch: "The not-found baseline. If a miss returns 200 with a themed page, status matching is " +
+			"useless and you filter on size, words or lines. Keep 401 and 403: those are findings.",
+		Examples: []string{"https://target/FUZZ", "https://target/admin/FUZZ"},
+	},
+	{
+		Key: "name-enumeration", Title: "Hidden name enumeration", Fuzzes: "the NAME of a parameter, header or cookie",
+		Why: "Finds inputs the application reads but never advertises. The value sent is irrelevant " +
+			"and constant; what matters is whether NAMING the input changes the response at all. A " +
+			"parameter nobody documented is a parameter nobody reviewed.",
+		IntruderAnalogue: "Sniper, with the payload in the parameter name rather than its value",
+		Wordlists:        "Parameter name lists, header name lists, cookie name lists.",
+		Watch: "The baseline response size. This is a differential technique: you are looking for any " +
+			"deviation from the unmodified request, not for a specific string.",
+		Examples: []string{"https://target/page?FUZZ=canary", "Header: FUZZ: canary"},
+	},
+	{
+		Key: "value-fuzzing", Title: "Value fuzzing", Fuzzes: "the VALUE of a known input",
+		Why: "Once you know an input exists, this is how you learn what it does. Different values " +
+			"produce different behaviour: an error, a redirect, a longer page, a different record. " +
+			"This is where logic flaws and injection candidates surface.",
+		IntruderAnalogue: "Sniper over one position, or Cluster bomb across two",
+		Wordlists:        "Payload lists matched to the hypothesis: traversal, SQL, template, IDs, enum values.",
+		Watch: "Anything that differs from the baseline, including timing. A value that changes the " +
+			"response is telling you the application acts on it.",
+		Examples: []string{"https://target/catalog?category=FUZZ"},
+	},
+	{
+		Key: "identifier-enumeration", Title: "Identifier enumeration", Fuzzes: "an object identifier",
+		Why: "Walks an id space to find records you should not be able to reach. This is how an IDOR " +
+			"goes from one proven case to a demonstration of scope.",
+		IntruderAnalogue: "Sniper with a number range payload",
+		Wordlists:        "A numeric range, or identifiers harvested from the application itself.",
+		Watch: "Responses that differ from the not-found case. Stop as soon as impact is proven: " +
+			"walking a live customer table is neither necessary nor authorised.",
+		Examples: []string{"https://target/order/details?orderId=FUZZ"},
+	},
+	{
+		Key: "auth-bruteforce", Title: "Credential and token attacks", Fuzzes: "credentials or tokens",
+		Why: "Password spraying, credential stuffing and token guessing. The highest-risk flow to run " +
+			"and the one most likely to be out of scope, so check the program rules first.",
+		IntruderAnalogue: "Cluster bomb for user and password pairs, Pitchfork for paired lists",
+		Wordlists:        "Credential lists, or a single password across many usernames for spraying.",
+		Watch: "Lockout. Also the difference between a wrong password and a wrong username, which is " +
+			"a username enumeration finding in its own right.",
+	},
+	{
+		Key: "vhost-discovery", Title: "Virtual host discovery", Fuzzes: "the Host header",
+		Why: "Finds applications served from the same address under a different hostname, which " +
+			"routine DNS enumeration never sees because those names may not resolve publicly.",
+		IntruderAnalogue: "Sniper on the Host header",
+		Wordlists:        "Subdomain name lists.",
+		Watch: "Calibrate against a hostname you know is wrong, then look for anything that differs " +
+			"from it.",
+	},
 }
 
 func loadFuzzStep(ctx context.Context, stepID string) (FuzzStep, error) {
@@ -114,9 +217,13 @@ func GetFuzzFlow(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	scopeTargetID := mux.Vars(r)["scope_target_id"]
 	tool := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("tool")))
+	// Which flow to read. Empty means the target's default, so every existing caller is unaffected.
+	// Without this a non-default flow's steps could never be read back, which made every flow except
+	// one write-only at creation and invisible afterwards.
+	requestedFlow := strings.TrimSpace(r.URL.Query().Get("flow_id"))
 
 	ctx := context.Background()
-	flowID, err := ensureFuzzFlow(ctx, scopeTargetID)
+	flowID, err := fuzzFlowIDFor(ctx, scopeTargetID, requestedFlow)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -136,6 +243,11 @@ func GetFuzzFlow(w http.ResponseWriter, r *http.Request) {
 }
 
 type fuzzStepRequest struct {
+	// FlowID names WHICH flow this step belongs to. Without it every step landed in the target's
+	// default flow no matter which flow the caller named, so a non-default flow could be created and
+	// then never written to or read back: created, listed, renamed, deleted, and otherwise unreachable.
+	// That made the named-flows feature look complete while being unusable for its entire purpose.
+	FlowID         string         `json:"flow_id"`
 	Tool           string         `json:"tool"`
 	Name           string         `json:"name"`
 	Enabled        *bool          `json:"enabled"`
@@ -194,7 +306,7 @@ func CreateFuzzStep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flowID, err := ensureFuzzFlow(ctx, scopeTargetID)
+	flowID, err := fuzzFlowIDFor(ctx, scopeTargetID, req.FlowID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return

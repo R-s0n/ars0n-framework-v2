@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/url"
 	"sort"
 	"strings"
@@ -60,6 +61,14 @@ type ScanScope struct {
 	// Hosts the operator named explicitly.
 	extra map[string]bool
 
+	// Set when the boundary could not be established at all. Refusing everything is the safe
+	// failure: a scan that measures nothing is recoverable, unauthorized traffic is not.
+	refuseAll bool
+
+	// Authored pattern rules. When non-empty these REPLACE the three fields above as the boundary,
+	// rather than adding to them, so a deny cannot be overridden by a legacy list.
+	rules []ScopeRule
+
 	mu      sync.Mutex
 	refused map[string]int
 }
@@ -83,16 +92,41 @@ func LoadScanScope(scopeTargetID string) *ScanScope {
 		return s
 	}
 	s.primary = strings.ToLower(host)
-	if rd := RegistrableDomain(s.primary); rd != "" {
+	// An address target is the exact host and nothing else. RegistrableDomain now returns the
+	// address itself rather than the last two labels of it, so widening here would put "10.0.0.18"
+	// in domains and Describe() would render the boundary as "*.10.0.0.18, 10.0.0.18". Nothing is
+	// admitted that primary does not already admit, so the only thing the entry would add is a
+	// wildcard in the operator's answer to "why was this skipped" that does not correspond to
+	// anything a subdomain could ever match.
+	if rd := RegistrableDomain(s.primary); rd != "" && !isIPLiteralHost(s.primary) {
 		s.domains[rd] = true
 	}
 	// Only record hosts the domain rule does not already cover. Adding one that is already inside
 	// the boundary changes nothing about what is allowed but does show up twice in Describe, and
 	// that description is the operator's answer to "why was this skipped".
-	for _, h := range InScopeCrawlHosts(scopeTargetID) {
+	crawled := InScopeCrawlHosts(scopeTargetID)
+	for _, h := range crawled {
 		if !s.Allows(h) {
 			s.extra[h] = true
 		}
+	}
+
+	// Load authored rules LAST, after the legacy boundary is fully built, because Allows() above
+	// must still be answering with the legacy logic while that boundary is being assembled.
+	// Assigning s.rules earlier would make those calls consult a half-built ruleset.
+	rules, err := LoadScopeRules(scopeTargetID)
+	if err != nil {
+		// A target whose rules will not compile is refused entirely rather than silently falling
+		// back to the wider legacy boundary. Falling back is the failure mode where an operator
+		// writes a deny, it fails to load, and traffic goes out anyway.
+		log.Printf("[SCOPE] target %s: rules failed to load, refusing everything: %v", scopeTargetID, err)
+		return &ScanScope{
+			domains: map[string]bool{}, extra: map[string]bool{}, refused: map[string]int{},
+			refuseAll: true,
+		}
+	}
+	if len(rules) > 0 {
+		s.rules = rules
 	}
 	return s
 }
@@ -188,6 +222,25 @@ func (s *ScanScope) Allows(host string) bool {
 	if s == nil {
 		return true // an unscoped client is the pre-existing behaviour for callers that opt out
 	}
+	if s.refuseAll {
+		return false
+	}
+
+	// Authored rules, when there are any, are the WHOLE boundary. Neither the host lists below nor
+	// the crawl's observed hosts are admitted alongside them.
+	//
+	// That is a deliberate narrowing and it is the point: a deny is meaningless if some other list
+	// can still allow past it. An operator who authors rules is taking control of the boundary, and
+	// coverage they lose is visible before they commit, because the preview endpoint reports
+	// newly_denied for exactly this.
+	//
+	// A target with no authored rules never reaches this branch, so its behaviour is byte-for-byte
+	// what it was before rules existed.
+	if len(s.rules) > 0 {
+		auth, ok := NormalizeAuthority(host, "")
+		return DecideScope(s.rules, auth, ok, ScopeDecisionInput{}).Allowed
+	}
+
 	host = strings.ToLower(strings.Trim(host, "."))
 	if host == "" {
 		return false

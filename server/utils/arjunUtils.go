@@ -286,13 +286,26 @@ func ExecuteArjunScan(scanID, scopeTargetID string) {
 		"groups": results, "selection": sel, "failed_groups": failed,
 	})
 
+	// The summary goes in RESULT, and error carries only the failure. This used to write the summary
+	// into `error` and leave `result` empty, which is the opposite of what x8Utils.go does with the
+	// identical structure two files over.
+	//
+	// It is not cosmetic. Every reader that asks "did this run fail" asks whether error is non-empty,
+	// so a completely successful arjun run with status='success' read as a failure: get_tool_output
+	// diagnosed the 2m43s run that found 46 parameters as "failed", on the strength of a non-empty
+	// error column holding its own results.
+	errMsg := ""
+	if status == "error" {
+		errMsg = "Every arjun pass failed: " + strings.Join(failed, ", ")
+	}
+
 	dbPool.Exec(ctx, `
 		UPDATE arjun_scans
 		SET status = $1, processed_endpoints = $2, parameters_found = $3,
-		    execution_time = $4, command = $5, stdout = $6, error = $7
-		WHERE scan_id = $8`,
+		    execution_time = $4, command = $5, stdout = $6, result = $7, error = $8
+		WHERE scan_id = $9`,
 		status, processed, found, time.Since(startTime).String(),
-		strings.Join(cmdStrs, "\n"), allOutput.String(), string(summary), scanID)
+		strings.Join(cmdStrs, "\n"), allOutput.String(), string(summary), errMsg, scanID)
 }
 
 // runArjunGroup runs one verb group and stores whatever it found.

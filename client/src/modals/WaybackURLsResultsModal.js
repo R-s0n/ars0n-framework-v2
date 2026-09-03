@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Modal, Button, Table, Badge, Spinner, Alert, Form, InputGroup, Tabs, Tab, Accordion } from 'react-bootstrap';
+import { ArchiveHostSummary } from './ArchiveHostSummary';
 
 export const WaybackURLsResultsModal = ({ 
   show, 
@@ -311,6 +312,7 @@ export const WaybackURLsResultsModal = ({
         </Modal.Title>
       </Modal.Header>
       <Modal.Body>
+        <ArchiveHostSummary scan={mostRecentWaybackURLsScan} />
         {mostRecentWaybackURLsScan && (
           <div className="mb-3">
             <div className="d-flex justify-content-between align-items-center">

@@ -1,14 +1,32 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { Modal, Table, Button, Spinner, Alert, Row, Col, Form, InputGroup } from 'react-bootstrap';
+import { Modal, Table, Button, Spinner, Alert, Row, Col, Form, InputGroup, Tab, Tabs } from 'react-bootstrap';
 import { FaCheck, FaTimes } from 'react-icons/fa';
+import {
+  useCompanyToolSettings,
+  CompanyToolSettingsPane,
+  CompanyToolReferencePane,
+  CompanyToolSettingsFooter,
+} from './CompanyToolSettings';
 
-const KatanaCompanyConfigModal = ({ 
-  show, 
-  handleClose, 
-  consolidatedCompanyDomains = [], 
+// TWO STORES, TWO TABS, ONE MODAL.
+//
+// The first tab is the target picker exactly as it was: root domains, wildcard results and live web
+// servers, written to katana_company_configs, which is what the runner reads today. The tabs after
+// it are the crawler's own settings, written to company_tool_settings through /company-tools and
+// generated entirely from the server's vocabulary.
+//
+// katana_company_configs is TARGET SELECTION ONLY and holds not one tool setting, so the settings
+// tabs start from a clean slate and must never write into it; -u and -list are declared
+// framework-owned so that stays true.
+const KatanaCompanyConfigModal = ({
+  show,
+  handleClose,
+  consolidatedCompanyDomains = [],
   activeTarget,
   onSaveConfig
 }) => {
+  const [activeTab, setActiveTab] = useState('targets');
+  const toolSettings = useCompanyToolSettings({ activeTarget, toolKey: 'katana_company', show });
   const [selectedDomains, setSelectedDomains] = useState(new Set());
   const [filters, setFilters] = useState({
     domain: ''
@@ -79,6 +97,7 @@ const KatanaCompanyConfigModal = ({
 
   useEffect(() => {
     if (show) {
+      setActiveTab('targets');
       loadSavedConfig();
       // If no domains provided via props, fetch them
       if (consolidatedCompanyDomains.length === 0) {
@@ -546,6 +565,8 @@ const KatanaCompanyConfigModal = ({
         </Modal.Title>
       </Modal.Header>
       <Modal.Body>
+        <Tabs activeKey={activeTab} onSelect={(k) => setActiveTab(k || 'targets')} className="mb-3">
+        <Tab eventKey="targets" title={`Targets (${selectedDomains.size})`}>
         {error && (
           <Alert variant="danger" dismissible onClose={() => setError('')}>
             {error}
@@ -825,8 +846,25 @@ const KatanaCompanyConfigModal = ({
             )}
           </>
         )}
+        </Tab>
+        {toolSettings.sections.map((section) => (
+          <Tab
+            key={section.group}
+            eventKey={`group:${section.group}`}
+            title={`${section.group} (${section.keys.length})`}
+          >
+            <CompanyToolSettingsPane ctl={toolSettings} group={section.group} />
+          </Tab>
+        ))}
+        <Tab eventKey="reference" title="What runs & what is fixed">
+          <CompanyToolReferencePane ctl={toolSettings} />
+        </Tab>
+        </Tabs>
       </Modal.Body>
       <Modal.Footer>
+        {/* Contextual, because the two halves of this modal save into different stores. The target
+            picker keeps its own button, unchanged, so nothing about the existing flow moves. */}
+        {activeTab === 'targets' ? (
         <div className="d-flex justify-content-between align-items-center w-100">
           <div className="text-white-50 small">
             {selectedDomains.size > 0 && (
@@ -840,8 +878,8 @@ const KatanaCompanyConfigModal = ({
             <Button variant="secondary" onClick={handleCloseModal} className="me-2">
               Cancel
             </Button>
-            <Button 
-              variant="danger" 
+            <Button
+              variant="danger"
               onClick={handleSaveConfig}
               disabled={saving || selectedDomains.size === 0}
             >
@@ -859,6 +897,13 @@ const KatanaCompanyConfigModal = ({
             </Button>
           </div>
         </div>
+        ) : (
+          <CompanyToolSettingsFooter
+            ctl={toolSettings}
+            onClose={handleCloseModal}
+            note="Saves the tool settings only; the target selection has its own Save on the first tab."
+          />
+        )}
       </Modal.Footer>
     </Modal>
   );

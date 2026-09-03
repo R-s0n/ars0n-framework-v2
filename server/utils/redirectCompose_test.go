@@ -1,6 +1,9 @@
 package utils
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -458,5 +461,66 @@ func TestARealNucleiMatchSurvivesWithAndWithoutMatcherStatus(t *testing.T) {
 		if got[0].Param != "back" {
 			t.Errorf("%s: the fuzzed parameter was lost: %+v", name, got[0])
 		}
+	}
+}
+
+// An out-of-band section decides "did the target call out" by substring-searching the inbox body for
+// the vector's token. That makes ANY non-2xx answer from the results URL dangerous, because the
+// search then runs over the wrong bytes and finds nothing, which is indistinguishable from a target
+// that never called out.
+//
+// The specific case, measured against a private webhook.site token: GET /token/{id}/requests answers
+// 302 to https://webhook.site/login, both with no auth header and with a wrong one. Go's default
+// client FOLLOWS that redirect and hands back a perfectly good 200 login page, so the old
+// `StatusCode >= 400` check passed and the section reported no callbacks.
+func TestAnAuthRedirectOnTheResultsURLIsAnErrorNotAnEmptyInbox(t *testing.T) {
+	login := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A believable login page: 200, and it obviously contains no vector tokens.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html><body>Please sign in</body></html>"))
+	}))
+	defer login.Close()
+
+	inbox := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, login.URL+"/login", http.StatusFound)
+	}))
+	defer inbox.Close()
+
+	_, err := CheckWebhookResults(context.Background(),
+		map[string]any{"resultsWebhookURL": inbox.URL + "/token/abc/requests"},
+		map[string]string{"rs0nTOKEN": "vector-1"})
+
+	if err == nil {
+		t.Fatal("an authentication redirect was reported as an inbox with no callbacks in it, which " +
+			"is how a real SSRF gets recorded as clean")
+	}
+	for _, want := range []string{"302", "auth", "Api-Key"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error must tell the operator how to fix it; %q is missing from: %s", want, err)
+		}
+	}
+}
+
+// The counterpart: a real inbox must still be read, and a token present in it must still be found.
+func TestARealInboxIsStillReadAndItsTokensFound(t *testing.T) {
+	inbox := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Api-Key"); got != "secret-key" {
+			t.Errorf("the results auth header was not sent, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"url":"https://webhook.site/rs0n/rs0nTOKEN?x=1"}]}`))
+	}))
+	defer inbox.Close()
+
+	hits, err := CheckWebhookResults(context.Background(), map[string]any{
+		"resultsWebhookURL": inbox.URL + "/token/abc/requests",
+		"resultsAuthHeader": "Api-Key: secret-key",
+	}, map[string]string{"rs0nTOKEN": "vector-1", "rs0nMISSING": "vector-2"})
+
+	if err != nil {
+		t.Fatalf("a healthy inbox must be readable: %v", err)
+	}
+	if len(hits) != 1 || hits[0].Token != "rs0nTOKEN" {
+		t.Errorf("expected exactly the token that appears in the inbox, got %+v", hits)
 	}
 }

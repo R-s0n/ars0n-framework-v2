@@ -159,3 +159,266 @@ func TestTheFlakyDetectorRetriesAndTheDeterministicOnesDoNot(t *testing.T) {
 		}
 	}
 }
+
+// THE EXIT CODE IS NOT THE SIGNAL. Forbidden validates its own arguments, prints a complaint and
+// exits ZERO, having written no report. Exit 0 plus no report file is indistinguishable from a clean
+// scan, which is how ginandjuice.shop was twice reported to have no 403 bypass on /admin while
+// GET /about with "X-Original-URL: /admin" was returning the admin panel to an anonymous caller.
+//
+// These are the exact bytes Forbidden 13.4 prints, captured from the container.
+func TestARefusalThatExitsZeroIsStillARefusal(t *testing.T) {
+	forbiddenOutput := "Missing a mandatory option (-u, -t) and/or optional (-ip, -ir, -v, -f, -p, " +
+		"-e, -H, -b, -i, -l, -rt, -th, -s, -a, -x, -sc, -st, -o, -dmp, -dbg)\n" +
+		"Use -h or --help for more info\n"
+
+	if !refusedItsCommandLine(forbiddenOutput) {
+		t.Fatal("a hand-rolled validator's refusal was not recognised, so the run reads as clean " +
+			"even though the tool never sent a request")
+	}
+	// It must not depend on the exit code, because there isn't one to depend on.
+	if refusedItsCommandLine("") {
+		t.Error("empty output must not be treated as a refusal")
+	}
+}
+
+// The counterpart that keeps this honest: a tool that really ran and merely quoted such a phrase out
+// of a target's response must not be turned into an error.
+func TestAScanThatQuotesTheTargetIsNotARefusal(t *testing.T) {
+	for name, output := range map[string]string{
+		"ordinary progress": "Validating the inaccessible URL...\nPreparing test records...\n" +
+			"Script has finished in 0:04:12",
+		"a finding": "[+] 200 OK X-Original-URL: /admin len=7293",
+	} {
+		if refusedItsCommandLine(output) {
+			t.Errorf("%s: an ordinary scan was reported as a broken command line:\n%s", name, output)
+		}
+	}
+
+	// The phrase match ALONE is not the whole guard, and this is the case that proves it: a scan
+	// that quotes one of these phrases back out of a target's response does match here. That is why
+	// the caller pairs the match with "produced nothing". A run that wrote a report or parsed a
+	// finding plainly ran, whatever its output happens to contain.
+	echoed := "[INFO] response body: 'Use -h or --help for more info' ... scan complete, 3 findings"
+	if !refusedItsCommandLine(echoed) {
+		t.Skip("the matcher no longer matches an echoed phrase, so the pairing below is moot")
+	}
+	t.Log("confirmed: an echoed phrase DOES match, so the caller must keep pairing it with " +
+		"producedNothing or a real scan could be turned into an error")
+}
+
+// 33 of the 42 findings from the Juice Shop campaign carried NO request and NO response, which is
+// what made them untriageable: the two false positives that mattered were only refutable from the
+// bytes. Six of the parsers record an exchange and the rest never will, so the runner composes one
+// from the vector it aimed. These are the real finding shapes those tools produce.
+func TestEveryFindingLeavesTheRunnerWithARequestSomebodyCanSend(t *testing.T) {
+	vector := vectorRow{
+		ID: "11111111-1111-1111-1111-111111111111", Method: "GET", Scheme: "http",
+		Domain: "10.0.0.18", Port: 3000, Path: "/rest/products/search",
+		InsertionPoint: "query", Parameters: []string{"q"},
+		EvidenceURL: "http://10.0.0.18:3000/rest/products/search?q=apple",
+		RawRequest: "GET /rest/products/search?q=apple HTTP/1.1\nHost: 10.0.0.18:3000\n" +
+			"Cookie: token=realsession; language=en\n\n",
+	}
+
+	for name, f := range map[string]VectorFinding{
+		"ghauri, which records no bytes at all": {
+			Tool: "ghauri", Kind: "boolean-based blind", InsertionPoint: "query", Param: "q (GET)",
+			Payload: "q=apple')) AND 5442=5442--", Method: "GET",
+			URL: "http://10.0.0.18:3000/rest/products/search?q=apple",
+		},
+		"sqlmap, same shape": {
+			Tool: "sqlmap", Kind: "UNION query", InsertionPoint: "query", Param: "q",
+			Payload: "q=apple')) UNION ALL SELECT NULL,NULL,NULL-- -", Method: "GET",
+			URL: "http://10.0.0.18:3000/rest/products/search?q=apple",
+		},
+		"commix, which lands in the generic path": {
+			Tool: "commix", Kind: "command-injection", InsertionPoint: "query", Param: "q",
+			Payload: "q=apple;sleep 5", Method: "GET",
+			URL: "http://10.0.0.18:3000/rest/products/search?q=apple",
+		},
+	} {
+		got := withFindingEvidence(f, vector)
+		if strings.TrimSpace(got.RawRequest) == "" {
+			t.Errorf("%s: the finding was stored with no request at all, so nobody can reproduce it", name)
+			continue
+		}
+		if FindingRequestOrigin(got.RawRequest) != RequestReconstructed {
+			t.Errorf("%s: a composed request must be marked as composed, got origin %q",
+				name, FindingRequestOrigin(got.RawRequest))
+		}
+		bytes, _ := SplitReconstructedRequest(got.RawRequest)
+		if !strings.Contains(bytes, "token=realsession") {
+			t.Errorf("%s: the vector's session was dropped, so this reproduces a logged-out page:\n%s",
+				name, bytes)
+		}
+		if !strings.Contains(bytes, "q=apple") || !strings.Contains(bytes, "5442") &&
+			!strings.Contains(bytes, "UNION") && !strings.Contains(bytes, "sleep") {
+			t.Errorf("%s: the payload never reached the request:\n%s", name, bytes)
+		}
+	}
+}
+
+// The other half of the same rule. dalfox with --include-all reports the exchange, and overwriting
+// it with something composed would replace the only measured evidence in the table with an inference.
+func TestAToolsOwnBytesAreNeverReplacedByAComposedRequest(t *testing.T) {
+	captured := "GET /rest/products/search?q=%3Csvg%2Fonload%3Dalert(1)%3E HTTP/1.1\n" +
+		"Host: 10.0.0.18:3000\nUser-Agent: dalfox/3\n\n"
+	got := withFindingEvidence(VectorFinding{
+		Tool: "dalfox", Kind: "V", InsertionPoint: "query", Param: "q",
+		Payload: "<svg/onload=alert(1)>", Method: "GET", RawRequest: captured,
+		RawResponse: "HTTP/1.1 200 OK\n\n{\"status\":\"success\"}",
+	}, vectorRow{ID: "x", RawRequest: "GET /other HTTP/1.1\nHost: 10.0.0.18:3000\n\n"})
+
+	if got.RawRequest != captured {
+		t.Errorf("captured bytes were rewritten:\n%s", got.RawRequest)
+	}
+	if FindingRequestOrigin(got.RawRequest) != RequestCaptured {
+		t.Error("bytes the tool reported must be reported as captured, or the operator discounts the " +
+			"one kind of evidence worth having")
+	}
+}
+
+// A payload whose home cannot be worked out must NOT be inserted somewhere plausible. A JSON body
+// finding whose payload is guessed into the query string produces a request that tests an input
+// nobody scanned, and it would be indistinguishable from one that reproduces the finding.
+func TestAPayloadWithNowhereToGoIsLeftOutAndSaidSo(t *testing.T) {
+	vector := vectorRow{
+		ID: "22222222-2222-2222-2222-222222222222", Method: "POST", InsertionPoint: "body",
+		EvidenceURL: "http://10.0.0.18:3000/rest/user/login",
+		RawRequest: "POST /rest/user/login HTTP/1.1\nHost: 10.0.0.18:3000\n" +
+			"Content-Type: application/json\n\n{\"email\":\"a@b.c\",\"password\":\"x\"}",
+	}
+	got := withFindingEvidence(VectorFinding{
+		Tool: "sqlmap", Kind: "boolean-based blind", InsertionPoint: "body", Param: "email",
+		Payload: "email=' OR 1=1--", Method: "POST",
+		URL: "http://10.0.0.18:3000/rest/user/login",
+	}, vector)
+
+	bytes, composed := SplitReconstructedRequest(got.RawRequest)
+	if !composed {
+		t.Fatal("the request was composed and must say so")
+	}
+	if strings.Contains(bytes, "?email=") {
+		t.Errorf("a body payload was guessed into the query string:\n%s", bytes)
+	}
+	if !strings.Contains(bytes, `{"email":"a@b.c"`) {
+		t.Errorf("the captured body was lost, so this is not the request that was scanned:\n%s", bytes)
+	}
+	if !strings.Contains(got.RawRequest, "NOT placed") {
+		t.Errorf("the banner has to say the payload is missing from the request, or the operator "+
+			"sends the ordinary request and concludes the finding is false:\n%s", got.RawRequest)
+	}
+}
+
+// The access bypass tools report a complete curl, and the header inside it IS the finding. Composing
+// from the vector instead would produce the CONTROL arm: an operator would send it, see the ordinary
+// refusal, and dismiss a real bypass.
+func TestABypassFindingKeepsTheHeaderTheToolReported(t *testing.T) {
+	got := withFindingEvidence(VectorFinding{
+		Tool: "forbidden", Kind: "access-control-bypass", Method: "GET", IsBypassTarget: true,
+		URL: "http://10.0.0.18:3000/about",
+		Evidence: "GET -> 200, 7293b. curl --path-as-is -iskL -H 'X-Original-URL: /admin/' " +
+			"-X 'GET' 'http://10.0.0.18:3000/about'",
+	}, vectorRow{ID: "33333333-3333-3333-3333-333333333333", IsBypassTarget: true,
+		EvidenceURL: "http://10.0.0.18:3000/about"})
+
+	if !strings.Contains(got.RawRequest, "X-Original-URL: /admin/") {
+		t.Errorf("the stored request is the control arm rather than the bypass:\n%s", got.RawRequest)
+	}
+}
+
+// Nothing is invented when there is nothing to build from. An empty request is a visible gap; a
+// fabricated one is a gap that looks like evidence.
+func TestNothingIsComposedWhenThereIsNothingToComposeFrom(t *testing.T) {
+	got := withFindingEvidence(VectorFinding{Tool: "domdig", Kind: "templateinj", Param: "x"},
+		vectorRow{ID: "44444444-4444-4444-4444-444444444444"})
+	if got.RawRequest != "" {
+		t.Errorf("a request was invented out of nothing:\n%s", got.RawRequest)
+	}
+	if FindingRequestOrigin(got.RawRequest) != RequestNone {
+		t.Error("an empty request must be reported as none, so the gap stays visible")
+	}
+}
+
+// Two tools record a whole proof-of-concept URL in the payload field rather than a value, and the
+// composed request has to go THERE. The trap is the other kind of absolute payload: an open redirect
+// or SSRF payload is the attacker's URL, and aiming the reproduction at it would send the operator's
+// session to a third party while testing nothing on the target.
+func TestAnAbsolutePayloadOnlyRedirectsTheRequestWhenItIsTheSameHost(t *testing.T) {
+	vector := vectorRow{
+		ID: "55555555-5555-5555-5555-555555555555", Method: "GET", InsertionPoint: "query",
+		EvidenceURL: "http://10.0.0.18:3000/rest/products/search?q=apple",
+		RawRequest: "GET /rest/products/search?q=apple HTTP/1.1\nHost: 10.0.0.18:3000\n" +
+			"Cookie: token=realsession\n\n",
+	}
+
+	// SQLiDetector: the injected URL is the request, and the session must survive being aimed at it.
+	poc := withFindingEvidence(VectorFinding{
+		Tool: "sqlidetector", Kind: "error-signature", InsertionPoint: "query", Param: "q",
+		Payload: "http://10.0.0.18:3000/rest/products/search?q=apple%27",
+		URL:     "http://10.0.0.18:3000/rest/products/search?q=apple%27", Method: "GET",
+	}, vector)
+	bytes, _ := SplitReconstructedRequest(poc.RawRequest)
+	if !strings.Contains(bytes, "q=apple%27") {
+		t.Errorf("the proof-of-concept URL was discarded:\n%s", bytes)
+	}
+	if !strings.Contains(bytes, "token=realsession") {
+		t.Errorf("the session was dropped on the way:\n%s", bytes)
+	}
+
+	// A redirect payload names somebody else's host. The request must stay pointed at the target.
+	redirect := withFindingEvidence(VectorFinding{
+		Tool: "nuclei-dast", Kind: "open-redirect", InsertionPoint: "query", Param: "to",
+		Payload: "https://evil.example.com/", Method: "GET",
+		URL: "http://10.0.0.18:3000/rest/products/search?q=apple",
+	}, vector)
+	bytes, _ = SplitReconstructedRequest(redirect.RawRequest)
+	if strings.Contains(bytes, "Host: evil.example.com") {
+		t.Errorf("the reproduction was aimed at the payload's host, which sends the operator's "+
+			"session to a third party and tests nothing on the target:\n%s", bytes)
+	}
+	if !strings.Contains(bytes, "10.0.0.18:3000") {
+		t.Errorf("the request left the target entirely:\n%s", bytes)
+	}
+	if !strings.Contains(bytes, "to=https") {
+		t.Errorf("the redirect payload never reached the parameter it was found in:\n%s", bytes)
+	}
+}
+
+// The JWT section stores the TOKEN in the vector's raw_request column, because its vectors are
+// tokens rather than endpoints. Composing on top of that would file a bare JWT under a banner
+// announcing it as an HTTP request, which is worse than storing nothing: it looks like evidence.
+func TestAVectorWhoseRawRequestIsNotARequestIsNotUsedAsOne(t *testing.T) {
+	got := withFindingEvidence(VectorFinding{
+		Tool: "jwt-tool", Kind: "alg-none", Method: "GET", InsertionPoint: "header",
+		URL: "http://10.0.0.18:3000/rest/user/whoami",
+	}, vectorRow{
+		ID: "66666666-6666-6666-6666-666666666666", InsertionPoint: "header",
+		EvidenceURL: "http://10.0.0.18:3000/rest/user/whoami",
+		RawRequest:  "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdGF0dXMiOiJzdWNjZXNzIn0.aaaa",
+	})
+	bytes, _ := SplitReconstructedRequest(got.RawRequest)
+	if strings.HasPrefix(strings.TrimSpace(bytes), "eyJ") {
+		t.Errorf("a JWT was stored as though it were the request bytes:\n%s", got.RawRequest)
+	}
+	if !strings.Contains(bytes, "GET /rest/user/whoami") {
+		t.Errorf("nothing sendable was composed from the finding's own URL:\n%s", bytes)
+	}
+}
+
+// A response cannot be composed: it is the target's answer, and inventing one would be fabricating
+// the evidence rather than the question. There are two honest answers here and there is no third.
+func TestAResponseIsNeverComposed(t *testing.T) {
+	if FindingResponseOrigin("") != RequestNone {
+		t.Error("a missing response must read as missing")
+	}
+	if FindingResponseOrigin("HTTP/1.1 200 OK\n\nbody") != RequestCaptured {
+		t.Error("a stored response came from the tool and is the strongest evidence here")
+	}
+}
+
+func TestExitDescriptionSaysWhyZeroIsSuspicious(t *testing.T) {
+	if got := exitDescription(nil); !strings.Contains(got, "0") || !strings.Contains(got, "clean") {
+		t.Errorf("a zero exit next to a refusal is the surprising part and must be spelled out, got %q", got)
+	}
+}

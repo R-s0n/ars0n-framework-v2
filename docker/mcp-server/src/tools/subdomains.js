@@ -1,6 +1,6 @@
 const { z } = require('zod');
 const { query } = require('../db');
-const { limitResults, clampLimit } = require('../utils/truncate');
+const { limitResults, limitFetched, clampLimit } = require('../utils/truncate');
 
 const querySubdomainsSchema = z.object({
   target_id: z.string().uuid().describe('The scope target UUID'),
@@ -22,7 +22,7 @@ async function querySubdomains(params) {
   sql += ` ORDER BY subdomain ASC LIMIT ${lim + 1}`;
 
   const result = await query(sql, values);
-  return limitResults(result.rows, lim);
+  return limitFetched(result.rows, lim);
 }
 
 const queryCompanyDomainsSchema = z.object({
@@ -34,7 +34,7 @@ async function queryCompanyDomains(params) {
   const lim = clampLimit(params.max_results);
   const sql = `SELECT id, domain, source, created_at FROM consolidated_company_domains WHERE scope_target_id = $1 ORDER BY domain ASC LIMIT ${lim + 1}`;
   const result = await query(sql, [params.target_id]);
-  return limitResults(result.rows, lim);
+  return limitFetched(result.rows, lim);
 }
 
 const queryNetworkRangesSchema = z.object({
@@ -47,7 +47,7 @@ async function queryNetworkRanges(params) {
   const sql = `SELECT id, cidr_block, asn, organization, description, country, source, created_at
     FROM consolidated_network_ranges WHERE scope_target_id = $1 ORDER BY cidr_block ASC LIMIT ${lim + 1}`;
   const result = await query(sql, [params.target_id]);
-  return limitResults(result.rows, lim);
+  return limitFetched(result.rows, lim);
 }
 
 module.exports = {

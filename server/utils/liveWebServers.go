@@ -116,31 +116,31 @@ type TargetURLResponse struct {
 }
 
 type HttpxScanConfig struct {
-	Ports            []int             `json:"ports"`
-	Threads          int               `json:"threads"`
-	RateLimit        int               `json:"rateLimit"`
-	Timeout          int               `json:"timeout"`
-	Retries          int               `json:"retries"`
-	MatchCodes       string            `json:"matchCodes"`
-	Probes           map[string]bool   `json:"probes"`
-	Filters          map[string]interface{} `json:"filters"`
-	Matchers         map[string]string `json:"matchers"`
-	Misc             map[string]interface{} `json:"misc"`
-	Headless         map[string]interface{} `json:"headless"`
-	Extractors       map[string]interface{} `json:"extractors"`
-	CustomHeaders    string            `json:"customHeaders"`
-	HttpProxy        string            `json:"httpProxy"`
-	Resolvers        string            `json:"resolvers"`
-	Path             string            `json:"path"`
-	RequestMethods   string            `json:"requestMethods"`
-	Body             string            `json:"body"`
+	Ports          []int                  `json:"ports"`
+	Threads        int                    `json:"threads"`
+	RateLimit      int                    `json:"rateLimit"`
+	Timeout        int                    `json:"timeout"`
+	Retries        int                    `json:"retries"`
+	MatchCodes     string                 `json:"matchCodes"`
+	Probes         map[string]bool        `json:"probes"`
+	Filters        map[string]interface{} `json:"filters"`
+	Matchers       map[string]string      `json:"matchers"`
+	Misc           map[string]interface{} `json:"misc"`
+	Headless       map[string]interface{} `json:"headless"`
+	Extractors     map[string]interface{} `json:"extractors"`
+	CustomHeaders  string                 `json:"customHeaders"`
+	HttpProxy      string                 `json:"httpProxy"`
+	Resolvers      string                 `json:"resolvers"`
+	Path           string                 `json:"path"`
+	RequestMethods string                 `json:"requestMethods"`
+	Body           string                 `json:"body"`
 }
 
 // RunHttpxScan handles the HTTP request to start a new httpx scan
 func RunHttpxScan(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[DEBUG] Received httpx scan request")
 	var payload struct {
-		FQDN   string          `json:"fqdn" binding:"required"`
+		FQDN   string           `json:"fqdn" binding:"required"`
 		Config *HttpxScanConfig `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.FQDN == "" {
@@ -1091,12 +1091,12 @@ func UpdateTargetURLFromHttpx(scopeTargetID string, httpxData map[string]interfa
 	}
 
 	url = NormalizeURL(url)
-	
+
 	statusCode := getIntFromInterface(httpxData["status_code"])
 	title := getStringFromInterface(httpxData["title"])
 	webServer := getStringFromInterface(httpxData["webserver"])
 	contentLength := getIntFromInterface(httpxData["content_length"])
-	
+
 	var technologies []string
 	if techInterface, ok := httpxData["tech"].([]interface{}); ok {
 		for _, tech := range techInterface {
@@ -1146,7 +1146,7 @@ func UpdateTargetURLFromHttpx(scopeTargetID string, httpxData map[string]interfa
 			contentLength,
 			scopeTargetID,
 			findingsJSONBytes)
-		
+
 		if err == nil {
 			log.Printf("[STATUS_CODE] URL: %s | Status: %d | Inserted from HTTPX", url, statusCode)
 		}
@@ -1174,7 +1174,7 @@ func UpdateTargetURLFromHttpx(scopeTargetID string, httpxData map[string]interfa
 			isNoLongerLive, // If previously marked as no longer live, mark as newly discovered
 			findingsJSONBytes,
 			existingID)
-		
+
 		if err == nil {
 			log.Printf("[STATUS_CODE] URL: %s | Status: %d | Updated from HTTPX", url, statusCode)
 		}
@@ -1185,7 +1185,7 @@ func UpdateTargetURLFromHttpx(scopeTargetID string, httpxData map[string]interfa
 	if err != nil && err != pgx.ErrNoRows {
 		return err
 	}
-	
+
 	return nil
 }
 

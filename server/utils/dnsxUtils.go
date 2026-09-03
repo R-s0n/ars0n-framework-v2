@@ -120,17 +120,29 @@ func ExecuteDNSxCompanyScan(scanID string, domains []string, scopeTargetID strin
 	var allDNSRecords []DNSxDNSRecord
 	var commandsExecuted []string
 
+	// The per-target Company settings, from the ONE store the Settings screen and the MCP company tool
+	// both write. Absent is the normal case and produces the exact command this runner has always
+	// built. Loaded ONCE, outside the per-domain loop, so every domain in a scan is configured
+	// identically - and note the loop itself is the reason -rl and -t are framework-owned: one hostname
+	// per docker exec means a rate limiter and a worker pool have nothing to act on.
+	tool, settings, notes := companyRunnerSettings(scopeTargetID, "dnsx_company")
+	if len(settings) > 0 {
+		log.Printf("[DNSX-COMPANY] [INFO] Running with stored Company settings for scope target %s: %s",
+			scopeTargetID, companySettingsSummary(settings))
+	}
+	settingsRecorded := false
+	failedDomains := 0
+
 	for i, domain := range domains {
 		log.Printf("[DNSX-COMPANY] [INFO] Processing domain %d/%d: %s", i+1, len(domains), domain)
 
-		cmd := exec.Command(
-			"docker", "exec", "-i",
-			"ars0n-framework-v2-dnsx-1",
-			"dnsx",
-			"-a", "-aaaa", "-cname", "-mx", "-ns", "-txt", "-ptr", "-srv",
-			"-re", "-j",
-			"-retry", "3",
-		)
+		argv, configNotes := dnsxCompanyCommandArgs(tool, settings)
+		if !settingsRecorded {
+			notes = append(notes, configNotes...)
+			companyLogNotes("DNSX-COMPANY", notes)
+			settingsRecorded = true
+		}
+		cmd := exec.Command(argv[0], argv[1:]...)
 
 		commandsExecuted = append(commandsExecuted, cmd.String())
 		log.Printf("[DNSX-COMPANY] [INFO] Executing command: %s with domain: %s", cmd.String(), domain)
@@ -142,6 +154,9 @@ func ExecuteDNSxCompanyScan(scanID string, domains []string, scopeTargetID strin
 
 		err := cmd.Run()
 		if err != nil {
+			// Fails open at the domain level, exactly like the amass step: the domain is skipped and the
+			// scan is still finalised as a success. The count is now recorded on the scan row.
+			failedDomains++
 			log.Printf("[DNSX-COMPANY] [ERROR] DNSx scan failed for domain %s: %v", domain, err)
 			log.Printf("[DNSX-COMPANY] [ERROR] stderr output: %s", stderr.String())
 			continue
@@ -199,6 +214,14 @@ func ExecuteDNSxCompanyScan(scanID string, domains []string, scopeTargetID strin
 	resultJSON, _ := json.Marshal(result)
 	execTime := time.Since(startTime).String()
 	commandsStr := strings.Join(commandsExecuted, "; ")
+
+	if note := companyDomainLoopNote("dnsx_company", failedDomains, len(domains)); note != "" {
+		notes = append(notes, note)
+		log.Printf("[DNSX-COMPANY] [WARN] %s", note)
+	}
+	if preamble := companySettingsPreamble(tool, scopeTargetID, settings, notes); preamble != "" {
+		commandsStr += "\n" + preamble
+	}
 
 	UpdateDNSxCompanyScanStatus(scanID, "success", string(resultJSON), "", commandsStr, execTime)
 

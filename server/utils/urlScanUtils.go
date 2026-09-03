@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -180,24 +181,39 @@ func fetchStatusCode(urlStr string) int {
 	return status
 }
 
-func enrichURLsWithStatusCodes(urls []string) map[string]int {
-	statusCodes := make(map[string]int)
+// targetSafeDelay is the gap to leave between requests for a target, taken from the rate the
+// operator applied to this target rather than from a constant.
+//
+// It reads the FFUF config because that is where the Target Behaviour Probe's recommendation ends up
+// once an operator accepts it, which makes it the one place on a target that says "this is the rate
+// we decided is safe here". Anything else pacing itself independently is, by definition, running at a
+// rate nobody chose.
+//
+// Falls back to the previous 10 per second when nothing is configured, so a target that has never
+// been probed behaves exactly as it did before rather than stalling.
+func targetSafeDelay(ctx context.Context, scopeTargetID string) time.Duration {
+	const fallback = 100 * time.Millisecond
 
-	log.Printf("[INFO] Fetching status codes for %d URLs", len(urls))
-
-	for i, urlStr := range urls {
-		if i > 0 && i%10 == 0 {
-			log.Printf("[INFO] Progress: %d/%d URLs checked", i, len(urls))
-		}
-
-		statusCode := fetchStatusCode(urlStr)
-		statusCodes[urlStr] = statusCode
-
-		time.Sleep(100 * time.Millisecond)
+	if strings.TrimSpace(scopeTargetID) == "" {
+		return fallback
 	}
-
-	log.Printf("[INFO] Completed fetching status codes for %d URLs", len(urls))
-	return statusCodes
+	var rate float64
+	err := dbPool.QueryRow(ctx, `
+		SELECT COALESCE((config->>'rateLimit')::float8, 0)
+		FROM ffuf_configs WHERE scope_target_id = $1`, scopeTargetID).Scan(&rate)
+	if err != nil || rate <= 0 {
+		return fallback
+	}
+	// Clamped so a mistyped or absurd value cannot either hammer a target or stall discovery for
+	// hours. One request every two seconds is the slowest this will go on its own.
+	if rate > 50 {
+		rate = 50
+	}
+	delay := time.Duration(float64(time.Second) / rate)
+	if delay > 2*time.Second {
+		delay = 2 * time.Second
+	}
+	return delay
 }
 
 func formatURLsWithStatusCodes(urls []string, statusCodes map[string]int) (string, string) {
@@ -619,12 +635,25 @@ func processURLGroup(urls []string, isDirect bool, scanID, scanType, scopeTarget
 
 	log.Printf("[INFO] Fetching status codes for %d endpoints (isDirect=%v)", len(endpoints), isDirect)
 
+	// PACED AT THE RATE THE OPERATOR ACTUALLY CHOSE, not at a hardcoded one.
+	//
+	// This used to sleep a flat 100ms, which is 10 requests per second. On a target the probe had
+	// measured as safe at 5, that is double the intended rate, and it runs once per discovered
+	// endpoint, so the largest single burst of traffic in the whole discovery phase was the one nobody
+	// had configured. Worse, it is invisible: the operator sets a rate limit, watches the crawlers
+	// honour it, and this loop quietly ignores it.
+	ctx := context.Background()
+	delay := targetSafeDelay(ctx, scopeTargetID)
 	for i := range endpoints {
 		endpoints[i].StatusCode = fetchStatusCode(endpoints[i].URL)
+		// A 401 or 403 seen here is the framework being refused, which is exactly what the access
+		// bypass section needs and exactly what used to be discarded as just another status code.
+		RecordDeniedEndpoint(ctx, scopeTargetID, endpoints[i].URL, endpoints[i].StatusCode,
+			"endpoint-discovery")
 		if i > 0 && i%10 == 0 {
 			log.Printf("[INFO] Status code progress: %d/%d", i, len(endpoints))
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(delay)
 	}
 
 	return endpoints
@@ -716,6 +745,238 @@ func storeDiscoveredEndpoints(endpoints []DiscoveredEndpoint) error {
 
 	log.Printf("[INFO] Successfully stored %d endpoints with parameters", len(endpoints))
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Discovery scan outcome guards
+//
+// Everything below exists to separate "this tool ran and the answer was nothing" from "this tool did
+// not run". The vector scanners already draw that line, in vectorScan.go; the discovery scanners did
+// not, so every way of failing arrived in the UI as a green "Found 0 direct endpoints".
+// ---------------------------------------------------------------------------
+
+// archiveQuery is what a public archive should be asked about a target, or the reason it must not be
+// asked at all.
+type archiveQuery struct {
+	// Host is exactly what to hand the tool: the hostname, with :port appended when the port is not
+	// the scheme's default.
+	Host string
+	// WithSubs reports whether a subdomain wildcard around Host is still a pattern an archive can
+	// match. It stops being one as soon as a port is involved.
+	WithSubs bool
+	// SkipReason is non-empty when querying an archive about this target can only return some other
+	// service's data.
+	SkipReason string
+}
+
+// planArchiveQuery decides what waybackurls and gau should be asked about a target.
+//
+// Both were being handed a bare hostname with the port thrown away, and both were wrong for the same
+// reason: the Wayback CDX index keys on the whole authority, so url=10.0.0.18/* answers about port 80
+// and url=10.0.0.18:3000/* answers about port 3000. Verified against the live CDX API on 2026-08-21:
+// the first returns crawls of a machine archived in July 2000, the second returns []. Nine of those
+// year-2000 paths (/Periodico/crearNoticia.asp, /login.cfm, /Content/Default.asp) were imported into
+// discovered_endpoints as endpoints of a Juice Shop on port 3000, recorded at http://10.0.0.18:80/,
+// a port nothing on the target listens on.
+//
+// An IP literal is refused outright rather than merely port-qualified. An archive keys its index on
+// the address string, and an address is not a stable identity for a service: whatever the archive
+// holds for 10.0.0.18 belongs to whoever had that address when the crawl ran, which for a private
+// range is a different network entirely. Crawlers reach sites by following hostnames, so the honest
+// expected yield for a bare address is nothing, and the measured yield was another machine's site map.
+//
+// The subdomain wildcard is dropped as soon as a port is in play. waybackurls interpolates its
+// argument as url=*.<arg>/*, and *.host:8080/* is not a pattern the CDX API can match: the wildcard
+// belongs in front of a hostname, not in front of a host:port authority.
+func planArchiveQuery(targetURL string) archiveQuery {
+	raw := strings.TrimSpace(targetURL)
+	if raw == "" {
+		return archiveQuery{SkipReason: "No target URL to ask an archive about."}
+	}
+	// url.Parse without a scheme reads "host:3000" as scheme "host", so give it one. The scheme only
+	// decides which port counts as default below.
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Hostname() == "" {
+		return archiveQuery{SkipReason: fmt.Sprintf("Could not read a host out of %q, so no archive was queried.", targetURL)}
+	}
+
+	host := parsed.Hostname()
+	if net.ParseIP(host) != nil {
+		return archiveQuery{SkipReason: fmt.Sprintf(
+			"%s is an IP address, so no public archive was queried. Archives index by address, and an "+
+				"address is not a stable identity for a service: asking about 10.0.0.18 on 2026-08-21 "+
+				"returned a machine crawled in July 2000, whose paths were then stored as this target's "+
+				"endpoints. Crawl this target directly with Katana or GoSpider instead.", host)}
+	}
+
+	port := parsed.Port()
+	if port == "" || (parsed.Scheme == "http" && port == "80") || (parsed.Scheme == "https" && port == "443") {
+		return archiveQuery{Host: host, WithSubs: true}
+	}
+	return archiveQuery{Host: host + ":" + port}
+}
+
+// archiveQueryFloor is the shortest a public-archive lookup can take and still have happened.
+//
+// Measured against the live Wayback CDX API on 2026-08-21: 3.4s, 4.6s and 32.1s for a query whose
+// correct answer is empty, and 14.6s and 20.7s for one with results. The failing scans recorded
+// 655ms and 665ms, and reproduced by hand at 451ms with zero bytes on stdout and zero on stderr.
+// The cause was NOT a container that could not reach the archive, which is what this comment first
+// claimed: wget from inside that container returns real CDX data. web.archive.org answers Go's
+// default User-Agent with HTTP 429 in well under a second, and waybackurls discards the resulting
+// error and exits 0. 2s sits below every real measurement and comfortably above every failed one,
+// and it still earns its place now that archivefetch reports the 429 itself: a future tool that
+// fails fast and quietly gets caught by runtime alone.
+const archiveQueryFloor = 2 * time.Second
+
+// buildWaybackURLsCommand turns an archive plan into a command line. Kept separate from the launcher
+// for the same reason buildKatanaCommand is: the mapping from decision to flag is one readable block,
+// and dropping the subdomain wildcard for a port-bearing argument is exactly the kind of detail that
+// disappears inside a scan function.
+// The tool is archivefetch, not waybackurls, and the container is still named for waybackurls
+// because that is what the compose service builds.
+//
+// waybackurls cannot do this job. It calls http.Get with Go's default client, web.archive.org
+// answers "Go-http-client/1.1" with HTTP 429, and waybackurls discards the resulting parse error
+// and exits 0 having printed nothing. Measured in that container on 2026-08-21 against
+// ginandjuice.shop: the Go default UA gets 429 and 162 bytes, any other UA gets 200 and 9826 bytes,
+// and both waybackurls@v0.1.0 and waybackurls@latest print zero bytes and exit 0 while wget against
+// the identical CDX URL from the same container returns real data. archivefetch sends a descriptive
+// UA, retries a 429, and exits NON-ZERO with a reason when the archive refuses. See
+// docker/waybackurls/archivefetch/main.go.
+func buildWaybackURLsCommand(plan archiveQuery) []string {
+	cmd := []string{
+		"docker", "exec",
+		"ars0n-framework-v2-waybackurls-1",
+		"archivefetch",
+	}
+	if !plan.WithSubs {
+		// A port is in the argument, and the query is url=*.<arg>/*, which for a host:port authority
+		// is not a pattern the CDX API can match.
+		cmd = append(cmd, "-no-subs")
+	}
+	return append(cmd, plan.Host)
+}
+
+// discoveryRun describes one discovery tool execution in enough detail to decide whether it did the
+// work its result line is about to claim.
+type discoveryRun struct {
+	Tool      string
+	Stdout    string
+	Stderr    string
+	URLsFound int
+	Elapsed   time.Duration
+
+	// MinRuntime is the shortest this tool's work could take and still have reached the network.
+	// Zero disables the check, for tools whose runtime says nothing useful.
+	MinRuntime time.Duration
+
+	// SilenceIsFailure marks a tool that writes something whenever it reached its target, so that a
+	// completely silent exit 0 can only mean it never got there. The archive tools are deliberately
+	// not marked: an archive holding no history for a host legitimately prints nothing.
+	SilenceIsFailure bool
+}
+
+// discoveryScanFailure returns an operator-facing reason when a discovery tool exited 0 without doing
+// its work, and "" when the run can be trusted.
+//
+// vectorScan.go guards the vector tools against exactly this with refusedItsCommandLine(), which is
+// called here rather than reimplemented. The discovery path had no equivalent, so a tool that never
+// ran produced the same row as a tool that ran and found nothing. Measured on 10.0.0.18:3000
+// (2026-08-21): waybackurls recorded "Found 0 direct endpoints", status success, in 655ms, which is
+// indistinguishable from a healthy run against a domain with no archive history and was in fact a
+// lookup that never left the container.
+func discoveryScanFailure(run discoveryRun) string {
+	// A tool complaining about its own arguments failed whatever it found, because whatever it found
+	// came from a command line that is not the one the operator configured.
+	if refusedItsCommandLine(run.Stdout + "\n" + run.Stderr) {
+		return fmt.Sprintf("%s rejected its own command line rather than scanning: %s",
+			run.Tool, firstLineOf(run.Stderr+"\n"+run.Stdout))
+	}
+
+	// Anything produced is evidence the tool ran. Everything below is only about zeroes.
+	if run.URLsFound > 0 {
+		return ""
+	}
+
+	if run.MinRuntime > 0 && run.Elapsed < run.MinRuntime {
+		return fmt.Sprintf(
+			"%s returned nothing in %s, and a lookup that reaches a public archive takes at least %s "+
+				"(measured 3.4s for an empty answer, 14s to 21s for a populated one). This is a query "+
+				"that never happened, not an archive with no history for the target. The archive "+
+				"refuses some clients outright: it answers Go's default User-Agent with HTTP 429, "+
+				"which is why waybackurls was replaced with archivefetch. Read the run's stderr for "+
+				"what the archive actually said.",
+			run.Tool, run.Elapsed.Round(time.Millisecond), run.MinRuntime)
+	}
+
+	if run.SilenceIsFailure && strings.TrimSpace(run.Stdout) == "" && strings.TrimSpace(run.Stderr) == "" {
+		return fmt.Sprintf(
+			"%s exited 0 after %s having written nothing at all, on stdout or stderr, which is what a "+
+				"crawler does when it never reached the target: one that got a response echoes at "+
+				"least the seed URL back. Measured 2026-08-21 against a closed port, gospider produced "+
+				"exactly this and katana still printed its seed.",
+			run.Tool, run.Elapsed.Round(time.Millisecond))
+	}
+
+	return ""
+}
+
+// firstLineOf reduces a tool's output to the one line an operator needs to recognise what happened.
+// The whole output goes in the stdout column; the error column is a summary of it.
+func firstLineOf(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if len(line) > 200 {
+			line = line[:200]
+		}
+		return line
+	}
+	return ""
+}
+
+// storeDiscoveryScanOutput records what a discovery tool actually printed.
+//
+// The five discovery tables have carried stdout and stderr columns since they were created and
+// nothing ever wrote to them: every row in waybackurls_scans has both NULL. That is why LinkFinder,
+// Katana and GoSpider were all misdiagnosed as broken after the 2026-08-21 run. Each had recorded an
+// error or a zero, and with no output stored there was no way to tell a tool that rejected its
+// arguments from a tool whose target had gone to sleep, which is what had actually happened. Stored
+// on every outcome including success, because a successful run's output is what proves its count.
+func storeDiscoveryScanOutput(table, scanID, stdout, stderr string) {
+	// table is a compile-time constant at every call site, never anything an operator or a tool
+	// supplies, so interpolating it carries no injection risk.
+	query := fmt.Sprintf(`UPDATE %s SET stdout = $1, stderr = $2 WHERE scan_id = $3`, table)
+	_, err := dbPool.Exec(context.Background(), query,
+		sanitizeForTextColumn(cappedToolOutput(stdout)),
+		sanitizeForTextColumn(cappedToolOutput(stderr)),
+		scanID)
+	if err != nil {
+		// Logged rather than swallowed. Losing this column silently is precisely how the last
+		// misdiagnosis happened, and a Postgres rejection of raw wire bytes has bitten this codebase
+		// before, in the ffuf evidence column.
+		log.Printf("[ERROR] Failed to store %s output for scan %s: %v", table, scanID, err)
+	}
+}
+
+// cappedToolOutput keeps a tool's output storable. A katana crawl prints megabytes and this column is
+// for diagnosis, not for results, which are already parsed into discovered_endpoints. Head and tail
+// are both kept: the head carries the banner and any refusal message, the tail carries how the run
+// ended.
+func cappedToolOutput(s string) string {
+	const keep = 64 * 1024
+	if len(s) <= 2*keep {
+		return s
+	}
+	return s[:keep] +
+		fmt.Sprintf("\n\n... [%d bytes omitted by the framework] ...\n\n", len(s)-2*keep) +
+		s[len(s)-keep:]
 }
 
 func RunKatanaURLScan(w http.ResponseWriter, r *http.Request) {
@@ -877,6 +1138,11 @@ func ExecuteAndParseKatanaURLScan(scanID, targetURL, scopeTargetID string) {
 	err := cmd.Run()
 	execTime := time.Since(startTime).String()
 
+	// Before any branching, so the output is on record whichever way this run ends. Katana was
+	// misdiagnosed as broken off the back of a run with no stored output; the run had been fine and
+	// the target had been asleep.
+	storeDiscoveryScanOutput("katana_url_scans", scanID, stdout.String(), stderr.String())
+
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			log.Printf("[ERROR] Katana URL scan timed out after 20m for %s", targetURL)
@@ -902,6 +1168,19 @@ func ExecuteAndParseKatanaURLScan(scanID, targetURL, scopeTargetID string) {
 		}
 
 		cleanURLs = append(cleanURLs, line)
+	}
+
+	if reason := discoveryScanFailure(discoveryRun{
+		Tool:             "katana",
+		Stdout:           rawResult,
+		Stderr:           stderr.String(),
+		URLsFound:        len(cleanURLs),
+		Elapsed:          time.Since(startTime),
+		SilenceIsFailure: true,
+	}); reason != "" {
+		log.Printf("[ERROR] %s", reason)
+		UpdateKatanaURLScanStatus(scanID, "error", "", reason, strings.Join(dockerCmd, " "), time.Since(startTime).String())
+		return
 	}
 
 	log.Printf("[INFO] Processing %d URLs (no filtering applied)", len(cleanURLs))
@@ -1093,11 +1372,10 @@ func linkFinderInputs(scanURL, scopeTargetID string, cfg LinkFinderURLConfig) []
 	}
 
 	if cfg.InputSource == "discovered_js" || cfg.InputSource == "both" {
-		limit := cfg.MaxJSFiles
-		if limit <= 0 {
-			limit = 50
-		}
-		for _, u := range discoveredJSURLs(scopeTargetID, limit) {
+		// cfg.MaxJSFiles is passed straight through, including zero, which discoveredJSURLs reads as
+		// "no cap". There is deliberately no fallback to a default here: substituting a number when
+		// the operator set none is how the old silent truncation happened.
+		for _, u := range discoveredJSURLs(scopeTargetID, cfg.MaxJSFiles) {
 			inputs = append(inputs, linkFinderInput{url: u, isJSFile: true})
 		}
 	}
@@ -1108,9 +1386,20 @@ func linkFinderInputs(scanURL, scopeTargetID string, cfg LinkFinderURLConfig) []
 // discoveredJSURLs collects JavaScript assets that earlier steps already found, from both the
 // crawlers' endpoint table and the manual crawl captures. Both are consulted because the manual
 // crawl routinely reaches authenticated bundles no unauthenticated crawler will ever see.
+//
+// A limit of zero or less means NO cap, which is how the corpus is sized for the JS Files metric.
+// Sizing it by any other route would be a bug waiting to happen: the capped call returns at most
+// `limit` entries, so len() of it is a page size rather than a total, and a metric built on that
+// would read "50 / 50" forever no matter how much JavaScript the target actually has. Both numbers
+// coming out of this one function is what makes them impossible to disagree.
 func discoveredJSURLs(scopeTargetID string, limit int) []string {
+	unbounded := limit <= 0
 	seen := map[string]bool{}
-	out := make([]string, 0, limit)
+	capacity := limit
+	if unbounded {
+		capacity = 0
+	}
+	out := make([]string, 0, capacity)
 
 	// pgx panics rather than erroring on a nil pool, which would take the process down instead of
 	// producing a scan that reports it found nothing to read.
@@ -1119,8 +1408,20 @@ func discoveredJSURLs(scopeTargetID string, limit int) []string {
 		return out
 	}
 
-	collect := func(query string) {
-		rows, err := dbPool.Query(context.Background(), query, scopeTargetID, limit)
+	collect := func(table string) {
+		// The dedupe below is what makes the number meaningful, so the query must not also try to
+		// distinct: two rows differing only by a cache-busting query string are one bundle, and only
+		// the stripped form can see that.
+		query := fmt.Sprintf(`SELECT url FROM %s
+		         WHERE scope_target_id = $1 AND url ~* '\.js($|\?)'
+		         ORDER BY created_at DESC`, table)
+		args := []interface{}{scopeTargetID}
+		if !unbounded {
+			query += " LIMIT $2"
+			args = append(args, limit)
+		}
+
+		rows, err := dbPool.Query(context.Background(), query, args...)
 		if err != nil {
 			log.Printf("[WARN] LinkFinder could not read discovered JS: %v", err)
 			return
@@ -1137,7 +1438,7 @@ func discoveredJSURLs(scopeTargetID string, limit int) []string {
 			if i := strings.Index(base, "?"); i >= 0 {
 				base = base[:i]
 			}
-			if seen[base] || len(out) >= limit {
+			if seen[base] || (!unbounded && len(out) >= limit) {
 				continue
 			}
 			seen[base] = true
@@ -1145,14 +1446,60 @@ func discoveredJSURLs(scopeTargetID string, limit int) []string {
 		}
 	}
 
-	collect(`SELECT url FROM discovered_endpoints
-	         WHERE scope_target_id = $1 AND url ~* '\.js($|\?)'
-	         ORDER BY created_at DESC LIMIT $2`)
-	collect(`SELECT url FROM manual_crawl_captures
-	         WHERE scope_target_id = $1 AND url ~* '\.js($|\?)'
-	         ORDER BY created_at DESC LIMIT $2`)
+	collect("discovered_endpoints")
+	collect("manual_crawl_captures")
 
 	return out
+}
+
+// linkFinderJSPlan says how many of the available JavaScript files a run would actually read.
+//
+// Kept separate from the handler so the rule is testable without a database, because the rule has
+// two edges that are easy to get wrong: "target" and the EMPTY STRING both mean the JS arm does not
+// run at all (linkFinderInputs matches the empty string only in the target arm), and the cap is a
+// ceiling rather than a target, so a corpus smaller than the cap is scanned whole.
+// A limit of zero or less means unlimited, and is reported back as zero rather than as a number,
+// so the client can say "no limit" instead of inventing a ceiling that does not exist.
+func linkFinderJSPlan(available, maxJSFiles int, inputSource string) (scanned, limit int) {
+	limit = maxJSFiles
+	if limit < 0 {
+		limit = 0
+	}
+	if inputSource != "discovered_js" && inputSource != "both" {
+		return 0, limit
+	}
+	if limit == 0 || available < limit {
+		return available, limit
+	}
+	return limit, limit
+}
+
+// GetLinkFinderJSFiles reports how much JavaScript LinkFinder will read against how much exists.
+//
+// The gap between the two is the whole point. The scan truncates newest-first and says nothing
+// about it: the summary line reports only endpoints found, so a target with 900 bundles and the
+// default cap of 50 looks identical to one with 50. This is the only place that difference is
+// visible before the operator goes looking for it.
+func GetLinkFinderJSFiles(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	scopeTargetID := mux.Vars(r)["scope_target_id"]
+	if scopeTargetID == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing_target", "scope_target_id is required")
+		return
+	}
+
+	cfg := LoadLinkFinderURLConfig(scopeTargetID)
+	available := len(discoveredJSURLs(scopeTargetID, 0))
+	scanned, limit := linkFinderJSPlan(available, cfg.MaxJSFiles, cfg.InputSource)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"available":    available,
+		"scanned":      scanned,
+		"max_js_files": limit,
+		"input_source": cfg.InputSource,
+		"truncated":    limit > 0 && available > scanned && scanned > 0,
+		"scans_js":     cfg.InputSource == "discovered_js" || cfg.InputSource == "both",
+	})
 }
 
 func buildLinkFinderCommand(in linkFinderInput, cfg LinkFinderURLConfig, scopeTargetID string) []string {
@@ -1283,6 +1630,10 @@ func ExecuteAndParseLinkFinderURLScan(scanID, targetURL, scopeTargetID string) {
 		lastCmd     []string
 		failures    int
 		firstStderr string
+		// LinkFinder runs once per input, so the stdout column has to be the transcript of the whole
+		// scan rather than whichever bundle happened to be last, for the same reason the command
+		// column already carries a note about the run shape.
+		transcript strings.Builder
 	)
 
 	// linkFinderOutputFailure recognises the ways linkfinder.py reports a problem while still exiting
@@ -1327,6 +1678,8 @@ func ExecuteAndParseLinkFinderURLScan(scanID, targetURL, scopeTargetID string) {
 		err := cmd.Run()
 		cancel()
 
+		fmt.Fprintf(&transcript, "$ %s\n%s%s\n", strings.Join(dockerCmd, " "), stdout.String(), stderr.String())
+
 		if err != nil {
 			// One unreadable bundle must not lose the endpoints from the other forty.
 			failures++
@@ -1334,6 +1687,20 @@ func ExecuteAndParseLinkFinderURLScan(scanID, targetURL, scopeTargetID string) {
 				firstStderr = stderr.String()
 			}
 			log.Printf("[WARN] LinkFinder failed on %s: %v", in.url, err)
+			continue
+		}
+
+		// A refusal is not "this bundle had no endpoints in it", it is the whole scan running a
+		// command line the operator did not configure, so it counts against every input rather than
+		// one. refusedItsCommandLine lives in vectorScan.go and is the shared list of the messages
+		// argparse, cobra and friends print when they reject their own arguments.
+		if refusedItsCommandLine(stdout.String() + "\n" + stderr.String()) {
+			failures++
+			if firstStderr == "" {
+				firstStderr = "LinkFinder rejected its own command line rather than scanning: " +
+					firstLineOf(stderr.String()+"\n"+stdout.String())
+			}
+			log.Printf("[WARN] LinkFinder refused its command line on %s", in.url)
 			continue
 		}
 
@@ -1358,6 +1725,11 @@ func ExecuteAndParseLinkFinderURLScan(scanID, targetURL, scopeTargetID string) {
 	}
 
 	execTime := time.Since(startTime).String()
+
+	// Before any branching, so the transcript is on record whichever way this run ends. LinkFinder was
+	// misdiagnosed as broken off the back of four error rows with no stored output; the invocation had
+	// been fine and the target had been asleep.
+	storeDiscoveryScanOutput("linkfinder_url_scans", scanID, transcript.String(), "")
 
 	// LinkFinder is invoked once per input, so a single stored command line describes one sixtieth
 	// of the scan and names whichever file happened to be last. An operator reading it to reproduce
@@ -1552,100 +1924,28 @@ func RunWaybackURLsScan(w http.ResponseWriter, r *http.Request) {
 
 func ExecuteAndParseWaybackURLsScan(scanID, targetURL, scopeTargetID string) {
 	log.Printf("[INFO] Starting WaybackURLs scan for %s (scan ID: %s)", targetURL, scanID)
-	startTime := time.Now()
 
-	targetDomain := extractDomain(targetURL)
-	if targetDomain == "" {
-		log.Printf("[ERROR] Failed to extract domain from target URL: %s", targetURL)
-		UpdateWaybackURLsScanStatus(scanID, "error", "", "Failed to extract domain from target URL", "", time.Since(startTime).String())
-		return
-	}
-	log.Printf("[INFO] Target domain for filtering: %s", targetDomain)
-
-	// The BARE DOMAIN, not targetURL. waybackurls interpolates its argument straight into a CDX
-	// query as url=*.<arg>/*, so a scheme-bearing value produces url=*.https://host/*, which is not
-	// the host it was meant to ask about. targetDomain was already computed above and then not used.
-	dockerCmd := []string{
-		"docker", "exec",
-		"ars0n-framework-v2-waybackurls-1",
-		"waybackurls",
-		targetDomain,
-	}
-
-	// Bound the run so a hung provider (or an enormous archive) cannot leave the
-	// scan stuck forever.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, dockerCmd[0], dockerCmd[1:]...)
-	log.Printf("[INFO] Executing command: %s", strings.Join(dockerCmd, " "))
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	execTime := time.Since(startTime).String()
-
+	cfg := LoadWaybackURLsURLConfig(scopeTargetID)
+	targets, err := ResolveArchiveTargets(scopeTargetID, cfg.HostMode, cfg.SelectedHosts)
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			log.Printf("[ERROR] WaybackURLs scan timed out after 10m for %s", targetURL)
-			UpdateWaybackURLsScanStatus(scanID, "error", "", "WaybackURLs scan timed out after 10 minutes", strings.Join(dockerCmd, " "), execTime)
-			return
-		}
-		log.Printf("[ERROR] WaybackURLs scan failed for %s: %v", targetURL, err)
-		log.Printf("[ERROR] stderr output: %s", stderr.String())
-		UpdateWaybackURLsScanStatus(scanID, "error", "", stderr.String(), strings.Join(dockerCmd, " "), execTime)
+		UpdateWaybackURLsScanStatus(scanID, "error", "", err.Error(), "", "0s")
 		return
 	}
-
-	rawResult := stdout.String()
-	lines := strings.Split(rawResult, "\n")
-	log.Printf("[DEBUG] Found %d total URLs", len(lines))
-
-	var cleanURLs []string
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		cleanURLs = append(cleanURLs, line)
-	}
-
-	log.Printf("[INFO] Processing %d URLs (no filtering applied)", len(cleanURLs))
-
-	endpoints, err := processURLsWithParameters(cleanURLs, targetDomain, scanID, "waybackurls", scopeTargetID)
-	if err != nil {
-		log.Printf("[ERROR] Failed to process URLs with parameters: %v", err)
-		UpdateWaybackURLsScanStatus(scanID, "error", "", fmt.Sprintf("Failed to process URLs: %v", err), strings.Join(dockerCmd, " "), time.Since(startTime).String())
+	selected := SelectedArchiveTargets(targets)
+	if len(selected) == 0 {
+		// Refused rather than run as a green zero. A custom selection that matches nothing is an
+		// operator mistake, and a scan reporting "0 endpoints" for it is indistinguishable from an
+		// archive that genuinely holds nothing.
+		UpdateWaybackURLsScanStatus(scanID, "error", "",
+			"No hosts are selected for this scan. Open Configure and choose at least one host.", "", "0s")
 		return
 	}
+	log.Printf("[INFO] WaybackURLs querying %d host(s) sequentially", len(selected))
 
-	err = storeDiscoveredEndpoints(endpoints)
-	if err != nil {
-		log.Printf("[ERROR] Failed to store discovered endpoints: %v", err)
-		UpdateWaybackURLsScanStatus(scanID, "error", "", fmt.Sprintf("Failed to store endpoints: %v", err), strings.Join(dockerCmd, " "), time.Since(startTime).String())
-		return
-	}
-
-	directCount := 0
-	adjacentCount := 0
-	for _, ep := range endpoints {
-		if ep.IsDirect {
-			directCount++
-		} else {
-			adjacentCount++
-		}
-	}
-
-	resultSummary := fmt.Sprintf("Found %d direct endpoints and %d adjacent endpoints with parameters", directCount, adjacentCount)
-
-	execTime = time.Since(startTime).String()
-	log.Printf("[INFO] WaybackURLs scan completed in %s for %s", execTime, targetURL)
-
-	UpdateWaybackURLsScanStatus(scanID, "success", resultSummary, "", strings.Join(dockerCmd, " "), execTime)
+	executeArchiveScan("waybackurls", "waybackurls_scans", scanID, targetURL, scopeTargetID,
+		selected, time.Duration(cfg.TimeoutMinutes)*time.Minute,
+		func(plan archiveQuery) []string { return buildArchiveFetchCommand(plan, cfg) },
+		UpdateWaybackURLsScanStatus)
 }
 
 func UpdateWaybackURLsScanStatus(scanID, status, result, errorMsg, command, execTime string) {
@@ -1700,7 +2000,7 @@ func GetWaybackURLsScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	scopeTargetID := vars["id"]
 
-	query := `SELECT scan_id, url, status, result, error, command, execution_time, created_at, status_code
+	query := `SELECT scan_id, url, status, result, error, command, execution_time, created_at, status_code, target_results
 	          FROM waybackurls_scans WHERE scope_target_id = $1 ORDER BY created_at DESC`
 
 	rows, err := dbPool.Query(context.Background(), query, scopeTargetID)
@@ -1723,10 +2023,14 @@ func GetWaybackURLsScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			ExecutionTime *string   `json:"execution_time"`
 			CreatedAt     time.Time `json:"created_at"`
 			StatusCode    *string   `json:"status_code"`
+			// Per-host outcomes for a run that queried several hosts. Sent as raw JSON so the
+			// results modal can show which host each number came from and which ones failed.
+			TargetResults *string `json:"target_results"`
 		}
 
 		err := rows.Scan(&scan.ScanID, &scan.URL, &scan.Status, &scan.Result,
-			&scan.Error, &scan.Command, &scan.ExecutionTime, &scan.CreatedAt, &scan.StatusCode)
+			&scan.Error, &scan.Command, &scan.ExecutionTime, &scan.CreatedAt, &scan.StatusCode,
+			&scan.TargetResults)
 		if err != nil {
 			log.Printf("[ERROR] Failed to scan row: %v", err)
 			continue
@@ -1742,6 +2046,7 @@ func GetWaybackURLsScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			"execution_time": scan.ExecutionTime,
 			"created_at":     scan.CreatedAt,
 			"status_code":    scan.StatusCode,
+			"target_results": scan.TargetResults,
 		})
 	}
 
@@ -1785,127 +2090,26 @@ func RunGAUURLScan(w http.ResponseWriter, r *http.Request) {
 }
 
 func ExecuteAndParseGAUURLScan(scanID, targetURL, scopeTargetID string) {
-	log.Printf("[INFO] Starting GAU URL scan for %s (scan ID: %s)", targetURL, scanID)
-	startTime := time.Now()
+	log.Printf("[INFO] Starting GAU scan for %s (scan ID: %s)", targetURL, scanID)
 
-	targetDomain := extractDomain(targetURL)
-	if targetDomain == "" {
-		log.Printf("[ERROR] Failed to extract domain from target URL: %s", targetURL)
-		UpdateGAUURLScanStatus(scanID, "error", "", "Failed to extract domain from target URL", "", time.Since(startTime).String())
-		return
-	}
-	log.Printf("[INFO] Target domain for filtering: %s", targetDomain)
-
-	// Reduce the target URL to a bare host for gau: strip the scheme, any path,
-	// and (critically) the trailing port. gau's providers query archives by
-	// hostname, so a value like "host.example.com:443" returns nothing.
-	domain := strings.TrimPrefix(strings.TrimPrefix(targetURL, "https://"), "http://")
-	domain = strings.Split(domain, "/")[0]
-	if host, _, ok := strings.Cut(domain, ":"); ok {
-		domain = host
-	}
-
-	// "wayback" IS included, despite the WaybackURLs scan nominally covering it.
-	//
-	// That split assumed waybackurls always delivers, and it does not. Measured on
-	// ginandjuice.shop 2026-08-19: the CDX API returns 178 URLs for the host and is reachable from
-	// the container, while the waybackurls binary emits a single newline and exits 0 with nothing on
-	// stderr, reproducibly. The whole run therefore saw 29 archive URLs instead of 187, an 85% loss,
-	// and nothing reported a problem because an empty result is a successful scan.
-	//
-	// Overlapping the two costs a few duplicate URLs, which consolidation folds away anyway. Relying
-	// on a single tool for the largest archive costs the archive.
-	dockerCmd := []string{
-		"docker", "run", "--rm",
-		"sxcurity/gau:latest",
-		domain,
-		"--providers", "wayback,commoncrawl,otx,urlscan",
-		"--json",
-		"--threads", "10",
-		"--retries", "3",
-		"--timeout", "60",
-	}
-
-	// Bound the whole run so a hung provider cannot leave the scan stuck.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, dockerCmd[0], dockerCmd[1:]...)
-	log.Printf("[INFO] Executing command: %s", strings.Join(dockerCmd, " "))
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	execTime := time.Since(startTime).String()
-
+	cfg := LoadGAUURLConfig(scopeTargetID)
+	targets, err := ResolveArchiveTargets(scopeTargetID, cfg.HostMode, cfg.SelectedHosts)
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			log.Printf("[ERROR] GAU URL scan timed out after 10m for %s", targetURL)
-			UpdateGAUURLScanStatus(scanID, "error", "", "GAU scan timed out after 10 minutes", strings.Join(dockerCmd, " "), execTime)
-			return
-		}
-		log.Printf("[ERROR] GAU URL scan failed for %s: %v", targetURL, err)
-		log.Printf("[ERROR] stderr output: %s", stderr.String())
-		UpdateGAUURLScanStatus(scanID, "error", "", stderr.String(), strings.Join(dockerCmd, " "), execTime)
+		UpdateGAUURLScanStatus(scanID, "error", "", err.Error(), "", "0s")
 		return
 	}
-
-	rawResult := stdout.String()
-	lines := strings.Split(rawResult, "\n")
-	log.Printf("[DEBUG] Found %d total URLs", len(lines))
-
-	var cleanURLs []string
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var gauResult map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &gauResult); err != nil {
-			continue
-		}
-
-		if urlStr, ok := gauResult["url"].(string); ok {
-			cleanURLs = append(cleanURLs, urlStr)
-		}
-	}
-
-	log.Printf("[INFO] Processing %d URLs (no filtering applied)", len(cleanURLs))
-
-	endpoints, err := processURLsWithParameters(cleanURLs, targetDomain, scanID, "gau", scopeTargetID)
-	if err != nil {
-		log.Printf("[ERROR] Failed to process URLs with parameters: %v", err)
-		UpdateGAUURLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to process URLs: %v", err), strings.Join(dockerCmd, " "), time.Since(startTime).String())
+	selected := SelectedArchiveTargets(targets)
+	if len(selected) == 0 {
+		UpdateGAUURLScanStatus(scanID, "error", "",
+			"No hosts are selected for this scan. Open Configure and choose at least one host.", "", "0s")
 		return
 	}
+	log.Printf("[INFO] GAU querying %d host(s) sequentially", len(selected))
 
-	err = storeDiscoveredEndpoints(endpoints)
-	if err != nil {
-		log.Printf("[ERROR] Failed to store discovered endpoints: %v", err)
-		UpdateGAUURLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to store endpoints: %v", err), strings.Join(dockerCmd, " "), time.Since(startTime).String())
-		return
-	}
-
-	directCount := 0
-	adjacentCount := 0
-	for _, ep := range endpoints {
-		if ep.IsDirect {
-			directCount++
-		} else {
-			adjacentCount++
-		}
-	}
-
-	resultSummary := fmt.Sprintf("Found %d direct endpoints and %d adjacent endpoints with parameters", directCount, adjacentCount)
-
-	execTime = time.Since(startTime).String()
-	log.Printf("[INFO] GAU URL scan completed in %s for %s", execTime, targetURL)
-
-	UpdateGAUURLScanStatus(scanID, "success", resultSummary, "", strings.Join(dockerCmd, " "), execTime)
+	executeArchiveScan("gau", "gau_url_scans", scanID, targetURL, scopeTargetID,
+		selected, time.Duration(cfg.TimeoutMinutes)*time.Minute,
+		func(plan archiveQuery) []string { return buildGAUCommand(plan, cfg) },
+		UpdateGAUURLScanStatus)
 }
 
 func UpdateGAUURLScanStatus(scanID, status, result, errorMsg, command, execTime string) {
@@ -1960,7 +2164,7 @@ func GetGAUURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	scopeTargetID := vars["id"]
 
-	query := `SELECT scan_id, url, status, result, error, command, execution_time, created_at, status_code
+	query := `SELECT scan_id, url, status, result, error, command, execution_time, created_at, status_code, target_results
 	          FROM gau_url_scans WHERE scope_target_id = $1 ORDER BY created_at DESC`
 
 	rows, err := dbPool.Query(context.Background(), query, scopeTargetID)
@@ -1983,10 +2187,14 @@ func GetGAUURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			ExecutionTime *string   `json:"execution_time"`
 			CreatedAt     time.Time `json:"created_at"`
 			StatusCode    *string   `json:"status_code"`
+			// Per-host outcomes for a run that queried several hosts. Sent as raw JSON so the
+			// results modal can show which host each number came from and which ones failed.
+			TargetResults *string `json:"target_results"`
 		}
 
 		err := rows.Scan(&scan.ScanID, &scan.URL, &scan.Status, &scan.Result,
-			&scan.Error, &scan.Command, &scan.ExecutionTime, &scan.CreatedAt, &scan.StatusCode)
+			&scan.Error, &scan.Command, &scan.ExecutionTime, &scan.CreatedAt, &scan.StatusCode,
+			&scan.TargetResults)
 		if err != nil {
 			log.Printf("[ERROR] Failed to scan row: %v", err)
 			continue
@@ -2002,6 +2210,7 @@ func GetGAUURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			"execution_time": scan.ExecutionTime,
 			"created_at":     scan.CreatedAt,
 			"status_code":    scan.StatusCode,
+			"target_results": scan.TargetResults,
 		})
 	}
 
@@ -2025,12 +2234,20 @@ func GetDiscoveredEndpoints(w http.ResponseWriter, r *http.Request) {
 	args := []interface{}{scanID}
 	argCount := 1
 
-	if isDirect == "true" {
+	// THE PLACEHOLDER COUNTER USED TO ADVANCE HERE WITHOUT AN ARGUMENT BEING ADDED.
+	//
+	// These two branches take no bind parameter: the value is a literal in the SQL. Incrementing
+	// argCount anyway left the counter one ahead of the argument list, so the NEXT filter to use a
+	// placeholder emitted $3 while only two arguments were ever supplied, and Postgres rejected the
+	// whole statement. The result was a 500 from get_discovered_endpoints whenever reach was set
+	// alongside a scan type, which is how the MCP tool calls it.
+	//
+	// Bound properly now rather than patched, so the counter and the argument list cannot drift apart
+	// again by adding another filter above this one.
+	if isDirect == "true" || isDirect == "false" {
 		argCount++
-		baseQuery += fmt.Sprintf(" AND e.is_direct = true")
-	} else if isDirect == "false" {
-		argCount++
-		baseQuery += fmt.Sprintf(" AND e.is_direct = false")
+		baseQuery += fmt.Sprintf(" AND e.is_direct = $%d", argCount)
+		args = append(args, isDirect == "true")
 	}
 
 	if scanType != "" {
@@ -2451,6 +2668,11 @@ func ExecuteAndParseGoSpiderURLScan(scanID, targetURL, scopeTargetID string) {
 	err := cmd.Run()
 	execTime := time.Since(startTime).String()
 
+	// Before any branching, so the output is on record whichever way this run ends. GoSpider was
+	// misdiagnosed as broken off the back of a "0 endpoints in 4m12s" row with no stored output; the
+	// run had been fine and the target had been asleep.
+	storeDiscoveryScanOutput("gospider_url_scans", scanID, stdout.String(), stderr.String())
+
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			log.Printf("[GOSPIDER-URL] GoSpider URL scan timed out after 20m for %s", targetURL)
@@ -2481,6 +2703,19 @@ func ExecuteAndParseGoSpiderURLScan(scanID, targetURL, scopeTargetID string) {
 				cleanURLs = append(cleanURLs, output)
 			}
 		}
+	}
+
+	if reason := discoveryScanFailure(discoveryRun{
+		Tool:             "gospider",
+		Stdout:           rawResult,
+		Stderr:           stderr.String(),
+		URLsFound:        len(cleanURLs),
+		Elapsed:          time.Since(startTime),
+		SilenceIsFailure: true,
+	}); reason != "" {
+		log.Printf("[GOSPIDER-URL] %s", reason)
+		UpdateGoSpiderURLScanStatus(scanID, "error", "", reason, strings.Join(dockerCmd, " "), time.Since(startTime).String())
+		return
 	}
 
 	log.Printf("[GOSPIDER-URL] Processing %d URLs (no filtering applied)", len(cleanURLs))

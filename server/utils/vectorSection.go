@@ -32,8 +32,8 @@ var VectorSectionFields = map[string][]struct {
 }{
 	"redirect-ssrf": {
 		{"listeningWebhookURL", VectorSectionField{
-			Kind:  "string",
-			Label: "Listening Webhook URL",
+			Kind:        "string",
+			Label:       "Listening Webhook URL",
 			Placeholder: "https://webhook.site/8f3c...",
 			Help: "The URL the payloads point at. A server-side request forgery is proved by the " +
 				"target making a request to somewhere you control, so this has to be reachable from " +
@@ -41,8 +41,8 @@ var VectorSectionFields = map[string][]struct {
 			Required: true,
 		}},
 		{"resultsWebhookURL", VectorSectionField{
-			Kind:  "string",
-			Label: "Webhook Results URL",
+			Kind:        "string",
+			Label:       "Webhook Results URL",
 			Placeholder: "https://webhook.site/token/8f3c.../requests",
 			Help: "The URL the framework READS to find out whether the listening URL was called. For " +
 				"webhook.site this is the token requests endpoint; anything returning the received " +
@@ -51,8 +51,8 @@ var VectorSectionFields = map[string][]struct {
 			Required: true,
 		}},
 		{"resultsAuthHeader", VectorSectionField{
-			Kind:  "string",
-			Label: "Results auth header",
+			Kind:        "string",
+			Label:       "Results auth header",
 			Placeholder: "Api-Key: abc123",
 			Help:        "Sent when reading the results URL, if that service needs one. Optional.",
 		}},
@@ -83,9 +83,9 @@ func GetVectorSectionSettings(category string) http.HandlerFunc {
 		settings := loadVectorSectionSettings(context.Background(), scopeTargetID, category)
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"category": category,
-			"settings": settings,
-			"fields":   VectorSectionFields[category],
+			"category":   category,
+			"settings":   settings,
+			"fields":     VectorSectionFields[category],
 			"configured": sectionWebhookConfigured(settings),
 			"note": "These belong to the section, so every tool in it reads the same pair. The same " +
 				"store is what manage_redirect reads and writes.",

@@ -1,14 +1,32 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { Modal, Table, Button, Spinner, Alert, Row, Col, Form, InputGroup } from 'react-bootstrap';
+import { Modal, Table, Button, Spinner, Alert, Row, Col, Form, InputGroup, Tab, Tabs } from 'react-bootstrap';
 import { FaCheck, FaTimes } from 'react-icons/fa';
+import {
+  useCompanyToolSettings,
+  CompanyToolSettingsPane,
+  CompanyToolReferencePane,
+  CompanyToolSettingsFooter,
+} from './CompanyToolSettings';
 
-const DNSxConfigModal = ({ 
-  show, 
-  handleClose, 
-  consolidatedCompanyDomains = [], 
+// TWO STORES, TWO TABS, ONE MODAL.
+//
+// The first tab is the domain picker exactly as it was: it answers "which domains do I scan" and it
+// writes dnsx_configs, which is what the runner reads today. The tabs after it answer "HOW do I
+// query them" and write company_tool_settings through /company-tools, generated entirely from the
+// server's vocabulary.
+//
+// dnsx_configs is byte-for-byte the same shape as amass_enum_configs and contains not one CLI flag,
+// so the two stores cannot collide; -l and -d are declared framework-owned to keep it that way, and
+// the runner feeds the hostname on stdin rather than through a flag.
+const DNSxConfigModal = ({
+  show,
+  handleClose,
+  consolidatedCompanyDomains = [],
   activeTarget,
   onSaveConfig
 }) => {
+  const [activeTab, setActiveTab] = useState('targets');
+  const toolSettings = useCompanyToolSettings({ activeTarget, toolKey: 'dnsx_company', show });
   const [selectedDomains, setSelectedDomains] = useState(new Set());
   const [filters, setFilters] = useState({
     domain: ''
@@ -57,6 +75,7 @@ const DNSxConfigModal = ({
 
   useEffect(() => {
     if (show) {
+      setActiveTab('targets');
       loadSavedConfig();
       // If no domains provided via props, fetch them
       if (consolidatedCompanyDomains.length === 0) {
@@ -477,6 +496,8 @@ const DNSxConfigModal = ({
         </Modal.Title>
       </Modal.Header>
       <Modal.Body>
+        <Tabs activeKey={activeTab} onSelect={(k) => setActiveTab(k || 'targets')} className="mb-3">
+        <Tab eventKey="targets" title={`Domains (${selectedDomains.size})`}>
         {error && (
           <Alert variant="danger" dismissible onClose={() => setError('')}>
             {error}
@@ -756,8 +777,25 @@ const DNSxConfigModal = ({
             )}
           </>
         )}
+        </Tab>
+        {toolSettings.sections.map((section) => (
+          <Tab
+            key={section.group}
+            eventKey={`group:${section.group}`}
+            title={`${section.group} (${section.keys.length})`}
+          >
+            <CompanyToolSettingsPane ctl={toolSettings} group={section.group} />
+          </Tab>
+        ))}
+        <Tab eventKey="reference" title="What runs & what is fixed">
+          <CompanyToolReferencePane ctl={toolSettings} />
+        </Tab>
+        </Tabs>
       </Modal.Body>
       <Modal.Footer>
+        {/* Contextual, because the two halves of this modal save into different stores. The domain
+            picker keeps its own button, unchanged, so nothing about the existing flow moves. */}
+        {activeTab === 'targets' ? (
         <div className="d-flex justify-content-between align-items-center w-100">
           <div className="text-white-50 small">
             {selectedDomains.size > 0 && (
@@ -771,8 +809,8 @@ const DNSxConfigModal = ({
             <Button variant="secondary" onClick={handleCloseModal} className="me-2">
               Cancel
             </Button>
-            <Button 
-              variant="danger" 
+            <Button
+              variant="danger"
               onClick={handleSaveConfig}
               disabled={saving || selectedDomains.size === 0}
             >
@@ -790,6 +828,13 @@ const DNSxConfigModal = ({
             </Button>
           </div>
         </div>
+        ) : (
+          <CompanyToolSettingsFooter
+            ctl={toolSettings}
+            onClose={handleCloseModal}
+            note="Saves the tool settings only; the domain selection has its own Save on the first tab."
+          />
+        )}
       </Modal.Footer>
     </Modal>
   );

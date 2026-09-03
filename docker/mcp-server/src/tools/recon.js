@@ -1,63 +1,76 @@
 const { z } = require('zod');
 const { query } = require('../db');
 const { apiGet } = require('../api');
-const { limitResults, truncateText, clampLimit } = require('../utils/truncate');
+const { limitResults, limitFetched, truncateText, clampLimit } = require('../utils/truncate');
+const { countStore, notApplicable, storeApplies } = require('../utils/scopeStores');
 
 // === Get Attack Surface Overview ===
 const getAttackSurfaceSchema = z.object({
   target_id: z.string().uuid().describe('The scope target UUID'),
 });
 
+// Every count in this tool used to be read from a Wildcard or Company table, and every failed read
+// was caught and replaced with 0. Against the URL target http://10.0.0.18:3000, which held 196
+// consolidated endpoints and 202 attack vectors, the "complete attack surface overview" answered
+// 0 subdomains, 0 target URLs, 0 live servers, no technologies and no status codes: an untouched
+// target. Two separate causes produced that, and both are fixed below.
+//
+// 1. Wrong corpus. A URL target's surface is its endpoint and attack vector tables. Those stores are
+//    now read for URL targets, and the Wildcard and Company stores report why they do not apply
+//    rather than reporting 0.
+// 2. Wrong query. live_web_servers has no scope_target_id column at all; it joins to its scope
+//    target through ip_port_scans.scan_id. The count therefore threw on every target of every type
+//    and was swallowed into 0, so "0 live servers" was never once a measurement.
 async function getAttackSurface(params) {
   const surface = {};
 
   // Target info
+  let t;
   try {
-    const t = await query('SELECT id, type, scope_target, active, created_at FROM scope_targets WHERE id = $1', [params.target_id]);
-    if (t.rows.length === 0) return { error: 'Target not found' };
-    surface.target = t.rows[0];
+    const res = await query('SELECT id, type, scope_target, active, created_at FROM scope_targets WHERE id = $1', [params.target_id]);
+    if (res.rows.length === 0) return { error: 'Target not found' };
+    t = res.rows[0];
+    surface.target = t;
   } catch (err) { return { error: err.message }; }
 
-  // Subdomains count
-  try {
-    const res = await query('SELECT COUNT(*) as count FROM consolidated_subdomains WHERE scope_target_id = $1', [params.target_id]);
-    surface.subdomain_count = parseInt(res.rows[0]?.count || '0');
-  } catch { surface.subdomain_count = 0; }
-
-  // Company domains count
-  try {
-    const res = await query('SELECT COUNT(*) as count FROM consolidated_company_domains WHERE scope_target_id = $1', [params.target_id]);
-    surface.company_domain_count = parseInt(res.rows[0]?.count || '0');
-  } catch { surface.company_domain_count = 0; }
-
-  // Network ranges count
-  try {
-    const res = await query('SELECT COUNT(*) as count FROM consolidated_network_ranges WHERE scope_target_id = $1', [params.target_id]);
-    surface.network_range_count = parseInt(res.rows[0]?.count || '0');
-  } catch { surface.network_range_count = 0; }
+  surface.subdomain_count = await countStore(query, 'consolidated_subdomains', t.type, params.target_id);
+  surface.company_domain_count = await countStore(query, 'consolidated_company_domains', t.type, params.target_id);
+  surface.network_range_count = await countStore(query, 'consolidated_network_ranges', t.type, params.target_id);
 
   // Target URLs with stats
-  try {
-    const res = await query(`
-      SELECT COUNT(*) as total,
-        COUNT(CASE WHEN roi_score > 0 THEN 1 END) as with_roi,
-        COUNT(CASE WHEN has_deprecated_tls = true OR has_expired_ssl = true OR has_mismatched_ssl = true OR has_revoked_ssl = true OR has_self_signed_ssl = true THEN 1 END) as ssl_issues,
-        AVG(CASE WHEN roi_score > 0 THEN roi_score END) as avg_roi
-      FROM target_urls WHERE scope_target_id = $1`, [params.target_id]);
-    const row = res.rows[0];
-    surface.target_urls = {
-      total: parseInt(row?.total || '0'),
-      with_roi: parseInt(row?.with_roi || '0'),
-      ssl_issues: parseInt(row?.ssl_issues || '0'),
-      avg_roi: row?.avg_roi ? parseFloat(row.avg_roi).toFixed(1) : null,
-    };
-  } catch { surface.target_urls = { total: 0 }; }
+  if (!storeApplies('target_urls', t.type)) {
+    surface.target_urls = notApplicable('target_urls', t.type);
+  } else {
+    try {
+      const res = await query(`
+        SELECT COUNT(*) as total,
+          COUNT(CASE WHEN roi_score > 0 THEN 1 END) as with_roi,
+          COUNT(CASE WHEN has_deprecated_tls = true OR has_expired_ssl = true OR has_mismatched_ssl = true OR has_revoked_ssl = true OR has_self_signed_ssl = true THEN 1 END) as ssl_issues,
+          AVG(CASE WHEN roi_score > 0 THEN roi_score END) as avg_roi
+        FROM target_urls WHERE scope_target_id = $1`, [params.target_id]);
+      const row = res.rows[0];
+      surface.target_urls = {
+        total: parseInt(row?.total || '0'),
+        with_roi: parseInt(row?.with_roi || '0'),
+        ssl_issues: parseInt(row?.ssl_issues || '0'),
+        avg_roi: row?.avg_roi ? parseFloat(row.avg_roi).toFixed(1) : null,
+      };
+    } catch (err) { surface.target_urls = { error: String(err.message || err) }; }
+  }
 
-  // Live web servers
-  try {
-    const res = await query('SELECT COUNT(*) as count FROM live_web_servers WHERE scope_target_id = $1', [params.target_id]);
-    surface.live_server_count = parseInt(res.rows[0]?.count || '0');
-  } catch { surface.live_server_count = 0; }
+  // Live web servers. countStore carries the join: this table is keyed by the IP/port scan that
+  // found the server, not by the scope target.
+  surface.live_server_count = await countStore(query, 'live_web_servers', t.type, params.target_id);
+
+  // The URL workflow's surface: endpoints, their validation verdicts, and the attack vectors derived
+  // from them. This is the section whose absence made the whole tool answer zero for a URL target.
+  if (t.type === 'URL') {
+    surface.endpoints = await urlEndpointSurface(params.target_id);
+    surface.attack_vectors = await urlAttackVectorSurface(params.target_id);
+  } else {
+    surface.endpoints = notApplicable('consolidated_url_endpoints', t.type);
+    surface.attack_vectors = notApplicable('attack_vectors', t.type);
+  }
 
   // Nuclei findings summary
   try {
@@ -81,25 +94,96 @@ async function getAttackSurface(params) {
     surface.nuclei_findings = { critical, high, medium, low, info, total: critical + high + medium + low + info };
   } catch { surface.nuclei_findings = { total: 0 }; }
 
-  // Technology breakdown
-  try {
-    const res = await query(`
-      SELECT unnest(technologies) as tech, COUNT(*) as count
-      FROM target_urls WHERE scope_target_id = $1 AND technologies IS NOT NULL
-      GROUP BY tech ORDER BY count DESC LIMIT 20`, [params.target_id]);
-    surface.top_technologies = res.rows;
-  } catch { surface.top_technologies = []; }
+  // Technology breakdown. Only the metadata step writes target_urls.technologies, so a URL target
+  // has no technology column to group by and is told that rather than shown an empty list.
+  if (!storeApplies('target_urls', t.type)) {
+    surface.top_technologies = notApplicable('target_urls', t.type);
+  } else {
+    try {
+      const res = await query(`
+        SELECT unnest(technologies) as tech, COUNT(*) as count
+        FROM target_urls WHERE scope_target_id = $1 AND technologies IS NOT NULL
+        GROUP BY tech ORDER BY count DESC LIMIT 20`, [params.target_id]);
+      surface.top_technologies = res.rows;
+    } catch (err) { surface.top_technologies = { error: String(err.message || err) }; }
+  }
 
-  // Status code breakdown
+  // Status code breakdown. A URL target's status codes live per endpoint, in a jsonb array, because
+  // one endpoint can have answered several codes across the crawls that saw it.
   try {
-    const res = await query(`
-      SELECT status_code, COUNT(*) as count
-      FROM target_urls WHERE scope_target_id = $1 AND status_code IS NOT NULL
-      GROUP BY status_code ORDER BY count DESC`, [params.target_id]);
-    surface.status_code_distribution = res.rows;
-  } catch { surface.status_code_distribution = []; }
+    if (t.type === 'URL') {
+      const res = await query(`
+        SELECT (code)::int AS status_code, COUNT(*) as count
+        FROM consolidated_url_endpoints, jsonb_array_elements_text(status_codes) AS code
+        WHERE scope_target_id = $1 AND deleted_at IS NULL AND jsonb_typeof(status_codes) = 'array'
+        GROUP BY 1 ORDER BY count DESC`, [params.target_id]);
+      surface.status_code_distribution = res.rows;
+    } else {
+      const res = await query(`
+        SELECT status_code, COUNT(*) as count
+        FROM target_urls WHERE scope_target_id = $1 AND status_code IS NOT NULL
+        GROUP BY status_code ORDER BY count DESC`, [params.target_id]);
+      surface.status_code_distribution = res.rows;
+    }
+  } catch (err) { surface.status_code_distribution = { error: String(err.message || err) }; }
 
   return surface;
+}
+
+// The endpoint corpus of a URL target, with the validation verdict breakdown, because "196
+// endpoints" and "75 of 196 confirmed reachable" are different facts and only the second one tells
+// an agent what it can attack.
+async function urlEndpointSurface(targetId) {
+  const out = {};
+  try {
+    const res = await query(`
+      SELECT COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE manual_added) AS manually_added,
+             COUNT(*) FILTER (WHERE content_class = 'api') AS api_class
+      FROM consolidated_url_endpoints WHERE scope_target_id = $1 AND deleted_at IS NULL`, [targetId]);
+    out.total = parseInt(res.rows[0]?.total || '0', 10);
+    out.manually_added = parseInt(res.rows[0]?.manually_added || '0', 10);
+    out.api_class = parseInt(res.rows[0]?.api_class || '0', 10);
+  } catch (err) { return { error: String(err.message || err) }; }
+
+  for (const [key, column] of [['by_validation_status', 'validation_status'], ['by_method', 'method']]) {
+    try {
+      const res = await query(
+        `SELECT ${column} AS value, COUNT(*) AS count FROM consolidated_url_endpoints
+          WHERE scope_target_id = $1 AND deleted_at IS NULL GROUP BY 1 ORDER BY count DESC`, [targetId]);
+      out[key] = Object.fromEntries(res.rows.map((r) => [r.value, parseInt(r.count, 10)]));
+    } catch (err) { out[key] = { error: String(err.message || err) }; }
+  }
+
+  try {
+    const res = await query(
+      `SELECT unnest(sources) AS source, COUNT(*) AS count FROM consolidated_url_endpoints
+        WHERE scope_target_id = $1 AND deleted_at IS NULL GROUP BY 1 ORDER BY count DESC`, [targetId]);
+    out.by_source = Object.fromEntries(res.rows.map((r) => [r.source, parseInt(r.count, 10)]));
+  } catch (err) { out.by_source = { error: String(err.message || err) }; }
+
+  return out;
+}
+
+// Attack vectors are the unique insertion points every vector tool scans, so their count and their
+// spread across insertion points is the part of a URL target's surface that decides what can be run.
+async function urlAttackVectorSurface(targetId) {
+  const out = {};
+  try {
+    const res = await query(
+      `SELECT COUNT(*) AS total FROM attack_vectors WHERE scope_target_id = $1 AND deleted_at IS NULL`,
+      [targetId]);
+    out.total = parseInt(res.rows[0]?.total || '0', 10);
+  } catch (err) { return { error: String(err.message || err) }; }
+
+  try {
+    const res = await query(
+      `SELECT insertion_point, COUNT(*) AS count FROM attack_vectors
+        WHERE scope_target_id = $1 AND deleted_at IS NULL GROUP BY 1 ORDER BY count DESC`, [targetId]);
+    out.by_insertion_point = Object.fromEntries(res.rows.map((r) => [r.insertion_point, parseInt(r.count, 10)]));
+  } catch (err) { out.by_insertion_point = { error: String(err.message || err) }; }
+
+  return out;
 }
 
 // === Query Cloud Assets ===
@@ -138,45 +222,73 @@ async function queryCloudAssets(params) {
 // === Query Discovered Endpoints ===
 const queryEndpointsSchema = z.object({
   target_id: z.string().uuid().describe('The scope target UUID'),
-  source: z.enum(['katana', 'linkfinder', 'waybackurls', 'gau', 'gospider', 'ffuf', 'all']).optional().describe('Filter by discovery source (default: all)'),
+  source: z.enum(['katana', 'linkfinder', 'waybackurls', 'gau', 'gospider', 'all']).optional().describe(
+    'Filter by the crawler that found the endpoint (default: all). ffuf is not a value here: nothing '
+    + 'in the fuzz flow writes discovered_endpoints, so filtering by it could only ever return '
+    + 'nothing. Use manage_fuzz for fuzzing findings.'),
   pattern: z.string().optional().describe('Filter endpoints by pattern (e.g. "*api*", "*.json", "*admin*")'),
   max_results: z.number().optional().describe('Maximum results (default 50)'),
 });
 
+// The raw crawler output lives in discovered_endpoints, one row per URL with the crawler that found
+// it in scan_type. This tool read /consolidated-endpoints instead, which is a different corpus (the
+// deduplicated, validated one that query_consolidated_endpoints already serves) and carries no
+// per-crawler column, so the source argument had nowhere to be applied and was silently dropped:
+// filtering by source returned exactly the same rows as no filter, and an agent comparing crawler
+// coverage got the same answer five times.
+//
+// sources_present is returned on every call so a zero can be read. "gospider found nothing matching
+// your pattern" and "gospider never ran against this target" are different answers, and an empty
+// array on its own is both.
 async function queryEndpoints(params) {
+  const lim = clampLimit(params.max_results);
+
+  let targetType = null;
   try {
-    // Try consolidated endpoints first
-    const consolidated = await apiGet(`/consolidated-endpoints/${params.target_id}`);
-    let endpoints = Array.isArray(consolidated) ? consolidated : ((consolidated && consolidated.endpoints) || []);
+    const res = await query('SELECT type FROM scope_targets WHERE id = $1', [params.target_id]);
+    if (res.rows.length === 0) return { error: 'Target not found' };
+    targetType = res.rows[0].type;
+  } catch (err) { return { error: String(err.message || err) }; }
 
-    if (params.pattern) {
-      const likePattern = params.pattern.replace(/\*/g, '').toLowerCase();
-      endpoints = endpoints.filter(e => {
-        const url = (e.url || e.endpoint || '').toLowerCase();
-        return url.includes(likePattern);
-      });
+  if (!storeApplies('discovered_endpoints', targetType)) {
+    return notApplicable('discovered_endpoints', targetType);
+  }
+
+  const values = [params.target_id];
+  let where = ' WHERE scope_target_id = $1';
+  if (params.source && params.source !== 'all') {
+    values.push(params.source);
+    where += ` AND scan_type = $${values.length}`;
+  }
+  if (params.pattern) {
+    values.push(`%${params.pattern.replace(/\*/g, '')}%`);
+    where += ` AND url ILIKE $${values.length}`;
+  }
+  const sql = `SELECT url, scan_type AS source, path, status_code, is_direct, scan_id, created_at
+                 FROM discovered_endpoints${where} ORDER BY created_at DESC, url LIMIT ${lim + 1}`;
+
+  try {
+    const rows = await query(sql, values);
+    const present = await query(
+      `SELECT scan_type, COUNT(*) AS count FROM discovered_endpoints
+        WHERE scope_target_id = $1 GROUP BY 1 ORDER BY count DESC`, [params.target_id]);
+
+    // The match count is COUNTED over the same filters rather than read off the page. Reporting the
+    // page size as `total` is how this call once answered "total: 6" for a source whose own
+    // sources_present said 13, in the same response.
+    let matched = null;
+    if (rows.rows.length > lim) {
+      const c = await query(`SELECT COUNT(*) AS count FROM discovered_endpoints${where}`, values);
+      matched = parseInt(c.rows[0]?.count || '0', 10);
     }
 
-    return limitResults(endpoints, params.max_results);
-  } catch {
-    // Fallback: query individual scan tables
-    const sources = params.source === 'all' || !params.source
-      ? ['katana_url', 'linkfinder_url', 'waybackurls', 'gau_url', 'gospider_url', 'ffuf_url']
-      : [params.source === 'katana' ? 'katana_url' : params.source === 'linkfinder' ? 'linkfinder_url' : params.source === 'gau' ? 'gau_url' : params.source === 'gospider' ? 'gospider_url' : params.source === 'ffuf' ? 'ffuf_url' : params.source];
-
-    const results = {};
-    for (const src of sources) {
-      try {
-        const res = await query(
-          `SELECT scan_id, status, substring(result, 1, 2000) as result_preview
-           FROM ${src}_scans WHERE scope_target_id = $1 AND status = 'success'
-           ORDER BY created_at DESC LIMIT 3`,
-          [params.target_id]
-        );
-        if (res.rows.length > 0) results[src] = res.rows;
-      } catch {}
-    }
-    return results;
+    return {
+      ...limitFetched(rows.rows, lim, matched),
+      source_filter: params.source && params.source !== 'all' ? params.source : 'all',
+      sources_present: Object.fromEntries(present.rows.map((r) => [r.scan_type, parseInt(r.count, 10)])),
+    };
+  } catch (err) {
+    return { error: String(err.message || err) };
   }
 }
 
@@ -332,7 +444,7 @@ async function queryAttackSurfaceAssets(params) {
          ORDER BY created_at DESC LIMIT ${lim + 1}`,
         [params.target_id]
       );
-      return limitResults(result.rows, lim);
+      return limitFetched(result.rows, lim);
     } catch {
       return { error: err.message };
     }

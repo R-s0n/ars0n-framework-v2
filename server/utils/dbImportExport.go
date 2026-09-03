@@ -1226,7 +1226,7 @@ func importTableRecords(tx pgx.Tx, tableName string, records []map[string]interf
 		if err := importSingleRecord(tx, tableName, record); err != nil {
 			errorCount++
 			log.Printf("[WARN] Failed to import record %d in table %s: %v", i+1, tableName, err)
-			
+
 			// Continue processing even if individual records fail
 			// This allows the import to proceed despite some foreign key constraint violations
 		} else {
@@ -1234,7 +1234,7 @@ func importTableRecords(tx pgx.Tx, tableName string, records []map[string]interf
 		}
 	}
 
-	log.Printf("[INFO] Successfully imported %d/%d records into table: %s (%d errors)", 
+	log.Printf("[INFO] Successfully imported %d/%d records into table: %s (%d errors)",
 		successCount, len(records), tableName, errorCount)
 	return nil
 }
@@ -1259,7 +1259,7 @@ func importSingleRecord(tx pgx.Tx, tableName string, record map[string]interface
 
 	// Use savepoint to handle individual record failures
 	savepointName := fmt.Sprintf("sp_%s_%d", tableName, time.Now().UnixNano())
-	
+
 	_, err := tx.Exec(context.Background(), fmt.Sprintf("SAVEPOINT %s", savepointName))
 	if err != nil {
 		log.Printf("[WARN] Failed to create savepoint for %s: %v", tableName, err)
@@ -1284,15 +1284,15 @@ func importSingleRecord(tx pgx.Tx, tableName string, record map[string]interface
 				log.Printf("[WARN] Failed to rollback to savepoint for %s: %v", tableName, rollbackErr)
 			}
 		}
-		
+
 		log.Printf("[WARN] Failed to insert record into %s: %v", tableName, execErr)
-		
+
 		// For foreign key constraint violations, log the details but don't fail the transaction
 		if strings.Contains(execErr.Error(), "foreign key constraint") ||
 			strings.Contains(execErr.Error(), "violates foreign key constraint") {
 			log.Printf("[WARN] Foreign key constraint violation in %s - this may indicate missing parent record", tableName)
 		}
-		
+
 		return execErr
 	} else {
 		// Release savepoint on success

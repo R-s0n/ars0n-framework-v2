@@ -169,4 +169,3 @@ func mergeManualInputs(body interface{}, manualInputValues map[string]interface{
 
 	return bodyMap
 }
-

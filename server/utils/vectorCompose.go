@@ -157,12 +157,12 @@ func vectorBodyFor(v VectorInput) string {
 	return values.Encode()
 }
 
-func firstParam(v VectorInput) string {
-	if len(v.Parameters) > 0 {
-		return v.Parameters[0]
-	}
-	return ""
-}
+// firstParam is GONE, deliberately. It returned Parameters[0], and the parameter list is stored
+// SORTED, so on a load-balanced target it reliably picked AWSALB: the marker landed on the load
+// balancer's stickiness cookie, the application's own parameters were never tested, and corrupting
+// that cookie broke session affinity for the rest of the run. It was fixed for sqlmap and ghauri and
+// left in place for command injection, LFI and the redirect/SSRF section, which is how the same
+// defect survived in five more files. Use markableParam.
 
 // markableParam chooses WHICH of a vector's parameters gets the injection marker.
 //
@@ -321,6 +321,20 @@ func composeVectorSettings(tool VectorTool, settings map[string]any, suppressedH
 			continue
 		}
 
+		// An option with NO FLAG is not a command line argument at all. It is either a target list
+		// the composer consumes itself (endpoints), or a switch that folds into a flag built
+		// elsewhere (Forbidden's nineteen test families all become one -t, nomore403's techniques
+		// all become one -k).
+		//
+		// Emitting them anyway appended an EMPTY STRING for each bool, and an empty string followed
+		// by the value for each list. Forbidden was handed four bare "" arguments and its own
+		// endpoint list as a stray positional, so it rejected the command line, printed usage and
+		// exited 0 in a third of a second. Exit 0 with no report file is indistinguishable from a
+		// clean scan, so the section reported "no bypass" on a target with a confirmed one.
+		if strings.TrimSpace(meta.Flag) == "" {
+			continue
+		}
+
 		switch meta.Kind {
 		case "bool":
 			if truthySetting(value) {
@@ -391,8 +405,41 @@ func stringifySetting(value any) string {
 		return strconv.Itoa(t)
 	case nil:
 		return ""
+	case []any:
+		return joinSettingList(t)
+	case []string:
+		parts := make([]any, len(t))
+		for i, s := range t {
+			parts[i] = s
+		}
+		return joinSettingList(parts)
 	}
 	return fmt.Sprintf("%v", value)
+}
+
+// joinSettingList flattens a REPEATABLE setting into one string.
+//
+// Without this, a list fell through to fmt.Sprintf("%v"), which renders Go's slice syntax. A single
+// cookie typed into SSTImap's Cookies field became the literal `-C "[token=AAA]"` on the wire, and
+// the framework still reported "Authenticated from your Cookies setting". The scan then ran
+// unauthenticated against an application whose interesting surface is behind a login, and reported
+// clean. That is this project's defect of choice, and it appeared INSIDE the fix meant to close it.
+//
+// "; " is the separator because every caller that flattens a list here is building a single-valued
+// header-ish flag, and cookie is the only one in practice: `a=1; b=2` is what a Cookie header holds.
+// A tool that wants one flag PER value must not come through here at all; composeVectorSettings
+// already emits those separately, which is what Repeatable means.
+//
+// Empty entries are dropped rather than producing "; ; ", because a trailing separator is how a
+// parser ends up with a nameless cookie.
+func joinSettingList(values []any) string {
+	parts := make([]string, 0, len(values))
+	for _, v := range values {
+		if s := strings.TrimSpace(stringifySetting(v)); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // rawRequestBody pulls the content type and the body out of a stored raw request.

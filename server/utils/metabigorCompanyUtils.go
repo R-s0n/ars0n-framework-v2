@@ -148,12 +148,32 @@ func ExecuteMetabigorCompanyScan(scanID, companyName string) {
 	// Create structured data tables
 	createMetabigorTables()
 
+	// The per-target Company settings, from the ONE store the Settings screen and the MCP company tool
+	// both write. Absent is the normal case and produces `metabigor net --org -v`, which is the exact
+	// string this runner has always built.
+	//
+	// TWO OF THE FOUR OPTIONS CARRY NO FLAG and are resolved here rather than composed: the de-spacing
+	// retry below, and whether IPv6 CIDRs are stored by the parser. Both are real, undocumented runner
+	// behaviours that change what a scan searches for and what it keeps, and neither was visible
+	// anywhere before.
+	scopeTargetID := companyScopeTargetForScan(
+		context.Background(), "metabigor_company_scans", scanID, "metabigor_company")
+	tool, settings, notes := companyRunnerSettings(scopeTargetID, "metabigor_company")
+	metabigorArgs, composeNotes := metabigorCompanyCommandArgs(tool, settings)
+	notes = append(notes, composeNotes...)
+	if len(settings) > 0 {
+		log.Printf("[METABIGOR-COMPANY] [INFO] Running with stored Company settings for scope target %s: %s",
+			scopeTargetID, companySettingsSummary(settings))
+	}
+	companyLogNotes("METABIGOR-COMPANY", notes)
+
 	// Helper function to execute the scan and count results
 	executeScan := func(name string) (string, int, error) {
-		command := fmt.Sprintf("echo '%s' | /usr/bin/docker exec -i ars0n-framework-v2-metabigor-1 metabigor net --org -v", name)
+		command := metabigorCommandLog(name, metabigorArgs...)
 		log.Printf("[METABIGOR-COMPANY] [DEBUG] Executing command: %s", command)
 
-		output, err := exec.Command("sh", "-c", command).CombinedOutput()
+		outStr, err := metabigorStdin(name, metabigorArgs...)
+		output := []byte(outStr)
 		if err != nil {
 			return string(output), 0, err
 		}
@@ -186,8 +206,13 @@ func ExecuteMetabigorCompanyScan(scanID, companyName string) {
 		return
 	}
 
-	// If no results and company name contains spaces, try without spaces
-	if resultCount == 0 && strings.Contains(companyName, " ") {
+	// If no results and company name contains spaces, try without spaces.
+	//
+	// ON BY DEFAULT because that is what this runner has always done, and settable because it is not
+	// obviously right: 'Acme Corp' silently becoming 'AcmeCorp' is sometimes the fix and sometimes a
+	// different company, and `--org` matches AS descriptions by SUBSTRING, so a de-spaced name matches
+	// more descriptions and every matched range is later dialled by the on-prem port scanner.
+	if resultCount == 0 && strings.Contains(companyName, " ") && metabigorCompanyRetryWithoutSpaces(settings) {
 		companyNameNoSpaces := strings.ReplaceAll(companyName, " ", "")
 		log.Printf("[METABIGOR-COMPANY] [INFO] No results found with original name. Retrying with no spaces: '%s'", companyNameNoSpaces)
 
@@ -211,10 +236,27 @@ func ExecuteMetabigorCompanyScan(scanID, companyName string) {
 
 	log.Printf("[METABIGOR-COMPANY] [DEBUG] Final output (found %d results): %s", resultCount, output)
 
-	// Parse and store structured results
-	ParseAndStoreMetabigorResults(scanID, companyName, output, "net")
+	// Parse and store structured results.
+	//
+	// includeIPv6Ranges is a framework-level switch with no flag: metabigor returns IPv6 CIDRs and the
+	// parser's character class accepts them, so they reach consolidated_network_ranges and contribute
+	// ZERO probed hosts, because generateIPsFromCIDR returns an empty slice for any prefix that fails
+	// ip.To4(). ON by default, which is today's behaviour.
+	ParseAndStoreMetabigorResultsFiltered(
+		scanID, companyName, output, "net", metabigorCompanyIncludeIPv6(settings))
 
-	UpdateMetabigorCompanyScanStatus(scanID, "success", "{}", "", "", time.Since(startTime).String())
+	// THE SUCCESS PATH HAS ALWAYS STORED command="" AND error="", throwing away the one diagnostic
+	// metabigor produces. That is recorded as a defect on the registry entry and is deliberately NOT
+	// changed here, because it would alter what a default scan stores. When settings WERE applied the
+	// column carries what ran, since otherwise there is nothing anywhere that says the scan differed
+	// from the default.
+	storedCommand := ""
+	if len(settings) > 0 || len(notes) > 0 {
+		storedCommand = "metabigor net (per domain, through sh -c): " + strings.Join(metabigorArgs, " ") + "\n" +
+			companySettingsPreamble(tool, scopeTargetID, settings, notes)
+	}
+
+	UpdateMetabigorCompanyScanStatus(scanID, "success", "{}", "", storedCommand, time.Since(startTime).String())
 	log.Printf("[METABIGOR-COMPANY] [INFO] Metabigor Company scan completed and results stored successfully for company %s (found %d network ranges)", companyName, resultCount)
 }
 
@@ -275,7 +317,25 @@ func createMetabigorTables() {
 	}
 }
 
+// ParseAndStoreMetabigorResults keeps every range metabigor returned, which is what the netd and asn
+// endpoints have always done and still do.
+//
+// The company `net --org` path calls ParseAndStoreMetabigorResultsFiltered instead, because
+// includeIPv6Ranges is one of its settings. Splitting it this way rather than adding a parameter to
+// this function keeps the other two call sites byte-identical without them having to pass a flag
+// they have no setting for.
 func ParseAndStoreMetabigorResults(scanID, companyName, result, scanType string) {
+	ParseAndStoreMetabigorResultsFiltered(scanID, companyName, result, scanType, true)
+}
+
+// ParseAndStoreMetabigorResultsFiltered is the same parser with the IPv6 decision made by the caller.
+//
+// includeIPv6 false DISCARDS IPv6 prefixes before they are written. Worth stating plainly, because
+// it looks like it loses data and today it does not: every IPv6 range stored contributes zero probed
+// addresses to the on-prem scan and inflates total_network_ranges, so the count reads as coverage
+// that does not exist. A CIDR that does not parse is treated as NOT IPv6 and is kept, so a filter
+// that cannot classify a line never deletes it.
+func ParseAndStoreMetabigorResultsFiltered(scanID, companyName, result, scanType string, includeIPv6 bool) {
 	log.Printf("[METABIGOR] [INFO] Parsing Metabigor verbose results for scan %s", scanID)
 
 	lines := strings.Split(result, "\n")
@@ -302,6 +362,13 @@ func ParseAndStoreMetabigorResults(scanID, companyName, result, scanType string)
 			cidrBlock := matches[2]
 			organization := strings.TrimSpace(matches[3])
 			country := matches[4]
+
+			if !includeIPv6 && isIPv6CIDR(cidrBlock) {
+				log.Printf("[METABIGOR] [INFO] Skipping IPv6 range %s: includeIPv6Ranges is off for this "+
+					"scope target. It would be counted in total_network_ranges and produce zero probed "+
+					"addresses, because generateIPsFromCIDR is IPv4 only.", cidrBlock)
+				continue
+			}
 
 			// Store network range
 			networkRange := MetabigorNetworkRange{
@@ -660,11 +727,13 @@ func ExecuteMetabigorNetdScan(scanID, companyName string) {
 	log.Printf("[METABIGOR-NETD] [INFO] Starting dynamic network scan for company %s (scan ID: %s)", companyName, scanID)
 	startTime := time.Now()
 
-	command := fmt.Sprintf("echo '%s' | /usr/bin/docker exec -i ars0n-framework-v2-metabigor-1 metabigor netd --org", companyName)
+	netdArgs := []string{"metabigor", "netd", "--org"}
+	command := metabigorCommandLog(companyName, netdArgs...)
 
 	log.Printf("[METABIGOR-NETD] [DEBUG] Executing command: %s", command)
 
-	output, err := exec.Command("sh", "-c", command).CombinedOutput()
+	outStr, err := metabigorStdin(companyName, netdArgs...)
+	output := []byte(outStr)
 	if err != nil {
 		log.Printf("[METABIGOR-NETD] [ERROR] Command failed: %v", err)
 		UpdateMetabigorCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Command failed: %v\nOutput: %s", err, string(output)), command, time.Since(startTime).String())
@@ -732,16 +801,16 @@ func ExecuteMetabigorASNScan(scanID, asnNumber, scanType string) {
 	log.Printf("[METABIGOR-ASN] [INFO] Starting ASN scan for %s using %s (scan ID: %s)", asnNumber, scanType, scanID)
 	startTime := time.Now()
 
-	var command string
+	asnArgs := []string{"metabigor", "net", "--asn"}
 	if scanType == "netd" {
-		command = fmt.Sprintf("echo '%s' | /usr/bin/docker exec -i ars0n-framework-v2-metabigor-1 metabigor netd --asn", asnNumber)
-	} else {
-		command = fmt.Sprintf("echo '%s' | /usr/bin/docker exec -i ars0n-framework-v2-metabigor-1 metabigor net --asn", asnNumber)
+		asnArgs = []string{"metabigor", "netd", "--asn"}
 	}
+	command := metabigorCommandLog(asnNumber, asnArgs...)
 
 	log.Printf("[METABIGOR-ASN] [DEBUG] Executing command: %s", command)
 
-	output, err := exec.Command("sh", "-c", command).CombinedOutput()
+	outStr, err := metabigorStdin(asnNumber, asnArgs...)
+	output := []byte(outStr)
 	if err != nil {
 		log.Printf("[METABIGOR-ASN] [ERROR] Command failed: %v", err)
 		UpdateMetabigorCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Command failed: %v\nOutput: %s", err, string(output)), command, time.Since(startTime).String())
@@ -810,16 +879,16 @@ func ExecuteMetabigorIPIntelligence(scanID, ipList, scanType string) {
 	log.Printf("[METABIGOR-IP] [INFO] Starting IP intelligence scan (scan ID: %s)", scanID)
 	startTime := time.Now()
 
-	var command string
+	ipArgs := []string{"metabigor", "ipc", "--json"}
 	if scanType == "open" {
-		command = fmt.Sprintf("echo '%s' | /usr/bin/docker exec -i ars0n-framework-v2-metabigor-1 metabigor ip -open", ipList)
-	} else {
-		command = fmt.Sprintf("echo '%s' | /usr/bin/docker exec -i ars0n-framework-v2-metabigor-1 metabigor ipc --json", ipList)
+		ipArgs = []string{"metabigor", "ip", "-open"}
 	}
+	command := metabigorCommandLog(ipList, ipArgs...)
 
 	log.Printf("[METABIGOR-IP] [DEBUG] Executing command: %s", command)
 
-	output, err := exec.Command("sh", "-c", command).CombinedOutput()
+	outStr, err := metabigorStdin(ipList, ipArgs...)
+	output := []byte(outStr)
 	if err != nil {
 		log.Printf("[METABIGOR-IP] [ERROR] Command failed: %v", err)
 		UpdateMetabigorCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Command failed: %v\nOutput: %s", err, string(output)), command, time.Since(startTime).String())
@@ -984,4 +1053,53 @@ func DeleteAllMetabigorNetworkRanges(w http.ResponseWriter, r *http.Request) {
 		"message":       "All network ranges deleted successfully",
 		"deleted_count": rowsAffected,
 	})
+}
+
+// metabigorStdin runs metabigor with `subject` on STDIN and NO SHELL ANYWHERE.
+//
+// COMMAND INJECTION, PROVEN, NOT THEORETICAL. Every metabigor runner used to build a shell string:
+//
+//	command := fmt.Sprintf("echo '%s' | /usr/bin/docker exec -i <container> %s", name, args)
+//	exec.Command("sh", "-c", command).CombinedOutput()
+//
+// `name` is the company name, interpolated raw inside single quotes and handed to sh -c. A single
+// apostrophe closes the quote and everything after it is shell. Measured with a benign marker:
+//
+//	name = "Cloudflare"                -> "Cloudflare"
+//	name = "O'Reilly"                  -> sh: -c: line 0: unexpected EOF while looking for matching '
+//	name = "x'; echo INJECTED; echo '" -> "x\nINJECTED"     <- arbitrary execution
+//
+// The last line is the whole finding. The sink is reachable from the Add Target form and from the
+// MCP add_target tool, and the api container mounts /var/run/docker.sock, so a company name was a
+// path to controlling the host's Docker daemon. An apostrophe in a real company name (O'Reilly,
+// Macy's, Lloyd's) also broke the scan outright, which is how this stayed unnoticed: it looked like
+// a quoting bug rather than a vulnerability.
+//
+// The fix is not escaping. Escaping keeps the shell and keeps the class of bug alive. There is no
+// shell here at all: argv is passed as a slice and the subject goes down stdin, which is what the
+// `echo |` was faking. Nothing in argv is caller-controlled.
+func metabigorStdin(subject string, args ...string) (string, error) {
+	argv := append([]string{"exec", "-i", "ars0n-framework-v2-metabigor-1"}, args...)
+	cmd := exec.Command("/usr/bin/docker", argv...)
+	// The trailing newline matters: metabigor reads stdin line by line and a subject with no newline
+	// is never delivered.
+	cmd.Stdin = strings.NewReader(subject + "\n")
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// metabigorCommandLog renders what metabigorStdin will run, for the stored command column and the
+// debug log. It is a DESCRIPTION, never executed, so it cannot reintroduce the shell.
+func metabigorCommandLog(subject string, args ...string) string {
+	return fmt.Sprintf("echo %q | docker exec -i ars0n-framework-v2-metabigor-1 %s",
+		subject, strings.Join(args, " "))
+}
+
+// metabigorStdinCommandForTest exposes the constructed command without running it, so the injection
+// guard can assert on argv and stdin rather than trusting a description.
+func metabigorStdinCommandForTest(subject string, args ...string) *exec.Cmd {
+	argv := append([]string{"exec", "-i", "ars0n-framework-v2-metabigor-1"}, args...)
+	cmd := exec.Command("/usr/bin/docker", argv...)
+	cmd.Stdin = strings.NewReader(subject + "\n")
+	return cmd
 }

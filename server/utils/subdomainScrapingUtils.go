@@ -793,8 +793,15 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 	log.Printf("[INFO] Using rate limit of %d for GAU scan", rateLimit)
 	log.Printf("[DEBUG] Note: GAU does not support custom headers or user agent")
 
+	// The operator's stored Wildcard configuration for gau, if any. Absent is the normal case and
+	// leaves the command line below byte-identical to what it was before this store existed.
+	gauSettings := wildcardStoredSettings(context.Background(),
+		wildcardScopeTargetID(context.Background(),
+			`SELECT scope_target_id::text FROM gau_scans WHERE scan_id = $1`, scanID),
+		"gau")
+
 	// Build base command
-	dockerCmd := []string{
+	baseCmd := []string{
 		"docker", "run", "--rm",
 		"sxcurity/gau:latest",
 		domain,
@@ -805,6 +812,11 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 		"--threads", "10",
 		"--timeout", "60",
 		"--retries", "2",
+	}
+
+	dockerCmd, configNotes := wildcardCommandWithSettings(baseCmd, "gau", gauSettings)
+	for _, note := range configNotes {
+		log.Printf("[WARN] [GAU config] %s", note)
 	}
 
 	// Note: GAU does not support custom headers or user agent
@@ -822,7 +834,7 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 	if err != nil {
 		log.Printf("[ERROR] GAU scan failed for %s: %v", domain, err)
 		log.Printf("[ERROR] stderr output: %s", stderr.String())
-		UpdateGauScanStatus(scanID, "error", "", stderr.String(), strings.Join(dockerCmd, " "), execTime)
+		UpdateGauScanStatus(scanID, "error", "", wildcardAnnotatedStderr(stderr.String(), configNotes), strings.Join(dockerCmd, " "), execTime)
 		return
 	}
 
@@ -835,8 +847,16 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 
 	// Check if we have actual results
 	if result == "" {
-		// Try a second attempt with different flags
-		dockerCmd = []string{
+		// Try a second attempt with different flags.
+		//
+		// THE OPERATOR'S SETTINGS GOVERN THIS ATTEMPT TOO, and that is a deliberate decision rather
+		// than an oversight. This retry hardcodes a DIFFERENT provider list, thread count, timeout and
+		// retry count, and gau has four measured ways to return an empty first attempt (an all-invalid
+		// provider list, an unreachable proxy, a date window that predates the archive history, and a
+		// match filter that matches nothing), so it fires often. Applying the configuration to only
+		// the first attempt would mean an operator who set providers=wayback,otx silently got
+		// wayback,otx,urlscan at 5 threads whenever it did.
+		retryBase := []string{
 			"docker", "run", "--rm",
 			"sxcurity/gau:latest",
 			domain,
@@ -845,6 +865,12 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 			"--threads", "5",
 			"--timeout", "30",
 			"--retries", "3",
+		}
+		var retryNotes []string
+		dockerCmd, retryNotes = wildcardCommandWithSettings(retryBase, "gau", gauSettings)
+		for _, note := range retryNotes {
+			log.Printf("[WARN] [GAU config] retry attempt: %s", note)
+			configNotes = append(configNotes, "retry attempt: "+note)
 		}
 
 		log.Printf("[INFO] No results from first attempt, trying second attempt with command: %s", strings.Join(dockerCmd, " "))
@@ -937,14 +963,14 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 			log.Printf("[INFO] Reduced %d URLs to %d unique subdomain URLs", lineCount, len(uniqueResults))
 
 			// Now update with the final result and set status to success
-			UpdateGauScanStatus(scanID, "success", result, stderr.String(), strings.Join(dockerCmd, " "), execTime)
+			UpdateGauScanStatus(scanID, "success", result, wildcardAnnotatedStderr(stderr.String(), configNotes), strings.Join(dockerCmd, " "), execTime)
 		} else {
 			// If results don't exceed 1000, just update with success directly
-			UpdateGauScanStatus(scanID, "success", result, stderr.String(), strings.Join(dockerCmd, " "), execTime)
+			UpdateGauScanStatus(scanID, "success", result, wildcardAnnotatedStderr(stderr.String(), configNotes), strings.Join(dockerCmd, " "), execTime)
 		}
 	} else {
 		// Empty result, update with success status
-		UpdateGauScanStatus(scanID, "success", result, stderr.String(), strings.Join(dockerCmd, " "), execTime)
+		UpdateGauScanStatus(scanID, "success", result, wildcardAnnotatedStderr(stderr.String(), configNotes), strings.Join(dockerCmd, " "), execTime)
 	}
 
 	log.Printf("[INFO] Scan status updated for scan %s", scanID)
@@ -1134,34 +1160,130 @@ func ExecuteAndParseCTLScan(scanID, domain string) {
 	log.Printf("[INFO] Starting CTL scan execution for domain %s (scan ID: %s)", domain, scanID)
 	startTime := time.Now()
 
-	subdomains, source, err := fetchCTLSubdomains(domain)
+	// CTL has no command line, so its stored configuration is read into a struct rather than composed
+	// into arguments. With nothing stored, ctlRunConfigFrom returns the exact literals this function
+	// used before the store existed and every request below is unchanged.
+	ctlSettings := wildcardStoredSettings(context.Background(),
+		wildcardScopeTargetID(context.Background(),
+			`SELECT scope_target_id::text FROM ctl_scans WHERE scan_id = $1`, scanID),
+		"ctl")
+	cfg, configNotes := ctlRunConfigFrom(ctlSettings)
+	for _, note := range configNotes {
+		log.Printf("[WARN] [CTL config] %s", note)
+	}
+
+	subdomains, source, err := fetchCTLSubdomains(domain, cfg)
 	if err != nil {
 		log.Printf("[CTL] [ERROR] All CT sources failed for %s: %v", domain, err)
-		UpdateCTLScanStatus(scanID, "error", "", err.Error(), "", time.Since(startTime).String())
+		UpdateCTLScanStatus(scanID, "error", "", wildcardAnnotatedStderr(err.Error(), configNotes), "", time.Since(startTime).String())
+		return
+	}
+
+	subdomains, policyNotes := ctlApplyResultPolicy(subdomains, domain, cfg)
+	configNotes = append(configNotes, policyNotes...)
+
+	// The two anti-silent-nothing controls, both OFF by default so the stored row is unchanged for an
+	// unconfigured target. crt.sh answers HTTP 200 with a valid empty array for a domain it knows
+	// nothing about, and can answer 200 with a short body when its backend is degraded, so without
+	// these a scan that SAW nothing and a scan that FOUND nothing are the same row in ctl_scans.
+	if cfg.minResultsWarn > 0 && len(subdomains) < cfg.minResultsWarn {
+		warning := fmt.Sprintf("Only %d subdomains were returned, below the configured warning threshold of %d. "+
+			"Source: %s. An unauthenticated certspotter fallback returns single-digit counts for domains with "+
+			"hundreds, so check the source before trusting this result.", len(subdomains), cfg.minResultsWarn, source)
+		log.Printf("[CTL] [WARN] %s", warning)
+		configNotes = append(configNotes, warning)
+	}
+	if cfg.failOnZeroResults && len(subdomains) == 0 {
+		failure := "failOnZeroResults is on and this scan returned no subdomains, so it is recorded as an " +
+			"error rather than a success. Source: " + source
+		log.Printf("[CTL] [ERROR] %s", failure)
+		UpdateCTLScanStatus(scanID, "error", "", wildcardAnnotatedStderr(failure, configNotes), source, time.Since(startTime).String())
 		return
 	}
 
 	result := strings.Join(subdomains, "\n")
 	log.Printf("[CTL] [INFO] Found %d subdomains for %s via %s", len(subdomains), domain, source)
-	UpdateCTLScanStatus(scanID, "success", result, "", source, time.Since(startTime).String())
+	UpdateCTLScanStatus(scanID, "success", result, wildcardAnnotatedStderr("", configNotes), source, time.Since(startTime).String())
 	log.Printf("[INFO] CTL scan completed and results stored successfully for domain %s", domain)
 }
 
-// fetchCTLSubdomains queries Certificate Transparency logs for subdomains of domain. It prefers
-// crt.sh (the most complete aggregator) but falls back to certspotter when crt.sh is unavailable —
-// crt.sh is chronically overloaded and frequently returns 502/timeouts.
-func fetchCTLSubdomains(domain string) (subdomains []string, source string, err error) {
-	subs, crtErr := fetchCTLFromCrtSh(domain)
+// fetchCTLSubdomains queries Certificate Transparency logs for subdomains of domain.
+//
+// The DEFAULT strategy is unchanged: crt.sh (the most complete aggregator) with a certspotter
+// fallback, because crt.sh is chronically overloaded and frequently returns 502/timeouts. cfg can
+// select the other three strategies, and union_both exists because the two sources are not
+// equivalent and the either/or wastes one of them: when crt.sh succeeds, certspotter's unique names
+// are never seen at all.
+//
+// The returned source string is stored in ctl_scans.command, so which source a result came from and
+// which URL was actually requested stays answerable after the fact.
+func fetchCTLSubdomains(domain string, cfg ctlRunConfig) (subdomains []string, source string, err error) {
+	crtShSource := "GET " + ctlCrtShQuery(domain, cfg)
+	certspotterSource := fmt.Sprintf("GET https://api.certspotter.com/v1/issuances?domain=%s&include_subdomains=true&expand=dns_names", domain)
+	if cfg.certspotterAPIKey != "" {
+		certspotterSource += " (authenticated)"
+	}
+
+	crtSh := func() ([]string, error) { return fetchCTLFromCrtSh(domain, cfg) }
+	certspotter := func() ([]string, error) { return fetchCTLFromCertspotter(domain, cfg) }
+
+	switch cfg.sourceMode {
+	case "crtsh_only":
+		subs, crtErr := ctlFetchWithRetries(cfg, crtSh)
+		if crtErr != nil {
+			return nil, "", fmt.Errorf("crt.sh failed and sourceMode is crtsh_only, so there is no fallback: %v", crtErr)
+		}
+		return subs, crtShSource + " (crtsh_only)", nil
+
+	case "certspotter_only":
+		subs, csErr := ctlFetchWithRetries(cfg, certspotter)
+		if csErr != nil {
+			return nil, "", fmt.Errorf("certspotter failed and sourceMode is certspotter_only, so there is no fallback: %v", csErr)
+		}
+		return subs, certspotterSource + " (certspotter_only)", nil
+
+	case "union_both":
+		crtSubs, crtErr := ctlFetchWithRetries(cfg, crtSh)
+		csSubs, csErr := ctlFetchWithRetries(cfg, certspotter)
+		if crtErr != nil && csErr != nil {
+			return nil, "", fmt.Errorf("both Certificate Transparency sources failed. crt.sh: %v. certspotter: %v", crtErr, csErr)
+		}
+		// Deliberately NOT an error when one source fails: a union that lost half its inputs is still
+		// better than nothing, and which half it lost is recorded in the source string rather than
+		// left for the operator to guess.
+		merged := filterCTSubdomains(append(append([]string{}, crtSubs...), csSubs...), domain)
+		unionSource := fmt.Sprintf("union_both: %s [%s] + %s [%s]",
+			crtShSource, ctlSourceOutcome(len(crtSubs), crtErr),
+			certspotterSource, ctlSourceOutcome(len(csSubs), csErr))
+		if crtErr != nil {
+			log.Printf("[CTL] [WARN] union_both: crt.sh failed for %s (%v), continuing with certspotter only", domain, crtErr)
+		}
+		if csErr != nil {
+			log.Printf("[CTL] [WARN] union_both: certspotter failed for %s (%v), continuing with crt.sh only", domain, csErr)
+		}
+		return merged, unionSource, nil
+	}
+
+	// crtsh_then_certspotter, the default and the behaviour this function has always had.
+	subs, crtErr := ctlFetchWithRetries(cfg, crtSh)
 	if crtErr == nil {
-		return subs, fmt.Sprintf("GET https://crt.sh/?q=%%.%s&output=json", domain), nil
+		return subs, crtShSource, nil
 	}
 	log.Printf("[CTL] [WARN] crt.sh failed for %s (%v) — falling back to certspotter", domain, crtErr)
 
-	subs, csErr := fetchCTLFromCertspotter(domain)
+	subs, csErr := ctlFetchWithRetries(cfg, certspotter)
 	if csErr == nil {
-		return subs, fmt.Sprintf("GET https://api.certspotter.com/v1/issuances?domain=%s (crt.sh fallback)", domain), nil
+		return subs, certspotterSource + " (crt.sh fallback)", nil
 	}
 	return nil, "", fmt.Errorf("both Certificate Transparency sources failed. crt.sh: %v. certspotter fallback: %v", crtErr, csErr)
+}
+
+// ctlSourceOutcome describes one source's contribution to a union run in the stored source string.
+func ctlSourceOutcome(count int, err error) string {
+	if err != nil {
+		return "FAILED: " + err.Error()
+	}
+	return fmt.Sprintf("%d names", count)
 }
 
 // filterCTSubdomains lowercases, strips wildcard prefixes, and keeps only names that are the domain
@@ -1182,18 +1304,20 @@ func filterCTSubdomains(names []string, domain string) []string {
 	return out
 }
 
-func fetchCTLFromCrtSh(domain string) ([]string, error) {
-	// crt.sh blocks/deprioritizes Go's default User-Agent, so present as a browser. Cap at 45s so
-	// we don't wait forever before falling back — crt.sh is frequently overloaded.
-	requestURL := fmt.Sprintf("https://crt.sh/?q=%%.%s&output=json", domain)
+func fetchCTLFromCrtSh(domain string, cfg ctlRunConfig) ([]string, error) {
+	// crt.sh blocks/deprioritizes Go's default User-Agent, so present as a browser. The timeout is a
+	// COVERAGE setting wearing a timeout's clothes: cutting it makes the certspotter fallback fire
+	// more often, and the fallback silently returns a fraction of the data. It defaults to the 45s
+	// this code has always used.
+	requestURL := ctlCrtShQuery(domain, cfg)
 	log.Printf("[CTL] [DEBUG] Requesting crt.sh URL: %s", requestURL)
-	client := &http.Client{Timeout: 45 * time.Second}
+	client := &http.Client{Timeout: cfg.crtShTimeout}
 
 	req, err := http.NewRequest("GET", requestURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", cfg.crtShUserAgent)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("Connection", "keep-alive")
@@ -1232,10 +1356,10 @@ func fetchCTLFromCrtSh(domain string) ([]string, error) {
 	return filterCTSubdomains(names, domain), nil
 }
 
-func fetchCTLFromCertspotter(domain string) ([]string, error) {
+func fetchCTLFromCertspotter(domain string, cfg ctlRunConfig) ([]string, error) {
 	requestURL := fmt.Sprintf("https://api.certspotter.com/v1/issuances?domain=%s&include_subdomains=true&expand=dns_names", domain)
 	log.Printf("[CTL] [DEBUG] Requesting certspotter URL: %s", requestURL)
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: cfg.certspotterTimeout}
 
 	req, err := http.NewRequest("GET", requestURL, nil)
 	if err != nil {
@@ -1243,6 +1367,13 @@ func fetchCTLFromCertspotter(domain string) ([]string, error) {
 	}
 	req.Header.Set("User-Agent", "ars0n-framework-v2")
 	req.Header.Set("Accept", "application/json")
+	// MEASURED: unauthenticated certspotter returned 17 issuances and 9 unique DNS names for
+	// hackerone.com, and &limit=1000 and the documented after= cursor both changed nothing, so that
+	// is the hard unauthenticated ceiling rather than a pagination bug. A bogus bearer token returned
+	// HTTP 401, which proves the header is read and only a real key was ever missing.
+	if cfg.certspotterAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.certspotterAPIKey)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1463,13 +1594,22 @@ func ExecuteAndParseSubfinderScan(scanID, domain string) {
 	log.Printf("[INFO] Starting Subfinder scan for domain %s (scan ID: %s)", domain, scanID)
 	startTime := time.Now()
 
-	cmd := exec.Command(
-		"docker", "exec",
-		"ars0n-framework-v2-subfinder-1",
-		"subfinder",
-		"-d", domain,
-		"-silent",
-	)
+	// The per-target Wildcard configuration for this tool, if the operator has set any. Absent is the
+	// normal case and adds nothing to the command line. subfinderWildcardCommandArgs also documents
+	// the deliberate -silent -> -stats change and the rate-limit precedence.
+	ctx := context.Background()
+	stored, scopeTargetID := wildcardWireStoredSettings(ctx, "subfinder_scans", scanID, "subfinder")
+	args, configNotes := subfinderWildcardCommandArgs(domain, GetSubfinderRateLimit(), stored)
+	if len(stored) > 0 {
+		log.Printf("[INFO] Subfinder is using %d stored Wildcard setting(s) for scope target %s", len(stored), scopeTargetID)
+	}
+	// Anything the configuration asked for that did NOT reach the command line, named with its reason
+	// rather than dropped in silence.
+	for _, note := range configNotes {
+		log.Printf("[WARN] Subfinder Wildcard configuration for scope target %s: %s", scopeTargetID, note)
+	}
+
+	cmd := exec.Command("docker", args...)
 
 	log.Printf("[INFO] Executing command: %s", cmd.String())
 
@@ -1493,7 +1633,22 @@ func ExecuteAndParseSubfinderScan(scanID, domain string) {
 
 	if result == "" {
 		log.Printf("[WARN] No output from Subfinder scan")
-		UpdateSubfinderScanStatus(scanID, "completed", "", "No results found", cmd.String(), execTime)
+		// The zero-result path is the one that used to be undiagnosable: it overwrote stderr with the
+		// literal "No results found", so a scan where a bad proxy made every source fail was stored
+		// identically to a domain that genuinely has none. Now that the runner passes -stats instead of
+		// -silent, stderr carries the per-source table (source, duration, results, requests, errors) and
+		// that is the only evidence which of the two happened, so it is KEPT.
+		//
+		// The STATUS is deliberately unchanged. Turning "every source errored" into an error is a change
+		// to a success path and belongs to whoever owns that decision; this only stops the evidence for
+		// it being thrown away.
+		diagnostics := strings.TrimSpace(stderr.String())
+		if diagnostics == "" {
+			diagnostics = "No results found"
+		} else {
+			diagnostics = "No results found. Subfinder -stats output follows.\n" + diagnostics
+		}
+		UpdateSubfinderScanStatus(scanID, "completed", "", diagnostics, cmd.String(), execTime)
 	} else {
 		log.Printf("[DEBUG] Subfinder output: %s", result)
 		UpdateSubfinderScanStatus(scanID, "success", result, stderr.String(), cmd.String(), execTime)

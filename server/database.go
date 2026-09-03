@@ -655,6 +655,24 @@ func createTables() {
 		`ALTER TABLE waf_probe_scans ADD COLUMN IF NOT EXISTS requests_sent INT DEFAULT 0;`,
 		`ALTER TABLE waf_probe_scans ADD COLUMN IF NOT EXISTS trips_used INT DEFAULT 0;`,
 
+		// Multi-endpoint probing. One configured endpoint produces one scan row, and the rows of a
+		// single Run share a run_id. The probe container is unchanged and still receives exactly one
+		// target url per invocation, which is deliberate: the image validates its payload safety at
+		// build time and that contract is not worth re-opening to batch a loop the server can do.
+		//
+		// run_id is nullable because every scan that predates this column is a legitimate single
+		// endpoint run. Backfilling it to scan_id would be tidier to query but would invent a Run
+		// that never existed, so history stays honest and readers coalesce instead.
+		`ALTER TABLE waf_probe_scans ADD COLUMN IF NOT EXISTS run_id UUID;`,
+		// What the operator called this endpoint, e.g. "admin app" or "public API". A target can host
+		// several unrelated applications behind one hostname and separate them by routing, so the
+		// hostname alone does not identify what was probed.
+		`ALTER TABLE waf_probe_scans ADD COLUMN IF NOT EXISTS endpoint_label TEXT;`,
+		`CREATE INDEX IF NOT EXISTS idx_waf_probe_scans_run
+			ON waf_probe_scans(run_id, created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_waf_probe_scans_target_created
+			ON waf_probe_scans(scope_target_id, created_at DESC);`,
+
 		// The probe no longer writes to tool configs, so waf_probe_apply_journal and
 		// probe_tool_tuning are no longer created. Automated apply was removed because its failures
 		// were silent: a translated value that did not fit the tool's field decoded to zero, and the
@@ -759,9 +777,58 @@ func createTables() {
 			impact_customer_data TEXT,
 			impact_attacker_scope TEXT,
 			impact_company_reputation TEXT,
+			test_status TEXT NOT NULL DEFAULT 'untested',
 			created_at TIMESTAMP DEFAULT NOW(),
 			updated_at TIMESTAMP DEFAULT NOW()
 		);`,
+
+		// A threat starts life untested and is moved to validated or rejected once it has actually been
+		// run against the target. Added by ALTER as well as in the CREATE above, so an existing install
+		// converges on the same schema as a fresh one.
+		`ALTER TABLE threat_model ADD COLUMN IF NOT EXISTS test_status TEXT NOT NULL DEFAULT 'untested';`,
+
+		// Two reader-facing fields added because the model had become unreadable at a glance: every
+		// threat forced you through a numbered attack procedure to learn what the attack even was.
+		// one_sentence is the headline; summary is the paragraph under it. Both default to '' so
+		// every existing row stays valid and simply renders without them until filled in.
+		`ALTER TABLE threat_model ADD COLUMN IF NOT EXISTS one_sentence TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE threat_model ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '';`,
+		// Severity is a closed set so the header badge can colour-code it and the list can sort by it.
+		// Defaults to '' rather than a guess: an unset severity is a triage decision nobody has made
+		// yet, and defaulting it to "low" would quietly assert one.
+		`ALTER TABLE threat_model ADD COLUMN IF NOT EXISTS severity TEXT NOT NULL DEFAULT '';`,
+		// NULLABLE on purpose. Three states, not two: true means the attacker must already hold a
+		// session, false means the attack works with no credential at all, and NULL means nobody has
+		// decided yet. A NOT NULL DEFAULT false would render every unexamined threat as a green
+		// "Unauthenticated" badge, which is an assertion rather than an absence.
+		`ALTER TABLE threat_model ADD COLUMN IF NOT EXISTS authenticated BOOLEAN;`,
+		// The Possible Attacks entry this threat is an instance of, e.g. 'xss'. Ids come from the
+		// generated catalog (scripts/gen-attack-catalog.mjs), whose source is client/src/data/attacks.js.
+		// Defaulted to empty so the migration is safe on existing rows; new rows are required to set it.
+		`ALTER TABLE threat_model ADD COLUMN IF NOT EXISTS attack_id TEXT NOT NULL DEFAULT '';`,
+		// An ad hoc attack name for threats that are not an instance of anything in the catalogue.
+		// Mutually exclusive with attack_id and deliberately NOT written back to attacks.js: the
+		// catalogue is curated knowledge, and letting per-target findings append to it would turn a
+		// reference work into a scratchpad.
+		`ALTER TABLE threat_model ADD COLUMN IF NOT EXISTS attack_custom_name TEXT NOT NULL DEFAULT '';`,
+		`DO $$ BEGIN
+		    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'threat_model_severity_check') THEN
+		        ALTER TABLE threat_model ADD CONSTRAINT threat_model_severity_check
+		            CHECK (severity IN ('', 'critical', 'high', 'moderate', 'low', 'informational'));
+		    END IF;
+		END $$;`,
+
+		// The constraint is applied from one place rather than inline in the CREATE, so a migrated
+		// database and a fresh one cannot end up with different schemas. ADD CONSTRAINT is not itself
+		// idempotent, hence the guard.
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint WHERE conname = 'threat_model_test_status_check'
+			) THEN
+				ALTER TABLE threat_model ADD CONSTRAINT threat_model_test_status_check
+					CHECK (test_status IN ('untested', 'validated', 'rejected'));
+			END IF;
+		END $$;`,
 
 		`CREATE TABLE IF NOT EXISTS nuclei_scans (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1188,6 +1255,24 @@ func createTables() {
 			created_at TIMESTAMP DEFAULT NOW(),
 			updated_at TIMESTAMP DEFAULT NOW()
 		);`,
+		`CREATE TABLE IF NOT EXISTS waybackurls_url_configs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
+			config JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+		`CREATE TABLE IF NOT EXISTS gau_url_configs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
+			config JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+		// Per-host outcomes for an archive run that now queries many hosts. Without this a run over
+		// twelve hosts collapses into one number and a partial failure is unreadable.
+		`ALTER TABLE waybackurls_scans ADD COLUMN IF NOT EXISTS target_results JSONB;`,
+		`ALTER TABLE gau_url_scans ADD COLUMN IF NOT EXISTS target_results JSONB;`,
 		`CREATE TABLE IF NOT EXISTS linkfinder_url_configs (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
@@ -1628,6 +1713,57 @@ func createTables() {
 		`CREATE INDEX IF NOT EXISTS idx_scope_target_scope_hosts_target
 		   ON scope_target_scope_hosts(scope_target_id);`,
 
+		// Scope RULES: the pattern-capable boundary that supersedes the exact-host list above.
+		//
+		// scope_target_scope_hosts is deliberately left untouched rather than migrated. It keeps
+		// working and is read as a set of implicit rules (an in_scope row means "this host and its
+		// subdomains", matching what ScanScope.Allows already does with it), so a target with no
+		// rules authored behaves exactly as it did before this table existed. That is what makes
+		// this additive and what makes rollback a matter of ignoring one table.
+		//
+		// `enabled` defaults FALSE for a reason: a rule whose blast radius is 'wide' can admit hosts
+		// nobody has ever seen, so it is stored inert and does nothing until it is confirmed.
+		`CREATE TABLE IF NOT EXISTS scope_rules (
+		    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		    scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+		    effect TEXT NOT NULL CHECK (effect IN ('allow','deny')),
+		    kind TEXT NOT NULL CHECK (kind IN ('host','subtree','subdomains','contains','regex')),
+		    value TEXT NOT NULL,
+		    port INTEGER CHECK (port IS NULL OR (port > 0 AND port < 65536)),
+		    within TEXT,
+		    is_ip BOOLEAN NOT NULL DEFAULT FALSE,
+		    blast TEXT NOT NULL CHECK (blast IN ('narrow','bounded','wide')),
+		    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+		    canonical TEXT NOT NULL,
+		    source TEXT NOT NULL DEFAULT 'operator',
+		    note TEXT,
+		    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_scope_rules_target
+		   ON scope_rules(scope_target_id);`,
+		// The canonical text is the identity of a rule: two rules that render the same sentence are
+		// the same rule, however they were typed.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_scope_rules_canonical
+		   ON scope_rules(scope_target_id, canonical);`,
+
+		// Free-text notes on a scope target. Nothing reads these except the notes screen and the MCP
+		// tool, so there are no constraints beyond "belongs to a target and has a title".
+		//
+		// content defaults to '' rather than allowing NULL because a note with a title and an empty
+		// body is a normal thing to create, and NULL would make every reader handle two spellings of
+		// the same emptiness.
+		`CREATE TABLE IF NOT EXISTS scope_target_notes (
+		    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		    scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+		    title TEXT NOT NULL,
+		    content TEXT NOT NULL DEFAULT '',
+		    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+		    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		);`,
+		// Matches the only query that runs: notes for one target, most recently edited first.
+		`CREATE INDEX IF NOT EXISTS idx_scope_target_notes_target
+		   ON scope_target_notes(scope_target_id, updated_at DESC);`,
+
 		// Capture provenance and the richer fields the multi-source extension produces.
 		// `sources` records which of webrequest/hook/debugger contributed, which is how you tell a
 		// metadata-only record from one that carries real bodies.
@@ -2038,6 +2174,55 @@ func createTables() {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_vector_scans_target ON vector_scans(scope_target_id, tool, created_at DESC);`,
 
+		// EXACTLY WHAT WE RAN AND EXACTLY WHAT CAME BACK, one row per docker exec.
+		//
+		// Every defect this section has ever had was diagnosed by re-running a tool by hand to see what
+		// it printed, because the output was thrown away the moment it was parsed. ghauri's "argument
+		// --delay: invalid int value" and Forbidden's "Missing a mandatory option ... Use -h or --help"
+		// both existed, on stdout, at the moment the run was filed as clean, and nobody could read them
+		// afterwards. tailOf() keeps 400 characters on the verdict row and that is the whole forensic
+		// record today.
+		//
+		// Three deliberate shapes here, each of which is a trap this area has already fallen into:
+		//   - vector_id carries NO foreign key. vector_scan_vectors.vector_id references attack_vectors
+		//     and a synthetic row (graphql endpoint, bypass target, canary) fails that insert, the error
+		//     is only logged, and the trace silently vanishes. A trace that disappears when the run is
+		//     unusual is worthless, because unusual runs are the ones being diagnosed.
+		//   - no UNIQUE constraint, so this is append-only. The verdict table's ON CONFLICT DO NOTHING
+		//     silently discards a second write, which would drop the retry attempts of a flaky detector
+		//     precisely when the retries are the interesting part.
+		//   - attempt is stored, so "found on attempt 3 of 4" is visible as data rather than as prose in
+		//     a warning string.
+		`CREATE TABLE IF NOT EXISTS vector_scan_traces (
+		    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		    scan_id UUID NOT NULL REFERENCES vector_scans(id) ON DELETE CASCADE,
+		    vector_id TEXT NOT NULL DEFAULT '',
+		    target_url TEXT NOT NULL DEFAULT '',
+		    run_label TEXT NOT NULL DEFAULT '',
+		    attempt INT NOT NULL DEFAULT 1,
+		    command TEXT NOT NULL DEFAULT '',
+		    stdout TEXT NOT NULL DEFAULT '',
+		    stdout_bytes INT NOT NULL DEFAULT 0,
+		    stdout_truncated BOOLEAN NOT NULL DEFAULT FALSE,
+		    exit_detail TEXT NOT NULL DEFAULT '',
+		    timed_out BOOLEAN NOT NULL DEFAULT FALSE,
+		    duration_ms BIGINT NOT NULL DEFAULT 0,
+		    created_at TIMESTAMP DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_vector_scan_traces_scan ON vector_scan_traces(scan_id, created_at);`,
+
+		// COOPERATIVE CANCELLATION, the same shape fuzz_runs and metadata_scans already use.
+		//
+		// There was no way to stop a vector scan at all. sqlmap ran for 2h44m and ghauri for 3h49m on
+		// one target, and the only way to end either was to kill the api, which left the row on
+		// 'running' forever with no error and no completed_at because nothing ever wrote a terminal
+		// status. Those rows then poison every "is a scan running" check that follows.
+		//
+		// Cooperative rather than a process kill: the runner checks between vectors, so a cancelled
+		// scan keeps the findings it had already stored and marks the rest UNTESTED rather than
+		// leaving them looking clean.
+		`ALTER TABLE vector_scans ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE;`,
+
 		// What happened to each vector in a scan, INCLUDING the ones that were never sent.
 		//
 		// The skipped rows are the reason this table exists. domdig handed a header vector scans its
@@ -2223,6 +2408,56 @@ func createTables() {
 		// A run the operator asked to stop. Checked between steps and used to kill the ffuf process
 		// currently executing, because the step timeout kills the docker client and not the tool.
 		`ALTER TABLE fuzz_runs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE;`,
+
+		// NAMED FUZZ FLOWS, several per target.
+		//
+		// ffuf is this framework's Burp Intruder, and Intruder is not one thing. A hunter uses it for
+		// at least four separate jobs against the same target: content discovery at the web root,
+		// hidden parameter and header and cookie NAME enumeration, VALUE fuzzing on a parameter that
+		// is already known, and enumeration of an identifier space. Those need different wordlists,
+		// different insertion points, different filters and different pacing, and they are run at
+		// different times.
+		//
+		// One flow per target forced all of that into a single list of steps, and the practical result
+		// on the first engagement was a flow of ten parameter-fuzzing steps with no content discovery
+		// in it at all, because content discovery would have meant rebuilding the flow.
+		//
+		// name defaults rather than being NOT NULL from the start: existing rows have no name and a
+		// bare NOT NULL would fail the migration on any database that has ever run this.
+		`ALTER TABLE fuzz_flows ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT 'Default flow';`,
+		`ALTER TABLE fuzz_flows ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';`,
+		// The kind this flow is for, which is what lets the UI and the MCP server offer the right
+		// template and the right guidance rather than a blank list of steps.
+		`ALTER TABLE fuzz_flows ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'custom';`,
+		// The one a scan uses when no flow is named, so existing callers keep working unchanged.
+		`ALTER TABLE fuzz_flows ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE;`,
+		// The single-flow-per-target constraint is what has to go. Dropped by name, and the new pair
+		// constraint added separately so a rerun of this migration is a no-op rather than an error.
+		`ALTER TABLE fuzz_flows DROP CONSTRAINT IF EXISTS fuzz_flows_scope_target_id_key;`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fuzz_flows_target_name ON fuzz_flows(scope_target_id, name);`,
+		// Exactly one default per target, enforced rather than assumed: two defaults would make which
+		// flow a scan runs depend on row order, which is the kind of bug nobody finds for months.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fuzz_flows_one_default ON fuzz_flows(scope_target_id)
+		    WHERE is_default;`,
+		// Every pre-existing flow becomes its target's default, so nothing that worked before changes.
+		//
+		// THE NOT EXISTS CLAUSE IS LOAD-BEARING AND WAS MISSING. Migrations here run on EVERY boot, and
+		// after the first run some targets already have a default, either from this statement or from
+		// ensureFuzzFlow adopting one. Without the guard the second boot tries to set a second default
+		// on those targets, violates idx_fuzz_flows_one_default, and the whole schema step fails. The
+		// API then refuses to start and every request 502s.
+		//
+		// That is exactly what happened: this migration took the API down on its second deploy. A
+		// statement that is correct once and fatal thereafter is worse than one that never worked,
+		// because it passes its own first test.
+		`UPDATE fuzz_flows SET is_default = TRUE
+		 WHERE NOT is_default
+		   AND id = (SELECT f2.id FROM fuzz_flows f2
+		             WHERE f2.scope_target_id = fuzz_flows.scope_target_id
+		             ORDER BY f2.created_at LIMIT 1)
+		   AND NOT EXISTS (SELECT 1 FROM fuzz_flows f3
+		                   WHERE f3.scope_target_id = fuzz_flows.scope_target_id
+		                     AND f3.is_default);`,
 		// Steps refused before the run started. They used to be returned once in the start response
 		// and then forgotten, so a three-step flow that ran one step reported success.
 		`ALTER TABLE fuzz_runs ADD COLUMN IF NOT EXISTS steps_blocked INT NOT NULL DEFAULT 0;`,
@@ -2785,6 +3020,70 @@ func createTables() {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_endpoint_scan_runs_target
 		 ON endpoint_scan_runs(scope_target_id, created_at DESC);`,
+
+		// The Wildcard workflow's tool configuration: ONE store for all of its tools.
+		//
+		// Same shape as vector_tool_settings, which solved this for the URL workflow's scanners, and
+		// deliberately NOT that table: it is keyed to the attack-vector layer and its rows are read by
+		// the vector runner, so putting subdomain scrapers in it would put amass settings in front of
+		// code that expects an XSS scanner. This is the parallel store for the Wildcard workflow.
+		//
+		// One table rather than one per tool. Eleven tables would mean eleven migrations, eleven
+		// handlers and eleven chances for one of them to be subtly different from the other ten.
+		//
+		// The vocabulary lives in server/utils/wildcardOptions.go, not here. What a key MEANS changes
+		// with the tool's version; what the column holds does not, so a jsonb blob is the right storage
+		// and the registry is the right validator.
+		//
+		// Idempotent, because this runs on every boot: a single CREATE TABLE IF NOT EXISTS with no
+		// ALTER that assumes a previous state, so the second boot is a no-op rather than a fatal.
+		//
+		// No secondary index. The primary key is already a btree led by scope_target_id, which serves
+		// both reads this table has: one tool for one target, and every tool for one target.
+		`CREATE TABLE IF NOT EXISTS wildcard_tool_settings (
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			tool TEXT NOT NULL,
+			settings JSONB NOT NULL DEFAULT '{}',
+			updated_at TIMESTAMP DEFAULT NOW(),
+			PRIMARY KEY (scope_target_id, tool)
+		);`,
+
+		// The Company workflow's tool configuration: ONE store for all of its tools, and the exact
+		// shape of wildcard_tool_settings above so that one loader, one merge rule and one set of
+		// refusals serve both workflows.
+		//
+		// ONE TABLE, NOT THIRTEEN. amass_intel, metabigor, the IP/port scanner, the four root-domain
+		// API tools, github-recon, amass enum, dnsx, katana and cloud_enum all live here keyed by
+		// (scope_target_id, tool). Thirteen tables would be thirteen migrations and thirteen chances
+		// for one to be subtly different from the other twelve.
+		//
+		// IT DOES NOT REPLACE THE EXISTING CONFIG TABLES AND MUST NOT. amass_enum_configs,
+		// amass_intel_configs, dnsx_configs, katana_company_configs, cloud_enum_configs, nuclei_configs
+		// and httpx_configs are in use and they own TARGET SELECTION: which domains, which ranges,
+		// which keywords, which templates. This table owns TOOL SETTINGS: how those targets are
+		// scanned. The two vocabularies are disjoint by construction, which is why every target
+		// selection flag (-d, -df, -l, -u, -k, -list, --aws-services, ...) is declared framework-owned
+		// in server/utils/companyOptions.go and refused on save.
+		//
+		// NOT PRESENT HERE AND DELIBERATELY SO: nuclei. One nuclei runner serves both workflows and it
+		// already reads wildcard_tool_settings keyed on scope_target_id alone, without ever consulting
+		// scope_targets.type, so a Company target's nuclei settings are honoured today. The company
+		// registry shares the wildcard nuclei vocabulary and the wildcard row rather than growing a
+		// second copy of either. See server/utils/companyNucleiShare.go.
+		//
+		// Idempotent, because this runs on EVERY boot: one CREATE TABLE IF NOT EXISTS and no ALTER
+		// that assumes a previous state, so the second boot is a no-op rather than a fatal that 502s
+		// the whole API.
+		//
+		// No secondary index. The primary key is a btree led by scope_target_id, which already serves
+		// both reads this table has: one tool for one target, and every tool for one target.
+		`CREATE TABLE IF NOT EXISTS company_tool_settings (
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			tool TEXT NOT NULL,
+			settings JSONB NOT NULL DEFAULT '{}',
+			updated_at TIMESTAMP DEFAULT NOW(),
+			PRIMARY KEY (scope_target_id, tool)
+		);`,
 	}
 
 	for _, query := range queries {
@@ -2869,11 +3168,32 @@ func createTables() {
 		WHERE status IN ('pending','running');
 		UPDATE fuzz_runs SET status = 'error',
 			error = 'Run was interrupted by a server restart and automatically failed on startup.'
-		WHERE status IN ('pending','running');`
+		WHERE status IN ('pending','running');
+		-- Vector scans were missing from this sweep and it cost a whole scanning row.
+		--
+		-- They run the same way: a detached goroutine issuing docker exec per vector, with no
+		-- persisted PID. Restarting the api kills the goroutine and every scanner process with it,
+		-- and the row stayed 'running' forever with nothing behind it. Measured on 2026-08-22: a
+		-- dalfox run sat at 88/103 and a domdig run at 30/45, both status 'running', both with zero
+		-- processes alive in their containers and no new trace for five minutes. The polling agent
+		-- watching them would have waited for a scan that could never finish.
+		--
+		-- The message says UNTESTED deliberately. vectorScanVerdict turns any non-empty error into
+		-- the verdict 'unverified', so an interrupted run reports as unknown rather than clean. That
+		-- is the whole invariant of this section: a scan that did not finish is not a negative.
+		UPDATE vector_scans SET status = 'error',
+			error = 'UNTESTED: this scan was interrupted by a server restart, so the vectors it had '
+				|| 'not reached were never sent. Their results are unknown, not clean. Re-run it.'
+		WHERE status IN ('pending','running');
+		-- Any per-vector row still mid-flight belongs in the untested column, not the clean one.
+		UPDATE vector_scan_vectors SET status = 'skipped',
+			reason = 'UNTESTED: the scan was interrupted by a server restart before this vector was '
+				|| 'sent.'
+		WHERE status NOT IN ('skipped','findings','error','clean');`
 	if _, err := dbPool.Exec(context.Background(), resolveStuckURLScansQuery); err != nil {
-		log.Printf("[WARN] Failed to resolve stuck FFUF/WAF-probe/x8/Arjun/fuzz scans on startup: %v", err)
+		log.Printf("[WARN] Failed to resolve stuck FFUF/WAF-probe/x8/Arjun/fuzz/vector scans on startup: %v", err)
 	} else {
-		log.Println("[INFO] Resolved any stuck FFUF/WAF-probe/x8/Arjun/fuzz scans left running after a restart")
+		log.Println("[INFO] Resolved any stuck FFUF/WAF-probe/x8/Arjun/fuzz/vector scans left running after a restart")
 	}
 
 	log.Println("[INFO] Database schema created successfully")

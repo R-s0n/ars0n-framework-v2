@@ -1,6 +1,6 @@
 const { z } = require('zod');
 const { query } = require('../db');
-const { limitResults, truncateText, clampLimit } = require('../utils/truncate');
+const { limitResults, limitFetched, truncateText, clampLimit } = require('../utils/truncate');
 const { parseAmassRecord } = require('../utils/dns');
 
 // === Find Subdomain Takeover Candidates ===
@@ -180,6 +180,11 @@ const findApiEndpointsSchema = z.object({
   max_results: z.number().optional().describe('Maximum results (default 50)'),
 });
 
+// The API surface of a URL target is in consolidated_url_endpoints. This tool only ever searched
+// target_urls, which is written by the Wildcard and Company httpx and metadata steps and holds no
+// row at all for a URL target. Against http://10.0.0.18:3000, whose 196 consolidated endpoints
+// include 25 under /rest/, 27 under /api/ and /api-docs/swagger.json itself, it returned total 0
+// with every category empty: the answer an operator would read as "this application exposes no API".
 async function findApiEndpoints(params) {
   const apiKeywords = [
     'api', 'swagger', 'graphql', 'graphiql', 'rest', 'v1', 'v2', 'v3',
@@ -189,16 +194,31 @@ async function findApiEndpoints(params) {
   ];
 
   try {
-    // Search target URLs
+    const targetRow = await query('SELECT type FROM scope_targets WHERE id = $1', [params.target_id]);
+    if (targetRow.rows.length === 0) return { error: 'Target not found' };
+    const targetType = targetRow.rows[0].type;
+
+    const lim = clampLimit(params.max_results);
     const conditions = apiKeywords.map((_, i) => `url ILIKE $${i + 2}`).join(' OR ');
     const values = [params.target_id, ...apiKeywords.map(k => `%${k}%`)];
 
-    const res = await query(
-      `SELECT url, status_code, title, technologies, roi_score
-       FROM target_urls WHERE scope_target_id = $1 AND (${conditions})
-       ORDER BY roi_score DESC NULLS LAST LIMIT $${values.length + 1}`,
-      [...values, params.max_results || 50]
-    );
+    // The corpus is named in the response because which table was searched is the difference
+    // between "no API here" and "the API surface of this target type lives somewhere else".
+    const corpus = targetType === 'URL' ? 'consolidated_url_endpoints' : 'target_urls';
+    const res = targetType === 'URL'
+      ? await query(
+        `SELECT url, method, status_codes, validation_status, content_class
+         FROM consolidated_url_endpoints
+         WHERE scope_target_id = $1 AND deleted_at IS NULL AND (${conditions})
+         ORDER BY url LIMIT ${lim + 1}`,
+        values
+      )
+      : await query(
+        `SELECT url, status_code, title, technologies, roi_score
+         FROM target_urls WHERE scope_target_id = $1 AND (${conditions})
+         ORDER BY roi_score DESC NULLS LAST LIMIT ${lim + 1}`,
+        values
+      );
 
     // Categorize
     const categorized = {
@@ -210,7 +230,10 @@ async function findApiEndpoints(params) {
       other: [],
     };
 
-    for (const row of res.rows) {
+    // Slice BEFORE categorising. The query asks for lim+1 purely to detect truncation, and the extra
+    // row was previously categorised too, so a call with max_results=50 could return 51 endpoints.
+    const page = res.rows.slice(0, lim);
+    for (const row of page) {
       const urlLower = row.url.toLowerCase();
       if (urlLower.includes('swagger') || urlLower.includes('openapi') || urlLower.includes('api-docs')) {
         categorized.swagger_openapi.push(row);
@@ -227,10 +250,43 @@ async function findApiEndpoints(params) {
       }
     }
 
-    return {
-      total: res.rows.length,
+    // `returned` is this page. `total` is the real match count and is only reported when it was
+    // actually counted: res.rows.length is capped at lim+1 by the LIMIT above, so publishing it as a
+    // total told a caller who asked for 50 that exactly 51 endpoints matched, whatever the truth was.
+    const truncated = res.rows.length > lim;
+    const result = {
+      returned: page.length,
+      truncated,
+      searched: corpus,
       categories: categorized,
     };
+    if (truncated) {
+      const matched = await query(
+        targetType === 'URL'
+          ? `SELECT COUNT(*) AS count FROM consolidated_url_endpoints
+               WHERE scope_target_id = $1 AND deleted_at IS NULL AND (${conditions})`
+          : `SELECT COUNT(*) AS count FROM target_urls WHERE scope_target_id = $1 AND (${conditions})`,
+        values
+      );
+      result.total = parseInt(matched.rows[0]?.count || '0', 10);
+    } else {
+      result.total = page.length;
+    }
+    if (res.rows.length === 0) {
+      // A zero here has to say which corpus was empty, otherwise it is indistinguishable from a
+      // target with no API, which is what this tool used to report for every URL target.
+      const size = await query(
+        corpus === 'consolidated_url_endpoints'
+          ? 'SELECT COUNT(*) AS count FROM consolidated_url_endpoints WHERE scope_target_id = $1 AND deleted_at IS NULL'
+          : 'SELECT COUNT(*) AS count FROM target_urls WHERE scope_target_id = $1',
+        [params.target_id]
+      );
+      const rows = parseInt(size.rows[0]?.count || '0', 10);
+      result.note = rows === 0
+        ? `${corpus} holds no rows for this ${targetType} target, so nothing was searched. Run the discovery phase first.`
+        : `None of the ${rows} rows in ${corpus} matched an API keyword.`;
+    }
+    return result;
   } catch (err) {
     return { error: err.message };
   }
@@ -565,7 +621,7 @@ async function queryByCidr(params) {
 
   try {
     const result = await query(sql, values);
-    return limitResults(result.rows, lim);
+    return limitFetched(result.rows, lim);
   } catch (err) {
     return { error: err.message };
   }
@@ -605,7 +661,7 @@ async function queryByTechStack(params) {
 
   try {
     const result = await query(sql, values);
-    return limitResults(result.rows, lim);
+    return limitFetched(result.rows, lim);
   } catch (err) {
     return { error: err.message };
   }

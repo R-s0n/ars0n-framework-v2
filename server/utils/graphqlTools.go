@@ -41,8 +41,8 @@ var graphqlCopOptions = map[string]VectorOptionMeta{
 		Placeholder: "https://target/graphql"},
 	"headers": {Kind: "string", Group: "Request", Label: "Header JSON", Flag: "-H", Repeatable: true,
 		Placeholder: `{"Authorization": "Bearer ey..."}`},
-	"proxy": {Kind: "string", Group: "Request", Label: "Proxy", Flag: "-x", Placeholder: "http://127.0.0.1:8080"},
-	"force": {Kind: "bool", Group: "Request", Label: "Scan even when GraphQL is not detected", Flag: "-f"},
+	"proxy":    {Kind: "string", Group: "Request", Label: "Proxy", Flag: "-x", Placeholder: "http://127.0.0.1:8080"},
+	"force":    {Kind: "bool", Group: "Request", Label: "Scan even when GraphQL is not detected", Flag: "-f"},
 	"wordlist": {Kind: "path", Group: "Request", Label: "Custom GraphQL endpoint wordlist", Flag: "-w"},
 }
 
@@ -66,17 +66,17 @@ var graphqlCopOwned = map[string]string{
 var clairvoyanceOptions = map[string]VectorOptionMeta{
 	"endpoints": {Kind: "csv", Group: "Endpoints", Label: "GraphQL endpoints (one per line)",
 		Placeholder: "https://target/graphql"},
-	"wordlist":  {Kind: "path", Group: "Scan", Label: "Wordlist", Flag: "-w", Placeholder: "the shipped list"},
-	"document":  {Kind: "string", Group: "Scan", Label: "Starting document", Flag: "-d", Placeholder: "query { FUZZ }"},
-	"concurrent": {Kind: "int", Group: "Scan", Label: "Concurrent requests", Flag: "-c"},
-	"profile":   {Kind: "enum", Group: "Scan", Label: "Speed profile", Flag: "-p", Choices: []string{"slow", "fast"}},
-	"maxRetries": {Kind: "int", Group: "Scan", Label: "Max retries", Flag: "-m"},
-	"backoff":   {Kind: "int", Group: "Scan", Label: "Backoff factor", Flag: "-b"},
-	"headers":   {Kind: "string", Group: "Request", Label: "Header", Flag: "-H", Repeatable: true},
-	"proxy":     {Kind: "string", Group: "Request", Label: "Proxy", Flag: "-x"},
-	"noSSL":     {Kind: "bool", Group: "Request", Label: "Skip TLS verification", Flag: "-k"},
+	"wordlist":    {Kind: "path", Group: "Scan", Label: "Wordlist", Flag: "-w", Placeholder: "the shipped list"},
+	"document":    {Kind: "string", Group: "Scan", Label: "Starting document", Flag: "-d", Placeholder: "query { FUZZ }"},
+	"concurrent":  {Kind: "int", Group: "Scan", Label: "Concurrent requests", Flag: "-c"},
+	"profile":     {Kind: "enum", Group: "Scan", Label: "Speed profile", Flag: "-p", Choices: []string{"slow", "fast"}},
+	"maxRetries":  {Kind: "int", Group: "Scan", Label: "Max retries", Flag: "-m"},
+	"backoff":     {Kind: "int", Group: "Scan", Label: "Backoff factor", Flag: "-b"},
+	"headers":     {Kind: "string", Group: "Request", Label: "Header", Flag: "-H", Repeatable: true},
+	"proxy":       {Kind: "string", Group: "Request", Label: "Proxy", Flag: "-x"},
+	"noSSL":       {Kind: "bool", Group: "Request", Label: "Skip TLS verification", Flag: "-k"},
 	"inputSchema": {Kind: "path", Group: "Scan", Label: "Existing schema to extend", Flag: "-i"},
-	"verbose":   {Kind: "bool", Group: "Scan", Label: "Verbose", Flag: "-v"},
+	"verbose":     {Kind: "bool", Group: "Scan", Label: "Verbose", Flag: "-v"},
 }
 
 var clairvoyanceOwned = map[string]string{
@@ -90,13 +90,13 @@ var clairvoyanceOwned = map[string]string{
 var graphw00fOptions = map[string]VectorOptionMeta{
 	"endpoints": {Kind: "csv", Group: "Endpoints", Label: "GraphQL endpoints (one per line)",
 		Placeholder: "https://target/graphql"},
-	"headers":     {Kind: "string", Group: "Request", Label: "Header", Flag: "-H", Repeatable: true},
-	"userAgent":   {Kind: "string", Group: "Request", Label: "User-Agent", Flag: "-u"},
-	"proxy":       {Kind: "string", Group: "Request", Label: "Proxy", Flag: "-p"},
-	"timeout":     {Kind: "int", Group: "Request", Label: "Timeout (s)", Flag: "-T"},
-	"noRedirect":  {Kind: "bool", Group: "Request", Label: "Do not follow redirects", Flag: "-r"},
-	"wordlist":    {Kind: "path", Group: "Scan", Label: "Custom endpoint wordlist for detect mode", Flag: "-w"},
-	"alsoDetect":  {Kind: "bool", Group: "Scan", Label: "Also run detect mode against the endpoint's host"},
+	"headers":    {Kind: "string", Group: "Request", Label: "Header", Flag: "-H", Repeatable: true},
+	"userAgent":  {Kind: "string", Group: "Request", Label: "User-Agent", Flag: "-u"},
+	"proxy":      {Kind: "string", Group: "Request", Label: "Proxy", Flag: "-p"},
+	"timeout":    {Kind: "int", Group: "Request", Label: "Timeout (s)", Flag: "-T"},
+	"noRedirect": {Kind: "bool", Group: "Request", Label: "Do not follow redirects", Flag: "-r"},
+	"wordlist":   {Kind: "path", Group: "Scan", Label: "Custom endpoint wordlist for detect mode", Flag: "-w"},
+	"alsoDetect": {Kind: "bool", Group: "Scan", Label: "Also run detect mode against the endpoint's host"},
 }
 
 var graphw00fOwned = map[string]string{
@@ -117,7 +117,7 @@ func init() {
 		VectorTool{
 			Key: "graphql-cop", Name: "graphql-cop", Category: "graphql",
 			Binary: "python", Container: "ars0n-framework-v2-graphql-cop-1",
-			Groups: []string{"Endpoints", "Checks", "Request"},
+			Groups:  []string{"Endpoints", "Checks", "Request"},
 			Options: graphqlCopOptionsWithChecks(), OwnedFlags: graphqlCopOwned,
 			InsertionPoints: VectorInsertionPoints,
 			RowSource:       graphqlRowSource("graphql-cop"),
@@ -135,7 +135,7 @@ func init() {
 		VectorTool{
 			Key: "clairvoyance", Name: "clairvoyance", Category: "graphql",
 			Binary: "python", Container: "ars0n-framework-v2-clairvoyance-1",
-			Groups: []string{"Endpoints", "Scan", "Request"},
+			Groups:  []string{"Endpoints", "Scan", "Request"},
 			Options: clairvoyanceOptions, OwnedFlags: clairvoyanceOwned,
 			InsertionPoints: VectorInsertionPoints,
 			UsesReportFile:  true,
@@ -158,7 +158,7 @@ func init() {
 			// graphw00f-batch, not main.py: it asks "Continue anyway? [y/n]" when it cannot confirm
 			// GraphQL and dies with EOFError on a non-TTY. See docker/graphw00f/Dockerfile.
 			Binary: "graphw00f-batch", Container: "ars0n-framework-v2-graphw00f-1",
-			Groups: []string{"Endpoints", "Scan", "Request"},
+			Groups:  []string{"Endpoints", "Scan", "Request"},
 			Options: graphw00fOptions, OwnedFlags: graphw00fOwned,
 			InsertionPoints: VectorInsertionPoints,
 			RowSource:       graphqlRowSource("graphw00f"),

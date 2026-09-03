@@ -1,6 +1,7 @@
 const { z } = require('zod');
 const { apiGet, apiPost, apiPut, apiDelete } = require('../api');
 const { clip, bodyOptions, DEFAULTS } = require('../utils/clip');
+const { DETAIL_LEVELS, isFull, withoutHeavy, detailDescription } = require('../utils/detail');
 
 // Auth Flows tools let an MCP client document & replay a target's HTTP authentication flows
 // (register / login / mfa_otp / reset). Each flow is an ordered list of steps; a step holds a raw
@@ -102,17 +103,29 @@ const getAuthFlowStepsSchema = z.object({
     'rather than the first N characters. The cheap way to pull one value out of a large page.'),
   body_match_window: z.number().int().positive().optional().describe(
     'Characters either side of a body_match hit. Default 400.'),
+  detail: z.enum(DETAIL_LEVELS).optional().describe(detailDescription(
+    'omits raw_request from a MULTI-step listing and reports raw_request_chars instead. Reading ' +
+    'one step with step_id always includes it.',
+    'includes raw_request on every step. A login flow of six steps is six whole HTTP requests, ' +
+    'which is what put listings like this past the MCP output cap.')),
 });
 async function getAuthFlowSteps(params) {
   let steps = await apiGet(`/auth-flows/flow/${params.flow_id}/steps`);
   steps = Array.isArray(steps) ? steps : [];
   if (params.step_id) steps = steps.filter((s) => s.id === params.step_id);
   const single = Boolean(params.step_id);
-  return trimSteps(steps, bodyOptions(
+  const trimmed = trimSteps(steps, bodyOptions(
     params,
     single ? DEFAULTS.single : DEFAULTS.record,
     single ? 1 : steps.length,
   ));
+
+  // raw_request is OMITTED here, never clipped. The distinction matters: this shape round-trips into
+  // update_auth_flow_step, which replaces the stored request wholesale, so a truncated raw_request
+  // handed back becomes a truncated request the replay engine later fires at the target as if it
+  // were real. An absent field cannot be written back by accident; a truncated one can.
+  if (single || isFull(params)) return trimmed;
+  return trimmed.map((s) => withoutHeavy(s, ['raw_request']));
 }
 
 // === Add a step (app sends the request and records the response) ===

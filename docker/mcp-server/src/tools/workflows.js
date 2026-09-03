@@ -1,7 +1,7 @@
 const { z } = require('zod');
 const { apiPost, apiGet } = require('../api');
 const { query } = require('../db');
-const { limitResults, clampLimit } = require('../utils/truncate');
+const { limitResults, limitFetched, clampLimit } = require('../utils/truncate');
 
 // === Run Wildcard Workflow ===
 const runWildcardWorkflowSchema = z.object({
@@ -188,16 +188,32 @@ async function runUrlWorkflow(params) {
           { name: 'gau_url', path: '/gau-url/run' },
           { name: 'gospider_url', path: '/gospider-url/run' },
         ];
-        const scanResults = {};
-        for (const tool of tools) {
-          try {
-            const res = await apiPost(tool.path, { scope_target_id: params.target_id });
-            scanResults[tool.name] = { status: 'started', ...res };
-          } catch (err) {
-            scanResults[tool.name] = { status: 'error', error: err.message };
+        // These five routes take `url`, NOT `scope_target_id`, and each looks the scope target up by
+        // its URL (see RunWaybackURLsScan in server/utils/urlScanUtils.go and its four siblings).
+        // Posting scope_target_id made every one of them 400 with "Invalid request body. `url` is
+        // required.", so this whole phase never started a single scan. run_scan has always sent the
+        // right key, which is why the two disagreed.
+        const targets = await apiGet('/scopetarget/read');
+        const target = (Array.isArray(targets) ? targets : [])
+          .find((t) => t.id === params.target_id);
+        if (!target || !target.scope_target) {
+          results.url_discovery = {
+            status: 'error',
+            error: `Could not resolve target ${params.target_id} to a URL, and these five scans are `
+              + 'looked up by URL rather than by id.',
+          };
+        } else {
+          const scanResults = {};
+          for (const tool of tools) {
+            try {
+              const res = await apiPost(tool.path, { url: target.scope_target });
+              scanResults[tool.name] = { status: 'started', ...res };
+            } catch (err) {
+              scanResults[tool.name] = { status: 'error', error: err.message };
+            }
           }
+          results.url_discovery = scanResults;
         }
-        results.url_discovery = scanResults;
       } else if (phase === 'consolidate_endpoints') {
         const res = await apiPost(`/consolidated-endpoints/${params.target_id}/consolidate`, {});
         results.consolidate_endpoints = res;
@@ -307,7 +323,7 @@ async function getAutoScanSessions(params) {
       error_message, final_consolidated_subdomains, final_live_web_servers
       FROM auto_scan_sessions ORDER BY started_at DESC LIMIT ${lim + 1}`;
     const result = await query(sql, []);
-    return limitResults(result.rows, lim);
+    return limitFetched(result.rows, lim);
   } catch {
     // Fallback to API
     try {

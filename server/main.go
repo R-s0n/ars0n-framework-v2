@@ -132,7 +132,19 @@ func main() {
 
 	// Attack vectors: one request carrying user-controlled input the application processes.
 	r.HandleFunc("/attack-vectors/{scope_target_id}/consolidate", utils.ConsolidateAttackVectors).Methods("POST", "OPTIONS")
+	// The methodology an experienced hunter would bring, as data. Read by the client AND by the MCP
+	// server, so an AI driving the framework gets the same ordering and the same warnings a human
+	// gets from the Help Me Learn modals instead of only a list of tool names.
+	r.HandleFunc("/methodology", utils.GetMethodology).Methods("GET", "OPTIONS")
+	r.HandleFunc("/attack-vector-model", utils.GetAttackVectorModel).Methods("GET", "OPTIONS")
+	r.HandleFunc("/tool-guidance", utils.GetToolGuidance).Methods("GET", "OPTIONS")
+	r.HandleFunc("/methodology/{scope_target_id}/advice", utils.GetTargetAdvice).Methods("GET", "OPTIONS")
+	r.HandleFunc("/methodology/{step}", utils.GetMethodology).Methods("GET", "OPTIONS")
 	r.HandleFunc("/attack-vectors/{scope_target_id}/summary", utils.GetAttackVectorSummary).Methods("GET", "OPTIONS")
+	// Above the bare /attack-vectors/{scope_target_id} below, or the literal segment is swallowed by
+	// the {scope_target_id} pattern, exactly as the comment on the category loop warns.
+	r.HandleFunc("/attack-vectors/{scope_target_id}/coverage", utils.GetAttackVectorCoverage).Methods("GET", "OPTIONS")
+	r.HandleFunc("/attack-vectors/{scope_target_id}/completeness", utils.GetFeatureCompleteness).Methods("GET", "OPTIONS")
 	r.HandleFunc("/attack-vectors/item/{id}/request", utils.GetAttackVectorRequest).Methods("GET", "OPTIONS")
 	r.HandleFunc("/attack-vectors/item/{id}/notes", utils.SetAttackVectorNotes).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/attack-vectors/item/{id}", utils.UpdateAttackVector).Methods("PUT", "OPTIONS")
@@ -156,9 +168,45 @@ func main() {
 		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/settings", utils.GetVectorSettings).Methods("GET", "OPTIONS")
 		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/settings", utils.SaveVectorSettings).Methods("POST", "OPTIONS")
 		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/scan", utils.RunVectorScan).Methods("POST", "OPTIONS")
+		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/cancel", utils.CancelVectorScan).Methods("POST", "OPTIONS")
 		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/status", utils.GetVectorScanStatus).Methods("GET", "OPTIONS")
 		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/results", utils.GetVectorResults).Methods("GET", "OPTIONS")
+		// Full stdout for ONE exec, fetched on demand. The results payload carries only trace summaries
+		// because a single sqlmap run can print megabytes, and pulling all of them on every poll of the
+		// results modal would make the diagnostic feature the reason the UI is slow.
+		r.HandleFunc(prefix+"/trace/{id}", utils.GetVectorTrace).Methods("GET", "OPTIONS")
 	}
+
+	// Discovery scan output. The vector scanners already have this at /{category}/trace/{id}; these are
+	// the same read for the 37 discovery scan tables, which store command, stdout, stderr and error per
+	// run and had no route that returned any of them. LinkFinder failed four times against a live
+	// target with the usage message and the wrong argv both already in its row, and neither was
+	// reachable. See server/utils/toolOutputAPI.go. Read-only: nothing here runs or re-runs a tool.
+	// The Wildcard workflow's tool configuration. ONE store and ONE option vocabulary, served here
+	// and rendered by both the Settings screen and the MCP wildcard tool, so neither carries its own
+	// copy and neither can drift from the other. See server/utils/wildcardOptions.go.
+	r.HandleFunc("/wildcard-tools", utils.GetWildcardTools).Methods("GET", "OPTIONS")
+	r.HandleFunc("/wildcard-tools/{scope_target_id}/settings", utils.GetAllWildcardSettings).Methods("GET", "OPTIONS")
+	r.HandleFunc("/wildcard-tools/{scope_target_id}/{tool}/settings", utils.GetWildcardSettings).Methods("GET", "OPTIONS")
+	r.HandleFunc("/wildcard-tools/{scope_target_id}/{tool}/settings", utils.SaveWildcardSettings).Methods("POST", "OPTIONS")
+
+	// The Company workflow's tool configuration. Same shape and same design as /wildcard-tools above:
+	// ONE store and ONE option vocabulary, rendered by both the Settings screen and the MCP company
+	// tool, so neither carries its own copy and neither can drift.
+	//
+	// nuclei is IN this registry but its settings live in wildcard_tool_settings, because one nuclei
+	// runner serves both workflows and loads by scope_target_id alone without reading the target's
+	// type. The handlers route it there automatically; there is no separate endpoint and there must
+	// not be one, or the two workflows would disagree about the same runner.
+	r.HandleFunc("/company-tools", utils.GetCompanyTools).Methods("GET", "OPTIONS")
+	r.HandleFunc("/company-tools/{scope_target_id}/settings", utils.GetAllCompanySettings).Methods("GET", "OPTIONS")
+	r.HandleFunc("/company-tools/{scope_target_id}/{tool}/settings", utils.GetCompanySettings).Methods("GET", "OPTIONS")
+	r.HandleFunc("/company-tools/{scope_target_id}/{tool}/settings", utils.SaveCompanySettings).Methods("POST", "OPTIONS")
+
+	r.HandleFunc("/tool-output/tools", utils.ListDiscoveryToolOutputSources).Methods("GET", "OPTIONS")
+	r.HandleFunc("/tool-output/runs/{scope_target_id}", utils.ListDiscoveryToolRuns).Methods("GET", "OPTIONS")
+	r.HandleFunc("/tool-output/run/{tool}/{scan_id}", utils.GetDiscoveryToolOutput).Methods("GET", "OPTIONS")
+
 	// Four sections take a hand-picked endpoint list rather than the attack vector table, and they all
 	// share one picker component. That picker asks for /{category}/{id}/candidate-endpoints, so the
 	// route has to exist under EVERY category it is mounted on: registered under one of them, the
@@ -420,6 +468,14 @@ func main() {
 	r.HandleFunc("/katana-url-config/{scope_target_id}", utils.GetKatanaURLConfig).Methods("GET", "OPTIONS")
 	r.HandleFunc("/gospider-url-config/{scope_target_id}", utils.SaveGoSpiderURLConfig).Methods("POST", "OPTIONS")
 	r.HandleFunc("/gospider-url-config/{scope_target_id}", utils.GetGoSpiderURLConfig).Methods("GET", "OPTIONS")
+	r.HandleFunc("/waybackurls-url-config/{scope_target_id}", utils.SaveWaybackURLsURLConfig).Methods("POST", "OPTIONS")
+	r.HandleFunc("/waybackurls-url-config/{scope_target_id}", utils.GetWaybackURLsURLConfig).Methods("GET", "OPTIONS")
+	r.HandleFunc("/gau-url-config/{scope_target_id}", utils.SaveGAUURLConfig).Methods("POST", "OPTIONS")
+	r.HandleFunc("/gau-url-config/{scope_target_id}", utils.GetGAUURLConfig).Methods("GET", "OPTIONS")
+	// Backs the host picker both Configure modals show.
+	r.HandleFunc("/archive-hosts/{tool}/{scope_target_id}", utils.GetArchiveHostCandidates).Methods("GET", "OPTIONS")
+	// How much JavaScript LinkFinder will read versus how much exists, for the JS Files metric.
+	r.HandleFunc("/linkfinder-js-files/{scope_target_id}", utils.GetLinkFinderJSFiles).Methods("GET", "OPTIONS")
 	r.HandleFunc("/linkfinder-url-config/{scope_target_id}", utils.SaveLinkFinderURLConfig).Methods("POST", "OPTIONS")
 	r.HandleFunc("/linkfinder-url-config/{scope_target_id}", utils.GetLinkFinderURLConfig).Methods("GET", "OPTIONS")
 
@@ -544,6 +600,10 @@ func main() {
 	r.HandleFunc("/threat-model/{scope_target_id}", utils.CreateThreatModel).Methods("POST", "OPTIONS")
 	r.HandleFunc("/threat-model/{threat_id}", utils.UpdateThreatModel).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/threat-model/{threat_id}", utils.DeleteThreatModel).Methods("DELETE", "OPTIONS")
+	// Registered before the {threat_id} routes above would ever match it, because the more specific
+	// path has its own trailing segment. Marking a threat tested is a one-field change and does not
+	// go through the full-replace PUT.
+	r.HandleFunc("/threat-model/{threat_id}/test-status", utils.SetThreatModelTestStatus).Methods("PATCH", "OPTIONS")
 
 	r.HandleFunc("/health", utils.HealthCheck).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/start", utils.StartManualCrawl).Methods("POST", "OPTIONS")
@@ -558,6 +618,30 @@ func main() {
 	r.HandleFunc("/manual-crawl/captures/target/{scope_target_id}", utils.GetManualCrawlCapturesForTarget).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/captures/{session_id}", utils.GetManualCrawlCaptures).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/endpoints/{scope_target_id}", utils.GetManualCrawlEndpoints).Methods("GET", "OPTIONS")
+	// The endpoints the Routing & WAF Probe may be pointed at: crawl-observed, HTTP 200 only,
+	// adjacent hosts included, explicitly-excluded hosts dropped.
+	r.HandleFunc("/manual-crawl/probe-candidates/{scope_target_id}", utils.GetProbeCandidateEndpoints).Methods("GET", "OPTIONS")
+
+	// Scope rules: the pattern-capable boundary. Preview is separate from create on purpose, so a
+	// rule can be rendered as a sentence and checked against already-recorded hosts before it is
+	// allowed to affect anything.
+	r.HandleFunc("/scope-rules/{scope_target_id}", utils.GetScopeRules).Methods("GET", "OPTIONS")
+	r.HandleFunc("/scope-rules/preview", utils.PreviewScopeRule).Methods("POST", "OPTIONS")
+	r.HandleFunc("/scope-rules", utils.CreateScopeRule).Methods("POST", "OPTIONS")
+	r.HandleFunc("/scope-rules/{rule_id}", utils.DeleteScopeRule).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/scope-rules/{rule_id}", utils.SetScopeRuleEnabled).Methods("PATCH", "OPTIONS")
+
+	// Notes on a scope target. The path variable is named for what it holds on each route, because
+	// gorilla matches on shape alone and /notes/{x} is the same shape whether x is a target or a note.
+	r.HandleFunc("/notes/{scope_target_id}", utils.GetNotes).Methods("GET", "OPTIONS")
+	r.HandleFunc("/notes", utils.CreateNote).Methods("POST", "OPTIONS")
+	r.HandleFunc("/notes/{note_id}", utils.UpdateNote).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/notes/{note_id}", utils.DeleteNote).Methods("DELETE", "OPTIONS")
+
+	// Multi-endpoint probe run: one scan per selected endpoint, grouped by run_id, executed one at a
+	// time because concurrent probes against the same host corrupt each other's measurements.
+	r.HandleFunc("/waf-probe/run-multi", utils.RunWAFProbeMultiScan).Methods("POST", "OPTIONS")
+	r.HandleFunc("/waf-probe/run/{run_id}/results", utils.GetWAFProbeRunResults).Methods("GET", "OPTIONS")
 	// Promote before the bare host route: gorilla matches in registration order, and the wildcard
 	// would otherwise swallow /promote.
 	// The valid-endpoint corpus behind the parameter tools, and which of them each tool runs.
@@ -567,6 +651,13 @@ func main() {
 	// The fuzz composer. Seeding turns a discovered endpoint into the raw HTTP request text that is
 	// the composer's authoritative artifact.
 	// Literal segments before the {step_id} wildcard, or gorilla matches the wildcard first.
+	// Named fuzz flows. Several per target, because ffuf is used for several unrelated jobs and
+	// they want different wordlists, insertion points, filters and pacing. Registered above the
+	// generic /fuzz/{scope_target_id}/... patterns so the literal segment is not swallowed.
+	r.HandleFunc("/fuzz/{scope_target_id}/flows", utils.ListFuzzFlows).Methods("GET", "OPTIONS")
+	r.HandleFunc("/fuzz/{scope_target_id}/flows", utils.CreateFuzzFlow).Methods("POST", "OPTIONS")
+	r.HandleFunc("/fuzz/flow/{flow_id}", utils.UpdateFuzzFlow).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/fuzz/flow/{flow_id}", utils.DeleteFuzzFlow).Methods("DELETE", "OPTIONS")
 	r.HandleFunc("/fuzz/{scope_target_id}/endpoints", utils.ListFuzzSeedEndpoints).Methods("GET", "OPTIONS")
 	r.HandleFunc("/fuzz/{scope_target_id}/flow", utils.GetFuzzFlow).Methods("GET", "OPTIONS")
 	r.HandleFunc("/fuzz/{scope_target_id}/steps", utils.CreateFuzzStep).Methods("POST", "OPTIONS")
@@ -638,7 +729,7 @@ func main() {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, X-HackerOne-API-Key")
 
 		if r.Method == "OPTIONS" {

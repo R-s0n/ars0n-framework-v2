@@ -50,6 +50,10 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
   const [recs, setRecs] = useState(null);
   const [recsLoading, setRecsLoading] = useState(false);
   const [copied, setCopied] = useState('');
+  // The sibling scans of a multi-endpoint run. A run probes each selected endpoint separately, so
+  // "the result" for such a run is N results; this is what lets the operator move between them
+  // without going back to the history tab and matching timestamps by eye.
+  const [runData, setRunData] = useState(null);
 
   const scan = viewScan || mostRecentWAFProbeScan;
   const probe = useMemo(() => parseResult(scan), [scan]);
@@ -112,6 +116,50 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
     loadRecommendations(scan?.scan_id);
   }, [show, scan?.scan_id, loadRecommendations]);
 
+  // Endpoints run strictly one at a time, so a run is in flight for as long as the sum of its
+  // endpoints' durations. Polling while it is means the operator can leave this modal open and
+  // watch it advance, rather than reopening it to find out whether it is still going.
+  const runID = scan?.run_id || '';
+  useEffect(() => {
+    if (!show || !runID) { setRunData(null); return; }
+    let cancelled = false;
+    let timer = null;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/waf-probe/run/${runID}/results`);
+        if (cancelled) return;
+        if (res.ok) {
+          const data = await res.json();
+          setRunData(data);
+          if (data.in_progress) timer = setTimeout(poll, 5000);
+        }
+      } catch {
+        // A failed poll is not worth an error banner: the next one may succeed, and the results
+        // already on screen stay valid regardless.
+      }
+    };
+    poll();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [show, runID]);
+
+  // Switching endpoints must carry run_id, or the poll above tears down the moment the operator
+  // clicks a sibling and the strip disappears mid-run.
+  const viewRunEndpoint = useCallback((row) => {
+    setViewScan({ ...row, run_id: runID });
+    setTab('verdict');
+  }, [runID]);
+
+  // Opening the modal mid-run lands on the newest scan, which in a multi-endpoint run is the LAST
+  // endpoint: still queued, no result, an empty panel while earlier endpoints have real findings.
+  // Fall forward to the most recent endpoint that actually produced something. Only when the
+  // operator has not chosen one themselves, so this never overrides a click.
+  useEffect(() => {
+    if (!show || viewScan || probe || !runData) return;
+    const finished = (runData.endpoints || []).filter((e) => e.result);
+    if (finished.length > 0) viewRunEndpoint(finished[finished.length - 1]);
+  }, [show, viewScan, probe, runData, viewRunEndpoint]);
+
   const copyTool = (tool, settings) => {
     const text = settings.map((s) =>
       `${s.setting} = ${formatValue(s.value)}${s.unit ? `   (${s.unit})` : ''}`).join('\n');
@@ -127,6 +175,13 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
       <Modal.Header closeButton>
         <Modal.Title className="text-danger">
           Target Behaviour Probe Results
+          {/* Named in the title because every panel below describes one endpoint, and with several
+              in a run it is otherwise easy to read one endpoint's verdict as the estate's. */}
+          {scan?.endpoint_label && (
+            <span className="text-white ms-2" style={{ fontSize: '0.85rem' }}>
+              — {scan.endpoint_label}
+            </span>
+          )}
           {probe?.probe_version && (
             <span className="text-white-50 ms-2" style={{ fontSize: '0.8rem' }}>
               v{probe.probe_version}
@@ -136,11 +191,98 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
       </Modal.Header>
 
       <Modal.Body className="text-white">
+        {/* The run strip sits above everything, including the empty state, because when a run is
+            still working through its endpoints the earlier ones already have results worth reading
+            while the current one is measured. */}
+        {runData && runData.endpoint_count > 1 && (
+          <div className="rounded p-2 mb-3" style={{ border: '1px solid rgba(220,53,69,0.45)' }}>
+            <div className="d-flex align-items-center gap-2 mb-2 flex-wrap">
+              <span className="text-danger fw-bold small">
+                Multi-endpoint run
+              </span>
+              <span className="text-white-50 small">
+                {runData.completed_count} of {runData.endpoint_count} finished
+                {' · '}{runData.total_requests_sent || 0} requests
+                {' · '}{runData.total_trips_used || 0} deliberate blocks
+              </span>
+              {runData.in_progress && (
+                <span className="text-white-50 small">
+                  <Spinner size="sm" animation="border" className="me-2" />
+                  probing one at a time
+                </span>
+              )}
+            </div>
+            <div className="d-flex flex-column gap-1">
+              {(runData.endpoints || []).map((row, i) => {
+                const rowPosture = POSTURE[row.posture] || POSTURE.UNKNOWN;
+                const isCurrent = row.scan_id === scan?.scan_id;
+                // Anything that is no longer queued or in flight has a result worth opening. An
+                // aborted scan especially: an abort rule firing is the probe stopping itself
+                // because it learned something, and everything measured up to that point stands.
+                const done = row.status !== 'pending' && row.status !== 'running';
+                return (
+                  <div
+                    key={row.scan_id}
+                    role={done ? 'button' : undefined}
+                    onClick={done ? () => viewRunEndpoint(row) : undefined}
+                    className={`d-flex align-items-center gap-2 rounded px-2 py-1 ${isCurrent ? 'border border-danger' : ''}`}
+                    style={{
+                      backgroundColor: isCurrent ? 'rgba(220,53,69,0.12)' : 'transparent',
+                      cursor: done ? 'pointer' : 'default',
+                      opacity: done ? 1 : 0.65,
+                    }}
+                  >
+                    <Badge bg="secondary">{i + 1}</Badge>
+                    <span className="text-white small" style={{ minWidth: '150px' }}>
+                      {row.endpoint_label || row.url}
+                    </span>
+                    {row.status === 'running' && (
+                      <Badge bg="info" text="dark">running</Badge>
+                    )}
+                    {row.status === 'pending' && <Badge bg="dark">queued</Badge>}
+                    {row.status === 'error' && <Badge bg="danger">failed</Badge>}
+                    {row.status === 'aborted' && (
+                      <Badge bg="warning" text="dark"
+                             title="An abort rule stopped this scan early. What it measured before stopping is valid.">
+                        stopped early
+                      </Badge>
+                    )}
+                    {done && row.posture && (
+                      <Badge bg={rowPosture.variant}>{rowPosture.text}</Badge>
+                    )}
+                    <span className="text-white-50 text-truncate"
+                          style={{ fontSize: '0.7rem', flex: 1 }} title={row.url}>
+                      {row.url}
+                    </span>
+                    {/* The safe rate is the number every later tool paces against, and it is per
+                        host rather than per estate. Showing it inline is what makes the strip a
+                        comparison rather than a list. */}
+                    {rowRate(row) && (
+                      <Badge bg="dark" className="border border-secondary text-white"
+                             style={{ fontSize: '0.62rem' }}
+                             title="Safe request rate measured for this endpoint">
+                        {rowRate(row)}
+                      </Badge>
+                    )}
+                    {row.requests_sent > 0 && (
+                      <span className="text-white-50" style={{ fontSize: '0.7rem' }}>
+                        {row.requests_sent} req
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {!probe && (
           <Alert variant="secondary">
             {scan?.status === 'error'
               ? `The probe failed: ${scan.error || 'no detail was recorded'}`
-              : 'No probe result is available for this target yet. Run a scan from the card.'}
+              : scan?.status === 'running' || scan?.status === 'pending'
+                ? 'This endpoint has not been probed yet. Its result appears here when it finishes.'
+                : 'No probe result is available for this target yet. Run a scan from the card.'}
           </Alert>
         )}
 
@@ -178,11 +320,16 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
               </div>
             </div>
 
-            {run.status === 'partial' && (
+            {(run.status === 'partial' || run.status === 'aborted') && (
               <Alert variant="warning" className="py-2 small">
                 This run did not finish. Everything below was measured before it stopped and is
                 valid; what is missing is missing, not negative.
-                {run.abort_reason && <> Reason: {run.abort_reason}.</>}
+                {/* abort_reason is an object with rule_id, detail, phase and request_n. Rendering
+                    it directly threw "Objects are not valid as a React child" and took the whole
+                    modal down, so an aborted scan showed nothing at all. */}
+                {formatAbortReason(run.abort_reason) && (
+                  <> Reason: {formatAbortReason(run.abort_reason)}</>
+                )}
                 {run.stopped_phases?.length > 0 && <> Stopped phases: {run.stopped_phases.join(', ')}.</>}
               </Alert>
             )}
@@ -450,7 +597,7 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
               <Tab eventKey="history" title={`History (${wafProbeScans.length})`}>
                 <Table size="sm" variant="dark" className="small align-middle">
                   <thead>
-                    <tr><th>When</th><th>Status</th><th>Posture</th><th>Requests</th>
+                    <tr><th>When</th><th>Endpoint</th><th>Status</th><th>Posture</th><th>Requests</th>
                         <th>Trips</th><th /></tr>
                   </thead>
                   <tbody>
@@ -458,6 +605,9 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
                       <tr key={s.scan_id}
                           className={s.scan_id === scan?.scan_id ? 'table-active' : ''}>
                         <td>{new Date(s.created_at).toLocaleString()}</td>
+                        {/* Without this column the history of a multi-endpoint run is N rows with
+                            the same timestamp and no way to tell which host each one measured. */}
+                        <td>{s.endpoint_label || <span className="text-white-50">-</span>}</td>
                         <td>{s.status}</td>
                         <td>{s.posture || '-'}</td>
                         <td>{s.requests_sent ?? '-'}</td>
@@ -515,10 +665,18 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
       </Modal.Body>
 
       <Modal.Footer>
+        {/* Clicking a sibling endpoint in the run strip also sets viewScan, and calling that a
+            historical run would be wrong: it is one endpoint of the run being looked at. */}
         {viewScan && (
-          <span className="text-warning small me-auto">
-            Viewing a historical run from {new Date(viewScan.created_at).toLocaleString()}.
-          </span>
+          runData && (runData.endpoints || []).some((e) => e.scan_id === viewScan.scan_id) ? (
+            <span className="text-white-50 small me-auto">
+              Viewing one endpoint of this run. The other endpoints are in the strip above.
+            </span>
+          ) : (
+            <span className="text-warning small me-auto">
+              Viewing a historical run from {new Date(viewScan.created_at).toLocaleString()}.
+            </span>
+          )
         )}
         <Button variant="outline-danger" onClick={handleClose}>Close</Button>
       </Modal.Footer>
@@ -546,6 +704,37 @@ function formatValue(v) {
   }
   if (typeof v === 'object') return JSON.stringify(v);
   return String(v);
+}
+
+// The safe rate for one endpoint of a run, read from its stored result. Marked when it is a
+// conservative default rather than a measurement: the safe preset runs no load test, so its rate is
+// an assumption, and a bare "5 req/s" would read as measured.
+function rowRate(row) {
+  if (!row?.result) return '';
+  let parsed;
+  try {
+    parsed = typeof row.result === 'string' ? JSON.parse(row.result) : row.result;
+  } catch {
+    return '';
+  }
+  const v = parsed?.verdict || {};
+  if (!v.safe_rps) return '';
+  const assumed = v.safe_rps_confidence && v.safe_rps_confidence !== 'measured';
+  return `${v.safe_rps} req/s${assumed ? ' (assumed)' : ''}`;
+}
+
+// The probe writes abort_reason as an object, but older results carry a bare string. Both have to
+// render, and neither may be handed to React as-is.
+function formatAbortReason(reason) {
+  if (!reason) return '';
+  if (typeof reason === 'string') return reason.endsWith('.') ? reason : `${reason}.`;
+  const detail = reason.detail || reason.rule_id || '';
+  if (!detail) return '';
+  const where = [
+    reason.phase ? `in ${reason.phase}` : '',
+    reason.request_n ? `at request #${reason.request_n}` : '',
+  ].filter(Boolean).join(' ');
+  return where ? `${detail} (${where}).` : `${detail}.`;
 }
 
 export default WAFProbeResultsModal;

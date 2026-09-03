@@ -12,7 +12,10 @@ import (
 // points, so a tool that found one and not another was telling us about itself:
 //
 //   - commix v4.2.dev76, 99 flags in 9 groups, from `commix.py -hh`.
-//   - SSTImap 1.2.3, 57 flags in 6 groups, from `sstimap.py --help`.
+//   - SSTImap 1.3.3.7, from `sstimap.py --help` and `--version` in the shipped container. The table
+//     below was written against 1.2.3 and re-read against the running container on 2026-08-23: every
+//     flag it names still exists. 1.3.x adds --bool-match-min, --bool-fuzzy, --bool-samples,
+//     -L/--force-level, --verify-blind-delay and --data-params, none of which are offered here yet.
 //   - TInjA v1.2.0, 3 subcommands and 18 flags, from `tinja --help` and each subcommand's help.
 //
 // THE RULE THAT COSTS COVERAGE: commix reaches a header only at --level 3, and only for the three
@@ -28,12 +31,18 @@ import (
 var commixGroups = []string{"Detection", "Injection", "Request", "Enumeration", "General"}
 
 var commixOwned = map[string]string{
-	"-u":                 "The URL is built per vector, with commix's INJECT_HERE marker in the right place.",
-	"--url":              "The URL is built per vector, with commix's INJECT_HERE marker in the right place.",
-	"-d":                 "Set from the vector's recorded body.",
-	"--data":             "Set from the vector's recorded body.",
-	"--cookie":           "Composed per vector: your Cookies setting is carried through and the target cookie is added.",
-	"--method":           "Set from the vector's method.",
+	"-u":       "The URL is built per vector, with commix's INJECT_HERE marker in the right place.",
+	"--url":    "The URL is built per vector, with commix's INJECT_HERE marker in the right place.",
+	"-d":       "Set from the vector's recorded body.",
+	"--data":   "Set from the vector's recorded body.",
+	"--method": "Set from the vector's method.",
+	// -H is commix's own header flag and the framework does NOT use it. Measured on the wire: commix
+	// declares it with action="store" (src/utils/menu.py), so `-H "A: 1" -H "B: 2"` sends B alone and
+	// says nothing about A. An operator with an Authorization header and a CSRF header would silently
+	// have lost one of them. Everything goes through --headers, which commix splits on a literal
+	// backslash-n and which really does carry all of them.
+	"-H": "commix's -H takes ONE header and a second occurrence silently replaces the first, so the " +
+		"framework combines every header into --headers instead. Set them there.",
 	"-r":                 "The framework drives commix per vector rather than from a saved request file.",
 	"-m":                 "The framework supplies one target per run so a finding can be tied to a vector.",
 	"-l":                 "Targets come from the attack vector table, not from a proxy log.",
@@ -86,8 +95,8 @@ var commixOptions = map[string]VectorOptionMeta{
 	"shellshock":    {Kind: "bool", Group: "Injection", Label: "Shellshock module", Flag: "--shellshock"},
 
 	// Request
-	"cookie":          {Kind: "string", Group: "Request", Label: "Cookies", Flag: "--cookie", Placeholder: "name=value; name2=value2. A cookie vector's own cookie is added alongside these"},
-	"header":          {Kind: "string", Group: "Request", Label: "Headers", Flag: "-H", Repeatable: true, Placeholder: "Name: value. Sent with every request, for authentication"},
+	"cookie":          {Kind: "string", Group: "Request", Label: "Cookies", Flag: "--cookie", Placeholder: "name=value; name2=value2. Sent with every request, for authentication. The session tokens the framework already holds and the cookies the vector's recorded request carried are merged in; a cookie vector's own cookie is added and yours of that name is dropped"},
+	"header":          {Kind: "string", Group: "Request", Label: "Headers", Flag: "--headers", Repeatable: true, Placeholder: "Name: value. Sent with every request, for authentication. commix's -H holds only ONE header, so these are combined into its --headers, which holds all of them"},
 	"userAgent":       {Kind: "string", Group: "Request", Label: "User agent", Flag: "--user-agent"},
 	"randomAgent":     {Kind: "bool", Group: "Request", Label: "Random user agent", Flag: "--random-agent"},
 	"mobile":          {Kind: "bool", Group: "Request", Label: "Imitate a smartphone", Flag: "--mobile"},
@@ -156,37 +165,35 @@ var commixKnownHeaders = map[string]bool{
 var sstimapGroups = []string{"Detection", "Request", "Engines", "Payload", "General"}
 
 var sstimapOwned = map[string]string{
-	"-u":                 "The URL is built per vector, with the marker in the right place.",
-	"--url":              "The URL is built per vector, with the marker in the right place.",
-	"-d":                 "Set from the vector's recorded body.",
-	"--data":             "Set from the vector's recorded body.",
-	"-C":                 "Composed per vector: your Cookies setting is carried through and the target cookie is added.",
-	"--cookie":           "Composed per vector: your Cookies setting is carried through and the target cookie is added.",
-	"-m":                 "Set from the vector's method.",
-	"--method":           "Set from the vector's method.",
-	"-i":                 "Interactive mode needs a terminal a scan runner does not have.",
-	"--interactive":      "Interactive mode needs a terminal a scan runner does not have.",
-	"--load-urls":        "Targets come from the attack vector table.",
-	"--load-forms":       "Targets come from the attack vector table.",
-	"-c":                 "Crawling is done by the workflow's own crawlers, and their output IS the vector list.",
-	"--crawl":            "Crawling is done by the workflow's own crawlers, and their output IS the vector list.",
-	"--no-color":         "Always set. Escape codes corrupt the stored evidence.",
-	"-t":                 "Interactive: it prompts for a template-engine shell.",
-	"--tpl-shell":        "Interactive: it prompts for a template-engine shell.",
-	"-x":                 "Interactive: it prompts for a language shell.",
-	"--eval-shell":       "Interactive: it prompts for a language shell.",
-	"-s":                 "Interactive: it prompts for an operating system shell.",
-	"--os-shell":         "Interactive: it prompts for an operating system shell.",
-	"-S":                 "Executes a command on the target. Detection is what this runner does.",
-	"--os-cmd":           "Executes a command on the target. Detection is what this runner does.",
-	"-B":                 "Opens a bind shell on the target.",
-	"--bind-shell":       "Opens a bind shell on the target.",
-	"-R":                 "Opens a reverse shell from the target.",
-	"--reverse-shell":    "Opens a reverse shell from the target.",
-	"-U":                 "Uploads a file to the target.",
-	"--upload":           "Uploads a file to the target.",
-	"-F":                 "Overwrites files on the target.",
-	"--force-overwrite":  "Overwrites files on the target.",
+	"-u":                "The URL is built per vector, with the marker in the right place.",
+	"--url":             "The URL is built per vector, with the marker in the right place.",
+	"-d":                "Set from the vector's recorded body.",
+	"--data":            "Set from the vector's recorded body.",
+	"-m":                "Set from the vector's method.",
+	"--method":          "Set from the vector's method.",
+	"-i":                "Interactive mode needs a terminal a scan runner does not have.",
+	"--interactive":     "Interactive mode needs a terminal a scan runner does not have.",
+	"--load-urls":       "Targets come from the attack vector table.",
+	"--load-forms":      "Targets come from the attack vector table.",
+	"-c":                "Crawling is done by the workflow's own crawlers, and their output IS the vector list.",
+	"--crawl":           "Crawling is done by the workflow's own crawlers, and their output IS the vector list.",
+	"--no-color":        "Always set. Escape codes corrupt the stored evidence.",
+	"-t":                "Interactive: it prompts for a template-engine shell.",
+	"--tpl-shell":       "Interactive: it prompts for a template-engine shell.",
+	"-x":                "Interactive: it prompts for a language shell.",
+	"--eval-shell":      "Interactive: it prompts for a language shell.",
+	"-s":                "Interactive: it prompts for an operating system shell.",
+	"--os-shell":        "Interactive: it prompts for an operating system shell.",
+	"-S":                "Executes a command on the target. Detection is what this runner does.",
+	"--os-cmd":          "Executes a command on the target. Detection is what this runner does.",
+	"-B":                "Opens a bind shell on the target.",
+	"--bind-shell":      "Opens a bind shell on the target.",
+	"-R":                "Opens a reverse shell from the target.",
+	"--reverse-shell":   "Opens a reverse shell from the target.",
+	"-U":                "Uploads a file to the target.",
+	"--upload":          "Uploads a file to the target.",
+	"-F":                "Overwrites files on the target.",
+	"--force-overwrite": "Overwrites files on the target.",
 }
 
 var sstimapOptions = map[string]VectorOptionMeta{
@@ -203,7 +210,13 @@ var sstimapOptions = map[string]VectorOptionMeta{
 	// Request
 	"injectionPoints": {Kind: "string", Group: "Request", Label: "Injection points", Flag: "-P", Placeholder: "QBHC, meaning Query, Body, Headers and Cookies are ALL tested without a marker. This is why SSTImap needs no level for a cookie or a header"},
 	"marker":          {Kind: "string", Group: "Request", Label: "Injection marker", Flag: "-M", Placeholder: "*. The framework places it for a path vector"},
-	"header":          {Kind: "string", Group: "Request", Label: "Headers", Flag: "-H", Repeatable: true, Placeholder: "Name: value"},
+	// THE MISSING FIELD. There was no cookie option here at all, while -C and --cookie were both
+	// claimed as framework owned and described as "composed per vector: your Cookies setting is
+	// carried through". There was no Cookies setting to carry: the form had no field for one, and a
+	// value stored over the API was reported as a key nothing reads. A target holding two live,
+	// validated session tokens was scanned as an anonymous user.
+	"cookie":          {Kind: "string", Group: "Request", Label: "Cookies", Flag: "-C", Repeatable: true, Placeholder: "name=value, one per row. Sent with every request, for authentication. The session tokens the framework already holds and the cookies the vector's recorded request carried are merged in; a cookie vector's own cookie is added and yours of that name is dropped"},
+	"header":          {Kind: "string", Group: "Request", Label: "Headers", Flag: "-H", Repeatable: true, Placeholder: "Name: value, one per row. Sent with every request, for authentication"},
 	"dataType":        {Kind: "string", Group: "Request", Label: "Body data type", Flag: "--data-type", Placeholder: "auto"},
 	"userAgent":       {Kind: "string", Group: "Request", Label: "User agent", Flag: "-a"},
 	"randomUserAgent": {Kind: "bool", Group: "Request", Label: "Random user agent", Flag: "-A"},
@@ -250,8 +263,8 @@ var tinjaOptions = map[string]VectorOptionMeta{
 	"reflection":  {Kind: "string", Group: "Scanning", Label: "Reflection URLs", Flag: "--reflection", Repeatable: true, Placeholder: "where a stored injection would show up"},
 
 	// Request
-	"cookie":          {Kind: "string", Group: "Request", Label: "Cookies", Flag: "-c", Repeatable: true, Placeholder: "name=value. These are STATIC values: TInjA has no flag that fuzzes a cookie"},
-	"header":          {Kind: "string", Group: "Request", Label: "Headers", Flag: "-H", Repeatable: true, Placeholder: "Name: value. Sent with every request. Fuzzing a header is done by the framework naming it to --testheaders"},
+	"cookie":          {Kind: "string", Group: "Request", Label: "Cookies", Flag: "-c", Repeatable: true, Placeholder: "name=value. These are STATIC values: TInjA has no flag that fuzzes a cookie, so they are purely authentication. The session tokens the framework already holds and the cookies the vector's recorded request carried are merged in"},
+	"header":          {Kind: "string", Group: "Request", Label: "Headers", Flag: "-H", Repeatable: true, Placeholder: "Name: value. Sent with every request, for authentication. Fuzzing a header is done by the framework naming it to --testheaders"},
 	"useragentchrome": {Kind: "bool", Group: "Request", Label: "Send Chrome's user agent", Flag: "--useragentchrome", Placeholder: "TInjA v1.2.0, which some WAFs block on sight"},
 	"proxyurl":        {Kind: "string", Group: "Request", Label: "Proxy URL", Flag: "--proxyurl"},
 	"proxycertpath":   {Kind: "path", Group: "Request", Label: "Proxy certificate", Flag: "--proxycertpath"},

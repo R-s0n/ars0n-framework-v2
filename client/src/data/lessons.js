@@ -1,4 +1,19 @@
+import { urlWorkflowLessons } from './lessonsUrlWorkflow';
+import { contentDiscoveryLessons } from './lessonsContentDiscovery';
+import { attackToolsInjectionLessons } from './lessonsAttackToolsInjection';
+import { attackToolsProtocolLessons } from './lessonsAttackToolsProtocol';
+import { attackToolsExposureLessons } from './lessonsAttackToolsExposure';
+
+// The URL workflow lessons live in their own files because this one is already large enough that
+// finding anything in it is a chore. They are spread in first so anything defined below wins on a
+// key collision, which keeps this file authoritative.
 export const lessons = {
+  ...urlWorkflowLessons,
+  ...contentDiscoveryLessons,
+  ...attackToolsInjectionLessons,
+  ...attackToolsProtocolLessons,
+  ...attackToolsExposureLessons,
+
   urlManualCrawlingMethodology: {
     title: "Manual Crawling: Where It Fits in the Methodology",
     overview: "Manual crawling is the first step of testing a single application. Before you point any automated tool at a target, you use the app by hand — through an intercepting proxy — to understand what it does and to capture the real traffic that everything else will build on.",

@@ -118,10 +118,10 @@ func graphqlRowSource(toolKey string) func(context.Context, string) ([]vectorRow
 		var out []vectorRow
 		for _, endpoint := range graphqlEndpointsFor(ctx, scopeTargetID, toolKey) {
 			row := vectorRow{
-				ID:             graphqlEndpointID(scopeTargetID, toolKey, endpoint),
-				Method:         "POST",
-				InsertionPoint: "body",
-				EvidenceURL:    endpoint,
+				ID:              graphqlEndpointID(scopeTargetID, toolKey, endpoint),
+				Method:          "POST",
+				InsertionPoint:  "body",
+				EvidenceURL:     endpoint,
 				IsGraphQLTarget: true,
 			}
 			row.Scheme, row.Domain, row.Port, row.Path = splitURLParts(endpoint)
@@ -209,11 +209,11 @@ func DetectGraphQLEndpoints(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"host":      target,
-		"found":     found,
-		"output":    stripANSI(string(output)),
-		"error":     errText(err),
-		"searched":  "graphw00f's own list of common GraphQL paths",
+		"host":     target,
+		"found":    found,
+		"output":   stripANSI(string(output)),
+		"error":    errText(err),
+		"searched": "graphw00f's own list of common GraphQL paths",
 	})
 }
 
@@ -491,6 +491,17 @@ var deniedStatusSources = []struct {
 	{"attack-surface", "consolidated_attack_surface_assets", "status_code", "AND asset_type = 'live_web_server'"},
 }
 
+// consolidatedDeniedUnion is the seventh source, kept apart from the six above because it does not
+// fit their shape: consolidated_url_endpoints records status_codes as a JSONB ARRAY, since one
+// endpoint can have answered differently on different observations. Expanding that array is the only
+// way a 403 recorded there reaches the bypass section, and without it the largest endpoint table on
+// the target contributes nothing.
+const consolidatedDeniedUnion = `
+	SELECT url, (jsonb_array_elements_text(status_codes))::int AS status_code,
+	       'consolidated' AS source
+	FROM consolidated_url_endpoints
+	WHERE scope_target_id = $1 AND url IS NOT NULL AND url <> ''`
+
 // DeniedEndpoints lists the URLs that already answered 401 or 403, so the bypass tools can be aimed
 // at the things that actually denied something.
 //
@@ -512,10 +523,14 @@ func DeniedEndpoints(w http.ResponseWriter, r *http.Request) {
 			   AND %s IN (401, 403, 404, 405, 407) %s`,
 			source.StatusColumn, source.Name, source.Table, source.StatusColumn, source.Where))
 	}
+	// The JSONB-array source cannot filter inside its own SELECT, because the status code only exists
+	// after the array is expanded, so it is filtered in the outer query below.
+	unions = append(unions, consolidatedDeniedUnion)
 
 	rows, err := dbPool.Query(r.Context(), `WITH found AS (`+strings.Join(unions, " UNION ALL ")+`)
 		SELECT url, MIN(status_code), ARRAY_AGG(DISTINCT source ORDER BY source)
-		FROM found GROUP BY url ORDER BY MIN(status_code), url`, scopeTargetID)
+		FROM found WHERE status_code IN (401, 403, 404, 405, 407)
+		GROUP BY url ORDER BY MIN(status_code), url`, scopeTargetID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

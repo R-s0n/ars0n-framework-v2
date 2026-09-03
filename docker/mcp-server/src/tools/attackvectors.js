@@ -2,6 +2,7 @@ const { z } = require('zod');
 const { apiGet, apiPost, apiPut, apiDelete } = require('../api');
 const { limitResults, clampLimit } = require('../utils/truncate');
 const { clip, resolveLimit, DEFAULTS } = require('../utils/clip');
+const { DETAIL_LEVELS, isFull, dropEmpty, detailDescription } = require('../utils/detail');
 
 // Unique Attack Vectors over MCP: consolidate, read, correct, add and delete.
 //
@@ -75,10 +76,17 @@ const manageAttackVectorsSchema = z.object({
     'list: return the soft-deleted vectors instead of the live ones (default false). This is how ' +
     'you find something to restore.'),
   max_results: z.number().optional().describe('list: maximum rows (default 50, max 1000)'),
+  detail: z.enum(DETAIL_LEVELS).optional().describe(detailDescription(
+    'omits raw_request and reports raw_request_chars instead, and drops the fields a row left ' +
+    'empty. This is everything needed to CHOOSE a vector: verb, host, path, parameter set, ' +
+    'insertion point, the confidences and which sources contributed it.',
+    'adds raw_request, clipped by max_body_chars. To read ONE vector\'s bytes prefer action ' +
+    '"request", which renders the request with the parameter spans marked and gets a much larger ' +
+    'budget because there is no row multiplier.')),
   max_body_chars: z.number().int().positive().optional().describe(
-    'Raise the per-request character budget for THIS call. raw_request is clipped by default ' +
-    'because a listing multiplies it by its row count; reading ONE vector with action "request" ' +
-    'already gets a much larger budget. Bounded at 200000 and divided by the row count.'),
+    'detail:"full" only. Raise the per-request character budget for THIS call. raw_request is ' +
+    'clipped because a listing multiplies it by its row count; reading ONE vector with action ' +
+    '"request" already gets a much larger budget. Bounded at 200000 and divided by the row count.'),
 
   // --- add and update -------------------------------------------------------------------------
   raw_request: z.string().optional().describe(
@@ -103,8 +111,13 @@ const manageAttackVectorsSchema = z.object({
 });
 
 // A vector row is small except for raw_request, which is a whole HTTP request.
-function compactVector(v, bodyLimit) {
-  return {
+//
+// Which is why it is not in the default row. Clipping it to 600 characters was not enough: 600
+// characters times forty rows is still 24000 characters of bytes nobody asked for, and that is what
+// put this listing over the MCP output cap at roughly forty vectors on the Juice Shop target. The
+// caller that wants bytes wants them for ONE vector, and action "request" serves exactly that.
+function compactVector(v, bodyLimit, full) {
+  const row = {
     id: v.id,
     method: v.method,
     method_confidence: v.method_confidence,
@@ -118,12 +131,19 @@ function compactVector(v, bodyLimit) {
     parameters_origin: v.parameters_origin,
     sources: v.sources,
     evidence_url: v.evidence_url,
-    raw_request: clip(v.raw_request, bodyLimit),
     notes: v.notes,
     manual_added: v.manual_added === true ? true : undefined,
     edited_at: v.edited_at,
     times_seen: v.times_seen,
   };
+  if (full) {
+    row.raw_request = clip(v.raw_request, bodyLimit);
+  } else if (typeof v.raw_request === 'string' && v.raw_request.length > 0) {
+    // The size, not the bytes. A caller can then tell a vector with recorded bytes from one that was
+    // reconstructed, which is the thing raw_request was actually being read for in a listing.
+    row.raw_request_chars = v.raw_request.length;
+  }
+  return dropEmpty(row);
 }
 
 function requireTarget(params, action) {
@@ -174,6 +194,7 @@ async function manageAttackVectors(params) {
 
       const rows = Array.isArray(result.vectors) ? result.vectors : [];
       const limit = clampLimit(params.max_results);
+      const full = isFull(params);
       const bodyLimit = resolveLimit(params.max_body_chars, DEFAULTS.list, Math.min(rows.length, limit) || 1);
 
       const by_insertion_point = {};
@@ -189,7 +210,16 @@ async function manageAttackVectors(params) {
         by_insertion_point,
         insertion_points: result.insertion_points,
         note: result.note,
-        ...limitResults(rows.map((v) => compactVector(v, bodyLimit)), limit),
+        detail: full ? 'full' : 'compact',
+        // Said explicitly because the alternative is an agent concluding the vectors have no
+        // recorded bytes. raw_request_chars on a row is the signal that they exist.
+        raw_request_note: full
+          ? 'raw_request is included and clipped per row. Use action "request" on one vector for the ' +
+            'marked, unclipped rendering.'
+          : 'raw_request is omitted: at forty rows it was what pushed this listing past the MCP ' +
+            'output cap. rows carrying recorded bytes show raw_request_chars. Use action "request" ' +
+            'for one vector, or detail:"full" to include it on every row.',
+        ...limitResults(rows.map((v) => compactVector(v, bodyLimit, full)), limit),
       };
     }
 
@@ -266,4 +296,6 @@ async function manageAttackVectors(params) {
   }
 }
 
-module.exports = { manageAttackVectorsSchema, manageAttackVectors };
+// compactVector is exported for the row-shape test. The size of a list row is the whole defect this
+// tool had, so it is worth asserting on directly rather than through a call that needs the API up.
+module.exports = { manageAttackVectorsSchema, manageAttackVectors, compactVector };

@@ -18,6 +18,9 @@ services:
       db:
         condition: service_healthy
     environment:
+      # Where the positive-control oracle lives. Explicit rather than relying on the
+      # compile-time default, so compose and the code cannot disagree about it silently.
+      ARS0N_CANARY_HOST: "oracle:8000"
       DATABASE_URL: postgres://postgres:postgres@db:5432/ars0n
       DB_HOST: db
       DB_PORT: 5432
@@ -739,6 +742,34 @@ services:
       - temp_data:/tmp
     entrypoint: ["sleep", "infinity"]
     restart: "no"
+    networks:
+      - ars0n-network
+
+  # The canary oracle. A deliberately vulnerable control target, reached by the scanner containers as
+  # http://oracle:8000 over the compose network's embedded DNS.
+  #
+  # It exists so that a scan reporting nothing can be told apart from a scan that tested nothing. Every
+  # vector scan also runs against this service, which is KNOWN to be vulnerable; a tool that finds
+  # nothing here did not work, and its verdict on the real target is withheld rather than reported as
+  # clean.
+  #
+  # NOT opt-in behind a profile, unlike ai_service. A control that only runs when someone remembers to
+  # enable it is not a control, and the failure mode of forgetting is silently going back to trusting
+  # every clean result.
+  #
+  # Deliberately publishes NO ports. It is reachable from sibling containers by service name and from
+  # nowhere else, so a deliberately vulnerable service is not exposed to the host or the LAN.
+  oracle:
+    container_name: ars0n-framework-v2-oracle-1
+    build: ./docker/oracle
+    restart: unless-stopped
+    environment:
+      ORACLE_PORT: "8000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     networks:
       - ars0n-network
 

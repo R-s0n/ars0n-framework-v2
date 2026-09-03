@@ -143,7 +143,18 @@ func CheckWebhookResults(ctx context.Context, settings map[string]any, tokens ma
 		}
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		// Redirects are NOT followed. A results URL that answers 3xx is almost always an
+		// authentication redirect, and following it lands on a login page that is a perfectly good
+		// 200 with no tokens in it. Since this function decides whether an out-of-band callback
+		// arrived by substring-searching the body, that reads as "the target never called out",
+		// which is the one wrong answer this whole section exists to avoid.
+		//
+		// Measured against a private webhook.site token: GET /token/{id}/requests answers
+		// 302 to https://webhook.site/login, both with no auth header and with a wrong one.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -156,7 +167,17 @@ func CheckWebhookResults(ctx context.Context, settings map[string]any, tokens ma
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode >= 400 {
+	// Anything that is not a 2xx means the body is not the inbox, so it cannot be searched for
+	// tokens. 3xx is called out separately because it has a specific and very common cause.
+	if resp.StatusCode >= 300 {
+		if resp.StatusCode < 400 {
+			return nil, fmt.Errorf("the results URL answered %d and redirected to %q instead of "+
+				"returning the received requests. That is an authentication redirect: the inbox is "+
+				"private. Set the section's results auth header, which for webhook.site is "+
+				"\"Api-Key: <your api key>\", or make the URL public. Nothing was read, so this is "+
+				"NOT evidence that no callback arrived",
+				resp.StatusCode, resp.Header.Get("Location"))
+		}
 		return nil, fmt.Errorf("the results URL answered %d, so it could not be read", resp.StatusCode)
 	}
 

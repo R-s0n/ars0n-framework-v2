@@ -171,16 +171,18 @@ async function populateBurp(params) {
   const cap = params.max_urls && params.max_urls > 0 ? params.max_urls : 200;
   const sending = urls.slice(0, cap);
 
-  // One POST per URL, the way the UI does it: the handler takes a single url per call.
+  // ONE POST carrying the whole list. The handler decodes {"urls": []} and nothing else, and
+  // rejects an empty list with 400 "No URLs provided" (populateBurpsuite in server/main.go), so the
+  // previous shape, one POST per URL sending {"url": ...}, decoded to an empty URLs slice every
+  // time. Every call 400d and the tool reported sent: 0, failed: N for a perfectly good list.
   const results = { sent: 0, failed: 0, errors: [] };
-  for (const url of sending) {
-    try {
-      await apiPost('/burpsuite/populate', { url });
-      results.sent++;
-    } catch (err) {
-      results.failed++;
-      if (results.errors.length < 5) results.errors.push(`${url}: ${apiError(err)}`);
-    }
+  try {
+    const res = await apiPost('/burpsuite/populate', { urls: sending });
+    results.sent = sending.length;
+    results.api_response = res;
+  } catch (err) {
+    results.failed = sending.length;
+    results.errors.push(apiError(err));
   }
 
   return {
@@ -188,9 +190,14 @@ async function populateBurp(params) {
     source,
     requested: urls.length,
     truncated: urls.length > sending.length,
-    note: urls.length > sending.length
-      ? `Only the first ${cap} were sent. Raise max_urls to send more.`
-      : undefined,
+    // "sent" means the API accepted the POST. PopulateBurpsuite returns nil unconditionally, so a
+    // success here is not evidence that Burp itself received anything.
+    note: [
+      urls.length > sending.length
+        ? `Only the first ${cap} were sent. Raise max_urls to send more.`
+        : null,
+      'sent counts URLs the API accepted, not URLs Burp confirmed receiving.',
+    ].filter(Boolean).join(' '),
   };
 }
 

@@ -59,6 +59,12 @@ import {
 } from './lib/scope.js';
 
 import {
+  normalizeAuthority,
+  decide as decideScope,
+  parseRule as parseScopeRule,
+} from './lib/scoperules.js';
+
+import {
   configureDeepCapture,
   syncAttachments,
   detachAll,
@@ -129,8 +135,18 @@ function captureResponseBodies(state) {
 }
 
 // Shared predicate so all three sources agree on what is in scope.
+//
+// Two boundaries live here. When the operator has authored scope RULES for this target, those are
+// the whole boundary and the host list is not consulted: a deny would mean nothing if the host list
+// could still admit past it. With no rules, this is byte-for-byte the behaviour that predates them.
+//
+// This verdict is a local optimisation, never authorization. The server re-decides every capture at
+// ingest with the same algorithm, so the worst a divergence here can do is record something the
+// server then discards.
 function shouldCapture(url, state) {
-  if (!state.active || !state.scopeHosts.length) return { capture: false };
+  const rules = state.scopeRules || [];
+  if (!state.active) return { capture: false };
+  if (!rules.length && !state.scopeHosts.length) return { capture: false };
 
   let parsed;
   try {
@@ -151,7 +167,18 @@ function shouldCapture(url, state) {
     /* apiBase malformed; fall through */
   }
 
-  if (!hostInScope(parsed.hostname, state.scopeHosts)) {
+  if (rules.length) {
+    const subject = normalizeAuthority(url);
+    // Rules alone decide. The host list is NOT admitted alongside them, because the whole point of
+    // authoring a rule is to control what gets recorded, and a list that could admit past a deny
+    // would make denies advisory. Switching a target to rules can therefore narrow what is
+    // recorded, which is the safe direction and is visible: anything dropped is counted in the
+    // out-of-scope tally the popup shows.
+    const verdict = decideScope(rules, subject, {});
+    if (!verdict.allowed) {
+      return { capture: false, outOfScopeHost: (subject ? subject.host : parsed.hostname).toLowerCase() };
+    }
+  } else if (!hostInScope(parsed.hostname, state.scopeHosts)) {
     return { capture: false, outOfScopeHost: parsed.hostname.toLowerCase() };
   }
 
@@ -440,7 +467,19 @@ async function startCaptureSession(settings, frameworkUrl) {
     if (!settings.scopeTargetId) throw new Error('No scope target selected');
 
     const scopeHosts = buildScopeHosts(targetUrlObj, settings);
-    console.log('[MANUAL-CRAWL] Starting session. In-scope hosts:', scopeHosts);
+    // Rules are fetched before the session opens, so the very first request of a recording is
+    // judged by the same boundary as the last one. Fetching after would leave a window in which the
+    // host list alone decides, and on a target whose rules exist to NARROW that list, the window is
+    // one where out-of-scope traffic gets recorded.
+    const ruleLoad = await fetchScopeRules(apiBase, settings.scopeTargetId);
+    const scopeRules = ruleLoad.rules;
+    if (ruleLoad.error) console.error('[MANUAL-CRAWL]', ruleLoad.error);
+    if (scopeRules.length) {
+      console.log('[MANUAL-CRAWL] Starting session. Scope RULES in force (host list not consulted):',
+        scopeRules.map((r) => r.kind + ':' + r.value));
+    } else {
+      console.log('[MANUAL-CRAWL] Starting session. In-scope hosts:', scopeHosts);
+    }
 
     const result = await postJSON(`${apiBase}/manual-crawl/start`, {
       targetUrl: targetUrlObj.origin,
@@ -459,6 +498,8 @@ async function startCaptureSession(settings, frameworkUrl) {
       scopeTargetId: result.body.scopeTargetId || settings.scopeTargetId,
       targetUrl: targetUrlObj.origin,
       scopeHosts,
+      scopeRules,
+      scopeRulesError: ruleLoad.error,
       settings,
       apiBase,
       startedAt: Date.now(),
@@ -537,19 +578,76 @@ async function persistExtraHostsForTarget(scopeTargetId, extraHosts) {
   });
 }
 
+// Pulls the operator's authored scope rules for a target and parses them for local evaluation.
+//
+// The server stores the canonical text, which is the same text the operator typed, so the extension
+// re-parses rather than trusting a pre-decomposed shape. That keeps ONE parser in JS: if the
+// canonical form and this parser ever disagree, every test in scoperules.test.mjs fails.
+//
+// A target with no rules returns an empty list, which is what keeps the pre-rules behaviour intact.
+async function fetchScopeRules(apiBase, scopeTargetId) {
+  if (!scopeTargetId) return { rules: [], error: null };
+  try {
+    const res = await fetch(`${apiBase}/scope-rules/${scopeTargetId}`);
+    if (!res.ok) return { rules: [], error: null };
+    const body = await res.json();
+    const serverCount = (body.rules || []).filter((row) => row.enabled !== false).length;
+    const rules = [];
+    for (const row of body.rules || []) {
+      if (row.enabled === false) continue;
+      const parsed = parseScopeRule(row.canonical);
+      // A rule the server accepted but this parser rejects is a REAL divergence between the two
+      // evaluators, which is the failure the shared vectors exist to prevent. Keeping the rest
+      // would silently widen the local boundary if the unparsed one were a deny, so the whole set
+      // is abandoned and the host list stays in charge as the narrower of the two.
+      //
+      // This is reported rather than merely logged: silently recording by a different boundary
+      // than the scanners enforce is exactly the condition an operator must not have to discover
+      // from a console they never open.
+      if (parsed.error) {
+        return {
+          rules: [],
+          error: `Scope rule "${row.canonical}" was accepted by the framework but could not be `
+               + `parsed by the extension (${parsed.error}). All ${serverCount} rules have been `
+               + `ignored and the host list is being used instead. Recording may be narrower than `
+               + `the framework's own boundary until this is fixed.`,
+        };
+      }
+      parsed.id = row.id;
+      rules.push(parsed);
+    }
+    return { rules, error: null };
+  } catch (error) {
+    // A network failure is not a divergence: the framework may simply be down, and the host list
+    // is the correct fallback. Reported at a lower key than a parse divergence.
+    console.warn('[MANUAL-CRAWL] could not load scope rules:', error.message);
+    return { rules: [], error: null };
+  }
+}
+
 async function applyScopeChange(settingsPatch) {
   const state = await getState();
   const settings = { ...(state.settings || {}), ...settingsPatch };
   const targetUrlObj = normalizeTargetUrl(state.targetUrl);
   const scopeHosts = buildScopeHosts(targetUrlObj, settings);
+  const ruleLoad = await fetchScopeRules(state.apiBase, settings.scopeTargetId);
+  const scopeRules = ruleLoad.rules;
 
-  // A host that just came into scope is no longer "observed out of scope".
+  // A host that just came into scope is no longer "observed out of scope". Which boundary decides
+  // that has to match the one shouldCapture uses, or a host disappears from the list the operator
+  // clicks to add it while still being dropped.
   const observed = { ...state.observedOutOfScope };
   Object.keys(observed).forEach((host) => {
-    if (hostInScope(host, scopeHosts)) delete observed[host];
+    const nowInScope = scopeRules.length
+      ? decideScope(scopeRules, normalizeAuthority(host, 'https'), {}).allowed
+      : hostInScope(host, scopeHosts);
+    if (nowInScope) delete observed[host];
   });
 
-  await updateState({ settings, scopeHosts, observedOutOfScope: observed });
+  await updateState({
+    settings, scopeHosts, scopeRules, observedOutOfScope: observed,
+    scopeRulesError: ruleLoad.error,
+  });
   await pushConfigToPages();
   if (state.deepCapture && state.deepCapture.enabled) await refreshDeepCapture();
   void broadcastState();
@@ -581,7 +679,12 @@ async function refreshDeepCapture() {
     return;
   }
 
-  const result = await syncAttachments(state.scopeHosts);
+  // Attach by the SAME boundary the capture path uses, or the debugger banner appears on sites the
+  // operator has explicitly denied.
+  const rules = state.scopeRules || [];
+  const result = await syncAttachments(rules.length
+    ? (host) => decideScope(rules, normalizeAuthority(host, 'https'), {}).allowed
+    : state.scopeHosts);
   await updateState({
     deepCapture: { ...state.deepCapture, attachedTabs: result.attached, errors: result.errors },
   });
@@ -1917,6 +2020,7 @@ function publicState(state) {
     scopeTargetId: state.scopeTargetId,
     targetUrl: state.targetUrl,
     scopeHosts: state.scopeHosts,
+    scopeRulesError: state.scopeRulesError || null,
     stats: state.stats,
     startedAt: state.startedAt,
     lastHeartbeatAt: state.lastHeartbeatAt,
@@ -2020,6 +2124,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await persistExtraHostsForTarget(state.scopeTargetId, extraHosts);
         const scopeHosts = await applyScopeChange({ extraHosts });
         sendResponse({ success: true, scopeHosts });
+      })
+      .catch((error) => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
+  // The worker holds its own parsed copy of the rules, so an edit made in the popup has to be
+  // pulled through here or a recording in progress keeps enforcing the boundary it started with.
+  if (message.action === 'refreshScopeRules') {
+    getState()
+      .then(async (state) => {
+        const ruleLoad = await fetchScopeRules(
+          state.apiBase, state.scopeTargetId || (state.settings && state.settings.scopeTargetId));
+        const scopeRules = ruleLoad.rules;
+        await updateState({ scopeRules, scopeRulesError: ruleLoad.error });
+        if (state.deepCapture && state.deepCapture.enabled) await refreshDeepCapture();
+        void broadcastState();
+        sendResponse({ success: true, ruleCount: scopeRules.length, error: ruleLoad.error });
       })
       .catch((error) => sendResponse({ success: false, error: error.message }));
     return true;

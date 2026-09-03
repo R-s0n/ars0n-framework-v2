@@ -36,22 +36,22 @@ import "time"
 var nucleiDastGroups = []string{"Templates", "Fuzzing", "Pacing", "Request", "Output"}
 
 var nucleiDastOwned = map[string]string{
-	"-u":            "The URL is built per vector.",
-	"-target":       "The URL is built per vector.",
-	"-l":            "A per-vector request file is written for body vectors; the URL is passed directly otherwise.",
-	"-list":         "A per-vector request file is written for body vectors; the URL is passed directly otherwise.",
-	"-im":           "Set to jsonl for a body vector, because that is the only input mode that carries a request body into the fuzzer.",
-	"-input-mode":   "Set to jsonl for a body vector, because that is the only input mode that carries a request body into the fuzzer.",
-	"-dast":         "Always set. Without it the fuzzing templates are not loaded and the scan tests nothing.",
-	"-jsonl":        "Findings are read back as jsonl. Another format cannot be parsed.",
-	"-o":            "The report path is per scan and per vector.",
-	"-nc":           "Always set. Escape codes corrupt the stored evidence.",
-	"-no-color":     "Always set. Escape codes corrupt the stored evidence.",
-	"-silent":       "The framework captures the run's output itself.",
-	"-update":       "Updating nuclei is done by rebuilding its container.",
-	"-ut":           "Templates are updated on your own cadence, not in the middle of a scan.",
+	"-u":                "The URL is built per vector.",
+	"-target":           "The URL is built per vector.",
+	"-l":                "A per-vector request file is written for body vectors; the URL is passed directly otherwise.",
+	"-list":             "A per-vector request file is written for body vectors; the URL is passed directly otherwise.",
+	"-im":               "Set to jsonl for a body vector, because that is the only input mode that carries a request body into the fuzzer.",
+	"-input-mode":       "Set to jsonl for a body vector, because that is the only input mode that carries a request body into the fuzzer.",
+	"-dast":             "Always set. Without it the fuzzing templates are not loaded and the scan tests nothing.",
+	"-jsonl":            "Findings are read back as jsonl. Another format cannot be parsed.",
+	"-o":                "The report path is per scan and per vector.",
+	"-nc":               "Always set. Escape codes corrupt the stored evidence.",
+	"-no-color":         "Always set. Escape codes corrupt the stored evidence.",
+	"-silent":           "The framework captures the run's output itself.",
+	"-update":           "Updating nuclei is done by rebuilding its container.",
+	"-ut":               "Templates are updated on your own cadence, not in the middle of a scan.",
 	"-update-templates": "Templates are updated on your own cadence, not in the middle of a scan.",
-	"-uncover":      "Targets come from the attack vector table, not from a search engine.",
+	"-uncover":          "Targets come from the attack vector table, not from a search engine.",
 }
 
 var nucleiDastOptions = map[string]VectorOptionMeta{
@@ -59,15 +59,15 @@ var nucleiDastOptions = map[string]VectorOptionMeta{
 	"templates": {Kind: "csv", Group: "Templates", Label: "Template sets", Flag: "-t",
 		Choices:     []string{"ssrf", "redirect"},
 		Placeholder: "both. ssrf is response-ssrf and blind-ssrf, redirect is open-redirect and open-redirect-bypass"},
-	"severity":        {Kind: "csv", Group: "Templates", Label: "Only these severities", Flag: "-severity", Choices: []string{"info", "low", "medium", "high", "critical"}},
+	"severity":         {Kind: "csv", Group: "Templates", Label: "Only these severities", Flag: "-severity", Choices: []string{"info", "low", "medium", "high", "critical"}},
 	"excludeTemplates": {Kind: "string", Group: "Templates", Label: "Exclude templates", Flag: "-et", Repeatable: true},
-	"extraTemplates":  {Kind: "path", Group: "Templates", Label: "Additional template path", Flag: "-t", Repeatable: true, Placeholder: "a directory inside the container"},
+	"extraTemplates":   {Kind: "path", Group: "Templates", Label: "Additional template path", Flag: "-t", Repeatable: true, Placeholder: "a directory inside the container"},
 
 	// Fuzzing
 	"fuzzAggression": {Kind: "enum", Group: "Fuzzing", Label: "Aggression", Flag: "-fa", Choices: []string{"low", "medium", "high"},
 		Placeholder: "low. Measured on a lab with a real SSRF, all three levels found it, so higher is more payloads rather than the difference between finding and not"},
-	"fuzzingType":  {Kind: "enum", Group: "Fuzzing", Label: "Override fuzzing type", Flag: "-ft", Choices: []string{"replace", "prefix", "postfix", "infix"}, Placeholder: "whatever the template says"},
-	"fuzzingMode":  {Kind: "enum", Group: "Fuzzing", Label: "Override fuzzing mode", Flag: "-fm", Choices: []string{"single", "multiple"}, Placeholder: "whatever the template says"},
+	"fuzzingType":        {Kind: "enum", Group: "Fuzzing", Label: "Override fuzzing type", Flag: "-ft", Choices: []string{"replace", "prefix", "postfix", "infix"}, Placeholder: "whatever the template says"},
+	"fuzzingMode":        {Kind: "enum", Group: "Fuzzing", Label: "Override fuzzing mode", Flag: "-fm", Choices: []string{"single", "multiple"}, Placeholder: "whatever the template says"},
 	"fuzzParamFrequency": {Kind: "int", Group: "Fuzzing", Label: "Uninteresting parameter frequency", Flag: "-fuzz-param-frequency", Placeholder: "10"},
 	"displayFuzzPoints":  {Kind: "bool", Group: "Fuzzing", Label: "Show fuzz points", Flag: "-dfp", Placeholder: "off. Useful when a vector reports nothing and you want to see what was actually fuzzed"},
 
@@ -78,9 +78,9 @@ var nucleiDastOptions = map[string]VectorOptionMeta{
 	"retries":     {Kind: "int", Group: "Pacing", Label: "Retries", Flag: "-retries", Placeholder: "1"},
 
 	// Request
-	"header":         {Kind: "string", Group: "Request", Label: "Headers", Flag: "-H", Repeatable: true, Placeholder: "Name: value. Sent with every request, for authentication"},
-	"proxy":          {Kind: "string", Group: "Request", Label: "Proxy", Flag: "-proxy"},
-	"followRedirects": {Kind: "bool", Group: "Request", Label: "Follow redirects", Flag: "-fr", Placeholder: "off, and it should stay off: the open redirect matchers read the Location header of the 30x itself"},
+	"header":           {Kind: "string", Group: "Request", Label: "Headers", Flag: "-H", Repeatable: true, Placeholder: "Name: value. Sent with every request, for authentication"},
+	"proxy":            {Kind: "string", Group: "Request", Label: "Proxy", Flag: "-proxy"},
+	"followRedirects":  {Kind: "bool", Group: "Request", Label: "Follow redirects", Flag: "-fr", Placeholder: "off, and it should stay off: the open redirect matchers read the Location header of the 30x itself"},
 	"interactshServer": {Kind: "string", Group: "Request", Label: "Interactsh server", Flag: "-iserver", Placeholder: "ProjectDiscovery's public servers. No account or key is needed"},
 	"noInteractsh":     {Kind: "bool", Group: "Request", Label: "Disable out-of-band checks", Flag: "-ni", Placeholder: "off. Turning this on leaves only the response-based payloads, which need no external service at all"},
 
@@ -97,13 +97,13 @@ var nucleiDastOptions = map[string]VectorOptionMeta{
 var recollapseGroups = []string{"Mutation", "Encoding", "Replay"}
 
 var recollapseOwned = map[string]string{
-	"-f":        "The input comes from the finding this run is based on, not from a file.",
-	"--file":    "The input comes from the finding this run is based on, not from a file.",
-	"-nt":       "The normalization table is reference material, not a scan.",
+	"-f":          "The input comes from the finding this run is based on, not from a file.",
+	"--file":      "The input comes from the finding this run is based on, not from a file.",
+	"-nt":         "The normalization table is reference material, not a scan.",
 	"--normtable": "The normalization table is reference material, not a scan.",
-	"-tt":       "The truncation table is reference material, not a scan.",
-	"-ct":       "The case table is reference material, not a scan.",
-	"--html":    "The tables are not part of a scan.",
+	"-tt":         "The truncation table is reference material, not a scan.",
+	"-ct":         "The case table is reference material, not a scan.",
+	"--html":      "The tables are not part of a scan.",
 }
 
 var recollapseOptions = map[string]VectorOptionMeta{
@@ -111,11 +111,11 @@ var recollapseOptions = map[string]VectorOptionMeta{
 	"modes": {Kind: "csv", Group: "Mutation", Label: "Variation modes", Flag: "-m",
 		Choices:     []string{"1", "2", "3", "4", "5", "6", "7"},
 		Placeholder: "1,2,3,4,5,6,7. 1 starting, 2 separator, 3 normalization, 4 termination, 5 regex metacharacters, 6 case folding, 7 byte truncation"},
-	"range":     {Kind: "string", Group: "Mutation", Label: "Byte range", Flag: "-r", Placeholder: "0,0xff"},
-	"size":      {Kind: "int", Group: "Mutation", Label: "Fuzzing bytes", Flag: "-s", Placeholder: "1"},
-	"alphanum":  {Kind: "bool", Group: "Mutation", Label: "Include alphanumeric bytes", Flag: "-an"},
-	"maxnorm":   {Kind: "int", Group: "Mutation", Label: "Max normalizations", Flag: "-mn", Placeholder: "3"},
-	"maxtrunc":  {Kind: "int", Group: "Mutation", Label: "Max truncations", Flag: "-mt", Placeholder: "3"},
+	"range":    {Kind: "string", Group: "Mutation", Label: "Byte range", Flag: "-r", Placeholder: "0,0xff"},
+	"size":     {Kind: "int", Group: "Mutation", Label: "Fuzzing bytes", Flag: "-s", Placeholder: "1"},
+	"alphanum": {Kind: "bool", Group: "Mutation", Label: "Include alphanumeric bytes", Flag: "-an"},
+	"maxnorm":  {Kind: "int", Group: "Mutation", Label: "Max normalizations", Flag: "-mn", Placeholder: "3"},
+	"maxtrunc": {Kind: "int", Group: "Mutation", Label: "Max truncations", Flag: "-mt", Placeholder: "3"},
 
 	// Encoding
 	"encoding": {Kind: "enum", Group: "Encoding", Label: "Output encoding", Flag: "-e", Choices: []string{"1", "2", "3", "4"},
@@ -150,9 +150,9 @@ var ssrfmapOptions = map[string]VectorOptionMeta{
 			"consul", "docker", "github", "zabbix", "memcache", "redis", "mysql", "postgres",
 			"fastcgi", "tomcat", "smtp", "axfr", "socksproxy", "smbhash", "custom"},
 		Placeholder: "portscan. Anything beyond portscan, networkscan and the cloud metadata readers talks to internal services on someone else's network, so choose deliberately"},
-	"level":      {Kind: "int", Group: "Modules", Label: "Level", Flag: "--level", Placeholder: "1, and the range is 1-5. It widens the address range portscan and networkscan sweep"},
+	"level":       {Kind: "int", Group: "Modules", Label: "Level", Flag: "--level", Placeholder: "1, and the range is 1-5. It widens the address range portscan and networkscan sweep"},
 	"targetFiles": {Kind: "string", Group: "Modules", Label: "Files to read", Flag: "--rfiles", Placeholder: "only used by the readfiles module"},
-	"ldomain":    {Kind: "string", Group: "Modules", Label: "Domain for AXFR", Flag: "--ldomain"},
+	"ldomain":     {Kind: "string", Group: "Modules", Label: "Domain for AXFR", Flag: "--ldomain"},
 
 	// Network
 	"ssl":   {Kind: "bool", Group: "Network", Label: "Use HTTPS without verification", Flag: "--ssl"},
@@ -175,10 +175,10 @@ func init() {
 			InsertionPoints:        []string{"query", "body", "header", "cookie"},
 			RequiresSectionSetting: "listeningWebhookURL",
 			UsesReportFile:         true,
-			Compose:         ComposeNucleiDast,
-			Parse:           parseNucleiDastReport,
-			SkipReason:      nucleiDastSkipReason,
-			Timeout:         25 * time.Minute,
+			Compose:                ComposeNucleiDast,
+			Parse:                  parseNucleiDastReport,
+			SkipReason:             nucleiDastSkipReason,
+			Timeout:                25 * time.Minute,
 			Limitation: "Fires the payload list at the query string, body, headers and cookies of every " +
 				"eligible vector, then reads the webhook to see which ones called out. Payloads that " +
 				"answer in the response, like a cloud metadata document or /etc/passwd, are matched " +
@@ -197,9 +197,9 @@ func init() {
 			// generating the same 3361 mutations once per vector would be seventy identical runs.
 			DedupeKey: func(VectorInput) string { return "one-list-per-target" },
 			ScanUnit:  "payload list",
-			Compose:                ComposeREcollapse,
-			Parse:           parseREcollapseOutput,
-			Timeout:         15 * time.Minute,
+			Compose:   ComposeREcollapse,
+			Parse:     parseREcollapseOutput,
+			Timeout:   15 * time.Minute,
 			Limitation: "REcollapse generates mutations of your webhook URL and sends nothing itself: it " +
 				"has no network code at all. One list is built per target and the scan beside it fires " +
 				"that list at every eligible vector. Configure the webhook first.",

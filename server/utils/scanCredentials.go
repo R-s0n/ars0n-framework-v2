@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -268,8 +269,31 @@ func (c *ScopedAuthContext) HasAny() bool {
 // It is not a full PSL. It handles the common two-label suffixes explicitly so co.uk and com.au
 // do not collapse a whole country's namespace into one bucket, which would let a cookie captured
 // on one customer's site be sent to another's.
+//
+// AN IP LITERAL IS ITS OWN BOUNDARY AND HAS NO REGISTRABLE DOMAIN. Without the check below,
+// RegistrableDomain("10.0.0.18") returned "0.18": the dotted-quad split into four labels, "0.18" was
+// not a known two-label suffix, and the last two labels came back. Two things followed from that one
+// string, both measured on the Juice Shop target on 2026-08-21:
+//
+//   - LoadScanScope put "0.18" in s.domains, so the boundary rendered as "*.0.18, 10.0.0.18" in
+//     every scan that printed it, and Allows() admitted ANY host ending in ".0.18".
+//     hostWithinDomain("110.0.0.18", "0.18") is true, because "110.0.0.18" really does end in
+//     ".0.18" at a label boundary. A completely unrelated machine would have been treated as in
+//     scope and sent traffic.
+//   - byDomain, the cookie bucket, keyed on it. Every address in a 10.x.x.18 or 192.x.x.18 range
+//     shared one bucket, so a session cookie captured on one host could be attached to a request to
+//     another.
+//
+// It returns the HOST rather than "". Empty looks tidier and is worse: byDomain is keyed on this
+// value, so "" would collapse EVERY IP-literal host into a single bucket and hand one machine's
+// cookies to the next. The host itself gives each address its own bucket, which is the correct
+// answer to "what namespace does this belong to" for something that belongs to no namespace.
+// LoadScanScope skips the domain widening for an address separately, so nothing renders "*.10.0.0.18".
 func RegistrableDomain(host string) string {
 	host = strings.ToLower(strings.Trim(host, "."))
+	if isIPLiteralHost(host) {
+		return host
+	}
 	parts := strings.Split(host, ".")
 	if len(parts) <= 2 {
 		return host
@@ -287,6 +311,15 @@ func RegistrableDomain(host string) string {
 		return strings.Join(parts[len(parts)-3:], ".")
 	}
 	return last2
+}
+
+// isIPLiteralHost reports whether a host string is an address rather than a name.
+//
+// Brackets are stripped because a URL authority writes IPv6 as [::1] and url.Hostname() does not
+// always get to strip them before a host string reaches here.
+func isIPLiteralHost(host string) bool {
+	h := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(host), "["), "]")
+	return h != "" && net.ParseIP(h) != nil
 }
 
 func scopeTargetHost(scopeTargetID string) string {

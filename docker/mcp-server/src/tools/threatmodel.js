@@ -43,9 +43,24 @@ const BODY_PREVIEW = 600;
 
 // Every column the modal writes, in the order the Go handler lists them. Used to work out whether
 // an update is partial, because the PUT sets all nine unconditionally.
+// Generated from client/src/data/attacks.js by scripts/gen-attack-catalog.mjs. Imported rather than
+// duplicated so the ids this tool accepts cannot drift from the ones the UI dropdown offers.
+const ATTACK_CATALOG = require('../data/attackCatalog.json').attacks;
+const ATTACK_IDS = ATTACK_CATALOG.map((a) => a.id);
+const ATTACKS_BY_CATEGORY = ATTACK_CATALOG.reduce((acc, a) => {
+  for (const c of a.categories) (acc[c] ||= []).push(a.id);
+  return acc;
+}, {});
+
 const THREAT_FIELDS = ['category', 'url', 'mechanism', 'target_object', 'steps',
                        'security_controls', 'impact_customer_data', 'impact_attacker_scope',
-                       'impact_company_reputation'];
+                       'impact_company_reputation', 'one_sentence', 'summary', 'severity', 'authenticated', 'attack_id', 'attack_custom_name', 'test_status'];
+
+// Whether the threat has actually been run against the target yet. The Go handler preserves this
+// column when the PUT omits it, so an update that only edits prose cannot silently reset a threat
+// that was already tested back to untested.
+const TEST_STATUS = z.enum(['untested', 'validated', 'rejected']);
+const SEVERITY = z.enum(['critical', 'high', 'moderate', 'low', 'informational']);
 
 const manageThreatModelSchema = z.object({
   action: z.enum(['list', 'create', 'update', 'delete']).describe(
@@ -74,6 +89,38 @@ const manageThreatModelSchema = z.object({
   url: z.string().optional().describe(
     'Where this threat would be exploited, e.g. https://app.example.com/api/v1/users/123. ' +
     'Required on create. This is the field that ties the model back to the endpoint corpus.'),
+  one_sentence: z.string().optional().describe(
+    'ONE sentence naming who does what to which object and what they get. This is the headline a ' +
+    'reader sees before anything else, so it must stand alone without the steps below it.'),
+  summary: z.string().optional().describe(
+    'A short paragraph expanding the one-sentence description: the mechanism, the precondition an ' +
+    'attacker needs, and why it matters on this target. Prose, not a numbered procedure; the steps ' +
+    'field already holds the procedure.'),
+  attack_id: z.enum(ATTACK_IDS).optional().describe(
+    'The Possible Attacks entry this threat is an instance of, e.g. "xss". REQUIRED on create. ' +
+    'It must be an attack weaponized to achieve this STRIDE category, and the API ' +
+    'refuses the pairing otherwise: ' +
+    Object.entries(ATTACKS_BY_CATEGORY).map(([c, ids]) => `${c} -> ${ids.join('|')}`).join('; ')),
+  attack_custom_name: z.string().max(120).optional().describe(
+    'An ad hoc attack name, for a threat that is not an instance of anything in the catalogue. ' +
+    'Mutually exclusive with attack_id: give one or the other, never both. It is stored on the ' +
+    'threat only and is NOT added to the Possible Attacks catalogue.'),
+  authenticated: z.boolean().optional().describe(
+    'Whether the attacker must already hold an authenticated session to execute this attack. ' +
+    'true renders a red "Auth Required" badge, false a green "Unauthenticated" badge. ' +
+    'Omit it to leave the question open: the badge is then hidden entirely, because a green ' +
+    '"Unauthenticated" on an unexamined threat asserts reachability nobody has established.'),
+  severity: SEVERITY.optional().describe(
+    'critical, high, moderate, low or informational. Rendered as a colour-coded badge at the top of ' +
+    'the accordion, so it is the first thing a reader sorts on. Leave unset rather than guessing: ' +
+    'an unset severity reads as "not yet triaged", and a guessed one reads as a decision.'),
+  test_status: TEST_STATUS.optional().describe(
+    'Whether this threat has been tested against the target yet, and what happened. ' +
+    'untested is the default on create and means nobody has run it. validated means the attack ' +
+    'worked. rejected means it was run and did not. It drives the colour of the entry in the ' +
+    'Threat Model Results UI, grey, green and red respectively, so a model full of grey is a model ' +
+    'nobody has acted on. On update this is PRESERVED when omitted, so editing a threat\'s prose ' +
+    'will not quietly reset a result somebody spent time establishing; pass it explicitly to change it.'),
   mechanism: z.string().optional().describe(
     'The application mechanism under attack, e.g. "Password Reset" or "Generate Pre-signed URL". ' +
     'The modal offers these from the mechanisms already documented on this target, so list ' +
@@ -437,6 +484,22 @@ function compactThreat(t, full) {
     impact_customer_data: clip(t.impact_customer_data, limit),
     impact_attacker_scope: clip(t.impact_attacker_scope, limit),
     impact_company_reputation: clip(t.impact_company_reputation, limit),
+    // Never clipped and always shown: it is one short word and it is the field that says whether
+    // anyone has acted on this threat.
+    test_status: t.test_status || 'untested',
+    // The three reader-facing fields. one_sentence and severity are never clipped: they are the
+    // headline and the badge, and a clipped headline is worse than none. summary IS clipped like
+    // the other prose, but it must be projected: omitting it made every read-back show the field as
+    // absent, so a caller that had just written it could not confirm the write landed.
+    one_sentence: t.one_sentence || '',
+    summary: clip(t.summary, limit),
+    severity: t.severity || '',
+    // Passed through as-is, including null: the reader has to be able to tell
+    // "not decided" from "no credential needed".
+    authenticated: t.authenticated === undefined ? null : t.authenticated,
+    attack_id: t.attack_id || '',
+    attack_custom_name: t.attack_custom_name || '',
+    attack_name: t.attack_name || '',
     created_at: t.created_at,
     updated_at: t.updated_at,
   });
@@ -501,6 +564,13 @@ function threatBody(params) {
   if (params.impact_company_reputation !== undefined) {
     body.impact_company_reputation = params.impact_company_reputation;
   }
+  if (params.one_sentence !== undefined) body.one_sentence = params.one_sentence;
+  if (params.summary !== undefined) body.summary = params.summary;
+  if (params.severity !== undefined) body.severity = params.severity;
+  if (params.authenticated !== undefined) body.authenticated = params.authenticated;
+  if (params.attack_id !== undefined) body.attack_id = params.attack_id;
+  if (params.attack_custom_name !== undefined) body.attack_custom_name = params.attack_custom_name;
+  if (params.test_status !== undefined) body.test_status = params.test_status;
   return body;
 }
 
@@ -509,7 +579,16 @@ function threatBody(params) {
 // than re-encoding somebody else's formatting.
 function threatRowToBody(t) {
   const body = {};
-  for (const field of THREAT_FIELDS) body[field] = t[field] || '';
+  for (const field of THREAT_FIELDS) {
+    // `|| ''` is wrong for a tri-state boolean: it turns a legitimate `false` into `''`, which the
+    // API cannot decode into a *bool. Undecided (null/undefined) is omitted so the stored NULL
+    // survives rather than being restated as a decision.
+    if (field === 'authenticated') {
+      if (typeof t[field] === 'boolean') body[field] = t[field];
+      continue;
+    }
+    body[field] = t[field] || '';
+  }
   return body;
 }
 

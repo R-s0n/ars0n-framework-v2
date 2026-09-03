@@ -229,7 +229,7 @@ func TestSmugglingScansTheObservedURLWithoutTheCanary(t *testing.T) {
 	v := VectorInput{
 		Method: "GET", Scheme: "https", Domain: "x.example.com", Path: "/search",
 		InsertionPoint: "query", Parameters: []string{"q", "undiscovered"},
-		EvidenceURL:    "https://x.example.com/search?q=shoes",
+		EvidenceURL: "https://x.example.com/search?q=shoes",
 	}
 
 	got := smugglingScanURL(v)

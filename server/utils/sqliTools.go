@@ -37,14 +37,23 @@ var sqlmapOwned = map[string]string{
 	"-c":                 "Settings come from this store, not from a config file inside the container.",
 	"--batch":            "Always set. Without it sqlmap prompts, and a scan runner has no terminal to answer from.",
 	"--disable-coloring": "Always set. Escape codes corrupt the stored evidence.",
-	"--report-json":      "The report path is per scan and per vector, and is how findings are read back.",
-	"--output-dir":       "Set to a path inside the shared volume so the report can be read back.",
-	"--sql-shell":        "Interactive: it needs a terminal a scan runner does not have. Use SQL query instead.",
-	"--os-shell":         "Interactive: it needs a terminal a scan runner does not have.",
-	"--os-pwn":           "Interactive, and it establishes an out-of-band shell on the target.",
-	"--wizard":           "Interactive.",
-	"--forms":            "The framework tells sqlmap exactly what to test, from the attack vector.",
-	"--crawl":            "Crawling is done by the workflow's own crawlers, and their output IS the vector list.",
+	// The same defect commix has and ghauri has, fixed in both and not here. sqlmap keeps a session
+	// per target under --output-dir/<host>/session.sqlite and RESTORES the stored verdict rather than
+	// retesting. Measured: /tmp/sqlmap-out inside the container held four host directories, some days
+	// old; six of one run's seven findings were resumed from a scan twenty hours earlier, and the
+	// oracle canary "passed" in 871ms without sending a test request.
+	"--flush-session": "Always set. sqlmap stores a session per target under its output directory and " +
+		"replays that verdict on the next run without sending a request, so without this a re-scan " +
+		"reports yesterday's answer, a fixed target still looks vulnerable, a newly vulnerable one " +
+		"still looks clean, and the positive control passes from cache while proving nothing.",
+	"--report-json": "The report path is per scan and per vector, and is how findings are read back.",
+	"--output-dir":  "Set to a path inside the shared volume so the report can be read back.",
+	"--sql-shell":   "Interactive: it needs a terminal a scan runner does not have. Use SQL query instead.",
+	"--os-shell":    "Interactive: it needs a terminal a scan runner does not have.",
+	"--os-pwn":      "Interactive, and it establishes an out-of-band shell on the target.",
+	"--wizard":      "Interactive.",
+	"--forms":       "The framework tells sqlmap exactly what to test, from the attack vector.",
+	"--crawl":       "Crawling is done by the workflow's own crawlers, and their output IS the vector list.",
 }
 
 var sqlmapOptions = map[string]VectorOptionMeta{

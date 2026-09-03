@@ -185,11 +185,11 @@ func parseCacheBoomOutput(stdout, report string, row vectorRow) []VectorFinding 
 			}
 			seen["cd:"+extension] = true
 			findings = append(findings, VectorFinding{
-				VectorID:   row.ID,
-				Tool:       "cacheboom",
-				Kind:       "web-cache-deception",
-				Severity:   "high",
-				Confidence: "confirmed: the same response was returned for an appended static path and the response was cacheable",
+				VectorID:       row.ID,
+				Tool:           "cacheboom",
+				Kind:           "web-cache-deception",
+				Severity:       "high",
+				Confidence:     "confirmed: the same response was returned for an appended static path and the response was cacheable",
 				InsertionPoint: row.InsertionPoint,
 				Param:          extension,
 				Payload:        payload,

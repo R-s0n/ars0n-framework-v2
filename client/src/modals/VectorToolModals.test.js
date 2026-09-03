@@ -90,7 +90,7 @@ test('the config modal states how much of the vector table the tool can reach', 
 test('the card shows eligible of total rather than total', () => {
   render(<AttackToolCard tool={TOOL} status={STATUS} />);
   expect(screen.getByText('27/71')).toBeInTheDocument();
-  expect(screen.getByText('Vectors Eligible')).toBeInTheDocument();
+  expect(screen.getByText('Eligible Attack Vectors')).toBeInTheDocument();
 });
 
 test('the card shows scan position while a scan is running', () => {
@@ -116,7 +116,10 @@ test('the card counts URLs, not vectors, for a tool that deduplicates', () => {
   render(<AttackToolCard tool={TOOL} status={cache} />);
   expect(screen.getByText('34')).toBeInTheDocument();
   expect(screen.getByText('URLs to Scan')).toBeInTheDocument();
-  expect(screen.getByText(/from 71 attack vectors/)).toBeInTheDocument();
+  // The dedupe sublabel was removed from the card: it made the card's height depend on the data,
+  // which shifted the buttons relative to the card beside it. The number it explained is still on
+  // screen, and the explanation lives in the results modal.
+  expect(screen.queryByText(/from 71 attack vectors/)).not.toBeInTheDocument();
 });
 
 test('the card renders without a status, for tools that are not wired up', () => {
@@ -142,8 +145,10 @@ test('the card shows numbers before any scan has ever run', () => {
   };
   render(<AttackToolCard tool={TOOL} status={beforeAnyScan} />);
   expect(screen.getByText('39/71')).toBeInTheDocument();
-  expect(screen.getByText('Vectors Eligible')).toBeInTheDocument();
-  expect(screen.getByText('query, body only')).toBeInTheDocument();
+  expect(screen.getByText('Eligible Attack Vectors')).toBeInTheDocument();
+  // The insertion-point sublabel was removed for the same reason. Pinned as ABSENT so it is not
+  // reintroduced by accident.
+  expect(screen.queryByText('query, body only')).not.toBeInTheDocument();
 });
 
 // The bug this guards against shipped: the section key in attackTools.js was 'redirect-ssrf' and the

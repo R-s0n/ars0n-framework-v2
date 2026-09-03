@@ -237,10 +237,10 @@ func parseMantraOutput(stdout, report string, row vectorRow) []VectorFinding {
 		seen[body] = true
 
 		findings = append(findings, VectorFinding{
-			VectorID:   row.ID,
-			Tool:       "mantra",
-			Kind:       "hardcoded-secret",
-			Severity:   "medium",
+			VectorID: row.ID,
+			Tool:     "mantra",
+			Kind:     "hardcoded-secret",
+			Severity: "medium",
 			Confidence: "Mantra matched a credential pattern in the content this endpoint served. That " +
 				"is pattern matching, not proof: run TruffleHog against the same endpoint to find out " +
 				"whether the key still works.",

@@ -40,7 +40,7 @@ const AttackToolCard = ({ tool, status, onConfig, onScan, onResults, disabled = 
       : '-');
   const primaryLabel = running
     ? `${unitLabel} Scanned`
-    : (dedupes ? `${unitLabel} to Scan` : 'Vectors Eligible');
+    : (dedupes ? `${unitLabel} to Scan` : 'Eligible Attack Vectors');
   const secondary = running ? (scan.finding_count || 0) : (scan?.finding_count ?? 0);
 
   return (
@@ -56,34 +56,31 @@ const AttackToolCard = ({ tool, status, onConfig, onScan, onResults, disabled = 
           {tool.description}
         </Card.Text>
 
+        {/* Metrics AND buttons share one bottom-pinned block, so the gap between the label row and
+            the buttons is identical on every card in a row no matter how long the description is.
+            With the metrics outside this, a two-line description shifted the numbers relative to
+            the buttons on the card next to it. */}
+        <div className="mt-auto">
         {status && (
-          <div className="my-3 py-2">
+          <div className="mb-3">
             <Row className="text-center align-items-center">
               <Col>
                 <div className="text-danger fw-bold fs-4">
                   {running && <Spinner animation="border" size="sm" className="me-2" />}
                   {primary}
                 </div>
-                <div className="text-muted small">{primaryLabel}</div>
+                <div className="text-muted small card-metric-label">{primaryLabel}</div>
               </Col>
               <Col>
                 <div className="text-danger fw-bold fs-4">{secondary}</div>
-                <div className="text-muted small">Findings</div>
+                <div className="text-muted small card-metric-label">Findings</div>
               </Col>
             </Row>
-            {/* The count on its own says a number was reached, not what it cost. This says which of
-                the five insertion points the tool can actually reach, so an operator reading 27/71
-                knows why rather than assuming the other 44 were clean. */}
-            {!running && eligibility && dedupes && (
-              <div className="text-muted mt-1" style={{ fontSize: '0.7rem' }}>
-                from {eligibility.eligible} attack vectors
-              </div>
-            )}
-            {!running && eligibility && !dedupes && eligibility.eligible < eligibility.total && (
-              <div className="text-muted mt-1" style={{ fontSize: '0.7rem' }}>
-                {(eligibility.reachable || []).join(', ')} only
-              </div>
-            )}
+            {/* The insertion-point breakdown ("query, body, header only") and the dedupe note used to
+                render here as small grey sublabels. Removed: they made the card's vertical size
+                depend on the data, which pushed the buttons around between cards in the same row.
+                Both facts are still available in the tool's results modal, which is where a number
+                that needs explaining belongs. */}
             {running && scan.current_host && (
               <div className="text-muted mt-1 text-truncate" style={{ fontSize: '0.7rem' }}>
                 {scan.current_host}
@@ -91,8 +88,6 @@ const AttackToolCard = ({ tool, status, onConfig, onScan, onResults, disabled = 
             )}
           </div>
         )}
-
-        <div className="mt-auto">
           <Row className="g-2">
             <Col>
               <Button variant="outline-danger" className="w-100" disabled={disabled}

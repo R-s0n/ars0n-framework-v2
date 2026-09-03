@@ -74,10 +74,10 @@ func TestNormalizeScopeHost(t *testing.T) {
 		"api.dev.countr.one.":              "api.dev.countr.one",
 
 		// Nothing that is not a host.
-		"":         "",
-		"   ":      "",
+		"":          "",
+		"   ":       "",
 		"localhost": "",
-		"*.":       "",
+		"*.":        "",
 	}
 	for in, want := range cases {
 		if got := normalizeScopeHost(in); got != want {

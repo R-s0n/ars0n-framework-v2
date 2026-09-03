@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +37,243 @@ import (
 
 // The sources this step consolidates. FFUF is not here on purpose; see the file comment.
 var consolidationScanTypes = []string{"katana", "gospider", "linkfinder", "gau", "waybackurls"}
+
+// Scope is enforced here, at import, rather than later at request time.
+//
+// Measured on a target scoped to http://10.0.0.18:3000. gau returned nine URLs on
+// http://10.0.0.18:80 (login.cfm, Content/Default.asp, Animal_Mineral_Vegetable/exercise1_config.jsp)
+// which is a different service on the same machine, and one host that cannot exist at all,
+// "http://.10.18/robots.txt". All ten became consolidated_url_endpoints rows and were only turned
+// away much later, by the request layer, as skipped.out_of_scope. By then they had already been
+// counted as attack surface, shown to the operator, and queued for validation. The same corpus also
+// holds w3.org, fonts.googleapis.com, youtube.com and opensea.io, which the crawlers read off the
+// page and which scanScope.go already calls "evidence of nothing".
+//
+// Two separate defects produced that, which is why the check is one object rather than a condition
+// bolted onto each pass.
+//
+//  1. Consolidation applied no host boundary whatsoever. Every row a source emitted became surface.
+//  2. The boundary that does exist mis-parses an IP literal. RegistrableDomain("10.0.0.18") returns
+//     "0.18", because it takes the last two labels of anything that is not a known two-label public
+//     suffix, so the boundary renders as "*.0.18, 10.0.0.18" and would admit any host ending in
+//     ".0.18". An IP literal has no registrable domain: for one, the boundary is the exact host and
+//     the domain widening is skipped entirely. RegistrableDomain itself lives in scanCredentials.go
+//     and is deliberately not touched from here.
+//
+// A port-bearing scope target is a single service, not a machine. When the target names a non-default
+// port every row must carry that same port, which is what separates the Juice Shop on :3000 from
+// whatever answers on :80.
+const (
+	exclusionInvalidHost = "invalid_host"
+	exclusionOutOfHost   = "out_of_scope_host"
+	exclusionOutOfPort   = "out_of_scope_port"
+)
+
+// consolidationScope is the admission decision, kept free of database access so both passes share
+// one implementation and so it is testable without a live target.
+type consolidationScope struct {
+	host     string // the scope target's own host, lowercased
+	port     int    // the non-default port the target names; 0 when it names none
+	hostIsIP bool
+
+	// allowed is used only for an IP-literal target: the target host plus whatever the operator
+	// explicitly authorised. Nothing is inferred from the labels of an address.
+	allowed map[string]bool
+
+	// scope is the normal registrable-domain boundary, used only for a named host.
+	scope *ScanScope
+
+	// unbounded means no host could be determined for this scope target. Consolidation records
+	// rather than requests, so refusing everything here would empty an operator's corpus over a
+	// database read that failed; the run says so instead.
+	unbounded bool
+}
+
+func newConsolidationScope(scopeTargetID, scheme, base string) *consolidationScope {
+	c := parseConsolidationScopeBase(scheme, base)
+	if c.unbounded {
+		return c
+	}
+	if c.hostIsIP {
+		c.allowed[c.host] = true
+		// An operator's explicit decision still counts, even for an address. InScopeCrawlHosts is
+		// the same list the scanner and the scope modal read, called rather than reimplemented so
+		// the three cannot disagree about what is in scope.
+		for _, h := range InScopeCrawlHosts(scopeTargetID) {
+			if h != "" {
+				c.allowed[strings.ToLower(h)] = true
+			}
+		}
+		return c
+	}
+	c.scope = LoadScanScope(scopeTargetID)
+	return c
+}
+
+// parseConsolidationScopeBase derives the host, the port and whether the host is an address.
+//
+// Separate from the database reads so the branch that matters, "is this target an IP literal and
+// therefore not eligible for registrable-domain widening", can be checked without a live target.
+func parseConsolidationScopeBase(scheme, base string) *consolidationScope {
+	c := &consolidationScope{allowed: map[string]bool{}}
+
+	u, err := url.Parse(base)
+	if err != nil || u.Hostname() == "" {
+		c.unbounded = true
+		return c
+	}
+	c.host = strings.ToLower(strings.Trim(u.Hostname(), "."))
+	if c.host == "" {
+		c.unbounded = true
+		return c
+	}
+	// ScopeTargetBase has already dropped a port that is the scheme default, so anything left is a
+	// port the operator meant.
+	if p := u.Port(); p != "" {
+		if n, convErr := strconv.Atoi(p); convErr == nil && !isDefaultPort(scheme, n) {
+			c.port = n
+		}
+	}
+	c.hostIsIP = net.ParseIP(c.host) != nil
+	return c
+}
+
+// admit reports whether this identity belongs to this target, and why not when it does not.
+func (c *consolidationScope) admit(id EndpointIdentity) (bool, string) {
+	// Checked before the boundary, and for every target: a host that cannot exist is not an endpoint
+	// no matter whose scope is being considered.
+	if !hostIsSyntacticallyValid(id.Host) {
+		return false, exclusionInvalidHost
+	}
+	if c == nil || c.unbounded {
+		return true, ""
+	}
+
+	// Host before port, because the reason is the whole point of recording the refusal. Checking the
+	// port first reported www.w3.org and fonts.googleapis.com as "out_of_scope_port" on this target,
+	// which is true and useless: they are not this application at all. With this order the only rows
+	// that read as a port problem are the ones that really are, the nine http://10.0.0.18:80 rows.
+	inScope := false
+	if c.hostIsIP {
+		// An address has no subdomains, so nothing is inferred from its labels.
+		inScope = c.allowed[id.Host]
+	} else {
+		inScope = c.scope.Allows(id.Host)
+	}
+	if !inScope {
+		return false, exclusionOutOfHost
+	}
+
+	if c.port != 0 && id.Port != c.port {
+		return false, exclusionOutOfPort
+	}
+	return true, ""
+}
+
+// hostIsSyntacticallyValid rejects strings that no resolver could ever answer for.
+//
+// "http://.10.18/robots.txt" survived a whole consolidation and was stored as an endpoint. Its host
+// has an empty first label, which is impossible, and no amount of scope configuration would ever
+// make it real. gau produces these by mangling an address it read out of an archive index.
+func hostIsSyntacticallyValid(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	// url.Hostname() strips the brackets off an IPv6 literal, so a colon here means an address.
+	if strings.Contains(host, ":") {
+		return net.ParseIP(host) != nil
+	}
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			ch := label[i]
+			switch {
+			case ch >= 'a' && ch <= 'z',
+				ch >= 'A' && ch <= 'Z',
+				ch >= '0' && ch <= '9',
+				ch == '-', ch == '_':
+			default:
+				return false
+			}
+		}
+	}
+	// A top-level label cannot be all digits. net.ParseIP above already admitted the real addresses,
+	// so anything reaching here that ends in a number is a mangled one: "10.0.18", "10.18", "3000".
+	last := labels[len(labels)-1]
+	for i := 0; i < len(last); i++ {
+		if last[i] < '0' || last[i] > '9' {
+			return true
+		}
+	}
+	return false
+}
+
+// How many refused URLs are kept verbatim. Bounded because the counts are stored as one JSON blob on
+// the run, and an archive source can emit tens of thousands of out-of-scope rows.
+const maxExclusionSamples = 500
+
+// consolidationExclusion is one row consolidation refused.
+//
+// Kept whole, with the URL that caused it, because "excluded=1 with no way to see which row" was
+// itself reported as a defect: a count an operator cannot act on is barely better than silence.
+type consolidationExclusion struct {
+	URL    string `json:"url"`
+	Host   string `json:"host"`
+	Port   int    `json:"port,omitempty"`
+	Source string `json:"source"`
+	Reason string `json:"reason"`
+}
+
+type exclusionLog struct {
+	Total     int                      `json:"total"`
+	ByReason  map[string]int           `json:"by_reason"`
+	ByHost    map[string]int           `json:"by_host"`
+	Samples   []consolidationExclusion `json:"samples"`
+	Truncated bool                     `json:"samples_truncated"`
+}
+
+func newExclusionLog() *exclusionLog {
+	return &exclusionLog{ByReason: map[string]int{}, ByHost: map[string]int{}}
+}
+
+func (e *exclusionLog) record(rawURL string, id EndpointIdentity, source, reason string) {
+	if e == nil {
+		return
+	}
+	e.Total++
+	e.ByReason[reason]++
+
+	// Grouped by host and port together, because "nine rows on 10.0.0.18:80" is the sentence that
+	// makes the problem obvious and "nine rows on 10.0.0.18" is the one that hides it.
+	hostKey := id.Host
+	if hostKey == "" {
+		hostKey = "(unparsed)"
+	}
+	if id.Port != 0 {
+		hostKey += ":" + strconv.Itoa(id.Port)
+	}
+	e.ByHost[hostKey]++
+
+	if len(e.Samples) >= maxExclusionSamples {
+		e.Truncated = true
+		return
+	}
+	if len(rawURL) > 512 {
+		rawURL = rawURL[:512]
+	}
+	e.Samples = append(e.Samples, consolidationExclusion{
+		URL: rawURL, Host: id.Host, Port: id.Port, Source: source, Reason: reason,
+	})
+}
 
 type consolidatedRow struct {
 	identity     EndpointIdentity
@@ -83,7 +323,7 @@ func executeConsolidation(scanID, scopeTargetID string) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			log.Printf("[CONSOLIDATE] panic in %s: %v", scanID, rec)
-			finishConsolidation(scanID, "error", 0, 0, nil, fmt.Sprintf("panic: %v", rec), started)
+			finishConsolidation(scanID, "error", 0, 0, nil, nil, fmt.Sprintf("panic: %v", rec), started)
 		}
 	}()
 
@@ -94,29 +334,44 @@ func executeConsolidation(scanID, scopeTargetID string) {
 		UPDATE endpoint_consolidation_runs SET status='running', updated_at=NOW()
 		WHERE scan_id = $1`, scanID)
 
-	defaultScheme, _, _ := ScopeTargetBase(scopeTargetID)
+	defaultScheme, _, base := ScopeTargetBase(scopeTargetID)
 	targetDomain := extractDomainFromScopeTarget(scopeTargetID)
+	scope := newConsolidationScope(scopeTargetID, defaultScheme, base)
 
 	rows := map[string]*consolidatedRow{}
 	skipped := map[string]int{}
+	excluded := newExclusionLog()
 	read := 0
 
-	if n, err := consolidateFromDiscovered(ctx, scopeTargetID, defaultScheme, rows, skipped); err != nil {
-		finishConsolidation(scanID, "error", 0, 0, skipped, err.Error(), started)
+	if scope.unbounded {
+		// Said out loud rather than silently importing everything: a run with no boundary looks
+		// identical on screen to a run whose boundary held.
+		log.Printf("[CONSOLIDATE] %s: no host could be determined for scope target %s, importing without a host boundary",
+			scanID, scopeTargetID)
+		skipped["scope_boundary_unknown"]++
+	}
+
+	if n, err := consolidateFromDiscovered(ctx, scopeTargetID, defaultScheme, scope, rows, skipped, excluded); err != nil {
+		finishConsolidation(scanID, "error", 0, 0, skipped, excluded, err.Error(), started)
 		return
 	} else {
 		read += n
 	}
 
-	if n, err := consolidateFromManualCrawl(ctx, scopeTargetID, defaultScheme, targetDomain, rows, skipped); err != nil {
+	if n, err := consolidateFromManualCrawl(ctx, scopeTargetID, defaultScheme, targetDomain, scope, rows, skipped, excluded); err != nil {
 		log.Printf("[CONSOLIDATE] manual crawl pass failed: %v", err)
 		skipped["manual_crawl_error"]++
 	} else {
 		read += n
 	}
 
+	if excluded.Total > 0 {
+		log.Printf("[CONSOLIDATE] %s: %d row(s) refused as out of scope: by reason %v, by host %v",
+			scanID, excluded.Total, excluded.ByReason, excluded.ByHost)
+	}
+
 	if len(rows) == 0 {
-		finishConsolidation(scanID, "success", 0, read, skipped, "", started)
+		finishConsolidation(scanID, "success", 0, read, skipped, excluded, "", started)
 		return
 	}
 
@@ -129,7 +384,7 @@ func executeConsolidation(scanID, scopeTargetID string) {
 
 	stored, err := storeConsolidated(ctx, scopeTargetID, scanID, rows, groupSize, exemplarTaken)
 	if err != nil {
-		finishConsolidation(scanID, "error", stored, read, skipped, err.Error(), started)
+		finishConsolidation(scanID, "error", stored, read, skipped, excluded, err.Error(), started)
 		return
 	}
 
@@ -148,7 +403,7 @@ func executeConsolidation(scanID, scopeTargetID string) {
 		log.Printf("[CONSOLIDATE] parameter refresh failed: %v", err)
 	}
 
-	finishConsolidation(scanID, "success", stored, read, skipped, "", started)
+	finishConsolidation(scanID, "success", stored, read, skipped, excluded, "", started)
 }
 
 // consolidateFromDiscovered streams the crawler and archive rows.
@@ -157,7 +412,8 @@ func executeConsolidation(scanID, scopeTargetID string) {
 // its parameter count and inflated request_count accordingly. Parameters are derived from the URL
 // itself and reattached separately.
 func consolidateFromDiscovered(ctx context.Context, scopeTargetID, defaultScheme string,
-	out map[string]*consolidatedRow, skipped map[string]int) (int, error) {
+	scope *consolidationScope, out map[string]*consolidatedRow, skipped map[string]int,
+	excluded *exclusionLog) (int, error) {
 
 	rows, err := dbPool.Query(ctx, `
 		SELECT url, COALESCE(status_code, 0), is_direct, scan_type, created_at
@@ -187,6 +443,14 @@ func consolidateFromDiscovered(ctx context.Context, scopeTargetID, defaultScheme
 			continue
 		}
 
+		// Refused here rather than stored and flagged at request time. This is where gau's nine
+		// http://10.0.0.18:80 rows and its "http://.10.18/robots.txt" stop being attack surface.
+		if admitted, reason := scope.admit(id); !admitted {
+			excluded.record(rawURL, id, scanType, reason)
+			skipped[reason]++
+			continue
+		}
+
 		row := ensureRow(out, id, isDirect, createdAt)
 		row.sources[scanType]++
 		row.requestCount++
@@ -202,7 +466,8 @@ func consolidateFromDiscovered(ctx context.Context, scopeTargetID, defaultScheme
 // consolidateFromManualCrawl folds in the captures. These are the only rows carrying a real verb,
 // a real request body and a real observed response, so they take precedence on every field.
 func consolidateFromManualCrawl(ctx context.Context, scopeTargetID, defaultScheme, targetDomain string,
-	out map[string]*consolidatedRow, skipped map[string]int) (int, error) {
+	scope *consolidationScope, out map[string]*consolidatedRow, skipped map[string]int,
+	excluded *exclusionLog) (int, error) {
 
 	rows, err := dbPool.Query(ctx, `
 		SELECT url, COALESCE(method,'GET'), COALESCE(status_code,0), headers, response_headers,
@@ -233,6 +498,16 @@ func consolidateFromManualCrawl(ctx context.Context, scopeTargetID, defaultSchem
 		id, ok := CanonicalizeEndpoint(rawURL, method, defaultScheme)
 		if !ok {
 			skipped["unusable_url"]++
+			continue
+		}
+
+		// A capture is the operator's own browsing, and InScopeCrawlHosts already admits every host
+		// they recorded unless they excluded it by hand, so this pass loses nothing an operator
+		// vouched for. What it does catch is a capture on a port the target does not name, which is
+		// a different service on the same machine and not the thing under test.
+		if admitted, reason := scope.admit(id); !admitted {
+			excluded.record(rawURL, id, "manual_crawl", reason)
+			skipped[reason]++
 			continue
 		}
 
@@ -581,17 +856,65 @@ func RefreshConsolidatedParameters(ctx context.Context, scopeTargetID string) er
 	return nil
 }
 
-func finishConsolidation(scanID, status string, count, read int, skipped map[string]int, errMsg string, started time.Time) {
+// consolidationScopeTargetFor reads back the target a run belongs to, so finishConsolidation can
+// count the corpus without every caller having to thread the id through.
+func consolidationScopeTargetFor(scanID string) string {
+	var id string
+	if err := dbPool.QueryRow(context.Background(),
+		`SELECT scope_target_id::text FROM endpoint_consolidation_runs WHERE scan_id = $1`,
+		scanID).Scan(&id); err != nil {
+		return ""
+	}
+	return id
+}
+
+func finishConsolidation(scanID, status string, count, read int, skipped map[string]int,
+	excluded *exclusionLog, errMsg string, started time.Time) {
 	if skipped == nil {
 		skipped = map[string]int{}
 	}
+	if excluded == nil {
+		excluded = newExclusionLog()
+	}
 	skippedJSON, _ := json.Marshal(skipped)
-	resultJSON, _ := json.Marshal(map[string]interface{}{
+	// The refused rows travel in `result` rather than in a new column, so the reason is retrievable
+	// without a schema change. GetConsolidationStatus unpacks it back out.
+	// corpus_total is COUNTED, and it is not the same number as endpoint_count.
+	//
+	// endpoint_count is what THIS RUN stored. It excludes every endpoint the operator added by hand,
+	// because those come from no source and so are never re-seen by a consolidation pass. Measured on
+	// the Juice Shop target: a run reported endpoint_count 201 while the live corpus held 218, the
+	// difference being 17 hand-added rows. The UI and the MCP tool both present that number as "the
+	// endpoint count", so the operator's own additions read as having vanished.
+	//
+	// Reported alongside rather than replacing it: "how many did this run account for" is a real
+	// question, and so is "how many are there". A single field cannot answer both, and this file has
+	// already been bitten once by a count that meant something narrower than its name.
+	corpusTotal := -1
+	if scopeTargetID := consolidationScopeTargetFor(scanID); scopeTargetID != "" {
+		var n int
+		if err := dbPool.QueryRow(context.Background(), `
+			SELECT COUNT(*) FROM consolidated_url_endpoints
+			WHERE scope_target_id = $1 AND deleted_at IS NULL`, scopeTargetID).Scan(&n); err == nil {
+			corpusTotal = n
+		}
+	}
+	result := map[string]interface{}{
 		"endpoint_count": count,
 		"rows_read":      read,
 		"skipped":        skipped,
+		"excluded":       excluded,
 		"sources":        consolidationScanTypes,
-	})
+	}
+	// Omitted rather than reported as 0 when it could not be read. A zero here would say the corpus
+	// is empty, which is the one thing it definitely is not if a run just stored rows into it.
+	if corpusTotal >= 0 {
+		result["corpus_total"] = corpusTotal
+		result["counts_note"] = "endpoint_count is what this run stored. corpus_total is every live " +
+			"endpoint on the target including the ones added by hand, which no consolidation pass " +
+			"re-sees because they come from no source."
+	}
+	resultJSON, _ := json.Marshal(result)
 	_, err := dbPool.Exec(context.Background(), `
 		UPDATE endpoint_consolidation_runs
 		SET status = $1, endpoint_count = $2, rows_read = $3, skipped = $4, result = $5,
@@ -602,11 +925,15 @@ func finishConsolidation(scanID, status string, count, read int, skipped map[str
 	if err != nil {
 		log.Printf("[CONSOLIDATE] failed to finish run %s: %v", scanID, err)
 	}
-	log.Printf("[CONSOLIDATE] %s finished: status=%s endpoints=%d read=%d in %s",
-		scanID, status, count, read, time.Since(started))
+	log.Printf("[CONSOLIDATE] %s finished: status=%s endpoints=%d read=%d excluded=%d in %s",
+		scanID, status, count, read, excluded.Total, time.Since(started))
 }
 
 // GetConsolidationStatus handles GET /consolidated-endpoints/{scope_target_id}/status/{scan_id}.
+//
+// Returns the refused rows, not only how many. A caller that is told "excluded: 9" and cannot ask
+// which nine has to go read the container log to find out whether the run threw away noise or threw
+// away the engagement, which is how the previous excluded-count defect was reported.
 func GetConsolidationStatus(w http.ResponseWriter, r *http.Request) {
 	scanID := mux.Vars(r)["scan_id"]
 
@@ -616,14 +943,15 @@ func GetConsolidationStatus(w http.ResponseWriter, r *http.Request) {
 		EndpointCount int       `json:"endpoint_count"`
 		RowsRead      int       `json:"rows_read"`
 		Skipped       []byte    `json:"-"`
+		Result        *string   `json:"-"`
 		Error         *string   `json:"error"`
 		ExecutionTime *string   `json:"execution_time"`
 		CreatedAt     time.Time `json:"created_at"`
 	}
 	err := dbPool.QueryRow(context.Background(), `
-		SELECT scan_id, status, endpoint_count, rows_read, skipped, error, execution_time, created_at
+		SELECT scan_id, status, endpoint_count, rows_read, skipped, result, error, execution_time, created_at
 		FROM endpoint_consolidation_runs WHERE scan_id = $1`, scanID).Scan(
-		&out.ScanID, &out.Status, &out.EndpointCount, &out.RowsRead, &out.Skipped,
+		&out.ScanID, &out.Status, &out.EndpointCount, &out.RowsRead, &out.Skipped, &out.Result,
 		&out.Error, &out.ExecutionTime, &out.CreatedAt)
 	if err != nil {
 		http.Error(w, "Consolidation run not found", http.StatusNotFound)
@@ -633,12 +961,55 @@ func GetConsolidationStatus(w http.ResponseWriter, r *http.Request) {
 	var skipped map[string]int
 	_ = json.Unmarshal(out.Skipped, &skipped)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	excluded := consolidationExclusionsFromResult(out.Result)
+
+	payload := map[string]interface{}{
 		"scan_id": out.ScanID, "status": out.Status, "endpoint_count": out.EndpointCount,
-		"rows_read": out.RowsRead, "skipped": skipped, "error": out.Error,
+		"rows_read": out.RowsRead, "skipped": skipped, "excluded": excluded, "error": out.Error,
 		"execution_time": out.ExecutionTime, "created_at": out.CreatedAt,
-	})
+	}
+	// Pass through the corpus total when the run recorded one. Runs written before it existed
+	// simply do not carry the key, which is the honest representation of "not measured".
+	if out.Result != nil {
+		var stored struct {
+			CorpusTotal *int    `json:"corpus_total"`
+			CountsNote  *string `json:"counts_note"`
+		}
+		if json.Unmarshal([]byte(*out.Result), &stored) == nil && stored.CorpusTotal != nil {
+			payload["corpus_total"] = *stored.CorpusTotal
+			if stored.CountsNote != nil {
+				payload["counts_note"] = *stored.CountsNote
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(payload)
+}
+
+// consolidationExclusionsFromResult unpacks the refused rows a run stored.
+//
+// Runs written before scope enforcement existed have no "excluded" key, and a run that refused
+// nothing should read as zero rather than as null: "excluded: null" is the same unanswerable state
+// the count-only report already was.
+func consolidationExclusionsFromResult(result *string) *exclusionLog {
+	empty := newExclusionLog()
+	if result == nil || strings.TrimSpace(*result) == "" {
+		return empty
+	}
+	var parsed struct {
+		Excluded *exclusionLog `json:"excluded"`
+	}
+	if json.Unmarshal([]byte(*result), &parsed) != nil || parsed.Excluded == nil {
+		return empty
+	}
+	if parsed.Excluded.ByReason == nil {
+		parsed.Excluded.ByReason = map[string]int{}
+	}
+	if parsed.Excluded.ByHost == nil {
+		parsed.Excluded.ByHost = map[string]int{}
+	}
+	return parsed.Excluded
 }
 
 func nullInt(n int) interface{} {

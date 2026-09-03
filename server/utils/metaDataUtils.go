@@ -179,8 +179,8 @@ func RunMetaDataScan(w http.ResponseWriter, r *http.Request) {
 		ScopeTargetID     string  `json:"scope_target_id" binding:"required"`
 		AutoScanSessionID *string `json:"auto_scan_session_id,omitempty"`
 		Config            *struct {
-			URLIds []string          `json:"url_ids,omitempty"`
-			Steps  map[string]bool   `json:"steps,omitempty"`
+			URLIds []string        `json:"url_ids,omitempty"`
+			Steps  map[string]bool `json:"steps,omitempty"`
 		} `json:"config,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.ScopeTargetID == "" {
@@ -201,12 +201,12 @@ func RunMetaDataScan(w http.ResponseWriter, r *http.Request) {
 	scanID := uuid.New().String()
 	var insertQuery string
 	var args []interface{}
-	
+
 	var configJSON []byte
 	if payload.Config != nil {
 		configJSON, _ = json.Marshal(payload.Config)
 	}
-	
+
 	if payload.AutoScanSessionID != nil && *payload.AutoScanSessionID != "" {
 		if configJSON != nil {
 			insertQuery = `INSERT INTO metadata_scans (scan_id, domain, status, scope_target_id, auto_scan_session_id, config) VALUES ($1, $2, $3, $4, $5, $6)`
@@ -324,7 +324,7 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 	}
 
 	log.Printf("[INFO] Processing %d URLs for scan ID: %s", len(urls), scanID)
-	
+
 	// Update status to running and initialize progress
 	_, err = dbPool.Exec(context.Background(),
 		`UPDATE metadata_scans SET status = 'running', current_step = 'initializing', total_urls = $1, processed_urls = 0 WHERE scan_id = $2`,
@@ -355,7 +355,7 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 	runFfuf := false
 	runTech := true
 	runSSL := true
-	
+
 	// Override with config values if provided
 	if config != nil && config.Steps != nil {
 		if val, exists := config.Steps["screenshots"]; exists {
@@ -375,7 +375,6 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 		}
 	}
 
-
 	// Check for cancellation before starting
 	if checkIfCancelled(scanID) {
 		log.Printf("[INFO] Scan %s cancelled before starting screenshots", scanID)
@@ -387,10 +386,10 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 	if runScreenshots {
 		log.Printf("[INFO] Starting screenshot capture - %d URLs", len(urls))
 		updateScanProgress(scanID, "screenshots", "", len(urls), 0)
-		
+
 		// Get custom HTTP settings
 		customUserAgent, customHeader := GetCustomHTTPSettings()
-		
+
 		// Build nuclei command for screenshots
 		screenshotCmd := exec.Command(
 			"docker", "exec", "ars0n-framework-v2-nuclei-1",
@@ -411,21 +410,21 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 				}(),
 			),
 		)
-		
+
 		var screenshotStdout, screenshotStderr bytes.Buffer
 		screenshotStdoutWriter := &ScreenshotLogWriter{prefix: "[NUCLEI-SCREENSHOT]"}
 		screenshotStderrWriter := &ScreenshotLogWriter{prefix: "[NUCLEI-SCREENSHOT-ERR]"}
-		
+
 		screenshotCmd.Stdout = io.MultiWriter(&screenshotStdout, screenshotStdoutWriter)
 		screenshotCmd.Stderr = io.MultiWriter(&screenshotStderr, screenshotStderrWriter)
-		
+
 		log.Printf("[INFO] Executing screenshot command for scan ID: %s", scanID)
 		err = screenshotCmd.Run()
 		if err != nil {
 			log.Printf("[WARN] Screenshot command failed for scan ID %s: %v (continuing with other steps)", scanID, err)
 		} else {
 			log.Printf("[INFO] Screenshots captured successfully for scan ID: %s, processing files...", scanID)
-			
+
 			// Process screenshot files
 			screenshotFiles, err := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "ls", "/app/screenshots/").Output()
 			if err != nil {
@@ -433,31 +432,31 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 			} else {
 				fileList := strings.Split(string(screenshotFiles), "\n")
 				log.Printf("[INFO] Found %d screenshot files to process", len(fileList))
-				
+
 				processedCount := 0
 				for _, file := range fileList {
 					if file == "" || !strings.HasSuffix(file, ".png") {
 						continue
 					}
-					
+
 					// Read the screenshot file
 					imgData, err := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "cat", "/app/screenshots/"+file).Output()
 					if err != nil {
 						log.Printf("[WARN] Failed to read screenshot file %s: %v", file, err)
 						continue
 					}
-					
+
 					// Convert the URL-safe filename back to a real URL
 					url := strings.TrimSuffix(file, ".png")
 					url = strings.ReplaceAll(url, "__", "://")
 					url = strings.ReplaceAll(url, "_", ".")
 					url = NormalizeURL(url)
-					
+
 					// Skip URLs with encoded characters that are nuclei test paths
 					if strings.Contains(url, "%") {
 						continue
 					}
-					
+
 					// Update target URL with screenshot
 					screenshot := base64.StdEncoding.EncodeToString(imgData)
 					if err := UpdateTargetURLFromScreenshot(url, screenshot); err != nil {
@@ -466,9 +465,9 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 						processedCount++
 					}
 				}
-				
+
 				log.Printf("[INFO] Successfully processed %d screenshots for scan ID: %s", processedCount, scanID)
-				
+
 				// Clean up screenshots in the container
 				exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "rm", "-rf", "/app/screenshots/*").Run()
 			}
@@ -500,123 +499,123 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 
 			completedKatana++
 			updateScanProgress(scanID, "katana", url, len(urls), completedKatana)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
 
-		katanaCmd := exec.CommandContext(ctx,
-			"docker", "exec", "ars0n-framework-v2-katana-1",
-			"katana",
-			"-u", url,
-			"-jc",
-			"-d", "2",
-			"-j",
-			"-v",
-			"-timeout", "30",
-			"-c", "15",
-			"-p", "15",
-		)
+			katanaCmd := exec.CommandContext(ctx,
+				"docker", "exec", "ars0n-framework-v2-katana-1",
+				"katana",
+				"-u", url,
+				"-jc",
+				"-d", "2",
+				"-j",
+				"-v",
+				"-timeout", "30",
+				"-c", "15",
+				"-p", "15",
+			)
 
-		katanaCmd.WaitDelay = 30 * time.Second
+			katanaCmd.WaitDelay = 30 * time.Second
 
-		var stdout, stderr bytes.Buffer
-		katanaCmd.Stdout = &stdout
-		katanaCmd.Stderr = &stderr
+			var stdout, stderr bytes.Buffer
+			katanaCmd.Stdout = &stdout
+			katanaCmd.Stderr = &stderr
 
-		log.Printf("[DEBUG] Executing Katana command: %s", katanaCmd.String())
-		if err := katanaCmd.Run(); err != nil {
-			if ctx.Err() == context.DeadlineExceeded {
-				log.Printf("[WARN] Katana scan timed out for URL %s (%d/%d)", url, completedKatana, len(urls))
-				continue
-			}
-			log.Printf("[WARN] Katana scan failed for URL %s (%d/%d): %v\nStderr: %s", url, completedKatana, len(urls), err, stderr.String())
-			continue
-		}
-
-		var crawledURLs []string
-		seenURLs := make(map[string]bool)
-
-		for _, line := range strings.Split(stdout.String(), "\n") {
-			if line == "" {
-				continue
-			}
-
-			var result struct {
-				Timestamp string `json:"timestamp"`
-				Request   struct {
-					Method   string `json:"method"`
-					Endpoint string `json:"endpoint"`
-					Tag      string `json:"tag"`
-					Source   string `json:"source"`
-					Raw      string `json:"raw"`
-				} `json:"request"`
-				Response struct {
-					StatusCode    int                    `json:"status_code"`
-					Headers       map[string]interface{} `json:"headers"`
-					Body          string                 `json:"body"`
-					ContentLength int                    `json:"content_length"`
-				} `json:"response"`
-			}
-
-			if err := json.Unmarshal([]byte(line), &result); err != nil {
-				log.Printf("[WARN] Failed to parse Katana output line: %v", err)
-				continue
-			}
-
-			// Add unique URLs from various sources
-			addUniqueURL := func(urlStr string) {
-				if urlStr != "" && !seenURLs[urlStr] {
-					seenURLs[urlStr] = true
-					crawledURLs = append(crawledURLs, urlStr)
+			log.Printf("[DEBUG] Executing Katana command: %s", katanaCmd.String())
+			if err := katanaCmd.Run(); err != nil {
+				if ctx.Err() == context.DeadlineExceeded {
+					log.Printf("[WARN] Katana scan timed out for URL %s (%d/%d)", url, completedKatana, len(urls))
+					continue
 				}
+				log.Printf("[WARN] Katana scan failed for URL %s (%d/%d): %v\nStderr: %s", url, completedKatana, len(urls), err, stderr.String())
+				continue
 			}
 
-			// Process endpoint URL
-			addUniqueURL(result.Request.Endpoint)
+			var crawledURLs []string
+			seenURLs := make(map[string]bool)
 
-			// Process source URL
-			addUniqueURL(result.Request.Source)
+			for _, line := range strings.Split(stdout.String(), "\n") {
+				if line == "" {
+					continue
+				}
 
-			// Look for URLs in response headers
-			for _, headerVals := range result.Response.Headers {
-				switch v := headerVals.(type) {
-				case string:
-					if strings.Contains(v, "http://") || strings.Contains(v, "https://") {
-						addUniqueURL(v)
+				var result struct {
+					Timestamp string `json:"timestamp"`
+					Request   struct {
+						Method   string `json:"method"`
+						Endpoint string `json:"endpoint"`
+						Tag      string `json:"tag"`
+						Source   string `json:"source"`
+						Raw      string `json:"raw"`
+					} `json:"request"`
+					Response struct {
+						StatusCode    int                    `json:"status_code"`
+						Headers       map[string]interface{} `json:"headers"`
+						Body          string                 `json:"body"`
+						ContentLength int                    `json:"content_length"`
+					} `json:"response"`
+				}
+
+				if err := json.Unmarshal([]byte(line), &result); err != nil {
+					log.Printf("[WARN] Failed to parse Katana output line: %v", err)
+					continue
+				}
+
+				// Add unique URLs from various sources
+				addUniqueURL := func(urlStr string) {
+					if urlStr != "" && !seenURLs[urlStr] {
+						seenURLs[urlStr] = true
+						crawledURLs = append(crawledURLs, urlStr)
 					}
-				case []interface{}:
-					for _, val := range v {
-						if str, ok := val.(string); ok {
-							if strings.Contains(str, "http://") || strings.Contains(str, "https://") {
-								addUniqueURL(str)
+				}
+
+				// Process endpoint URL
+				addUniqueURL(result.Request.Endpoint)
+
+				// Process source URL
+				addUniqueURL(result.Request.Source)
+
+				// Look for URLs in response headers
+				for _, headerVals := range result.Response.Headers {
+					switch v := headerVals.(type) {
+					case string:
+						if strings.Contains(v, "http://") || strings.Contains(v, "https://") {
+							addUniqueURL(v)
+						}
+					case []interface{}:
+						for _, val := range v {
+							if str, ok := val.(string); ok {
+								if strings.Contains(str, "http://") || strings.Contains(str, "https://") {
+									addUniqueURL(str)
+								}
 							}
 						}
 					}
 				}
 			}
-		}
 
-		// Remove any invalid URLs and normalize the rest
-		var validURLs []string
-		for _, urlStr := range crawledURLs {
-			if strings.HasPrefix(urlStr, "http://") || strings.HasPrefix(urlStr, "https://") {
-				validURLs = append(validURLs, NormalizeURL(urlStr))
-			}
-		}
-		crawledURLs = validURLs
-
-		log.Printf("[INFO] Katana found %d unique URLs for %s", len(crawledURLs), url)
-		if len(crawledURLs) > 0 {
-			log.Printf("[DEBUG] First 5 URLs found by Katana for %s:", url)
-			for i, crawledURL := range crawledURLs {
-				if i >= 5 {
-					break
+			// Remove any invalid URLs and normalize the rest
+			var validURLs []string
+			for _, urlStr := range crawledURLs {
+				if strings.HasPrefix(urlStr, "http://") || strings.HasPrefix(urlStr, "https://") {
+					validURLs = append(validURLs, NormalizeURL(urlStr))
 				}
-				log.Printf("[DEBUG]   - %s", crawledURL)
 			}
-			if len(crawledURLs) > 5 {
-				log.Printf("[DEBUG]   ... and %d more URLs", len(crawledURLs)-5)
+			crawledURLs = validURLs
+
+			log.Printf("[INFO] Katana found %d unique URLs for %s", len(crawledURLs), url)
+			if len(crawledURLs) > 0 {
+				log.Printf("[DEBUG] First 5 URLs found by Katana for %s:", url)
+				for i, crawledURL := range crawledURLs {
+					if i >= 5 {
+						break
+					}
+					log.Printf("[DEBUG]   - %s", crawledURL)
+				}
+				if len(crawledURLs) > 5 {
+					log.Printf("[DEBUG]   ... and %d more URLs", len(crawledURLs)-5)
+				}
 			}
-		}
 			katanaResults[url] = crawledURLs
 		}
 
@@ -707,94 +706,94 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 		)
 		log.Printf("[INFO] Executing command: %s", cmd.String())
 
-	var stderr bytes.Buffer
-	stdoutWriter := &NucleiLogWriter{prefix: "[NUCLEI-SSL]"}
-	stderrWriter := &NucleiLogWriter{prefix: "[NUCLEI-SSL-ERR]"}
-	
-	cmd.Stdout = stdoutWriter
-	cmd.Stderr = io.MultiWriter(&stderr, stderrWriter)
+		var stderr bytes.Buffer
+		stdoutWriter := &NucleiLogWriter{prefix: "[NUCLEI-SSL]"}
+		stderrWriter := &NucleiLogWriter{prefix: "[NUCLEI-SSL-ERR]"}
 
-	log.Printf("[INFO] Nuclei SSL scan started, streaming output...")
-	err = cmd.Run()
-	if err != nil {
-		log.Printf("[ERROR] Nuclei scan failed: %v", err)
-		UpdateMetaDataScanStatus(scanID, "error", "", stderr.String(), cmd.String(), time.Since(startTime).String())
-		return
-	}
-	log.Printf("[INFO] Nuclei SSL scan completed")
+		cmd.Stdout = stdoutWriter
+		cmd.Stderr = io.MultiWriter(&stderr, stderrWriter)
 
-	// Read the JSON output file
-	outputCmd := exec.Command(
-		"docker", "exec", "ars0n-framework-v2-nuclei-1",
-		"cat", "/output.json",
-	)
-	output, err := outputCmd.Output()
-	if err != nil {
-		log.Printf("[ERROR] Failed to read output file: %v", err)
-		UpdateMetaDataScanStatus(scanID, "error", "", fmt.Sprintf("Failed to read output file: %v", err), cmd.String(), time.Since(startTime).String())
-		return
-	}
-
-	// Process each finding and update the database
-	findings := strings.Split(string(output), "\n")
-	for _, finding := range findings {
-		if finding == "" {
-			continue
-		}
-
-		var result map[string]interface{}
-		if err := json.Unmarshal([]byte(finding), &result); err != nil {
-			log.Printf("[ERROR] Failed to parse JSON finding: %v", err)
-			continue
-		}
-
-		templateID, ok := result["template-id"].(string)
-		if !ok {
-			continue
-		}
-
-		matchedURL, ok := result["matched-at"].(string)
-		if !ok {
-			continue
-		}
-
-		// Convert matched-at (host:port) to URL
-		url := "https://" + strings.TrimSuffix(matchedURL, ":443")
-
-		// Skip URLs with encoded characters that are nuclei test paths
-		if strings.Contains(url, "%") {
-			log.Printf("[DEBUG] Skipping nuclei test URL with encoded characters: %s", url)
-			continue
-		}
-
-		// Update the target_urls table based on the template
-		var updateField string
-		switch templateID {
-		case "deprecated-tls":
-			updateField = "has_deprecated_tls"
-		case "expired-ssl":
-			updateField = "has_expired_ssl"
-		case "mismatched-ssl-certificate":
-			updateField = "has_mismatched_ssl"
-		case "revoked-ssl-certificate":
-			updateField = "has_revoked_ssl"
-		case "self-signed-ssl":
-			updateField = "has_self_signed_ssl"
-		case "untrusted-root-certificate":
-			updateField = "has_untrusted_root_ssl"
-		default:
-			continue
-		}
-
-		query := fmt.Sprintf("UPDATE target_urls SET %s = true WHERE url = $1 AND scope_target_id = $2", updateField)
-		commandTag, err := dbPool.Exec(context.Background(), query, url, scopeTargetID)
+		log.Printf("[INFO] Nuclei SSL scan started, streaming output...")
+		err = cmd.Run()
 		if err != nil {
-			log.Printf("[ERROR] Failed to update target URL %s for template %s: %v", url, templateID, err)
-		} else {
-			rowsAffected := commandTag.RowsAffected()
-			log.Printf("[INFO] Successfully updated target URL %s with %s = true (Rows affected: %d)", url, updateField, rowsAffected)
+			log.Printf("[ERROR] Nuclei scan failed: %v", err)
+			UpdateMetaDataScanStatus(scanID, "error", "", stderr.String(), cmd.String(), time.Since(startTime).String())
+			return
 		}
-	}
+		log.Printf("[INFO] Nuclei SSL scan completed")
+
+		// Read the JSON output file
+		outputCmd := exec.Command(
+			"docker", "exec", "ars0n-framework-v2-nuclei-1",
+			"cat", "/output.json",
+		)
+		output, err := outputCmd.Output()
+		if err != nil {
+			log.Printf("[ERROR] Failed to read output file: %v", err)
+			UpdateMetaDataScanStatus(scanID, "error", "", fmt.Sprintf("Failed to read output file: %v", err), cmd.String(), time.Since(startTime).String())
+			return
+		}
+
+		// Process each finding and update the database
+		findings := strings.Split(string(output), "\n")
+		for _, finding := range findings {
+			if finding == "" {
+				continue
+			}
+
+			var result map[string]interface{}
+			if err := json.Unmarshal([]byte(finding), &result); err != nil {
+				log.Printf("[ERROR] Failed to parse JSON finding: %v", err)
+				continue
+			}
+
+			templateID, ok := result["template-id"].(string)
+			if !ok {
+				continue
+			}
+
+			matchedURL, ok := result["matched-at"].(string)
+			if !ok {
+				continue
+			}
+
+			// Convert matched-at (host:port) to URL
+			url := "https://" + strings.TrimSuffix(matchedURL, ":443")
+
+			// Skip URLs with encoded characters that are nuclei test paths
+			if strings.Contains(url, "%") {
+				log.Printf("[DEBUG] Skipping nuclei test URL with encoded characters: %s", url)
+				continue
+			}
+
+			// Update the target_urls table based on the template
+			var updateField string
+			switch templateID {
+			case "deprecated-tls":
+				updateField = "has_deprecated_tls"
+			case "expired-ssl":
+				updateField = "has_expired_ssl"
+			case "mismatched-ssl-certificate":
+				updateField = "has_mismatched_ssl"
+			case "revoked-ssl-certificate":
+				updateField = "has_revoked_ssl"
+			case "self-signed-ssl":
+				updateField = "has_self_signed_ssl"
+			case "untrusted-root-certificate":
+				updateField = "has_untrusted_root_ssl"
+			default:
+				continue
+			}
+
+			query := fmt.Sprintf("UPDATE target_urls SET %s = true WHERE url = $1 AND scope_target_id = $2", updateField)
+			commandTag, err := dbPool.Exec(context.Background(), query, url, scopeTargetID)
+			if err != nil {
+				log.Printf("[ERROR] Failed to update target URL %s for template %s: %v", url, templateID, err)
+			} else {
+				rowsAffected := commandTag.RowsAffected()
+				log.Printf("[INFO] Successfully updated target URL %s with %s = true (Rows affected: %d)", url, updateField, rowsAffected)
+			}
+		}
 
 		// Update scan status to indicate SSL scan is complete but tech scan is pending
 		UpdateMetaDataScanStatus(
@@ -853,7 +852,7 @@ func ExecuteAndParseMetaDataScan(scanID, domain string) {
 				UpdateMetaDataScanStatus(scanID, "cancelled", "", "Scan cancelled by user", "", time.Since(startTime).String())
 				return
 			}
-			
+
 			updateScanProgress(scanID, "ffuf", url, len(urls), i+1)
 			if err := ExecuteFfufScan(url, scopeTargetID); err != nil {
 				log.Printf("[ERROR] Failed to run ffuf scan for URL %s: %v", url, err)
@@ -972,8 +971,8 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 		successfulRequests++
 		log.Printf("[STATUS_CODE] URL: %s | Status: %d | Stored successfully", urlStr, resp.StatusCode)
 	}
-	
-	log.Printf("[INFO] Screenshot capture complete - Success: %d | Failed: %d | Total: %d", 
+
+	log.Printf("[INFO] Screenshot capture complete - Success: %d | Failed: %d | Total: %d",
 		successfulRequests, failedRequests, len(urls))
 	if failedRequests > 0 {
 		log.Printf("[WARN] %d URLs failed to fetch - these will not have metadata", failedRequests)
@@ -1015,7 +1014,7 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 	var stderr bytes.Buffer
 	stdoutWriter := &NucleiLogWriter{prefix: "[NUCLEI-TECH]"}
 	stderrWriter := &NucleiLogWriter{prefix: "[NUCLEI-TECH-ERR]"}
-	
+
 	cmd.Stdout = stdoutWriter
 	cmd.Stderr = io.MultiWriter(&stderr, stderrWriter)
 
@@ -1539,7 +1538,7 @@ func ExecuteFfufScan(url string, scopeTargetID string) error {
 	if err := cmd.Run(); err != nil {
 		stderrOutput := stderr.String()
 		log.Printf("[ERROR] ffuf scan failed for URL %s: %v\nStderr: %s", url, err, stderrOutput)
-		
+
 		if strings.Contains(stderrOutput, "403 Forbidden") || strings.Contains(stderrOutput, "95%") {
 			return fmt.Errorf("ffuf scan stopped: more than 95%% of responses returned 403 Forbidden - target may be blocking requests")
 		} else if strings.Contains(stderrOutput, "spurious") {
@@ -1547,12 +1546,12 @@ func ExecuteFfufScan(url string, scopeTargetID string) error {
 		}
 		return fmt.Errorf("ffuf scan failed: %v", err)
 	}
-	
+
 	stderrOutput := stderr.String()
 	if strings.Contains(stderrOutput, "stopped") || strings.Contains(stderrOutput, "403") {
 		log.Printf("[WARN] FFUF may have stopped early for URL %s: %s", url, stderrOutput)
 	}
-	
+
 	log.Printf("[INFO] Completed ffuf scan for URL: %s", url)
 
 	// Read and parse results

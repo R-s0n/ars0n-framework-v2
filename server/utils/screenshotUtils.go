@@ -106,6 +106,48 @@ func RunNucleiScreenshotScan(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+var nucleiScreenshotBaseArity = map[string]int{
+	"-t": 1, "-list": 1, "-headless": 0, "-c": 1, "-rl": 1,
+	"-timeout": 1, "-retries": 1, "-bs": 1, "-H": 1, "-sc": 0,
+}
+
+// buildNucleiScreenshotCommand builds the screenshot argument vector.
+//
+// PURE, and argv rather than a shell string, which is what makes wiring this step safe at all: the
+// values below now travel as separate process arguments instead of being interpolated into a
+// `bash -c` command. With an empty settings map the nuclei flag sequence is exactly what it has
+// always been, pinned by TestNucleiScreenshotDefaultCommandIsUnchanged.
+func buildNucleiScreenshotCommand(customUserAgent, customHeader string,
+	tool WildcardTool, settings map[string]any) ([]string, []string) {
+
+	base := []string{
+		"-t", "/root/nuclei-templates/headless/screenshot.yaml",
+		"-list", "/urls.txt",
+		"-headless",
+		"-c", "25",
+		"-rl", "150",
+		"-timeout", "10",
+		"-retries", "1",
+		"-bs", "25",
+	}
+	if customHeader != "" {
+		base = append(base, "-H", customHeader)
+	}
+	if customUserAgent != "" {
+		base = append(base, "-H", "User-Agent: "+customUserAgent)
+	}
+
+	overlay := wildcardOverlay{
+		tool:      tool,
+		settings:  settings,
+		baseArity: nucleiScreenshotBaseArity,
+	}
+	args, notes := overlay.apply(base)
+
+	argv := append([]string{"docker", "exec", "ars0n-framework-v2-nuclei-1", "nuclei"}, args...)
+	return argv, notes
+}
+
 // ExecuteAndParseNucleiScreenshotScan runs the Nuclei screenshot scan and processes its results
 func ExecuteAndParseNucleiScreenshotScan(scanID, domain string) {
 	log.Printf("[INFO] Starting Nuclei screenshot scan execution for scan ID: %s", scanID)
@@ -168,32 +210,44 @@ func ExecuteAndParseNucleiScreenshotScan(scanID, domain string) {
 		return
 	}
 
-	// Build base command
-	cmdArgs := []string{
-		"docker", "exec", "ars0n-framework-v2-nuclei-1",
-		"bash", "-c",
+	// The target list, written into the container over STDIN.
+	//
+	// This used to be `bash -c "echo '<every url>' > /urls.txt && nuclei ..."`, and that shape had two
+	// problems worth being rid of. It put attacker-influenced data (a URL discovered by httpx) inside
+	// a single-quoted shell string, where one apostrophe rewrites the command; and it meant every
+	// configurable value would also have had to be quoted into that string, which is why the
+	// nuclei-screenshot vocabulary deliberately contains no free text. Writing the file over stdin and
+	// running nuclei as argv removes the shell from the data path entirely. The nuclei flag sequence
+	// below is unchanged from what it has always been.
+	writeURLs := exec.Command("docker", "exec", "-i", "ars0n-framework-v2-nuclei-1", "sh", "-c", "cat > /urls.txt")
+	writeURLs.Stdin = strings.NewReader(strings.Join(urls, "\n") + "\n")
+	var writeErrOut bytes.Buffer
+	writeURLs.Stderr = &writeErrOut
+	if err := writeURLs.Run(); err != nil {
+		log.Printf("[ERROR] Failed to write the screenshot target list into the container for scan ID %s: %v", scanID, err)
+		UpdateNucleiScreenshotScanStatus(scanID, "error", "",
+			fmt.Sprintf("Failed to write /urls.txt into the nuclei container: %v\nStderr: %s", err, writeErrOut.String()),
+			writeURLs.String(), time.Since(startTime).String())
+		return
 	}
 
-	nucleiCmd := fmt.Sprintf("echo '%s' > /urls.txt && nuclei -t /root/nuclei-templates/headless/screenshot.yaml -list /urls.txt -headless -c 25 -rl 150 -timeout 10 -retries 1 -bs 25", strings.Join(urls, "\n"))
-
-	// Add custom headers if specified
-	if customHeader != "" {
-		nucleiCmd += fmt.Sprintf(" -H '%s'", customHeader)
+	screenshotTool, screenshotSettings := wildcardRunnerSettings(scopeTargetID, "nuclei-screenshot")
+	if len(screenshotSettings) > 0 {
+		log.Printf("[INFO] Nuclei screenshot is running with %d stored Wildcard settings for scope target %s",
+			len(screenshotSettings), scopeTargetID)
 	}
 
-	// Add custom user agent via header if specified
-	if customUserAgent != "" {
-		nucleiCmd += fmt.Sprintf(" -H 'User-Agent: %s'", customUserAgent)
+	argv, settingNotes := buildNucleiScreenshotCommand(customUserAgent, customHeader, screenshotTool, screenshotSettings)
+	for _, note := range settingNotes {
+		log.Printf("[INFO] Nuclei screenshot settings: %s", note)
 	}
-
-	cmdArgs = append(cmdArgs, nucleiCmd)
-	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	log.Printf("[INFO] Prepared Nuclei command for scan ID %s: %s", scanID, cmd.String())
 
 	var stdout, stderr bytes.Buffer
 	stdoutWriter := &ScreenshotLogWriter{prefix: "[NUCLEI-SCREENSHOT]"}
 	stderrWriter := &ScreenshotLogWriter{prefix: "[NUCLEI-SCREENSHOT-ERR]"}
-	
+
 	cmd.Stdout = io.MultiWriter(&stdout, stdoutWriter)
 	cmd.Stderr = io.MultiWriter(&stderr, stderrWriter)
 

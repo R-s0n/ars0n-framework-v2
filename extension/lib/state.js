@@ -48,6 +48,13 @@ export const EMPTY_STATE = {
   scopeTargetId: null,
   targetUrl: null,
   scopeHosts: [],
+  // Authored scope rules for this target, parsed. When non-empty these are the WHOLE boundary and
+  // scopeHosts is not consulted, so a deny cannot be overridden by the host list.
+  scopeRules: [],
+  // Set only when a rule the framework accepted could not be parsed here, which means the two
+  // evaluators disagree. Surfaced in the popup because recording by a different boundary than the
+  // scanners enforce must never be a console-only fact.
+  scopeRulesError: null,
   settings: null,
   apiBase: 'http://localhost/api',
   startedAt: null,

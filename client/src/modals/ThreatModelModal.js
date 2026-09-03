@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Modal, Button, Form, ListGroup, Badge, Spinner, Alert, Card, Nav, Tab } from 'react-bootstrap';
+import { attacksForCategory, attacks as ATTACK_CATALOG } from '../data/attacks';
 
 const STRIDE_CATEGORIES = [
   {
@@ -34,6 +35,38 @@ const STRIDE_CATEGORIES = [
   }
 ];
 
+// Mirrors THREAT_SEVERITY in App.js so the modal and the accordion badge agree on wording.
+// Sentinel for the select. It is never stored: choosing it swaps the control for a text box,
+// and what gets saved is attack_custom_name with attack_id left empty.
+const CUSTOM_ATTACK = '__custom__';
+
+const ATTACK_NAME_BY_ID = ATTACK_CATALOG.reduce((acc, a) => { acc[a.id] = a.name; return acc; }, {});
+
+const MODAL_SEVERITY_COLORS = {
+  critical:      { bg: '#7f1d1d', fg: '#fecaca' },
+  high:          { bg: '#9a3412', fg: '#fed7aa' },
+  moderate:      { bg: '#854d0e', fg: '#fde68a' },
+  low:           { bg: '#1e3a5f', fg: '#bfdbfe' },
+  informational: { bg: '#334155', fg: '#cbd5e1' }
+};
+
+const SEVERITY_OPTIONS = [
+  { value: '', label: 'Not triaged' },
+  { value: 'critical', label: 'Critical' },
+  { value: 'high', label: 'High' },
+  { value: 'moderate', label: 'Moderate' },
+  { value: 'low', label: 'Low' },
+  { value: 'informational', label: 'Informational' }
+];
+
+// The select carries strings, so undecided is '' rather than a third boolean-ish value. It converts
+// back to a real null on save, which is what tells the API to reset the column.
+const AUTHENTICATED_OPTIONS = [
+  { value: '', label: 'Not determined' },
+  { value: 'true', label: 'Auth Required' },
+  { value: 'false', label: 'Unauthenticated' }
+];
+
 export const ThreatModelModal = ({ 
   show, 
   handleClose, 
@@ -58,8 +91,19 @@ export const ThreatModelModal = ({
     security_controls: [{control: '', explanation: ''}],
     impact_customer_data: '',
     impact_attacker_scope: '',
-    impact_company_reputation: ''
+    impact_company_reputation: '',
+    one_sentence: '',
+    summary: '',
+    severity: '',
+    authenticated: '',
+    attack_id: '',
+    attack_custom_name: ''
   });
+
+  // Filtered by the open tab: a Spoofing threat may only cite an attack that achieves spoofing.
+  // Memoised: it feeds an effect dependency list, and a fresh array each render would
+  // re-run that effect on every keystroke in the form.
+  const categoryAttacks = useMemo(() => attacksForCategory(activeTab), [activeTab]);
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [threatToDelete, setThreatToDelete] = useState(null);
@@ -84,7 +128,15 @@ export const ThreatModelModal = ({
           security_controls: threat.security_controls ? JSON.parse(threat.security_controls) : [{control: '', explanation: ''}],
           impact_customer_data: threat.impact_customer_data || '',
           impact_attacker_scope: threat.impact_attacker_scope || '',
-          impact_company_reputation: threat.impact_company_reputation || ''
+          impact_company_reputation: threat.impact_company_reputation || '',
+          one_sentence: threat.one_sentence || '',
+          summary: threat.summary || '',
+          severity: threat.severity || '',
+          // A stored null has to land on '' rather than 'false': the form must not turn
+          // "nobody decided" into "no credential needed" just by being opened.
+          authenticated: typeof threat.authenticated === 'boolean' ? String(threat.authenticated) : '',
+          attack_id: threat.attack_id || (threat.attack_custom_name ? CUSTOM_ATTACK : ''),
+          attack_custom_name: threat.attack_custom_name || ''
         });
         setIsEditing(false);
       }
@@ -130,9 +182,29 @@ export const ThreatModelModal = ({
     }
   };
 
+  // Switching STRIDE tabs while composing can leave an attack selected that does not achieve the
+  // new category. Clearing it forces a deliberate re-pick instead of letting the server reject it.
+  useEffect(() => {
+    if (!isEditing || !editedThreat.attack_id) return;
+    if (editedThreat.attack_id === CUSTOM_ATTACK) return;
+    if (!categoryAttacks.some((a) => a.id === editedThreat.attack_id)) {
+      setEditedThreat(prev => ({ ...prev, attack_id: '' }));
+    }
+  }, [activeTab, isEditing, editedThreat.attack_id, categoryAttacks]);
+
   const handleSaveThreat = async () => {
     if (!activeTarget || !editedThreat.url.trim()) {
       setError('URL is required');
+      return;
+    }
+    // Checked here as well as server-side so the user is told at the form rather than by a failed
+    // request. The list is already filtered to this category, so anything in it is a legal pairing.
+    if (!editedThreat.attack_id) {
+      setError('Pick the attack this threat is an instance of, or choose Custom attack to name your own');
+      return;
+    }
+    if (editedThreat.attack_id === CUSTOM_ATTACK && !editedThreat.attack_custom_name.trim()) {
+      setError('Enter a name for the custom attack');
       return;
     }
 
@@ -152,7 +224,20 @@ export const ThreatModelModal = ({
         security_controls: JSON.stringify(securityControlsFiltered),
         impact_customer_data: editedThreat.impact_customer_data.trim(),
         impact_attacker_scope: editedThreat.impact_attacker_scope.trim(),
-        impact_company_reputation: editedThreat.impact_company_reputation.trim()
+        impact_company_reputation: editedThreat.impact_company_reputation.trim(),
+        one_sentence: editedThreat.one_sentence.trim(),
+        summary: editedThreat.summary.trim(),
+        severity: editedThreat.severity,
+        // null, not omitted: this form is a full-record editor, so choosing "Not determined" has to
+        // reset the stored value. Omitting the key would mean "leave it alone" and the choice would
+        // silently do nothing.
+        authenticated: editedThreat.authenticated === '' ? null : editedThreat.authenticated === 'true',
+        // Exactly one half is populated. The API refuses both-or-neither, so the sentinel is
+        // translated here rather than sent.
+        attack_id: editedThreat.attack_id === CUSTOM_ATTACK ? '' : editedThreat.attack_id,
+        attack_custom_name: editedThreat.attack_id === CUSTOM_ATTACK
+          ? editedThreat.attack_custom_name.trim()
+          : ''
       };
 
       const method = selectedThreat ? 'PUT' : 'POST';
@@ -258,7 +343,15 @@ export const ThreatModelModal = ({
           security_controls: threat.security_controls ? JSON.parse(threat.security_controls) : [{control: '', explanation: ''}],
           impact_customer_data: threat.impact_customer_data || '',
           impact_attacker_scope: threat.impact_attacker_scope || '',
-          impact_company_reputation: threat.impact_company_reputation || ''
+          impact_company_reputation: threat.impact_company_reputation || '',
+          one_sentence: threat.one_sentence || '',
+          summary: threat.summary || '',
+          severity: threat.severity || '',
+          // A stored null has to land on '' rather than 'false': the form must not turn
+          // "nobody decided" into "no credential needed" just by being opened.
+          authenticated: typeof threat.authenticated === 'boolean' ? String(threat.authenticated) : '',
+          attack_id: threat.attack_id || (threat.attack_custom_name ? CUSTOM_ATTACK : ''),
+          attack_custom_name: threat.attack_custom_name || ''
         });
       }
     }
@@ -274,7 +367,13 @@ export const ThreatModelModal = ({
       security_controls: [{control: '', explanation: ''}],
       impact_customer_data: '',
       impact_attacker_scope: '',
-      impact_company_reputation: ''
+      impact_company_reputation: '',
+      one_sentence: '',
+      summary: '',
+      severity: '',
+      authenticated: '',
+      attack_id: '',
+      attack_custom_name: ''
     });
     setIsEditing(true);
   };
@@ -451,6 +550,110 @@ export const ThreatModelModal = ({
                       <h5 className="text-danger mb-4">
                         {selectedThreat ? 'Edit Threat' : 'New Threat'}
                       </h5>
+
+                      <Form.Group className="mb-3">
+                        <Form.Label className="text-white">
+                          Attack <span className="text-danger">*</span>
+                        </Form.Label>
+                        <Form.Select
+                          value={editedThreat.attack_id}
+                          onChange={(e) => setEditedThreat(prev => ({ ...prev, attack_id: e.target.value }))}
+                          data-bs-theme="dark"
+                        >
+                          <option value="">Select an attack...</option>
+                          {categoryAttacks.map((a) => (
+                            <option key={a.id} value={a.id}>{a.name}</option>
+                          ))}
+                          <option value={CUSTOM_ATTACK}>Custom attack (not in the list)...</option>
+                        </Form.Select>
+                        {editedThreat.attack_id === CUSTOM_ATTACK && (
+                          <Form.Control
+                            type="text"
+                            className="mt-2"
+                            value={editedThreat.attack_custom_name}
+                            onChange={(e) => setEditedThreat(prev => ({ ...prev, attack_custom_name: e.target.value }))}
+                            placeholder="Name the attack, e.g. Insufficient Audit Logging"
+                            maxLength={120}
+                            data-bs-theme="dark"
+                            autoFocus
+                          />
+                        )}
+                        <Form.Text className="text-white-50">
+                          {/* Filtered to the open STRIDE tab, so the options are only attacks that are
+                              actually weaponized to achieve this category. */}
+                          {editedThreat.attack_id === CUSTOM_ATTACK
+                            ? 'Stored on this threat only. It is not added to the Possible Attacks list.'
+                            : `The Possible Attacks entry this threat is an instance of. Only attacks that achieve ${
+                                STRIDE_CATEGORIES.find(c => c.key === activeTab)?.label.replace(/[()]/g, '')
+                              } are listed (${categoryAttacks.length} available).`}
+                        </Form.Text>
+                      </Form.Group>
+
+                      <Form.Group className="mb-3">
+                        <Form.Label className="text-white">Describe the Attack in One Sentence</Form.Label>
+                        <Form.Control
+                          type="text"
+                          value={editedThreat.one_sentence}
+                          onChange={(e) => setEditedThreat(prev => ({ ...prev, one_sentence: e.target.value }))}
+                          placeholder="An attacker can ..."
+                          data-bs-theme="dark"
+                        />
+                        <Form.Text className="text-white-50">
+                          A single sentence naming the attack, shown at the top of the threat
+                        </Form.Text>
+                      </Form.Group>
+
+                      <Form.Group className="mb-3">
+                        <Form.Label className="text-white">Summary</Form.Label>
+                        <Form.Control
+                          as="textarea"
+                          rows={4}
+                          value={editedThreat.summary}
+                          onChange={(e) => setEditedThreat(prev => ({ ...prev, summary: e.target.value }))}
+                          placeholder="What the attack is, why it works, and what it gets the attacker..."
+                          data-bs-theme="dark"
+                        />
+                        <Form.Text className="text-white-50">
+                          The fuller explanation, shown above the attack steps
+                        </Form.Text>
+                      </Form.Group>
+
+                      <div className="row">
+                        <div className="col-md-6">
+                          <Form.Group className="mb-3">
+                            <Form.Label className="text-white">Severity</Form.Label>
+                            <Form.Select
+                              value={editedThreat.severity}
+                              onChange={(e) => setEditedThreat(prev => ({ ...prev, severity: e.target.value }))}
+                              data-bs-theme="dark"
+                            >
+                              {SEVERITY_OPTIONS.map(opt => (
+                                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                              ))}
+                            </Form.Select>
+                            <Form.Text className="text-white-50">
+                              Left as Not triaged, no severity badge is shown
+                            </Form.Text>
+                          </Form.Group>
+                        </div>
+                        <div className="col-md-6">
+                          <Form.Group className="mb-3">
+                            <Form.Label className="text-white">Authenticated</Form.Label>
+                            <Form.Select
+                              value={editedThreat.authenticated}
+                              onChange={(e) => setEditedThreat(prev => ({ ...prev, authenticated: e.target.value }))}
+                              data-bs-theme="dark"
+                            >
+                              {AUTHENTICATED_OPTIONS.map(opt => (
+                                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                              ))}
+                            </Form.Select>
+                            <Form.Text className="text-white-50">
+                              Whether the attacker needs a session to run this attack
+                            </Form.Text>
+                          </Form.Group>
+                        </div>
+                      </div>
 
                       <Form.Group className="mb-3">
                         <Form.Label className="text-white">URL <span className="text-danger">*</span></Form.Label>
@@ -672,6 +875,63 @@ export const ThreatModelModal = ({
                           </Button>
                         </div>
                       </div>
+
+                      {(editedThreat.attack_id || editedThreat.attack_custom_name) && (
+                        <Card className="bg-dark border-secondary mb-3">
+                          <Card.Body>
+                            <h6 className="text-danger">Attack</h6>
+                            <p className="text-white mb-0">
+                              {ATTACK_NAME_BY_ID[editedThreat.attack_id] || editedThreat.attack_custom_name}
+                              {!ATTACK_NAME_BY_ID[editedThreat.attack_id] && editedThreat.attack_custom_name && (
+                                <span className="text-white-50 ms-2" style={{ fontSize: '0.8rem' }}>(custom)</span>
+                              )}
+                            </p>
+                          </Card.Body>
+                        </Card>
+                      )}
+
+                      {(editedThreat.severity || editedThreat.authenticated !== '') && (
+                        <div className="d-flex flex-wrap align-items-center mb-3" style={{ gap: '0.35rem' }}>
+                          {editedThreat.severity && (
+                            <Badge bg="" style={{
+                              backgroundColor: MODAL_SEVERITY_COLORS[editedThreat.severity]?.bg,
+                              color: MODAL_SEVERITY_COLORS[editedThreat.severity]?.fg,
+                              textTransform: 'uppercase', letterSpacing: '0.06em'
+                            }}>
+                              {SEVERITY_OPTIONS.find(o => o.value === editedThreat.severity)?.label}
+                            </Badge>
+                          )}
+                          {editedThreat.authenticated !== '' && (
+                            <Badge bg="" style={{
+                              backgroundColor: editedThreat.authenticated === 'true' ? '#7f1d1d' : '#14532d',
+                              color: editedThreat.authenticated === 'true' ? '#fecaca' : '#bbf7d0',
+                              textTransform: 'uppercase', letterSpacing: '0.06em'
+                            }}>
+                              {editedThreat.authenticated === 'true' ? 'Auth Required' : 'Unauthenticated'}
+                            </Badge>
+                          )}
+                        </div>
+                      )}
+
+                      {editedThreat.one_sentence && (
+                        <Card className="bg-dark border-secondary mb-3">
+                          <Card.Body>
+                            <h6 className="text-danger">Describe the Attack in One Sentence</h6>
+                            <p className="text-white mb-0">{editedThreat.one_sentence}</p>
+                          </Card.Body>
+                        </Card>
+                      )}
+
+                      {editedThreat.summary && (
+                        <Card className="bg-dark border-secondary mb-3">
+                          <Card.Body>
+                            <h6 className="text-danger">Summary</h6>
+                            <p className="text-white mb-0" style={{ whiteSpace: 'pre-wrap' }}>
+                              {editedThreat.summary}
+                            </p>
+                          </Card.Body>
+                        </Card>
+                      )}
 
                       <Card className="bg-dark border-secondary mb-3">
                         <Card.Body>

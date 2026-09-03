@@ -17,6 +17,14 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
   const [scopeDescription, setScopeDescription] = useState('');
   const [hostsBusy, setHostsBusy] = useState(false);
   const [hostNotice, setHostNotice] = useState('');
+  // Scope RULES: the pattern boundary. Once any rule exists it replaces the per-host in_scope
+  // toggles below entirely, which the UI has to say out loud or the two look like they combine.
+  const [scopeRules, setScopeRules] = useState([]);
+  const [rulesActive, setRulesActive] = useState(false);
+  const [ruleInput, setRuleInput] = useState('');
+  const [rulePreview, setRulePreview] = useState(null);
+  const [ruleBusy, setRuleBusy] = useState(false);
+  const [ruleError, setRuleError] = useState('');
 
   useEffect(() => {
     if (show && scopeTargetId) {
@@ -24,14 +32,108 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
       loadAllSessions();
       loadAllCaptures();
       loadHosts();
+      loadScopeRules();
     }
   }, [show, scopeTargetId]);
+
+  // Debounced so a preview request is not sent per keystroke. The preview comes from the server
+  // because that is the evaluator which will actually enforce the rule; a sentence computed here
+  // could differ from the enforced boundary, and a preview that disagrees is worse than none.
+  useEffect(() => {
+    if (!show) return undefined;
+    const typed = ruleInput.trim();
+    if (!typed) { setRulePreview(null); return undefined; }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch('/api/scope-rules/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scope_target_id: scopeTargetId, typed }),
+        });
+        const body = await res.json();
+        if (!cancelled) setRulePreview(body);
+      } catch (err) {
+        if (!cancelled) setRulePreview(null);
+      }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [ruleInput, show, scopeTargetId]);
 
   const handleRefresh = () => {
     loadSessions();
     loadAllSessions();
     loadAllCaptures();
     loadHosts();
+    loadScopeRules();
+  };
+
+  const loadScopeRules = async () => {
+    try {
+      const response = await fetch(`/api/scope-rules/${scopeTargetId}`);
+      if (!response.ok) return;
+      const data = await response.json();
+      setScopeRules(data.rules || []);
+      setRulesActive(!!data.rules_active);
+    } catch (err) {
+      console.error('Error loading scope rules:', err);
+    }
+  };
+
+  const addScopeRule = async () => {
+    const typed = ruleInput.trim();
+    if (!typed) return;
+    setRuleBusy(true);
+    setRuleError('');
+
+    const send = (confirmWide) => fetch('/api/scope-rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope_target_id: scopeTargetId, typed, confirm_wide: confirmWide || '' }),
+    });
+
+    try {
+      let res = await send('');
+      if (res.status === 428) {
+        // A rule that can admit hosts nobody has seen is stored only on a second, deliberate act.
+        // The confirmation is the rule's own canonical text, so an operator cannot confirm a
+        // different rule from the one in front of them.
+        const message = await res.text();
+        const canonical = (message.match(/confirm_wide exactly as "([^"]+)"/) || [])[1];
+        if (!canonical || !window.confirm(`${message}\n\nAdd it anyway?`)) {
+          setRuleError('Not added. Add "within <domain>" to bound it.');
+          setRuleBusy(false);
+          return;
+        }
+        res = await send(canonical);
+      }
+      if (!res.ok) {
+        setRuleError((await res.text()) || `Framework returned ${res.status}`);
+        setRuleBusy(false);
+        return;
+      }
+      setRuleInput('');
+      setRulePreview(null);
+      await loadScopeRules();
+      await loadHosts();
+    } catch (err) {
+      setRuleError(err.message);
+    } finally {
+      setRuleBusy(false);
+    }
+  };
+
+  const removeScopeRule = async (ruleId) => {
+    setRuleBusy(true);
+    try {
+      await fetch(`/api/scope-rules/${ruleId}`, { method: 'DELETE' });
+      await loadScopeRules();
+      await loadHosts();
+    } catch (err) {
+      setRuleError(err.message);
+    } finally {
+      setRuleBusy(false);
+    }
   };
 
   const loadHosts = async () => {
@@ -801,12 +903,134 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                 In-scope hosts are the ones the endpoint scan is allowed to send requests to, so
                 excluding a host here removes its endpoints from testing without deleting them.
               </div>
-              {scopeDescription && (
+              {scopeDescription && !rulesActive && (
                 <div className="small">
                   <span className="text-white-50">Current scan boundary: </span>
                   <code className="text-light">{scopeDescription}</code>
                 </div>
               )}
+            </div>
+
+            {/* ---------------------------------------------------------- scope rules */}
+            <div className="rounded p-3 mb-3" style={{ border: '1px solid rgba(220,53,69,0.45)' }}>
+              <div className="d-flex align-items-center gap-2 mb-2">
+                <span className="text-danger fw-bold small">Scope rules</span>
+                {rulesActive && <Badge bg="danger">in force</Badge>}
+              </div>
+
+              <p className="text-white-50 small mb-2">
+                A rule can name an exact host, a whole subtree, subdomains only, a substring or a
+                regex, and it can deny as well as allow. A deny always wins, whatever else matches.
+              </p>
+
+              {rulesActive && (
+                <Alert variant="warning" className="py-2 small mb-2">
+                  Rules are the whole boundary. The per-host in/out toggles below are{' '}
+                  <strong>not consulted</strong> while any rule exists, and neither is the crawl's
+                  own observed-host list. Remove every rule to go back to the host list.
+                </Alert>
+              )}
+
+              <div className="mb-2">
+                {scopeRules.length === 0 ? (
+                  <div className="text-white-50 small">
+                    No rules. The host list below is the boundary.
+                  </div>
+                ) : scopeRules.map((rule) => (
+                  <div key={rule.id} className="d-flex align-items-start gap-2 mb-1">
+                    <Badge bg={rule.effect === 'deny' ? 'danger' : 'secondary'}
+                           style={{ fontSize: '0.6rem' }}>
+                      {rule.effect === 'deny' ? 'DENY' : 'ALLOW'}
+                    </Badge>
+                    <div className="flex-grow-1">
+                      {/* The sentence is the primary text. A bare pattern is what gets misread. */}
+                      <div className="small text-white">{rule.sentence}</div>
+                      <code className="text-white-50" style={{ fontSize: '0.7rem' }}>
+                        {rule.canonical}
+                      </code>
+                      {rule.blast === 'wide' && (
+                        <Badge bg="warning" text="dark" className="ms-2"
+                               style={{ fontSize: '0.6rem' }}
+                               title="Can admit hosts nobody has seen yet">
+                          wide
+                        </Badge>
+                      )}
+                    </div>
+                    <Button size="sm" variant="link" className="text-danger p-0"
+                            disabled={ruleBusy}
+                            onClick={() => removeScopeRule(rule.id)} title="Remove this rule">
+                      <i className="bi bi-x-lg" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="d-flex gap-2">
+                <input
+                  type="text"
+                  className="form-control form-control-sm bg-dark text-light border-secondary"
+                  placeholder="e.g. *.example.com, =api.example.com, ~jivo within acme.io, !cdn.example.com"
+                  value={ruleInput}
+                  disabled={ruleBusy}
+                  onChange={(e) => { setRuleInput(e.target.value); setRuleError(''); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addScopeRule(); } }}
+                />
+                <Button size="sm" variant="outline-danger" disabled={ruleBusy || !ruleInput.trim()}
+                        onClick={addScopeRule}>
+                  {ruleBusy ? <Spinner animation="border" size="sm" /> : 'Add'}
+                </Button>
+              </div>
+
+              {ruleError && <div className="small text-danger mt-1">{ruleError}</div>}
+
+              {rulePreview && !rulePreview.ok && (
+                <div className="small text-danger mt-1">{rulePreview.error}</div>
+              )}
+              {rulePreview && rulePreview.ok && (
+                <div className="small mt-2">
+                  <div className={rulePreview.rule.blast === 'wide' ? 'text-warning' : 'text-info'}>
+                    {rulePreview.rule.sentence}
+                  </div>
+                  <div className="text-white-50" style={{ fontSize: '0.72rem' }}>
+                    {(rulePreview.newly_allowed || []).length > 0 && (
+                      <span className="me-3">
+                        would newly allow {rulePreview.newly_allowed.length} recorded host
+                        {rulePreview.newly_allowed.length === 1 ? '' : 's'}:{' '}
+                        {rulePreview.newly_allowed.slice(0, 4).join(', ')}
+                        {rulePreview.newly_allowed.length > 4 ? '…' : ''}
+                      </span>
+                    )}
+                    {(rulePreview.newly_denied || []).length > 0 && (
+                      <span className="text-warning">
+                        would remove {rulePreview.newly_denied.length} host
+                        {rulePreview.newly_denied.length === 1 ? '' : 's'} currently in scope:{' '}
+                        {rulePreview.newly_denied.slice(0, 4).join(', ')}
+                        {rulePreview.newly_denied.length > 4 ? '…' : ''}
+                      </span>
+                    )}
+                  </div>
+                  {rulePreview.warning && (
+                    <div className="text-warning mt-1" style={{ fontSize: '0.72rem' }}>
+                      {rulePreview.warning}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <details className="mt-2">
+                <summary className="text-white-50 small" style={{ cursor: 'pointer' }}>syntax</summary>
+                <div className="text-white-50 mt-1" style={{ fontSize: '0.72rem', lineHeight: 1.7 }}>
+                  <div><code>example.com</code> host and every subdomain</div>
+                  <div><code>*.example.com</code> subdomains only, <em>not</em> example.com itself</div>
+                  <div><code>=api.example.com</code> that exact host only</div>
+                  <div><code>=app.example.com:8443</code> that host on that port only</div>
+                  <div><code>~jivo</code> any host containing "jivo" (wide)</div>
+                  <div><code>~jivo within acme.io</code> the same, bounded to one domain</div>
+                  <div><code>{'re:prod-[0-9]+\\.acme\\.io'}</code> full-match regex</div>
+                  <div><code>!cdn.example.com</code> deny that subtree</div>
+                  <div><code>!=cdn.example.com</code> deny that exact host</div>
+                </div>
+              </details>
             </div>
 
             {hostNotice && (
@@ -836,7 +1060,8 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                   <Button
                     size="sm"
                     variant="outline-secondary"
-                    disabled={hostsBusy || excludedHosts.length === 0}
+                    disabled={hostsBusy || rulesActive || excludedHosts.length === 0}
+                    title={rulesActive ? 'Scope rules are in force; per-host scope is not consulted' : undefined}
                     onClick={() => setHostScope(excludedHosts, true)}
                   >
                     Include all in scope ({excludedHosts.length})
@@ -886,7 +1111,8 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                                 size="sm"
                                 variant="link"
                                 className={`p-0 me-3 ${h.in_scope ? 'text-white-50' : 'text-danger'}`}
-                                disabled={hostsBusy}
+                                disabled={hostsBusy || rulesActive}
+                                title={rulesActive ? 'Scope rules are in force; per-host scope is not consulted' : undefined}
                                 onClick={() => setHostScope([h.host], !h.in_scope)}
                               >
                                 {h.in_scope ? 'Exclude' : 'Include'}

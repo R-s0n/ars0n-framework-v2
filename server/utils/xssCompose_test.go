@@ -349,3 +349,349 @@ func TestValueCarryingAndSwitchBlindersAreBothDetected(t *testing.T) {
 		t.Error("the path blinders stopped being detected")
 	}
 }
+
+// dalfox does not spend its budget on body, header and cookie vectors unless asked.
+//
+// MEASURED, and this is the whole reason the default exists. Pointed at all 249 vectors on the Juice
+// Shop corpus, dalfox covered body 49/49, header 40/40 and cookie 39/57 and then stalled, having
+// reached ZERO of the 45 query vectors and ZERO of the 58 path vectors. Query is where
+// /rest/products/search?q= lives, and dalfox is the only tool in this section that reaches path at
+// all. It spent everything on the three points least likely to carry reflected XSS.
+func TestDalfoxSkipsBodyHeaderAndCookieByDefault(t *testing.T) {
+	tool, ok := VectorToolByKey("dalfox")
+	if !ok {
+		t.Fatal("dalfox is not registered")
+	}
+
+	// The capability is NOT removed. Off by default and cannot do it are different claims, and an
+	// operator who opts in must actually get the scan.
+	for _, point := range []string{"query", "body", "header", "cookie", "path"} {
+		if !VectorToolCanReach(tool, point) {
+			t.Errorf("dalfox no longer declares it can reach %s; the default was meant to change, "+
+				"not the capability", point)
+		}
+	}
+
+	for _, point := range []string{"body", "header", "cookie"} {
+		if !vectorPointNeedsOptIn(tool, point, map[string]any{}) {
+			t.Errorf("%s vectors are scanned with no settings at all; the default is supposed to be off", point)
+		}
+		setting := tool.OptInPoints[point]
+		if setting == "" {
+			t.Errorf("%s has no opt-in setting, so an operator cannot turn it back on", point)
+			continue
+		}
+		if _, known := tool.Options[setting]; !known {
+			t.Errorf("opt-in setting %q for %s is not in the option vocabulary, so save_settings will "+
+				"refuse it and the point can never be enabled", setting, point)
+		}
+		if vectorPointNeedsOptIn(tool, point, map[string]any{setting: true}) {
+			t.Errorf("%s is still skipped after opting in with %s", point, setting)
+		}
+	}
+
+	// The two that matter must never need opting in to.
+	for _, point := range []string{"query", "path"} {
+		if vectorPointNeedsOptIn(tool, point, map[string]any{}) {
+			t.Errorf("%s vectors need an opt-in; those are the two points most likely to carry a "+
+				"finding and are the reason the other three are off", point)
+		}
+	}
+}
+
+// A settings value that survived JSON as a string or a number must still count as on, or an operator
+// who ticks the box in one client and not another gets different coverage with no error anywhere.
+func TestOptInAcceptsTheShapesJSONActuallyDelivers(t *testing.T) {
+	tool, _ := VectorToolByKey("dalfox")
+	for _, on := range []any{true, "true", "TRUE", " true ", "1", "yes", "on", 1, float64(1)} {
+		if vectorPointNeedsOptIn(tool, "body", map[string]any{"scanBodyVectors": on}) {
+			t.Errorf("scanBodyVectors=%#v (%T) did not turn body vectors on", on, on)
+		}
+	}
+	for _, off := range []any{false, "false", "", "0", "no", 0, float64(0), nil, "banana"} {
+		if !vectorPointNeedsOptIn(tool, "body", map[string]any{"scanBodyVectors": off}) {
+			t.Errorf("scanBodyVectors=%#v (%T) turned body vectors on; only an explicit true should", off, off)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Path aiming. dalfox is the ONLY tool in this section that reaches a path segment, and path is 58
+// of the 103 eligible vectors on the reference corpus, so everything below decides whether more
+// than half the section is measured or merely counted.
+// ---------------------------------------------------------------------------------------------
+
+// A path vector carries no -p, so nothing constrains dalfox to the input the vector names and it
+// spends the whole budget guessing QUERY parameter names from a wordlist. Measured on a
+// single-page-application shaped target, requests counted at the target rather than reported by
+// dalfox: 166 requests for one path vector, of which 2 touched a path segment and 164 were 148
+// distinct query parameter names dalfox invented. With --skip-mining, 19 requests. On a target that
+// does reflect its path, --skip-mining kept the real Path finding and removed a phantom Query
+// finding on a parameter the vector never claimed.
+func TestDalfoxPathVectorSkipsParameterMining(t *testing.T) {
+	path := VectorInput{
+		Method: "GET", Scheme: "http", Domain: "shop.example.com", Path: "/rest/products/12345",
+		InsertionPoint: "path",
+	}
+	args, _ := ComposeDalfox(path, map[string]any{}, "/tmp/r.jsonl")
+	if !argsContain(args, "--skip-mining") {
+		t.Fatalf("a path vector spends 98%% of its requests on query parameter names dalfox invented "+
+			"unless mining is off, got %v", args)
+	}
+
+	// The four AIMED points keep mining: they carry -p, so a mined name cannot displace the input
+	// under test, and mining is how dalfox finds the sibling parameters worth knowing about.
+	for _, point := range []string{"query", "body", "header", "cookie"} {
+		v := VectorInput{
+			Method: "GET", Scheme: "http", Domain: "shop.example.com", Path: "/search",
+			InsertionPoint: point, Parameters: []string{"q"},
+		}
+		aimed, _ := ComposeDalfox(v, map[string]any{}, "/tmp/r.jsonl")
+		if argsContain(aimed, "--skip-mining") {
+			t.Errorf("%s vectors are aimed with -p and must keep mining, got %v", point, aimed)
+		}
+	}
+}
+
+// The operator's own mining settings must be DROPPED for a path vector rather than emitted beside
+// the framework's --skip-mining, and the override has to be reported. A -W wordlist left on the
+// command line alongside --skip-mining is two flags arguing, and an operator who configured mining
+// and never heard otherwise believes it ran.
+func TestDalfoxPathVectorReportsSuppressingTheOperatorsMining(t *testing.T) {
+	v := VectorInput{
+		Method: "GET", Scheme: "http", Domain: "shop.example.com", Path: "/rest/products/12345",
+		InsertionPoint: "path",
+	}
+	settings := map[string]any{
+		"miningDictWord": "/app/wordlists/params.txt",
+		"skipMiningDom":  true,
+	}
+	args, warnings := ComposeDalfox(v, settings, "/tmp/r.jsonl")
+
+	if argsContain(args, "-W") || argsContain(args, "--skip-mining-dom") {
+		t.Errorf("a mining setting survived onto a path vector's command line: %v", args)
+	}
+	if !argsContain(args, "--skip-mining") {
+		t.Errorf("mining was not turned off for the path vector: %v", args)
+	}
+	joined := strings.Join(warnings, " ")
+	if !strings.Contains(joined, "miningDictWord") {
+		t.Errorf("the operator's wordlist was overridden silently: %q", joined)
+	}
+
+	// skipMiningDom asked for LESS mining and --skip-mining gives it that and more, so claiming it
+	// "was not applied" would be a false alarm. Only the settings that ask for more are reported.
+	if strings.Contains(joined, "skipMiningDom") {
+		t.Errorf("a setting that --skip-mining supersedes was reported as overridden: %q", joined)
+	}
+	_, quiet := ComposeDalfox(v, map[string]any{"skipMiningDom": true}, "/tmp/r.jsonl")
+	for _, w := range quiet {
+		if strings.Contains(w, "Mining guesses") {
+			t.Errorf("skipMiningDom alone produced a mining override warning: %q", w)
+		}
+	}
+}
+
+// A consolidated endpoint stores an identifier segment as a template, so the path arrives as
+// /rest/products/{id}/reviews. Sent literally that is a route the application does not have: it
+// answers 404 or a catch-all page, dalfox's path probe never sees its token come back, and the path
+// is never injected into. sqliTargetURL has done this for sqlmap and ghauri since the marker rules
+// were established; dalfox was still sending the braces.
+func TestDalfoxMakesTemplatedPathSegmentsConcrete(t *testing.T) {
+	v := VectorInput{
+		Method: "GET", Scheme: "https", Domain: "shop.example.com",
+		Path: "/rest/{version}/products/{id}/reviews", InsertionPoint: "path",
+	}
+	got := dalfoxTargetURL(v)
+
+	if strings.Contains(got, "{") || strings.Contains(got, "}") {
+		t.Fatalf("a templated segment was sent literally, so dalfox probed a route that does not "+
+			"exist: %s", got)
+	}
+	// EVERY templated segment, not only the last. dalfox probes each segment in turn, so one brace
+	// left anywhere breaks the route for all of them.
+	if strings.Count(got, VectorCanary) != 2 {
+		t.Errorf("expected both templated segments replaced with the canary, got %s", got)
+	}
+	if !strings.HasPrefix(got, "https://shop.example.com/rest/") ||
+		!strings.HasSuffix(got, "/reviews") {
+		t.Errorf("the rest of the path was not preserved: %s", got)
+	}
+
+	// A path with nothing templated must come through byte-identical, so this cannot rewrite the 57
+	// vectors that were already concrete.
+	plain := VectorInput{
+		Method: "GET", Scheme: "https", Domain: "shop.example.com",
+		Path: "/rest/products/12345/reviews", InsertionPoint: "path",
+	}
+	if dalfoxTargetURL(plain) != plain.TargetURL() {
+		t.Errorf("a concrete path was rewritten: %s", dalfoxTargetURL(plain))
+	}
+
+	// And the composed command line has to use it, not TargetURL.
+	args, _ := ComposeDalfox(v, map[string]any{}, "/tmp/r.jsonl")
+	if len(args) < 2 || args[1] != got {
+		t.Errorf("ComposeDalfox scanned %q instead of the concrete URL %q", args[1], got)
+	}
+}
+
+// A clean path vector does not mean what a clean query vector means, and the difference is not
+// guessable from the result. Every path vector has to say so.
+//
+// Measured against a target that reflects its last path segment unencoded, requests counted at the
+// target: bare URL with discovery on, 660 requests and an R Path finding; -p seg:path with
+// discovery off, 150 requests and nothing, byte-identical to -p seg:bogus; --inject-marker with the
+// marker written into the path, 3 requests and "clean", with the URL and with -i raw-http alike.
+func TestDalfoxTellsEveryPathVectorItCannotBeAimed(t *testing.T) {
+	v := VectorInput{
+		Method: "GET", Scheme: "http", Domain: "shop.example.com", Path: "/rest/products/12345",
+		InsertionPoint: "path",
+	}
+	args, warnings := ComposeDalfox(v, map[string]any{}, "/tmp/r.jsonl")
+	if args == nil {
+		t.Fatal("the path vector was refused; discovery is imperfect but it is real coverage and the " +
+			"only path coverage this section has")
+	}
+
+	joined := strings.Join(warnings, " ")
+	if joined == "" {
+		t.Fatal("a path vector was scanned with no explanation of what a clean result would mean")
+	}
+	for _, want := range []string{"cannot be aimed", "discovery", "inject-marker", "NOT that payloads"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the path warning does not mention %q, so it does not tell the operator what "+
+				"dalfox actually did: %q", want, joined)
+		}
+	}
+
+	// The four aimed points must NOT carry it. A warning printed on every vector is a warning
+	// nobody reads.
+	for _, point := range []string{"query", "body", "header", "cookie"} {
+		aimed := VectorInput{
+			Method: "GET", Scheme: "http", Domain: "shop.example.com", Path: "/search",
+			InsertionPoint: point, Parameters: []string{"q"},
+		}
+		if _, w := ComposeDalfox(aimed, map[string]any{}, "/tmp/r.jsonl"); len(w) != 0 {
+			t.Errorf("%s vectors are aimed with -p and need no path caveat, got %v", point, w)
+		}
+	}
+}
+
+// dalfox's discovery APPENDS A QUERY PARAMETER OF ITS OWN, __dalfox_key_inject__, to find out
+// whether an endpoint echoes an arbitrary query string. On a path vector there is no -p to stop it,
+// and parseDalfoxJSONL stamps every finding with the VECTOR's insertion point, so a finding on a
+// parameter that does not exist in the application was being stored as path coverage. All five of
+// dalfox's false positives on the Juice Shop run were exactly that.
+//
+// The report below is the real shape, reproduced against a target returning Express's default error
+// page, which echoes the full original URL.
+func TestDalfoxPathVectorKeepsOnlyFindingsDalfoxCalledPath(t *testing.T) {
+	report := strings.Join([]string{
+		`{"meta":{"dalfox_version":"3.2.1","findings_count":4,"incomplete":false,` +
+			`"target_summary":[{"findings_count":4,"status":"findings","target":"http://t/err/api/12345"}],` +
+			`"total_requests":38}}`,
+		`{"type":"V","severity":"High","confidence":"high","param":"__dalfox_key_inject__",` +
+			`"location":"Query","payload":"<svg onload=alert(1)>","method":"GET",` +
+			`"data":"http://t/err/api/12345?__dalfox_key_inject__=%3Csvg%20onload=alert(1)%3E"}`,
+		`{"type":"V","severity":"High","confidence":"high","param":"path_segment_1",` +
+			`"location":"Path","payload":"\"-alert(1)-\"","method":"GET","data":"http://t/err/api/x"}`,
+		`{"type":"V","severity":"High","confidence":"high","param":"path_segment_2",` +
+			`"location":"Path","payload":"\"-alert(1)-\"","method":"GET","data":"http://t/err/x/12345"}`,
+		`{"type":"V","severity":"High","confidence":"high","param":"any",` +
+			`"location":"Query","payload":"<svg onload=alert(1)>","method":"GET",` +
+			`"data":"http://t/err/api/12345?any=%3Csvg%20onload=alert(1)%3E"}`,
+	}, "\n")
+
+	pathRow := vectorRow{ID: "v1", Method: "GET", InsertionPoint: "path",
+		EvidenceURL: "http://t/err/api/12345"}
+	got := parseDalfoxForVector("", report, pathRow)
+
+	if len(got) != 2 {
+		var params []string
+		for _, f := range got {
+			params = append(params, f.Param)
+		}
+		t.Fatalf("expected only the two Path findings on a path vector, got %d: %v", len(got), params)
+	}
+	for _, f := range got {
+		if !strings.HasPrefix(f.Param, "path_segment_") {
+			t.Errorf("a finding on %q was recorded as path coverage; dalfox appended that parameter "+
+				"itself, so it says the application echoes arbitrary query strings and nothing about "+
+				"this vector's path segment", f.Param)
+		}
+		if f.InsertionPoint != "path" {
+			t.Errorf("a kept path finding lost its insertion point: %q", f.InsertionPoint)
+		}
+	}
+
+	// A QUERY vector is aimed with -p and keeps everything, exactly as before. The filter must not
+	// leak into the four points that were never broken.
+	queryRow := vectorRow{ID: "v2", Method: "GET", InsertionPoint: "query",
+		Parameters: []string{"any"}, EvidenceURL: "http://t/err/api/12345?any=1"}
+	if all := parseDalfoxForVector("", report, queryRow); len(all) != 4 {
+		t.Errorf("a query vector lost findings to the path filter: got %d of 4", len(all))
+	}
+}
+
+// Failing in the safe direction. If dalfox's report shape moves and the locations can no longer be
+// zipped to the findings, nothing is dropped: deleting real findings on a mapping we cannot trust
+// is worse than keeping a mislabelled one.
+func TestDalfoxPathFilterKeepsEverythingWhenTheReportShapeIsUnreadable(t *testing.T) {
+	report := `{"type":"V","param":"path_segment_1","payload":"x"}` + "\n" +
+		`{"type":"V","param":"other","payload":"y"}`
+	row := vectorRow{ID: "v1", InsertionPoint: "path"}
+
+	// Both lines parse and both carry an empty location, so the zip is intact and the filter runs.
+	if got := parseDalfoxForVector("", report, row); len(got) != 0 {
+		t.Errorf("an empty location is not Path and must not be kept, got %d", len(got))
+	}
+
+	// Nothing parseable at all: no findings either way, and no panic.
+	if got := parseDalfoxForVector("", "not json at all", row); len(got) != 0 {
+		t.Errorf("unparseable report produced %d findings", len(got))
+	}
+}
+
+// A stored injection marker silently zeroes the whole tool. The framework builds every URL from the
+// vector and never writes the operator's marker into it, so dalfox switches to marker substitution,
+// finds no marker anywhere, and reports clean. Measured with one flag changed and nothing else:
+//
+//	-p q:query                          28 requests, V Query q
+//	-p q:query --inject-marker FUZZ      3 requests, clean
+//	-p sid:cookie --inject-marker FUZZ   4 requests, clean
+//
+// Same shape as the userAgent blinder above, and it had been documented in the option's placeholder
+// as merely "does not work for a path segment".
+func TestADalfoxInjectMarkerIsReportedAsBlindingTheWholeTool(t *testing.T) {
+	blinded := VectorBlindedPoints("dalfox", map[string]any{"injectMarker": "FUZZ"})
+	found := false
+	for _, key := range blinded["all"] {
+		if key == "injectMarker" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("setting an injection marker makes dalfox report every vector clean after three "+
+			"requests and nothing says so, got %v", blinded)
+	}
+	if b := VectorBlindedPoints("dalfox", map[string]any{"injectMarker": ""}); len(b) != 0 {
+		t.Errorf("an unset marker must not be reported as blinding: %v", b)
+	}
+}
+
+// The skip reason must not read like a capability limit. An operator who cannot tell "off by
+// default" from "this tool cannot do that" will read the zero as coverage either way.
+func TestTheOptInSkipReasonSaysItWasAChoice(t *testing.T) {
+	tool, _ := VectorToolByKey("dalfox")
+	reason := vectorOptInReason(tool, "body")
+
+	if strings.Contains(strings.ToLower(reason), "cannot reach") {
+		t.Errorf("the opt-in reason reads as a capability limit: %q", reason)
+	}
+	for _, want := range []string{"scanBodyVectors", "not a clean result", "by default"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the opt-in reason does not mention %q, so it does not tell the operator what "+
+				"happened or how to change it: %q", want, reason)
+		}
+	}
+}

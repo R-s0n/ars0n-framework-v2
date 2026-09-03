@@ -1,0 +1,255 @@
+{
+  "generatedBy": "scripts/gen-attack-catalog.mjs",
+  "attacks": [
+    {
+      "id": "app-dos",
+      "name": "Application-Layer Denial of Service",
+      "categories": [
+        "denial_of_service"
+      ]
+    },
+    {
+      "id": "authentication-bypass",
+      "name": "Authentication Bypass",
+      "categories": [
+        "spoofing",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "cors-misconfiguration",
+      "name": "CORS Misconfiguration",
+      "categories": [
+        "spoofing",
+        "information_disclosure"
+      ]
+    },
+    {
+      "id": "csrf",
+      "name": "Cross-Site Request Forgery (CSRF)",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "file-upload",
+      "name": "Malicious File Upload",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "graphql-abuse",
+      "name": "GraphQL API Abuse",
+      "categories": [
+        "tampering",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "http-request-smuggling",
+      "name": "HTTP Request Smuggling",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "information_disclosure",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "idor",
+      "name": "Insecure Direct Object Reference (IDOR)",
+      "categories": [
+        "tampering",
+        "information_disclosure",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "insecure-deserialization",
+      "name": "Insecure Deserialization",
+      "categories": [
+        "tampering",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "jwt-attacks",
+      "name": "JWT Attacks",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "ldap-injection",
+      "name": "LDAP Injection",
+      "categories": [
+        "spoofing",
+        "information_disclosure",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "log-injection",
+      "name": "Log Injection and Forging",
+      "categories": [
+        "tampering",
+        "repudiation"
+      ]
+    },
+    {
+      "id": "mass-assignment",
+      "name": "Mass Assignment (Autobinding)",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "nosql-injection",
+      "name": "NoSQL Injection",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "oauth-account-takeover",
+      "name": "OAuth 2.0 / OpenID Connect Abuse",
+      "categories": [
+        "spoofing",
+        "information_disclosure",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "open-redirect",
+      "name": "Open Redirect",
+      "categories": [
+        "spoofing",
+        "information_disclosure",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "os-command-injection",
+      "name": "OS Command Injection",
+      "categories": [
+        "tampering",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "path-traversal-lfi",
+      "name": "Path Traversal and File Inclusion (LFI/RFI)",
+      "categories": [
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "prototype-pollution",
+      "name": "Prototype Pollution",
+      "categories": [
+        "tampering",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "race-condition",
+      "name": "Race Condition (TOCTOU)",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "sql-injection",
+      "name": "SQL Injection",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "ssrf",
+      "name": "Server-Side Request Forgery (SSRF)",
+      "categories": [
+        "spoofing",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "ssti",
+      "name": "Server-Side Template Injection (SSTI)",
+      "categories": [
+        "tampering",
+        "information_disclosure",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "web-cache-poisoning",
+      "name": "Web Cache Poisoning & Deception",
+      "categories": [
+        "tampering",
+        "information_disclosure",
+        "denial_of_service"
+      ]
+    },
+    {
+      "id": "xpath-injection",
+      "name": "XPath / XQuery Injection",
+      "categories": [
+        "spoofing",
+        "information_disclosure",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "xss",
+      "name": "Cross-Site Scripting (XSS)",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "information_disclosure",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "xxe",
+      "name": "XML External Entity (XXE)",
+      "categories": [
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    }
+  ]
+}

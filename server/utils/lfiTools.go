@@ -25,13 +25,19 @@ import "time"
 
 var lfimapGroups = []string{"Techniques", "Payloads", "Request", "Wordlists", "Output"}
 
+// THE SAVE TRAP, and it is why nobody could have authenticated LFImap even by hand. -C and -H used
+// to be listed here while lfimapOptions ALSO offered them as the Cookies and Headers settings, and
+// refusedVectorFlags answers any save that names an option whose flag is owned with a 400
+// "framework_owned". So the Config modal drew a Cookies field and a Headers field for LFImap that
+// could not be saved, with no symptom beyond the failed request. Between that and the composer
+// reading nothing but settings["cookie"], there was no route by which a credential could reach this
+// tool at all, which is what 250 anonymous command lines on scan 991aaec6 look like from the inside.
+// Fixed the same way it was fixed for SSTImap: composed per vector AND settable, so it is not owned.
 var lfimapOwned = map[string]string{
 	"-U":            "The URL is built per vector, with the placeholder where the payload goes.",
 	"-F":            "The framework supplies one target per run so a finding can be tied to a vector.",
 	"-R":            "The framework drives LFImap per vector rather than from a saved request file.",
 	"-D":            "Set from the vector's recorded body.",
-	"-C":            "Composed per vector: your Cookies setting is carried through and the target cookie is marked.",
-	"-H":            "Composed per vector: your Headers setting is carried through and the target header is marked.",
 	"-M":            "Set from the vector's method.",
 	"--placeholder": "The framework places the marker itself, so it has to know what it is.",
 	"-nc":           "Always set. Escape codes corrupt the stored evidence.",
@@ -55,28 +61,28 @@ var lfimapOptions = map[string]VectorOptionMeta{
 	"all":        {Kind: "bool", Group: "Techniques", Label: "Every technique", Flag: "-a", Placeholder: "the framework sends filter and traversal when nothing is chosen"},
 
 	// Payloads
-	"encoding":   {Kind: "string", Group: "Payloads", Label: "Payload encoding", Flag: "-n", Placeholder: "U for URL, B for base64, or both"},
-	"quick":      {Kind: "bool", Group: "Payloads", Label: "Quick mode", Flag: "-q", Placeholder: "off. Quick sends far fewer payloads and is the difference between a sweep and a spot check"},
-	"callback":   {Kind: "string", Group: "Payloads", Label: "Out-of-band callback host", Flag: "--callback", Placeholder: "needed by the remote file inclusion technique"},
-	"noStop":     {Kind: "bool", Group: "Payloads", Label: "Keep going after a finding", Flag: "--no-stop", Placeholder: "off, so each technique stops at its first hit"},
+	"encoding": {Kind: "string", Group: "Payloads", Label: "Payload encoding", Flag: "-n", Placeholder: "U for URL, B for base64, or both"},
+	"quick":    {Kind: "bool", Group: "Payloads", Label: "Quick mode", Flag: "-q", Placeholder: "off. Quick sends far fewer payloads and is the difference between a sweep and a spot check"},
+	"callback": {Kind: "string", Group: "Payloads", Label: "Out-of-band callback host", Flag: "--callback", Placeholder: "needed by the remote file inclusion technique"},
+	"noStop":   {Kind: "bool", Group: "Payloads", Label: "Keep going after a finding", Flag: "--no-stop", Placeholder: "off, so each technique stops at its first hit"},
 
 	// Request
-	"cookie":      {Kind: "string", Group: "Request", Label: "Cookies", Flag: "-C", Placeholder: "name=value. A cookie vector's own cookie is added and marked alongside these"},
-	"header":      {Kind: "string", Group: "Request", Label: "Headers", Flag: "-H", Repeatable: true, Placeholder: "Name: value. A header vector's own header is added and marked alongside these"},
-	"userAgent":   {Kind: "string", Group: "Request", Label: "User agent", Flag: "--useragent"},
-	"referer":     {Kind: "string", Group: "Request", Label: "Referer", Flag: "--referer"},
-	"proxy":       {Kind: "string", Group: "Request", Label: "Proxy", Flag: "-P"},
-	"delay":       {Kind: "int", Group: "Request", Label: "Delay between requests", Flag: "--delay", Placeholder: "milliseconds"},
-	"maxTimeout":  {Kind: "int", Group: "Request", Label: "Timeout", Flag: "--max-timeout", Placeholder: "5 seconds"},
-	"httpOk":      {Kind: "string", Group: "Request", Label: "Status codes to treat as valid", Flag: "--http-ok"},
-	"forceSSL":    {Kind: "bool", Group: "Request", Label: "Force HTTPS", Flag: "--force-ssl"},
-	"csrfParam":   {Kind: "string", Group: "Request", Label: "CSRF token parameter", Flag: "--csrf-param"},
-	"csrfURL":     {Kind: "string", Group: "Request", Label: "CSRF token URL", Flag: "--csrf-url"},
-	"csrfMethod":  {Kind: "string", Group: "Request", Label: "CSRF token method", Flag: "--csrf-method"},
-	"csrfData":    {Kind: "string", Group: "Request", Label: "CSRF token data", Flag: "--csrf-data"},
-	"secondURL":   {Kind: "string", Group: "Request", Label: "Second-order URL", Flag: "--second-url", Placeholder: "where the result of the inclusion shows up"},
+	"cookie":       {Kind: "string", Group: "Request", Label: "Cookies", Flag: "-C", Placeholder: "name=value. A cookie vector's own cookie is added and marked alongside these"},
+	"header":       {Kind: "string", Group: "Request", Label: "Headers", Flag: "-H", Repeatable: true, Placeholder: "Name: value. A header vector's own header is added and marked alongside these"},
+	"userAgent":    {Kind: "string", Group: "Request", Label: "User agent", Flag: "--useragent"},
+	"referer":      {Kind: "string", Group: "Request", Label: "Referer", Flag: "--referer"},
+	"proxy":        {Kind: "string", Group: "Request", Label: "Proxy", Flag: "-P"},
+	"delay":        {Kind: "int", Group: "Request", Label: "Delay between requests", Flag: "--delay", Placeholder: "milliseconds"},
+	"maxTimeout":   {Kind: "int", Group: "Request", Label: "Timeout", Flag: "--max-timeout", Placeholder: "5 seconds"},
+	"httpOk":       {Kind: "string", Group: "Request", Label: "Status codes to treat as valid", Flag: "--http-ok"},
+	"forceSSL":     {Kind: "bool", Group: "Request", Label: "Force HTTPS", Flag: "--force-ssl"},
+	"csrfParam":    {Kind: "string", Group: "Request", Label: "CSRF token parameter", Flag: "--csrf-param"},
+	"csrfURL":      {Kind: "string", Group: "Request", Label: "CSRF token URL", Flag: "--csrf-url"},
+	"csrfMethod":   {Kind: "string", Group: "Request", Label: "CSRF token method", Flag: "--csrf-method"},
+	"csrfData":     {Kind: "string", Group: "Request", Label: "CSRF token data", Flag: "--csrf-data"},
+	"secondURL":    {Kind: "string", Group: "Request", Label: "Second-order URL", Flag: "--second-url", Placeholder: "where the result of the inclusion shows up"},
 	"secondMethod": {Kind: "string", Group: "Request", Label: "Second-order method", Flag: "--second-method"},
-	"secondData":  {Kind: "string", Group: "Request", Label: "Second-order data", Flag: "--second-data"},
+	"secondData":   {Kind: "string", Group: "Request", Label: "Second-order data", Flag: "--second-data"},
 
 	// Wordlists
 	"wordlist": {Kind: "path", Group: "Wordlists", Label: "Traversal wordlist", Flag: "-wT", Placeholder: "LFImap's own short.txt"},
@@ -121,14 +127,29 @@ func init() {
 			InsertionPoints: VectorInsertionPoints,
 			Compose:         ComposeLFImap,
 			Parse:           parseLFImapOutput,
-			SkipReason:      lfimapSkipReason,
-			Timeout:         25 * time.Minute,
+			// Without this, a run that sent NOTHING was recorded clean. Measured: 125 of 250 traces on
+			// scan 991aaec6 exited having delivered no payload, and the framework wrote zero error rows
+			// for them. See lfimapIncomplete for the two shapes, one of which exits 0.
+			Incomplete: lfimapIncomplete,
+			SkipReason: lfimapSkipReason,
+			Timeout:    25 * time.Minute,
 			Limitation: "LFImap marks where the payload goes with a placeholder, so it tests the exact " +
-				"input a vector names, at any of the five. Most of its techniques are PHP's wrappers; " +
-				"path traversal is the one that applies to a target of any language. A path-segment " +
-				"result depends on the server as much as the application: Apache rejects an encoded " +
-				"slash with 404 and a literal ../ with 400 before either reaches the code, so a path " +
-				"finding on Apache is unlikely however injectable the parameter is.",
+				"input a vector names, at any of the five. It is sent the credentials the framework " +
+				"holds, so it tests the authenticated surface. WHAT IT CANNOT FIND, counted in the " +
+				"shipped tool: every payload names a FIXED OPERATING SYSTEM FILE and success is decided " +
+				"by looking for one of 30 fixed strings from those files (root:x:0:0, daemon:x:1:, " +
+				"www-data:x, their base64 and ROT13 forms, the Windows hosts file's comments). The " +
+				"filter technique is 11 php:// payloads, inapplicable to anything that is not PHP; the " +
+				"traversal technique is one request per wordlist line, 20 in short.txt and 1055 in " +
+				"long.txt, every one of which contains a path separator and asks for /etc/passwd or " +
+				"Windows\\System32\\drivers\\etc\\hosts, and neither list contains %2500 anywhere. So a " +
+				"bug that returns an APPLICATION file, a backup or a config or a source file, is " +
+				"neither requested nor recognised at any setting, and that cannot be fixed from the " +
+				"command line because the 30 strings are hard-coded inside the tool. Read a zero here " +
+				"as a zero for operating system file reads. A path-segment result also depends on the " +
+				"server as much as the application: Apache rejects an encoded slash with 404 and a " +
+				"literal ../ with 400 before either reaches the code, so a path finding on Apache is " +
+				"unlikely however injectable the parameter is.",
 		},
 		VectorTool{
 			Key: "lfihunt", Name: "LFIHunt", Category: "lfi",
@@ -150,7 +171,12 @@ func init() {
 				"here. Five of its seven checks run headless: PHP filter chains, the filter wrapper, " +
 				"php://input, data:// and /proc/self/environ. The other two are behind a prompt that " +
 				"defaults to no, so they are skipped whether or not there is a terminal. Its checks are " +
-				"PHP's, so a target that is not PHP will correctly report nothing.",
+				"PHP's, so a target that is not PHP will correctly report nothing. IT CANNOT BE " +
+				"AUTHENTICATED: scanner.py declares only an input file, an output file and a thread " +
+				"count, and its checkers build requests carrying no cookie and no header, so every " +
+				"result here is an anonymous one however many session tokens the framework holds. On an " +
+				"application whose surface is behind a login, that makes its zero meaningless; use " +
+				"LFImap, which is sent the credentials.",
 		},
 	)
 	VectorCategories = append(VectorCategories, struct {

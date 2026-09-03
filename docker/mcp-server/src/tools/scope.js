@@ -7,7 +7,8 @@ const { limitResults, trimScanRecords } = require('../utils/truncate');
 const addTargetSchema = z.object({
   type: z.enum(['Company', 'Wildcard', 'URL']).describe('Target type: Company (org with on-prem infra), Wildcard (*.domain.com), or URL (single application)'),
   scope_target: z.string().describe('The target value (e.g. "Acme Corp", "*.example.com", "https://app.example.com")'),
-  mode: z.enum(['bb', 'pentest']).optional().describe('Mode: bb (bug bounty) or pentest (default: bb)'),
+  mode: z.enum(['Passive', 'Active']).optional().describe(
+    'Passive (default) or Active. These are the only values the database accepts; the enum here previously read bb/pentest, which made every add_target call fail with a bare 500.')
 });
 
 async function addTarget(params) {

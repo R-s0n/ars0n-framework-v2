@@ -70,10 +70,17 @@ type ScanConfig struct {
 	WebServiceTimeout  time.Duration `json:"web_service_timeout"`
 }
 
-// Common ports to probe for host discovery
+// Common ports to probe for host discovery.
+//
+// THIS IS THE GATE, and it is the default half of a configurable value now: companyWireNetwork.go
+// reads company_tool_settings.ip_port_scan.hostDiscoveryPorts and falls back to exactly this list.
+// It stays a package-level literal so that the default is one thing in one place, and it must never
+// be mutated: ipPortScanDefaultPlan copies it precisely so a settings map cannot leak into the next
+// scan.
 var hostDiscoveryPorts = []int{80, 443, 22, 21, 25, 53, 110, 995, 993, 143}
 
-// Common web ports for detailed scanning
+// Common web ports for detailed scanning. Same arrangement as hostDiscoveryPorts above: this is the
+// fallback for the webPorts setting, not a value the scan path reads directly any more.
 var webPorts = []int{
 	80, 443, 8080, 8443, 8000, 8001, 8008, 8888,
 	9000, 9001, 9080, 9443, 3000, 3001, 4000, 4001,
@@ -82,6 +89,12 @@ var webPorts = []int{
 	9200, 9300, 5432, 3306, 1433, 27017, 6379, 11211,
 }
 
+// getDefaultScanConfig is the scanner with nothing configured.
+//
+// It is still the answer for a target that has stored nothing, which is why it is unchanged and why
+// the wiring goes through ipPortScanDefaultPlan rather than through here: this function has no scope
+// target to look a setting up with, and giving it one would make a pure constant into a database
+// call that every caller would then have to reason about.
 func getDefaultScanConfig() ScanConfig {
 	return ScanConfig{
 		MaxIPsPerRange:     254,             // Limit IPs per CIDR
@@ -159,11 +172,29 @@ func ExecuteIPPortScan(scanID, scopeTargetID string) {
 
 	log.Printf("[IP-PORT-SCAN] [INFO] Found %d consolidated network ranges", len(networkRanges))
 
+	// The per-target Company settings, from the ONE store the Settings screen and the MCP company tool
+	// both write. Absent is the normal case and produces exactly the ScanConfig and the two port lists
+	// this scanner has always used.
+	//
+	// This scanner has NO command line, so there is nothing for a command column to record and nothing
+	// for an operator to reconstruct after the fact. When something IS configured the effective plan is
+	// written onto the scan row, and every note - a narrowed host-discovery list, a dropped port, the
+	// pre-existing mismatch between the two lists - is logged against the scan.
+	plan := companyIPPortScanPlan(scopeTargetID)
+	if plan.Configured || len(plan.Notes) > 0 {
+		companyLogNotes("IP-PORT-SCAN", plan.Notes)
+	}
+	if plan.Configured {
+		log.Printf("[IP-PORT-SCAN] [INFO] Running with stored Company settings for scope target %s: %s",
+			scopeTargetID, ipPortScanPlanSummary(plan))
+		updateIPPortScanCommand(scanID, ipPortScanPlanSummary(plan), plan.Notes)
+	}
+
 	// Update scan with total ranges
 	updateIPPortScanProgress(scanID, "discovering_ips", len(networkRanges), 0, 0, 0, 0)
 
 	// Phase 1: Discover live IPs
-	liveIPs, err := discoverLiveIPs(scanID, networkRanges)
+	liveIPs, err := discoverLiveIPs(scanID, networkRanges, plan)
 	if err != nil {
 		updateIPPortScanStatus(scanID, "error", fmt.Sprintf("IP discovery failed: %v", err))
 		return
@@ -173,7 +204,7 @@ func ExecuteIPPortScan(scanID, scopeTargetID string) {
 	updateIPPortScanProgress(scanID, "port_scanning", len(networkRanges), len(networkRanges), len(liveIPs), 0, 0)
 
 	// Phase 2: Port scan for web services
-	liveWebServers, err := discoverLiveWebServers(scanID, liveIPs)
+	liveWebServers, err := discoverLiveWebServers(scanID, liveIPs, plan)
 	if err != nil {
 		updateIPPortScanStatus(scanID, "error", fmt.Sprintf("Port scanning failed: %v", err))
 		return
@@ -181,8 +212,12 @@ func ExecuteIPPortScan(scanID, scopeTargetID string) {
 
 	log.Printf("[IP-PORT-SCAN] [INFO] Found %d live web servers", len(liveWebServers))
 
-	// Update final status
-	totalPortsScanned := len(liveIPs) * len(webPorts)
+	// Update final status.
+	//
+	// Still an ASSUMPTION rather than a measurement - live IPs times the length of the web-port list,
+	// not a count of dials - and it now uses the list that was actually scanned rather than the
+	// package literal, so a configured list does not make this figure a lie on top of being an estimate.
+	totalPortsScanned := len(liveIPs) * len(plan.WebPorts)
 	updateIPPortScanProgress(scanID, "success", len(networkRanges), len(networkRanges), len(liveIPs), totalPortsScanned, len(liveWebServers))
 	updateIPPortScanExecutionTime(scanID, time.Since(startTime).String())
 
@@ -220,10 +255,10 @@ func getConsolidatedNetworkRanges(scopeTargetID string) ([]ConsolidatedNetworkRa
 }
 
 // Discover live IPs using TCP connect probes
-func discoverLiveIPs(scanID string, networkRanges []ConsolidatedNetworkRange) ([]string, error) {
+func discoverLiveIPs(scanID string, networkRanges []ConsolidatedNetworkRange, plan ipPortScanPlan) ([]string, error) {
 	log.Printf("[IP-PORT-SCAN] [INFO] Starting IP discovery for %d network ranges", len(networkRanges))
 
-	config := getDefaultScanConfig()
+	config := plan.Config
 	var allLiveIPs []string
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -266,7 +301,7 @@ func discoverLiveIPs(scanID string, networkRanges []ConsolidatedNetworkRange) ([
 					log.Printf("[IP-PORT-SCAN] [DEBUG] Probing IP %d/%d in range %s: %s", idx+1, len(ips), cidr, ipAddr)
 				}
 
-				if isHostAlive(ipAddr, config.HostProbeTimeout) {
+				if isHostAlive(ipAddr, plan.HostDiscoveryPorts, config.HostProbeTimeout) {
 					mu.Lock()
 					allLiveIPs = append(allLiveIPs, ipAddr)
 					mu.Unlock()
@@ -291,12 +326,19 @@ func discoverLiveIPs(scanID string, networkRanges []ConsolidatedNetworkRange) ([
 	return uniqueIPs, nil
 }
 
-// Check if a host is alive by trying to connect to common ports
-func isHostAlive(ip string, timeout time.Duration) bool {
+// Check if a host is alive by trying to connect to common ports.
+//
+// THE PORT LIST IS A PARAMETER NOW, not the package literal, because it is configurable and because
+// this function is the gate: it returns true on the FIRST port that accepts a connection and false
+// otherwise, and false means the address is never port scanned, never probed for a web service and
+// never written to discovered_live_ips. A caller passing a narrower list is deciding which live
+// hosts get recorded as dead, which is why applyIPPortScanSettings names every port removed from the
+// default list on the scan row rather than letting the difference show up only as a smaller number.
+func isHostAlive(ip string, discoveryPorts []int, timeout time.Duration) bool {
 	// Use the timeout directly per port - no division needed
 	// Each port gets the full timeout (1 second)
 
-	for _, port := range hostDiscoveryPorts {
+	for _, port := range discoveryPorts {
 		address := fmt.Sprintf("%s:%d", ip, port)
 		conn, err := net.DialTimeout("tcp", address, timeout)
 		if err == nil {
@@ -359,10 +401,10 @@ func generateIPsFromCIDR(ipNet *net.IPNet) []string {
 }
 
 // Port scan live IPs for web services
-func discoverLiveWebServers(scanID string, liveIPs []string) ([]LiveWebServer, error) {
+func discoverLiveWebServers(scanID string, liveIPs []string, plan ipPortScanPlan) ([]LiveWebServer, error) {
 	log.Printf("[IP-PORT-SCAN] [INFO] Starting port scanning for %d live IPs", len(liveIPs))
 
-	config := getDefaultScanConfig()
+	config := plan.Config
 	var allWebServers []LiveWebServer
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -380,7 +422,7 @@ func discoverLiveWebServers(scanID string, liveIPs []string) ([]LiveWebServer, e
 			log.Printf("[IP-PORT-SCAN] [DEBUG] Port scanning IP %d/%d: %s", idx+1, len(liveIPs), ipAddr)
 
 			// Scan web ports
-			openPorts := scanTCPPorts(ipAddr, webPorts, config.PortScanTimeout)
+			openPorts := scanTCPPorts(ipAddr, plan.WebPorts, config.PortScanTimeout)
 
 			// Check each open port for web services
 			for _, port := range openPorts {
@@ -664,6 +706,27 @@ func insertLiveWebServer(scanID string, webServer LiveWebServer) {
 		log.Printf("[IP-PORT-SCAN] [ERROR] Failed to insert live web server: %v", err)
 	} else if webServer.Hostname != "" {
 		log.Printf("[IP-PORT-SCAN] [DEBUG] Resolved hostname for %s: %s", webServer.IPAddress, webServer.Hostname)
+	}
+}
+
+// updateIPPortScanCommand records WHAT THIS SCAN ACTUALLY RAN, for a scanner that has no command
+// line to record.
+//
+// ip_port_scans.command has existed since the table was created and has never been written, because
+// there is no argv to put in it. Every other tool in the workflow answers "what did this actually
+// run" from that column and this one could not answer it at all, which was tolerable while the
+// answer was always the same six constants and stops being tolerable the moment they are
+// configurable.
+//
+// Called ONLY when a stored setting changed something, so a target that has configured nothing
+// leaves the column NULL exactly as before.
+func updateIPPortScanCommand(scanID, summary string, notes []string) {
+	if len(notes) > 0 {
+		summary += "\nNotes:\n  - " + strings.Join(notes, "\n  - ")
+	}
+	query := `UPDATE ip_port_scans SET command = $1 WHERE scan_id = $2`
+	if _, err := dbPool.Exec(context.Background(), query, summary, scanID); err != nil {
+		log.Printf("[IP-PORT-SCAN] [ERROR] Failed to record the effective scan configuration: %v", err)
 	}
 }
 

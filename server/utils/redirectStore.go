@@ -58,10 +58,10 @@ func storeREcollapseMutations(ctx context.Context, tool VectorTool, v VectorInpu
 		Severity: "info",
 		Confidence: "not a vulnerability: this is the payload list the scan will send. REcollapse " +
 			"generates mutations and sends nothing itself",
-		InsertionPoint:  v.InsertionPoint,
-		Param:           firstParam(v),
-		Method:          v.Method,
-		URL:             v.TargetURL(),
+		InsertionPoint: v.InsertionPoint,
+		Param:          markableParam(v),
+		Method:         v.Method,
+		URL:            v.TargetURL(),
 		Evidence: itoa(len(lines)) + " mutations of the webhook URL, plus " + itoa(len(extra)) +
 			" structural bypass forms from the framework. Each one carries a marker unique to the " +
 			"vector it is sent at, so a callback names the parameter that produced it.",

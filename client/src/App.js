@@ -17,6 +17,7 @@ import { ShuffleDNSResultsModal } from './modals/shuffleDNSModals.js';
 import ScreenshotResultsModal from './modals/ScreenshotResultsModal.js';
 import SettingsModal from './modals/SettingsModal.js';
 import ToolsModal from './modals/ToolsModal.js';
+import NotesModal from './modals/NotesModal.js';
 import Ars0nFrameworkHeader from './components/ars0nFrameworkHeader.js';
 import ManageScopeTargets from './components/manageScopeTargets.js';
 import fetchAmassScans from './utils/fetchAmassScans.js';
@@ -36,6 +37,7 @@ import {
   ProgressBar,
   Alert,
   Badge,
+  Accordion,
 } from 'react-bootstrap';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import 'bootstrap-icons/font/bootstrap-icons.css';
@@ -216,6 +218,9 @@ import { ATTACK_TOOL_SECTIONS } from './data/attackTools';
 import { WIRED_CATEGORIES } from './data/wiredCategories';
 import VectorToolConfigModal from './modals/VectorToolConfigModal';
 import VectorToolResultsModal from './modals/VectorToolResultsModal';
+import WildcardToolConfigModal from './modals/WildcardToolConfigModal';
+import CompanyToolConfigModal from './modals/CompanyToolConfigModal';
+import IPPortScanConfigModal from './modals/IPPortScanConfigModal';
 import SectionWebhookModal from './modals/SectionWebhookModal';
 import ManualCrawlResultsModal from './modals/ManualCrawlResultsModal';
 import AuthFlowModal from './modals/AuthFlowModal';
@@ -231,6 +236,7 @@ import PossibleAttacksModal from './modals/PossibleAttacksModal';
 import ExtensionInstallModal from './modals/ExtensionInstallModal';
 import ManageEndpointsModal from './modals/ManageEndpointsModal';
 import EndpointScanResultsModal from './modals/EndpointScanResultsModal';
+import { attacks as ATTACK_CATALOG } from './data/attacks';
 
 const ExportModal = lazy(() => import('./modals/ExportModal.js'));
 const ImportModal = lazy(() => import('./modals/ImportModal.js'));
@@ -243,6 +249,51 @@ const WelcomeModal = lazy(() => import('./modals/WelcomeModal.js'));
 // Sections whose tools share a setting that belongs to the section rather than to any one of them.
 // The label is what the button says.
 const SECTION_SETTINGS_BUTTON = { 'redirect-ssrf': 'Configure Webhook' };
+
+// How a threat model entry's test status is shown. A threat is grey until somebody has actually run
+// it, green when the attack worked, red when it was run and did not. The point of the colour is that
+// a model which is still entirely grey is one nobody has acted on, which should be obvious at a glance
+// without opening anything. Rows written before this column existed come back without it, so anything
+// unrecognised falls back to untested rather than rendering uncoloured.
+// validated carries a className instead of a plain border: a landed attack is the whole point of the
+// exercise and gets the glow treatment from index.css, which owns the animation because keyframes
+// cannot be expressed as an inline style.
+const THREAT_TEST_STATUS = {
+  untested: { border: '#6c757d', badge: 'secondary', label: 'Untested', className: '' },
+  validated: { border: '#20c997', badge: 'success', label: 'Validated', className: 'threat-validated' },
+  rejected: { border: '#dc3545', badge: 'danger', label: 'Rejected', className: '' },
+};
+const threatTestStatus = (status) => THREAT_TEST_STATUS[status] || THREAT_TEST_STATUS.untested;
+
+// Severity, as rendered in the accordion header. Explicit hex rather than Bootstrap contextual
+// colours because bg="warning" and bg="danger" are the same two colours the test-status badge and
+// the glow already use, and three different meanings sharing two colours is unreadable at a glance.
+// An unset severity renders nothing at all: a missing triage decision must not look like a low one.
+// Every threat cites one entry from the Possible Attacks catalogue. Resolving the name here rather
+// than reading a stored copy means renaming an attack in attacks.js updates every threat that cites
+// it, and a threat whose attack id no longer exists degrades to its own descriptor instead of
+// rendering a dangling label.
+const ATTACK_NAME_BY_ID = ATTACK_CATALOG.reduce((acc, a) => { acc[a.id] = a.name; return acc; }, {});
+
+// "Cross-Site Scripting (XSS) - Product Search on Search Query": the attack first, because that is
+// what the reader is scanning for, then what makes this instance of it specific.
+const threatTitle = (threat) => {
+  const specific = `${threat.mechanism || 'Unnamed mechanism'}${threat.target_object ? ` on ${threat.target_object}` : ''}`;
+  // A catalogue citation resolves through the local catalogue so renames propagate without a
+  // refetch; an ad hoc name is carried on the threat itself. attack_name is the API's own
+  // resolution of the same pair and backs both up.
+  const attackName = ATTACK_NAME_BY_ID[threat.attack_id] || threat.attack_custom_name || threat.attack_name || '';
+  return attackName ? `${attackName} - ${specific}` : specific;
+};
+
+const THREAT_SEVERITY = {
+  critical:      { label: 'Critical',      bg: '#7f1d1d', fg: '#fecaca' },
+  high:          { label: 'High',          bg: '#9a3412', fg: '#fed7aa' },
+  moderate:      { label: 'Moderate',      bg: '#854d0e', fg: '#fde68a' },
+  low:           { label: 'Low',           bg: '#1e3a5f', fg: '#bfdbfe' },
+  informational: { label: 'Informational', bg: '#334155', fg: '#cbd5e1' },
+};
+const threatSeverity = (v) => THREAT_SEVERITY[String(v || '').toLowerCase()] || null;
 
 const VECTOR_TOOL_CATEGORY = new Map(
   ATTACK_TOOL_SECTIONS
@@ -269,7 +320,13 @@ const HelpMeLearn = ({ section }) => (
 // rather than five copies of the same regex.
 function countURLToolEndpoints(scan) {
   if (!scan || !scan.result) return 0;
-  const match = String(scan.result).match(/Found (\d+) direct endpoints and (\d+) adjacent endpoints/);
+  // TWO summary shapes are in play and this has to read both. The live-target crawlers write
+  // "Found N direct endpoints and M adjacent endpoints with parameters". The archive tools query
+  // several hosts per run and write "Found N direct and M adjacent endpoints across H of T hosts"
+  // so the host count has somewhere to live. Matching only the first shape reported 0 on both
+  // archive cards while their scans were finding hundreds of endpoints, which reads as a broken
+  // tool rather than a parser that stopped matching.
+  const match = String(scan.result).match(/Found (\d+) direct(?: endpoints)? and (\d+) adjacent endpoints/);
   return match ? parseInt(match[1], 10) + parseInt(match[2], 10) : 0;
 }
 
@@ -288,10 +345,31 @@ const URLToolCard = ({ tool }) => (
         <Card.Text className="text-white small fst-italic">
           {tool.description}
         </Card.Text>
+        {/* Everything below the description is pinned to the bottom of the card, so the metric sits
+            the SAME distance above the buttons on every card regardless of how long the description
+            is. Metrics outside this block drift with the text above them. */}
         <div className="mt-auto">
-          <Card.Text className="text-white small mb-3">
-            {tool.resultLabel}: {tool.resultCount || '0'}
-          </Card.Text>
+          {/* An optional second metric, rendered to the LEFT of the result count. Tools that do not
+              set one keep the single centred metric they had, so this cannot shift the cards that
+              were not asked to change. Row/Col with card-metric-label is the same shape the
+              multi-metric cards elsewhere use, so the label wrapping rules apply here too. */}
+          {tool.secondaryLabel ? (
+            <Row className="text-center align-items-start mb-3">
+              <Col className="card-metric">
+                <div className="text-danger fw-bold fs-4">{tool.secondaryCount}</div>
+                <div className="text-muted small card-metric-label">{tool.secondaryLabel}</div>
+              </Col>
+              <Col className="card-metric">
+                <div className="text-danger fw-bold fs-4">{tool.resultCount || 0}</div>
+                <div className="text-muted small card-metric-label">{tool.resultLabel}</div>
+              </Col>
+            </Row>
+          ) : (
+            <div className="card-metric mb-3">
+              <div className="text-danger fw-bold fs-4">{tool.resultCount || 0}</div>
+              <div className="text-muted small card-metric-label">{tool.resultLabel}</div>
+            </div>
+          )}
           <div className="d-flex justify-content-center gap-2">
             {tool.onConfig && (
               <Button variant="outline-danger" className="flex-fill" onClick={tool.onConfig}
@@ -466,6 +544,7 @@ function App() {
   const [isAutoScanCancelling, setIsAutoScanCancelling] = useState(false);
 
   const [showGlobalScansModal, setShowGlobalScansModal] = useState(false);
+  const [showNotesModal, setShowNotesModal] = useState(false);
   const [isWildfireRunning, setIsWildfireRunning] = useState(false);
   const [, setWildfireCancelled] = useState(false);
   const [wildfireProgress, setWildfireProgress] = useState(null);
@@ -682,6 +761,26 @@ function App() {
   const [showWildcardNucleiHistoryModal, setShowWildcardNucleiHistoryModal] = useState(false);
   const [activeWildcardNucleiScan, setActiveWildcardNucleiScan] = useState(null);
 
+  // Which Wildcard workflow tool the generic configuration modal is showing, as {key, name}. ONE modal
+  // for every tool in the workflow: it renders whatever GET /wildcard-tools describes, so there is no
+  // per-tool screen here to fall out of step with the server's vocabulary or with the MCP tool that
+  // reads and writes the same rows.
+  const [wildcardConfigTool, setWildcardConfigTool] = useState(null);
+
+  // Which COMPANY workflow tool the generic configuration modal is showing, as {key, name}. Same
+  // design as the Wildcard one above and for the same reason: it renders whatever GET /company-tools
+  // describes, so there is no per-tool screen here to fall out of step with the server's vocabulary
+  // or with the MCP company tool that reads and writes the same rows.
+  //
+  // The three Company tools that already own a target picker (Amass Enum, DNSx, Katana) do NOT use
+  // this modal: their settings are extra tabs inside the picker they already have, so an operator
+  // never has to know that two screens configure one tool.
+  const [companyConfigTool, setCompanyConfigTool] = useState(null);
+
+  // The on-prem IP/port scanner's own modal, which is not this generic one because it also has to
+  // show WHICH network ranges and addresses the next scan will actually reach.
+  const [showIPPortScanConfigModal, setShowIPPortScanConfigModal] = useState(false);
+
   // Katana Company state variables
   const [katanaCompanyScans, setKatanaCompanyScans] = useState([]);
   const [mostRecentKatanaCompanyScanStatus, setMostRecentKatanaCompanyScanStatus] = useState(null);
@@ -749,9 +848,56 @@ function App() {
   const [showFFUFURLResultsModal, setShowFFUFURLResultsModal] = useState(false);
   const [showWAFProbeResultsModal, setShowWAFProbeResultsModal] = useState(false);
   const [showWAFProbeConfigModal, setShowWAFProbeConfigModal] = useState(false);
+  // A refused run is not a failure to report to the console. The message names the budget that is
+  // short and the value that would clear it, which is only useful on screen.
+  const [wafProbeRunError, setWafProbeRunError] = useState('');
+  // How many endpoints are currently SELECTED to be scanned, read from the saved config rather than
+  // from any scan. It is the only one of the four card numbers that describes intent instead of
+  // history, which is why it is not derived from wafProbeScans.
+  const [wafProbeTargetCount, setWafProbeTargetCount] = useState(null);
+
+  // A 1-second tick, running ONLY while an Amass scan is in flight.
+  //
+  // The card cannot use getLatestScanTime for a running scan: that reads execution_time, which the
+  // server writes when the scan FINISHES. Mid-run it is empty, so the card would show "---" or, if
+  // the row had not been replaced yet, the PREVIOUS scan's duration presented as the current one.
+  // Elapsed time is derived from the running scan's created_at instead, and this tick is what makes
+  // it advance.
+  const [scanClockTick, setScanClockTick] = useState(0);
+  const amassScanRunning = isScanning || mostRecentAmassScanStatus === 'pending';
+  useEffect(() => {
+    if (!amassScanRunning) return undefined;
+    const t = setInterval(() => setScanClockTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [amassScanRunning]);
+
+  const amassElapsed = useMemo(() => {
+    if (!amassScanRunning) return null;
+    const startedAt = mostRecentAmassScan?.created_at;
+    if (!startedAt) return null;
+    const secs = Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000));
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    return h > 0
+      ? `${h}h ${String(m).padStart(2, '0')}m`
+      : `${m}m ${String(s).padStart(2, '0')}s`;
+    // scanClockTick is the whole point of the dependency: it is what re-renders the clock.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [amassScanRunning, mostRecentAmassScan, scanClockTick]);
   // Which crawler's config modal is open, or null. One piece of state for all three, since only
   // one can be open at a time.
   const [crawlerConfigTool, setCrawlerConfigTool] = useState(null);
+  // How many hosts each archive tool will actually query, versus how many it could. The default
+  // host mode resolves at RUN time, so this is read from the server rather than derived from the
+  // saved config: a config that says "default" does not itself know the number.
+  const [archiveHostCounts, setArchiveHostCounts] = useState({
+    waybackurls: null, gau: null,
+  });
+  // How much JavaScript LinkFinder will actually read, against how much has been discovered. The
+  // two differ by default: the cap is 50 and truncation is silent, so without this the card cannot
+  // distinguish a target with 50 bundles from one with 900.
+  const [linkFinderJS, setLinkFinderJS] = useState(null);
 
   const [showArjunConfigModal, setShowArjunConfigModal] = useState(false);
   const [showArjunResultsModal, setShowArjunResultsModal] = useState(false);
@@ -796,6 +942,10 @@ function App() {
   const [notableObjectsForThreatModel, setNotableObjectsForThreatModel] = useState([]);
   const [securityControlsForThreatModel, setSecurityControlsForThreatModel] = useState([]);
   const [threatModelCounts, setThreatModelCounts] = useState({ questions: 0, mechanisms: 0, notableObjects: 0, securityControls: 0 });
+  // The documented threats themselves, grouped by STRIDE category. Separate from the counts above,
+  // which only measure the four supporting collections and say nothing about whether any threat has
+  // actually been written.
+  const [threatModelResults, setThreatModelResults] = useState({});
   const [showAuthFlowModal, setShowAuthFlowModal] = useState(false);
   const [authFlowCategory, setAuthFlowCategory] = useState('login');
   const [showClientIdentityModal, setShowClientIdentityModal] = useState(false);
@@ -4994,14 +5144,33 @@ function App() {
     );
   };
 
+  // Reloaded whenever the target changes or the config is saved, so the card's "configured" number
+  // reflects what the next run will actually do rather than what the last one did.
+  const loadWAFProbeTargetCount = useCallback(async () => {
+    if (!activeTarget?.id) { setWafProbeTargetCount(null); return; }
+    try {
+      const res = await fetch(`/api/waf-probe/config/${activeTarget.id}`);
+      if (!res.ok) { setWafProbeTargetCount(0); return; }
+      const cfg = await res.json();
+      setWafProbeTargetCount((cfg?.targets || []).filter((t) => t && t.url).length);
+    } catch (e) {
+      // Null, not zero: "we could not read it" must not render as "none configured".
+      setWafProbeTargetCount(null);
+    }
+  }, [activeTarget]);
+
+  useEffect(() => { void loadWAFProbeTargetCount(); }, [loadWAFProbeTargetCount]);
+
   const startWAFProbeScan = (configOverride = null) => {
+    setWafProbeRunError('');
     initiateWAFProbeScan(
       activeTarget,
       setIsWAFProbeScanning,
       setWAFProbeScans,
       setMostRecentWAFProbeScan,
       setMostRecentWAFProbeScanStatus,
-      configOverride
+      configOverride,
+      setWafProbeRunError
     );
   };
 
@@ -5011,10 +5180,29 @@ function App() {
   // The rate and its confidence are one fact, never two. "5 req/s" alone would let an assumed
   // default read as a measurement, which is the most expensive mistake this card could make.
   const wafProbeCard = useMemo(() => {
+    // How many endpoints the LATEST run actually scanned. Counted from the scans sharing the newest
+    // run_id, and only those carrying a result: a scan still pending or one that died before
+    // producing anything has not scanned its endpoint, and counting it would overstate coverage.
+    const scans = Array.isArray(wafProbeScans) ? wafProbeScans : [];
+    const newestRunId = scans.find((s) => s?.run_id)?.run_id || null;
+    const newestRun = newestRunId ? scans.filter((s) => s.run_id === newestRunId) : [];
+    const targetsScanned = newestRunId
+      ? newestRun.filter((s) => s.result).length
+      // A single-endpoint run predates run_id, so one completed scan is one endpoint scanned.
+      : (scans[0]?.result ? 1 : 0);
+
+    // How many endpoints the IN-FLIGHT run covers, counted from its scan rows rather than from the
+    // saved config. A run started with inline endpoints (the MCP run tools, or any API caller) never
+    // writes to the config, so the card would otherwise report "0 configured" while visibly scanning
+    // two of them. During a run the run's own target set IS the operative intent.
+    const targetsInFlightRun = newestRun.some((s) => s.status === 'pending' || s.status === 'running')
+      ? newestRun.length
+      : 0;
+
     const empty = {
       state: 'none', rate: null, rateNote: null, rateMeasured: false,
       threads: null, blockers: 0, topBlocker: null, posture: null,
-      runStatus: null, at: null,
+      runStatus: null, at: null, targetsScanned, targetsInFlightRun,
     };
     const raw = mostRecentWAFProbeScan?.result;
     if (!raw) {
@@ -5053,8 +5241,50 @@ function App() {
       posture: v.posture || null,
       runStatus: p.run?.status || null,
       at: mostRecentWAFProbeScan?.created_at,
+      targetsScanned,
+      targetsInFlightRun,
+      // The three things the card's own description promises to answer. Each is rendered only when
+      // the probe actually established it, because "not measured" and "measured as none" are
+      // different answers and the card must not blur them.
+      concurrency: v.safe_concurrency || null,
+      // Routing: whether every Host under the domain reaches the same application, which decides
+      // whether subdomain-oriented discovery means anything on this target.
+      //
+      // Mapped from the probe's own verdict strings rather than compared against a guessed one. The
+      // real value is "wildcard_vhost", and an === 'wildcard' test silently rendered the OPPOSITE
+      // answer. Anything unrecognised renders nothing at all: a routing claim the probe did not make
+      // is worse than a blank line.
+      // The probe emits exactly two values here (tests_protocol.py:412): wildcard_vhost when almost
+      // every Host tried returned the baseline application, specific_vhost otherwise. Read from the
+      // source rather than guessed: an === 'wildcard' test rendered the OPPOSITE answer, and a
+      // startsWith('wildcard') test silently dropped specific_vhost entirely.
+      hostRoutingText: (() => {
+        switch (p.results?.wildcard_host_routing?.verdict) {
+          case 'wildcard_vhost':
+            return 'Any Host under this domain serves the same application';
+          case 'specific_vhost':
+            return 'Hosts route to distinct applications';
+          default:
+            return null;
+        }
+      })(),
+      // Volume: whether a rate limit was found at all, as opposed to a rate being assumed.
+      rateLimited: p.results?.load_ramp?.verdict
+        ? p.results.load_ramp.verdict !== 'no_limit_observed'
+        : null,
     };
-  }, [mostRecentWAFProbeScan, mostRecentWAFProbeScanStatus]);
+  }, [mostRecentWAFProbeScan, mostRecentWAFProbeScanStatus, wafProbeScans]);
+
+  // How the probe's posture reads on the card. The wording is the operator's answer to "will my
+  // scans get blocked", not the probe's internal enum.
+  const WAF_POSTURE = {
+    DEFENDED: { text: 'Actively blocking payloads', className: 'text-danger', icon: 'bi-shield-fill-exclamation' },
+    PARTIALLY_DEFENDED: { text: 'Blocks some payload classes', className: 'text-warning', icon: 'bi-shield-fill' },
+    OPEN: { text: 'No inline blocking observed', className: 'text-success', icon: 'bi-shield-slash' },
+    INCONCLUSIVE: { text: 'Blocking behaviour inconclusive', className: 'text-muted', icon: 'bi-question-circle' },
+    UNKNOWN: { text: 'Blocking not characterised', className: 'text-muted', icon: 'bi-question-circle' },
+    REFUSED: { text: 'Probe refused to run', className: 'text-muted', icon: 'bi-slash-circle' },
+  };
 
   // All three FFUF phases on the card. A scan that ran and found nothing must not look identical
   // to one that was never run, which is what a bare "Endpoints: 0" did.
@@ -5642,7 +5872,12 @@ function App() {
       }
     }
   };
-  const handleCloseThreatModelModal = () => setShowThreatModelModal(false);
+  // Re-read on close so a threat added or deleted in the modal is reflected in the results section
+  // below it without a page reload.
+  const handleCloseThreatModelModal = () => {
+    setShowThreatModelModal(false);
+    fetchThreatModelResults();
+  };
   const handleOpenPossibleAttacksModal = (category) => {
     setPossibleAttacksCategory(category && category.key ? category.key : category);
     setShowPossibleAttacksModal(true);
@@ -5651,6 +5886,10 @@ function App() {
   // Attack Vectors: one request carrying user-controlled input, identified by verb, host, path, the
   // parameter in play and where the payload goes.
   const [attackVectorCounts, setAttackVectorCounts] = useState({});
+  // Per-insertion-point counts and the named gaps. Every scan below is bounded by this: a point with
+  // no vectors will be reported clean by every tool in every section, for the sole reason that
+  // nothing was ever sent there.
+  const [attackVectorCoverage, setAttackVectorCoverage] = useState(null);
   const [isConsolidatingAttackVectors, setIsConsolidatingAttackVectors] = useState(false);
   const [showAddAttackVectorModal, setShowAddAttackVectorModal] = useState(false);
   const [showAttackVectorsModal, setShowAttackVectorsModal] = useState(false);
@@ -5668,6 +5907,10 @@ function App() {
     try {
       const res = await fetch(`/api/attack-vectors/${activeTarget.id}/summary`);
       if (res.ok) setAttackVectorCounts(await res.json());
+      // Coverage is fetched alongside the totals because a total on its own is misleading: 54
+      // vectors reads as thorough right up until you notice that none of them is a header.
+      const cov = await fetch(`/api/attack-vectors/${activeTarget.id}/coverage`);
+      if (cov.ok) setAttackVectorCoverage(await cov.json());
     } catch {
       // A target that has never been consolidated has no summary, which the card shows as dashes.
     }
@@ -5907,8 +6150,115 @@ function App() {
     } catch (error) { console.error('Error fetching security controls count:', error); }
     setThreatModelCounts(counts);
   };
+  // steps and security_controls are stored as JSON TEXT and come back from the API as strings, so
+  // they are parsed once here rather than in the render. A row whose JSON is malformed keeps the
+  // rest of the threat: losing a whole finding because one column will not parse is worse than
+  // showing it with an empty step list.
+  const parseThreatJSON = (value, fallback) => {
+    if (!value) return fallback;
+    if (Array.isArray(value)) return value;
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : fallback;
+    } catch (error) {
+      console.error('Error parsing threat model JSON column:', error);
+      return fallback;
+    }
+  };
+  // threatModelResults is keyed by STRIDE category, so the total is the sum of the six buckets.
+  const threatModelResultCount = Object.values(threatModelResults || {})
+    .reduce((total, list) => total + (Array.isArray(list) ? list.length : 0), 0);
+  // Refreshed on target change and after a Configure save, because changing the selection is the
+  // one action that moves this number.
+  const fetchArchiveHostCounts = async (targetId) => {
+    const id = targetId || (activeTarget && activeTarget.id);
+    if (!id) {
+      setArchiveHostCounts({ waybackurls: null, gau: null });
+      return;
+    }
+    const next = {};
+    await Promise.all(['waybackurls', 'gau'].map(async (tool) => {
+      try {
+        const res = await fetch(`/api/archive-hosts/${tool}/${id}`);
+        if (!res.ok) { next[tool] = null; return; }
+        const data = await res.json();
+        next[tool] = { selected: data.selected_count ?? 0, total: data.total ?? 0 };
+      } catch (error) {
+        // A target with no host list yet is normal, not an error worth surfacing on a card.
+        next[tool] = null;
+      }
+    }));
+    setArchiveHostCounts(next);
+
+    try {
+      const res = await fetch(`/api/linkfinder-js-files/${id}`);
+      setLinkFinderJS(res.ok ? await res.json() : null);
+    } catch (error) {
+      setLinkFinderJS(null);
+    }
+  };
+
+  const fetchThreatModelResults = async (targetId) => {
+    const id = targetId || (activeTarget && activeTarget.id);
+    if (!id) {
+      setThreatModelResults({});
+      return;
+    }
+    try {
+      const res = await fetch(`/api/threat-model/${id}`);
+      if (!res.ok) throw new Error(`threat model request failed: ${res.status}`);
+      const data = await res.json();
+      const grouped = {};
+      if (Array.isArray(data)) {
+        data.forEach((threat) => {
+          const key = threat.category;
+          if (!key) return;
+          if (!grouped[key]) grouped[key] = [];
+          grouped[key].push({
+            ...threat,
+            steps: parseThreatJSON(threat.steps, []),
+            security_controls: parseThreatJSON(threat.security_controls, []),
+          });
+        });
+      }
+      setThreatModelResults(grouped);
+    } catch (error) {
+      console.error('Error fetching threat model results:', error);
+      setThreatModelResults({});
+    }
+  };
+  // Flips one threat between untested, validated and rejected. This goes to its own route rather than
+  // the normal PUT, because that one replaces every column and demands category and url: marking a
+  // threat tested is a one-field change and should not risk rewriting prose the click never read.
+  const handleSetThreatTestStatus = async (threatId, testStatus) => {
+    if (!threatId) return;
+    try {
+      const res = await fetch(`/api/threat-model/${threatId}/test-status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ test_status: testStatus }),
+      });
+      if (!res.ok) throw new Error(`set test status failed: ${res.status}`);
+      // Patch the one row in place instead of refetching the whole model. The accordion is
+      // uncontrolled, so a refetch here would collapse every open item the operator was reading.
+      setThreatModelResults((prev) => {
+        const next = {};
+        Object.keys(prev).forEach((key) => {
+          next[key] = prev[key].map((t) => (
+            t.id === threatId ? { ...t, test_status: testStatus } : t
+          ));
+        });
+        return next;
+      });
+    } catch (error) {
+      console.error('Error setting threat test status:', error);
+    }
+  };
+
   useEffect(() => {
     fetchThreatModelCounts();
+    fetchThreatModelResults();
+    fetchArchiveHostCounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTarget]);
   useEffect(() => {
@@ -6332,6 +6682,7 @@ function App() {
         onExportClick={handleOpenExportModal}
         onImportClick={handleOpenImportModal}
         onGlobalScansClick={() => setShowGlobalScansModal(true)}
+        onNotesClick={() => setShowNotesModal(true)}
         isGlobalScanRunning={isWildfireRunning || isSlowburnRunning}
       />
 
@@ -6805,7 +7156,11 @@ function App() {
                         // If scan exists but state not yet populated, show 0 while fetching
                         return amassIntelNetworkRanges.length;
                       })(),
-                      resultLabel: 'Network Ranges'
+                      resultLabel: 'Network Ranges',
+                      // The key this step is registered under in the server's Company tool registry.
+                      // The modal asks the server what this tool can be configured with; nothing
+                      // about its options lives in this file.
+                      configTool: { key: 'amass_intel', name: 'Amass Intel' }
                     },
                     {
                       name: 'Metabigor',
@@ -6823,7 +7178,8 @@ function App() {
                         // If scan exists but state not yet populated, show 0 while fetching
                         return metabigorNetworkRanges.length;
                       })(),
-                      resultLabel: 'Network Ranges'
+                      resultLabel: 'Network Ranges',
+                      configTool: { key: 'metabigor_company', name: 'Metabigor' }
                     }
                   ].map((tool, index) => (
                     <Col md={6} key={index}>
@@ -6838,17 +7194,30 @@ function App() {
                             {tool.description}
                           </Card.Text>
                           <div className="mt-auto">
-                            <Card.Text className="text-white small mb-3">
-                              {tool.resultLabel}: {tool.resultCount || "0"}
-                            </Card.Text>
+                            <div className="card-metric mb-3">
+                              <div className="text-danger fw-bold fs-4">{tool.resultCount || 0}</div>
+                              <div className="text-muted small card-metric-label">{tool.resultLabel}</div>
+                            </div>
                             <div className="d-flex justify-content-between gap-2">
-                              <Button 
-                                variant="outline-danger" 
-                                className="flex-fill" 
+                              <Button
+                                variant="outline-danger"
+                                className="flex-fill"
                                 onClick={tool.onHistory}
                               >
                                 History
                               </Button>
+                              {/* Between History and Scan, as asked. The modal is generic: it draws
+                                  whatever the server's Company tool registry describes for this key,
+                                  so no option, flag or default is named in this file. */}
+                              {tool.configTool && (
+                                <Button
+                                  variant="outline-danger"
+                                  className="flex-fill"
+                                  onClick={() => setCompanyConfigTool(tool.configTool)}
+                                >
+                                  Config
+                                </Button>
+                              )}
                               <Button
                                 variant="outline-danger"
                                 className="flex-fill"
@@ -6892,16 +7261,16 @@ function App() {
                         <div className="text-danger mb-4">
                           <div className="row">
                             <div className="col">
-                              <h3 className="mb-0">{consolidatedNetworkRangesCount}</h3>
-                              <small className="text-white-50">Network Ranges</small>
+                              <div className="text-danger fw-bold fs-4">{consolidatedNetworkRangesCount}</div>
+                              <div className="text-muted small card-metric-label">Network Ranges</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{calculateEstimatedScanTime(consolidatedNetworkRanges)}</h3>
-                              <small className="text-white-50">Est. Scan Time</small>
+                              <div className="text-danger fw-bold fs-4">{calculateEstimatedScanTime(consolidatedNetworkRanges)}</div>
+                              <div className="text-muted small card-metric-label">Est. Scan Time</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{mostRecentIPPortScan?.live_web_servers_found || 0}</h3>
-                              <small className="text-white-50">Live Web Servers</small>
+                              <div className="text-danger fw-bold fs-4">{mostRecentIPPortScan?.live_web_servers_found || 0}</div>
+                              <div className="text-muted small card-metric-label">Live Web Servers</div>
                             </div>
                           </div>
                         </div>
@@ -6925,8 +7294,18 @@ function App() {
                               ) : 'Consolidate'}
                             </div>
                           </Button>
-                          <Button 
-                            variant="outline-danger" 
+                          {/* The scanner's own configuration: which ranges and addresses the next
+                              scan reaches, plus host discovery, port scanning, the web service probe
+                              and concurrency. Every field on it comes from the server's registry. */}
+                          <Button
+                            variant="outline-danger"
+                            className="flex-fill"
+                            onClick={() => setShowIPPortScanConfigModal(true)}
+                          >
+                            Configure
+                          </Button>
+                          <Button
+                            variant="outline-danger"
                             className="flex-fill"
                             onClick={handleDiscoverLiveIPs}
                             disabled={isIPPortScanning}
@@ -7031,9 +7410,10 @@ function App() {
                             {tool.description}
                           </Card.Text>
                           <div className="mt-auto">
-                            <Card.Text className="text-white small mb-3">
-                              Domains: {tool.resultCount || "0"}
-                            </Card.Text>
+                            <div className="card-metric mb-3">
+                              <div className="text-danger fw-bold fs-4">{tool.resultCount || 0}</div>
+                              <div className="text-muted small card-metric-label">Domains</div>
+                            </div>
                             {tool.isGoogleDorking ? (
                               <div className="d-flex justify-content-between gap-2">
                                 <Button
@@ -7238,9 +7618,10 @@ function App() {
                             {tool.description}
                           </Card.Text>
                           <div className="mt-auto">
-                            <Card.Text className="text-white small mb-3">
-                              Domains: {tool.resultCount || "0"}
-                            </Card.Text>
+                            <div className="card-metric mb-3">
+                              <div className="text-danger fw-bold fs-4">{tool.resultCount || 0}</div>
+                              <div className="text-muted small card-metric-label">Domains</div>
+                            </div>
                             <div className="d-flex justify-content-between gap-2">
                               <Button 
                                 variant="outline-danger" 
@@ -7292,11 +7673,11 @@ function App() {
                         <div className="text-danger mb-4">
                           <div className="row">
                             <div className="col">
-                              <h3 className="mb-0">{consolidatedCompanyDomainsCount}</h3>
-                              <small className="text-white-50">Unique Root Domains</small>
+                              <div className="text-danger fw-bold fs-4">{consolidatedCompanyDomainsCount}</div>
+                              <div className="text-muted small card-metric-label">Unique Root Domains</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{
+                              <div className="text-danger fw-bold fs-4">{
                                 scopeTargets.filter(target => {
                                   if (target.type !== 'Wildcard' || !target.scope_target) return false;
                                   
@@ -7311,8 +7692,8 @@ function App() {
                                     return domain && domain.toLowerCase() === baseDomain.toLowerCase();
                                   });
                                 }).length
-                              }</h3>
-                              <small className="text-white-50">Wildcard Targets Created</small>
+                              }</div>
+                              <div className="text-muted small card-metric-label">Wildcard Targets Created</div>
                             </div>
                           </div>
                         </div>
@@ -7387,12 +7768,12 @@ function App() {
                         <div className="text-danger mb-4">
                           <div className="row">
                             <div className="col">
-                              <h3 className="mb-0">{amassEnumScannedDomainsCount}</h3>
-                              <small className="text-white-50">Company Domains<br/>Scanned</small>
+                              <div className="text-danger fw-bold fs-4">{amassEnumScannedDomainsCount}</div>
+                              <div className="text-muted small card-metric-label">Company Domains Scanned</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{amassEnumCompanyCloudDomains?.length || 0}</h3>
-                              <small className="text-white-50">Cloud Assets<br/>Discovered</small>
+                              <div className="text-danger fw-bold fs-4">{amassEnumCompanyCloudDomains?.length || 0}</div>
+                              <div className="text-muted small card-metric-label">Cloud Assets Discovered</div>
                             </div>
                           </div>
                         </div>
@@ -7438,12 +7819,12 @@ function App() {
                         <div className="text-danger mb-4">
                           <div className="row">
                             <div className="col">
-                              <h3 className="mb-0">{dnsxScannedDomainsCount}</h3>
-                              <small className="text-white-50">Company Domains<br/>Scanned</small>
+                              <div className="text-danger fw-bold fs-4">{dnsxScannedDomainsCount}</div>
+                              <div className="text-muted small card-metric-label">Company Domains Scanned</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{dnsxCompanyDnsRecords?.length || 0}</h3>
-                              <small className="text-white-50">DNS Records<br/>Discovered</small>
+                              <div className="text-danger fw-bold fs-4">{dnsxCompanyDnsRecords?.length || 0}</div>
+                              <div className="text-muted small card-metric-label">DNS Records Discovered</div>
                             </div>
                           </div>
                         </div>
@@ -7492,7 +7873,7 @@ function App() {
                           Multi-cloud OSINT tool for enumerating public resources in AWS, Azure, and Google Cloud through brute-force techniques.
                         </Card.Text>
                         <div className="text-danger mb-4">
-                          <h3 className="mb-0">{(() => {
+                          <div className="text-danger fw-bold fs-4">{(() => {
                             if (!mostRecentCloudEnumScan?.result) return 0;
                             try {
                               // Backend stores results as JSON array string, not newline-delimited JSON
@@ -7504,8 +7885,8 @@ function App() {
                             } catch (error) {
                               return 0;
                             }
-                          })()}</h3>
-                          <small className="text-white-50">Cloud Assets<br/>Discovered</small>
+                          })()}</div>
+                          <div className="text-muted small card-metric-label">Cloud Assets Discovered</div>
                         </div>
                         <div className="d-flex justify-content-between mt-auto gap-2">
                           <Button 
@@ -7557,8 +7938,8 @@ function App() {
                           Next-generation crawling and spidering framework designed for comprehensive web asset discovery and enumeration through intelligent crawling techniques.
                         </Card.Text>
                         <div className="text-danger mb-4">
-                          <h3 className="mb-0">{katanaCompanyCloudAssets ? katanaCompanyCloudAssets.length : 0}</h3>
-                          <small className="text-white-50">Cloud Assets<br/>Discovered</small>
+                          <div className="text-danger fw-bold fs-4">{katanaCompanyCloudAssets ? katanaCompanyCloudAssets.length : 0}</div>
+                          <div className="text-muted small card-metric-label">Cloud Assets Discovered</div>
                         </div>
                         <div className="d-flex justify-content-between mt-auto gap-2">
                           <Button 
@@ -7613,28 +7994,28 @@ function App() {
                       <div className="text-danger mb-4">
                         <div className="row row-cols-6">
                           <div className="col">
-                            <h3 className="mb-0">{attackSurfaceASNsCount}</h3>
-                            <small className="text-white-50">Autonomous System<br/>Numbers (ASNs)</small>
+                            <div className="text-danger fw-bold fs-4">{attackSurfaceASNsCount}</div>
+                            <div className="text-muted small card-metric-label">Autonomous System Numbers (ASNs)</div>
                           </div>
                           <div className="col">
-                            <h3 className="mb-0">{attackSurfaceNetworkRangesCount}</h3>
-                            <small className="text-white-50">Network<br/>Ranges</small>
+                            <div className="text-danger fw-bold fs-4">{attackSurfaceNetworkRangesCount}</div>
+                            <div className="text-muted small card-metric-label">Network Ranges</div>
                           </div>
                           <div className="col">
-                            <h3 className="mb-0">{attackSurfaceIPAddressesCount}</h3>
-                            <small className="text-white-50">IP<br/>Addresses</small>
+                            <div className="text-danger fw-bold fs-4">{attackSurfaceIPAddressesCount}</div>
+                            <div className="text-muted small card-metric-label">IP Addresses</div>
                           </div>
                           <div className="col">
-                            <h3 className="mb-0">{attackSurfaceFQDNsCount}</h3>
-                            <small className="text-white-50">Domain<br/>Names</small>
+                            <div className="text-danger fw-bold fs-4">{attackSurfaceFQDNsCount}</div>
+                            <div className="text-muted small card-metric-label">Domain Names</div>
                           </div>
                           <div className="col">
-                            <h3 className="mb-0">{attackSurfaceCloudAssetsCount}</h3>
-                            <small className="text-white-50">Cloud Asset<br/>Domains</small>
+                            <div className="text-danger fw-bold fs-4">{attackSurfaceCloudAssetsCount}</div>
+                            <div className="text-muted small card-metric-label">Cloud Asset Domains</div>
                           </div>
                           <div className="col">
-                            <h3 className="mb-0">{attackSurfaceLiveWebServersCount}</h3>
-                            <small className="text-white-50">Live Web<br/>Servers</small>
+                            <div className="text-danger fw-bold fs-4">{attackSurfaceLiveWebServersCount}</div>
+                            <div className="text-muted small card-metric-label">Live Web Servers</div>
                           </div>
                         </div>
                       </div>
@@ -7695,29 +8076,38 @@ function App() {
                         <div className="text-danger mb-4">
                           <div className="row row-cols-5">
                             <div className="col">
-                              <h3 className="mb-0">{getNucleiSelectedTargetsCount()}</h3>
-                              <small className="text-white-50">Selected<br/>Targets</small>
+                              <div className="text-danger fw-bold fs-4">{getNucleiSelectedTargetsCount()}</div>
+                              <div className="text-muted small card-metric-label">Selected Targets</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{getNucleiSelectedTemplatesCount()}</h3>
-                              <small className="text-white-50">Selected<br/>Templates</small>
+                              <div className="text-danger fw-bold fs-4">{getNucleiSelectedTemplatesCount()}</div>
+                              <div className="text-muted small card-metric-label">Selected Templates</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{getNucleiEstimatedScanTime()}</h3>
-                              <small className="text-white-50">Estimated<br/>Scan Time</small>
+                              <div className="text-danger fw-bold fs-4">{getNucleiEstimatedScanTime()}</div>
+                              <div className="text-muted small card-metric-label">Estimated Scan Time</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{getNucleiTotalFindings()}</h3>
-                              <small className="text-white-50">Total<br/>Findings</small>
+                              <div className="text-danger fw-bold fs-4">{getNucleiTotalFindings()}</div>
+                              <div className="text-muted small card-metric-label">Total Findings</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{getNucleiImpactfulFindings()}</h3>
-                              <small className="text-white-50">Impactful<br/>Findings</small>
+                              <div className="text-danger fw-bold fs-4">{getNucleiImpactfulFindings()}</div>
+                              <div className="text-muted small card-metric-label">Impactful Findings</div>
                             </div>
                           </div>
                         </div>
                         <div className="d-flex justify-content-between mt-auto gap-2">
                           <Button variant="outline-danger" className="flex-fill" onClick={handleOpenNucleiHistoryModal}>History</Button>
+                          {/* Settings is the ENGINE flags (rate, concurrency, timeouts, retries).
+                              Configure, next to it, is the existing targets-and-templates screen and
+                              is untouched: two screens that both set templates is how a
+                              configuration comes to contradict itself.
+
+                              These settings deliberately live in wildcard_tool_settings, because ONE
+                              nuclei runner serves both workflows and it loads by scope target id
+                              alone. The modal says so on every tab. */}
+                          <Button variant="outline-danger" className="flex-fill" onClick={() => setCompanyConfigTool({ key: 'nuclei', name: 'Nuclei' })}>Settings</Button>
                           <Button variant="outline-danger" className="flex-fill" onClick={handleOpenNucleiConfigModal}>Configure</Button>
                           <Button 
                             variant="outline-danger" 
@@ -7756,24 +8146,63 @@ function App() {
                           <Card.Text className="text-white small fst-italic text-center">
                             A powerful subdomain enumeration and OSINT tool for in-depth reconnaissance.
                           </Card.Text>
-                          <Card.Text className="text-white small d-flex justify-content-between">
-                            <span>Last Scanned: &nbsp;&nbsp;{getLastScanDate(amassScans)}</span>
-                            <span>Total Results: {getResultLength(scanHistory[scanHistory.length - 1]) || "N/a"}</span>
-                          </Card.Text>
-                          <Card.Text className="text-white small d-flex justify-content-between">
-                            <span>Last Scan Status: &nbsp;&nbsp;{getLatestScanStatus(amassScans)}</span>
-                            <span>Cloud Domains: {cloudDomains.length || "0"}</span>
-                          </Card.Text>
-                          <Card.Text className="text-white small d-flex justify-content-between">
-                            <span>Scan Time: &nbsp;&nbsp;{getExecutionTime(getLatestScanTime(amassScans))}</span>
-                            <span>Subdomains: {subdomains.length || "0"}</span>
-                          </Card.Text>
-                          <Card.Text className="text-white small d-flex justify-content-between mb-3">
-                            <span>Scan ID: {renderScanId(getLatestScanId(amassScans))}</span>
-                            <span>DNS Records: {dnsRecords.length}</span>
-                          </Card.Text>
+                          {/* Liveness on its own row, the same shape as the Manual Crawling card:
+                              it is a status, not a number, and it is the first thing an operator
+                              looks for. While a scan runs this shows its elapsed time, so a long
+                              Amass run is visibly progressing rather than merely "not finished". */}
+                          <div className="text-center mt-2">
+                            {amassScanRunning ? (
+                              <div className="text-danger">
+                                <Spinner animation="border" size="sm" className="me-2" />
+                                <strong>Scan Running</strong>
+                                {/* Live elapsed, not execution_time: that field is only written when
+                                    the scan completes. Omitted rather than faked if the start time
+                                    is unavailable. */}
+                                {amassElapsed && <span className="text-muted ms-2">{amassElapsed}</span>}
+                              </div>
+                            ) : (
+                              <div className="text-muted">
+                                <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
+                                No Scan Running
+                              </div>
+                            )}
+                          </div>
+
+                          {/* The four numbers this tool produces, in the same big-number shape as
+                              every other card in the three workflows. The scan id, status and
+                              timestamp that used to share this space are still one click away in
+                              Scan History, which is where a value nobody reads at a glance belongs. */}
+                          <div className="mt-3 mb-3">
+                            <Row className="text-center align-items-start">
+                              <Col>
+                                <div className="text-danger fw-bold fs-4">
+                                  {getResultLength(scanHistory[scanHistory.length - 1]) || 0}
+                                </div>
+                                <div className="text-muted small card-metric-label">Total Results</div>
+                              </Col>
+                              <Col>
+                                <div className={`fw-bold fs-4 ${cloudDomains.length ? 'text-danger' : 'text-secondary'}`}>
+                                  {cloudDomains.length || 0}
+                                </div>
+                                <div className="text-muted small card-metric-label">Cloud Domains</div>
+                              </Col>
+                              <Col>
+                                <div className={`fw-bold fs-4 ${subdomains.length ? 'text-danger' : 'text-secondary'}`}>
+                                  {subdomains.length || 0}
+                                </div>
+                                <div className="text-muted small card-metric-label">Subdomains</div>
+                              </Col>
+                              <Col>
+                                <div className={`fw-bold fs-4 ${dnsRecords.length ? 'text-danger' : 'text-secondary'}`}>
+                                  {dnsRecords.length || 0}
+                                </div>
+                                <div className="text-muted small card-metric-label">DNS Records</div>
+                              </Col>
+                            </Row>
+                          </div>
                         </div>
                         <div className="d-flex justify-content-between w-100 mt-3 gap-2">
+                          <Button variant="outline-danger" className="flex-fill" onClick={() => setWildcardConfigTool({ key: 'amass', name: 'Amass' })}>&nbsp;&nbsp;&nbsp;Configure&nbsp;&nbsp;&nbsp;</Button>
                           <Button variant="outline-danger" className="flex-fill" onClick={handleOpenScanHistoryModal}>&nbsp;&nbsp;&nbsp;Scan History&nbsp;&nbsp;&nbsp;</Button>
                           <Button variant="outline-danger" className="flex-fill" onClick={handleOpenRawResultsModal}>&nbsp;&nbsp;&nbsp;Raw Results&nbsp;&nbsp;&nbsp;</Button>
                           <Button variant="outline-danger" className="flex-fill" onClick={handleOpenInfraModal}>Infrastructure</Button>
@@ -7804,6 +8233,10 @@ function App() {
                     { name: 'Passive OSINT',
                       link: 'https://sidxparab.gitbook.io/subdomain-enumeration-guide/passive-enumeration/passive-sources',
                       isActive: true,
+                      // The key this step is registered under in the server's Wildcard tool registry.
+                      // The modal asks the server what that tool can be configured with; nothing about
+                      // its options is decided here.
+                      configTool: 'sublist3r',
                       status: mostRecentSublist3rScanStatus,
                       isScanning: isSublist3rScanning,
                       onScan: startSublist3rScan,
@@ -7811,9 +8244,10 @@ function App() {
                       resultCount: mostRecentSublist3rScan && mostRecentSublist3rScan.result ? 
                         mostRecentSublist3rScan.result.split('\n').filter(line => line.trim()).length : 0
                     },
-                    { name: 'Assetfinder', 
+                    { name: 'Assetfinder',
                       link: 'https://github.com/tomnomnom/assetfinder',
                       isActive: true,
+                      configTool: 'assetfinder',
                       status: mostRecentAssetfinderScanStatus,
                       isScanning: isAssetfinderScanning,
                       onScan: startAssetfinderScan,
@@ -7822,9 +8256,10 @@ function App() {
                         mostRecentAssetfinderScan.result.split('\n').filter(line => line.trim()).length : 0
                     },
                     { 
-                      name: 'GAU', 
+                      name: 'GAU',
                       link: 'https://github.com/lc/gau',
                       isActive: true,
+                      configTool: 'gau',
                       status: mostRecentGauScanStatus,
                       isScanning: isGauScanning,
                       onScan: startGauScan,
@@ -7849,9 +8284,10 @@ function App() {
                         })() : 0
                     },
                     { 
-                      name: 'CTL', 
+                      name: 'CTL',
                       link: 'https://github.com/hannob/tlshelpers',
                       isActive: true,
+                      configTool: 'ctl',
                       status: mostRecentCTLScanStatus,
                       isScanning: isCTLScanning,
                       onScan: startCTLScan,
@@ -7861,9 +8297,10 @@ function App() {
                       apiError: mostRecentCTLScanStatus === 'error',
                       onApiError: () => setShowCTLApiErrorModal(true)
                     },
-                    { name: 'Subfinder', 
+                    { name: 'Subfinder',
                       link: 'https://github.com/projectdiscovery/subfinder',
                       isActive: true,
+                      configTool: 'subfinder',
                       status: mostRecentSubfinderScanStatus,
                       isScanning: isSubfinderScanning,
                       onScan: startSubfinderScan,
@@ -7892,38 +8329,53 @@ function App() {
                             {tool.name === 'GAU' ? 'Get All URLs - Fetch known URLs from AlienVault\'s Open Threat Exchange, the Wayback Machine, and Common Crawl.' : tool.name === 'Passive OSINT' ? 'Unions subdomains from multiple free, key-less passive OSINT sources.' : 'A subdomain enumeration tool that uses OSINT techniques.'}
                           </Card.Text>
                           <div className="mt-auto">
-                            <Card.Text className="text-white small mb-3">
-                              Subdomains: {tool.resultCount || "0"}
-                            </Card.Text>
-                            <div className="d-flex justify-content-between gap-2">
-                              {tool.isActive ? (
-                                <>
-                                  <Button 
-                                    variant="outline-danger" 
-                                    className="flex-fill" 
-                                    onClick={tool.onResults}
-                                  >
-                                    Results
-                                  </Button>
-                                  <Button
-                                    variant="outline-danger"
-                                    className="flex-fill"
-                                    onClick={tool.onScan}
-                                    disabled={tool.isScanning || tool.status === "pending"}
-                                  >
-                                    <div className="btn-content">
-                                      {tool.isScanning || tool.status === "pending" ? (
-                                        <div className="spinner"></div>
-                                      ) : 'Scan'}
-                                    </div>
-                                  </Button>
-                                </>
-                              ) : (
-                                <>
-                                  <Button variant="outline-danger" className="flex-fill" disabled>Results</Button>
-                                  <Button variant="outline-danger" className="flex-fill" disabled>Scan</Button>
-                                </>
-                              )}
+                            <div className="card-metric mb-3">
+                              <div className="text-danger fw-bold fs-4">{tool.resultCount || 0}</div>
+                              <div className="text-muted small card-metric-label">Subdomains</div>
+                            </div>
+                            {/* Three EQUAL-WIDTH icon buttons: gear, play, list. flex 1 1 0 gives
+                                each exactly a third of the row whatever it contains, so they stay
+                                the same size as one another. With all three as icons there is no
+                                text to fit, which is what row-cols-5 could not afford: a fifth of a
+                                card leaves about 41px of usable width once .btn padding is taken,
+                                and "Results" does not fit in that at a readable size.
+                                Every button carries title (hover) and aria-label (screen reader)
+                                with the full word, because an icon alone is not a label. */}
+                            <div className="d-flex gap-2 flex-nowrap btn-scrape-row">
+                              <Button
+                                variant="outline-danger"
+                                className="btn-scrape"
+                                onClick={() => setWildcardConfigTool({ key: tool.configTool, name: tool.name })}
+                                disabled={!tool.isActive || !tool.configTool}
+                                title="Config"
+                                aria-label="Config"
+                              >
+                                <i className="bi bi-gear-fill"></i>
+                              </Button>
+                              <Button
+                                variant="outline-danger"
+                                className="btn-scrape"
+                                onClick={tool.onScan}
+                                disabled={!tool.isActive || tool.isScanning || tool.status === "pending"}
+                                title="Scan"
+                                aria-label="Scan"
+                              >
+                                <div className="btn-content">
+                                  {tool.isScanning || tool.status === "pending"
+                                    ? <div className="spinner"></div>
+                                    : <i className="bi bi-play-fill"></i>}
+                                </div>
+                              </Button>
+                              <Button
+                                variant="outline-danger"
+                                className="btn-scrape"
+                                onClick={tool.onResults}
+                                disabled={!tool.isActive}
+                                title="Results"
+                                aria-label="Results"
+                              >
+                                <i className="bi bi-list-ul"></i>
+                              </Button>
                             </div>
                           </div>
                         </Card.Body>
@@ -7944,12 +8396,12 @@ function App() {
                         <div className="text-danger mb-4">
                           <div className="row">
                             <div className="col">
-                              <h3 className="mb-0">{consolidatedCount}</h3>
-                              <small className="text-white-50">Unique Subdomains</small>
+                              <div className="text-danger fw-bold fs-4">{consolidatedCount}</div>
+                              <div className="text-muted small card-metric-label">Unique Subdomains</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{getHttpxResultsCount(mostRecentHttpxScan)}</h3>
-                              <small className="text-white-50">Live Web Servers</small>
+                              <div className="text-danger fw-bold fs-4">{getHttpxResultsCount(mostRecentHttpxScan)}</div>
+                              <div className="text-muted small card-metric-label">Live Web Servers</div>
                             </div>
                           </div>
                         </div>
@@ -7979,7 +8431,7 @@ function App() {
                             className="flex-fill"
                             onClick={handleOpenConfigureHttpxModal}
                           >
-                            {httpxScanConfig ? <><i className="bi bi-gear-fill me-1"></i>HTTPX Config</> : <><i className="bi bi-gear me-1"></i>Configure HTTPX</>}
+                            {httpxScanConfig ? 'HTTPX Config' : 'Configure HTTPX'}
                           </Button>
                           <Button
                             variant="outline-danger"
@@ -8004,9 +8456,10 @@ function App() {
                 <Row className="justify-content-between mb-4">
                   {[
                     { 
-                      name: 'ShuffleDNS', 
+                      name: 'ShuffleDNS',
                       link: 'https://github.com/projectdiscovery/shuffledns',
                       isActive: true,
+                      configTool: 'shuffledns',
                       status: mostRecentShuffleDNSScanStatus,
                       isScanning: isShuffleDNSScanning,
                       onScan: startShuffleDNSScan,
@@ -8015,9 +8468,10 @@ function App() {
                         mostRecentShuffleDNSScan.result.split('\n').filter(line => line.trim()).length : 0
                     },
                     { 
-                      name: 'CeWL', 
+                      name: 'CeWL',
                       link: 'https://github.com/digininja/CeWL',
                       isActive: true,
+                      configTool: 'cewl',
                       status: mostRecentCeWLScanStatus,
                       isScanning: isCeWLScanning,
                       onScan: startCeWLScan,
@@ -8040,18 +8494,19 @@ function App() {
                               'A custom word list generator for target-specific wordlists.'}
                           </Card.Text>
                           {tool.isActive && (
-                            <Card.Text className="text-white small mb-3">
-                              Subdomains: {tool.resultCount || "0"}
-                            </Card.Text>
+                            <div className="card-metric mb-3">
+                              <div className="text-danger fw-bold fs-4">{tool.resultCount || 0}</div>
+                              <div className="text-muted small card-metric-label">Subdomains</div>
+                            </div>
                           )}
                           <div className="d-flex justify-content-between mt-auto gap-2">
-                            <Button 
-                              variant="outline-danger" 
+                            <Button
+                              variant="outline-danger"
                               className="flex-fill"
-                              onClick={tool.onResults}
-                              disabled={!tool.isActive || !tool.resultCount}
+                              onClick={() => setWildcardConfigTool({ key: tool.configTool, name: tool.name })}
+                              disabled={!tool.configTool}
                             >
-                              Results
+                              Config
                             </Button>
                             <Button
                               variant="outline-danger"
@@ -8064,6 +8519,14 @@ function App() {
                                   <div className="spinner"></div>
                                 ) : 'Scan'}
                               </div>
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={tool.onResults}
+                              disabled={!tool.isActive || !tool.resultCount}
+                            >
+                              Results
                             </Button>
                           </div>
                         </Card.Body>
@@ -8084,12 +8547,12 @@ function App() {
                         <div className="text-danger mb-4">
                           <div className="row">
                             <div className="col">
-                              <h3 className="mb-0">{consolidatedCount}</h3>
-                              <small className="text-white-50">Unique Subdomains</small>
+                              <div className="text-danger fw-bold fs-4">{consolidatedCount}</div>
+                              <div className="text-muted small card-metric-label">Unique Subdomains</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{getHttpxResultsCount(mostRecentHttpxScan)}</h3>
-                              <small className="text-white-50">Live Web Servers</small>
+                              <div className="text-danger fw-bold fs-4">{getHttpxResultsCount(mostRecentHttpxScan)}</div>
+                              <div className="text-muted small card-metric-label">Live Web Servers</div>
                             </div>
                           </div>
                         </div>
@@ -8119,7 +8582,7 @@ function App() {
                             className="flex-fill"
                             onClick={handleOpenConfigureHttpxModal}
                           >
-                            {httpxScanConfig ? <><i className="bi bi-gear-fill me-1"></i>HTTPX Config</> : <><i className="bi bi-gear me-1"></i>Configure HTTPX</>}
+                            {httpxScanConfig ? 'HTTPX Config' : 'Configure HTTPX'}
                           </Button>
                           <Button
                             variant="outline-danger"
@@ -8144,9 +8607,10 @@ function App() {
                 <Row className="justify-content-between mb-4">
                   {[
                     { 
-                      name: 'GoSpider', 
+                      name: 'GoSpider',
                       link: 'https://github.com/jaeles-project/gospider',
                       isActive: true,
+                      configTool: 'gospider',
                       status: mostRecentGoSpiderScanStatus,
                       isScanning: isGoSpiderScanning,
                       onScan: startGoSpiderScan,
@@ -8155,9 +8619,10 @@ function App() {
                         mostRecentGoSpiderScan.result.split('\n').filter(line => line.trim()).length : 0
                     },
                     { 
-                      name: 'Subdomainizer', 
+                      name: 'Subdomainizer',
                       link: 'https://github.com/nsonaniya2010/SubDomainizer',
                       isActive: true,
+                      configTool: 'subdomainizer',
                       status: mostRecentSubdomainizerScanStatus,
                       isScanning: isSubdomainizerScanning,
                       onScan: startSubdomainizerScan,
@@ -8178,18 +8643,19 @@ function App() {
                             A fast web spider written in Go for web scraping and crawling.
                           </Card.Text>
                           {tool.isActive && (
-                            <Card.Text className="text-white small mb-3">
-                              Subdomains: {tool.resultCount || "0"}
-                            </Card.Text>
+                            <div className="card-metric mb-3">
+                              <div className="text-danger fw-bold fs-4">{tool.resultCount || 0}</div>
+                              <div className="text-muted small card-metric-label">Subdomains</div>
+                            </div>
                           )}
                           <div className="d-flex justify-content-between mt-auto gap-2">
-                            <Button 
-                              variant="outline-danger" 
+                            <Button
+                              variant="outline-danger"
                               className="flex-fill"
-                              onClick={tool.onResults}
-                              disabled={!tool.isActive || !tool.resultCount}
+                              onClick={() => setWildcardConfigTool({ key: tool.configTool, name: tool.name })}
+                              disabled={!tool.configTool}
                             >
-                              Results
+                              Config
                             </Button>
                             <Button
                               variant="outline-danger"
@@ -8202,6 +8668,14 @@ function App() {
                                   <div className="spinner"></div>
                                 ) : 'Scan'}
                               </div>
+                            </Button>
+                            <Button
+                              variant="outline-danger"
+                              className="flex-fill"
+                              onClick={tool.onResults}
+                              disabled={!tool.isActive || !tool.resultCount}
+                            >
+                              Results
                             </Button>
                           </div>
                         </Card.Body>
@@ -8222,12 +8696,12 @@ function App() {
                         <div className="text-danger mb-4">
                           <div className="row">
                             <div className="col">
-                              <h3 className="mb-0">{consolidatedCount}</h3>
-                              <small className="text-white-50">Unique Subdomains</small>
+                              <div className="text-danger fw-bold fs-4">{consolidatedCount}</div>
+                              <div className="text-muted small card-metric-label">Unique Subdomains</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{getHttpxResultsCount(mostRecentHttpxScan)}</h3>
-                              <small className="text-white-50">Live Web Servers</small>
+                              <div className="text-danger fw-bold fs-4">{getHttpxResultsCount(mostRecentHttpxScan)}</div>
+                              <div className="text-muted small card-metric-label">Live Web Servers</div>
                             </div>
                           </div>
                         </div>
@@ -8257,7 +8731,7 @@ function App() {
                             className="flex-fill"
                             onClick={handleOpenConfigureHttpxModal}
                           >
-                            {httpxScanConfig ? <><i className="bi bi-gear-fill me-1"></i>HTTPX Config</> : <><i className="bi bi-gear me-1"></i>Configure HTTPX</>}
+                            {httpxScanConfig ? 'HTTPX Config' : 'Configure HTTPX'}
                           </Button>
                           <Button
                             variant="outline-danger"
@@ -8595,25 +9069,30 @@ function App() {
                         <div className="text-danger mb-4">
                           <div className="row row-cols-4">
                             <div className="col">
-                              <h3 className="mb-0">{getWildcardNucleiSelectedTargetsCount()}</h3>
-                              <small className="text-white-50">Selected<br/>Targets</small>
+                              <div className="text-danger fw-bold fs-4">{getWildcardNucleiSelectedTargetsCount()}</div>
+                              <div className="text-muted small card-metric-label">Selected Targets</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{getWildcardNucleiSelectedTemplatesCount()}</h3>
-                              <small className="text-white-50">Selected<br/>Templates</small>
+                              <div className="text-danger fw-bold fs-4">{getWildcardNucleiSelectedTemplatesCount()}</div>
+                              <div className="text-muted small card-metric-label">Selected Templates</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{getWildcardNucleiTotalFindings()}</h3>
-                              <small className="text-white-50">Total<br/>Findings</small>
+                              <div className="text-danger fw-bold fs-4">{getWildcardNucleiTotalFindings()}</div>
+                              <div className="text-muted small card-metric-label">Total Findings</div>
                             </div>
                             <div className="col">
-                              <h3 className="mb-0">{getWildcardNucleiImpactfulFindings()}</h3>
-                              <small className="text-white-50">Impactful<br/>Findings</small>
+                              <div className="text-danger fw-bold fs-4">{getWildcardNucleiImpactfulFindings()}</div>
+                              <div className="text-muted small card-metric-label">Impactful Findings</div>
                             </div>
                           </div>
                         </div>
                         <div className="d-flex justify-content-between mt-auto gap-2">
                           <Button variant="outline-danger" className="flex-fill" onClick={handleOpenWildcardNucleiHistoryModal}>History</Button>
+                          {/* Settings is the ENGINE flags (rate, concurrency, timeouts, retries).
+                              Configure, next to it, is the existing targets-and-templates screen and is
+                              untouched: two screens that both set templates is how a configuration comes
+                              to contradict itself, so the registry deliberately owns neither here. */}
+                          <Button variant="outline-danger" className="flex-fill" onClick={() => setWildcardConfigTool({ key: 'nuclei', name: 'Nuclei' })}>Settings</Button>
                           <Button variant="outline-danger" className="flex-fill" onClick={handleOpenWildcardNucleiConfigModal}>Configure</Button>
                           <Button 
                             variant="outline-danger" 
@@ -8666,27 +9145,27 @@ function App() {
                             </div>
                           )}
                         </div>
-                        <div className="my-3 py-3">
+                        <div className="mt-auto pt-3 mb-3">
                           <Row className="text-center align-items-center">
                             <Col>
                               <div className="text-danger fw-bold fs-4">{manualCrawlDirectCount}</div>
-                              <div className="text-muted small">Direct Endpoints</div>
+                              <div className="text-muted small card-metric-label">Direct Endpoints</div>
                             </Col>
                             <Col>
                               <div className="text-danger fw-bold fs-4">{manualCrawlAdjacentCount}</div>
-                              <div className="text-muted small">Adjacent Endpoints</div>
+                              <div className="text-muted small card-metric-label">Adjacent Endpoints</div>
                             </Col>
                             <Col>
                               <div className="text-danger fw-bold fs-4">{manualCrawlAdjacentHostCount}</div>
-                              <div className="text-muted small">Adjacent Hosts</div>
+                              <div className="text-muted small card-metric-label">Adjacent Hosts</div>
                             </Col>
                             <Col>
                               <div className="text-danger fw-bold fs-4">{manualCrawlSessionCount}</div>
-                              <div className="text-muted small">Crawl Sessions</div>
+                              <div className="text-muted small card-metric-label">Crawl Sessions</div>
                             </Col>
                           </Row>
                         </div>
-                        <div className="mt-auto">
+                        <div className="card-actions">
                           <Row className="g-2">
                             <Col>
                               <Button
@@ -8749,46 +9228,98 @@ function App() {
                               <i className="bi bi-exclamation-triangle-fill me-2" style={{ fontSize: '0.8rem' }}></i>
                               <strong>{wafProbeCard.blockers} finding(s) will break your scans</strong>
                             </div>
-                          ) : null}
+                          ) : wafProbeCard.posture && WAF_POSTURE[wafProbeCard.posture] ? (
+                            // The card promises to characterise how the target BLOCKS traffic, and
+                            // until now it never showed the answer: posture was computed and thrown
+                            // away. With no blocker to report this is the most useful line the probe
+                            // produces, so it takes the same slot rather than a badge beside the
+                            // numbers.
+                            <div className={WAF_POSTURE[wafProbeCard.posture].className}>
+                              <i className={`bi ${WAF_POSTURE[wafProbeCard.posture].icon} me-2`} style={{ fontSize: '0.8rem' }}></i>
+                              <strong>{WAF_POSTURE[wafProbeCard.posture].text}</strong>
+                            </div>
+                          ) : (
+                            <div className="text-muted">
+                              <i className="bi bi-circle-fill me-2" style={{ fontSize: '0.6rem' }}></i>
+                              Never probed
+                            </div>
+                          )}
                         </div>
 
-                        <div className="my-3 py-3">
+                        {/* The other two things the description promises: how it ROUTES and how it
+                            handles VOLUME. Each renders only once the probe has established it, so an
+                            un-run card stays honest rather than showing reassuring defaults. */}
+                        {wafProbeCard.state === 'ok' && (
+                          <div className="text-center mt-2 d-flex flex-column gap-1">
+                            {wafProbeCard.rateLimited !== null && (
+                              <div className="text-muted" style={{ fontSize: '0.75rem' }}>
+                                <i className="bi bi-speedometer2 me-2"></i>
+                                {wafProbeCard.rateLimited
+                                  ? 'Rate limiting observed under load'
+                                  : 'No rate limiting observed under load'}
+                                {wafProbeCard.concurrency
+                                  ? ` · throughput plateaus at ${wafProbeCard.concurrency} concurrent`
+                                  : ''}
+                              </div>
+                            )}
+                            {wafProbeCard.hostRoutingText && (
+                              <div className="text-muted" style={{ fontSize: '0.75rem' }}>
+                                <i className="bi bi-diagram-3 me-2"></i>
+                                {wafProbeCard.hostRoutingText}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="mt-auto pt-3 mb-3">
                           <Row className="text-center align-items-start">
                             <Col>
+                              {/* Intent, not history: how many endpoints the NEXT run will cover. */}
+                              <div className={`fw-bold fs-4 ${(wafProbeCard.targetsInFlightRun || wafProbeTargetCount) ? 'text-danger' : 'text-secondary'}`}>
+                                {wafProbeCard.targetsInFlightRun
+                                  || (wafProbeTargetCount === null ? '-' : wafProbeTargetCount)}
+                              </div>
+                              <div className="text-muted small card-metric-label">Targets Configured</div>
+                            </Col>
+                            <Col>
+                              <div className={`fw-bold fs-4 ${wafProbeCard.targetsScanned ? 'text-danger' : 'text-secondary'}`}>
+                                {wafProbeCard.targetsScanned || '-'}
+                              </div>
+                              <div className="text-muted small card-metric-label">Targets Scanned</div>
+                            </Col>
+                            <Col title={wafProbeCard.rateNote || undefined}>
                               {/* Muted when the rate is not a measurement, so an assumed default
-                                  cannot be mistaken for something the probe observed. */}
+                                  cannot be mistaken for something the probe observed. The confidence
+                                  wording moved off the card into this tooltip: the distinction between
+                                  a measured rate and an assumed one still matters, it just no longer
+                                  needs a permanent line. */}
                               <div className={`fw-bold fs-4 ${wafProbeCard.rateMeasured ? 'text-danger' : 'text-secondary'}`}>
                                 {wafProbeCard.rate ? `${wafProbeCard.rate}` : '-'}
                               </div>
-                              <div className="text-muted small">req/s</div>
-                              {wafProbeCard.rateNote && (
-                                <div className="text-muted" style={{ fontSize: '0.68rem' }}>
-                                  {wafProbeCard.rateNote}
-                                </div>
-                              )}
-                            </Col>
-                            <Col>
-                              <div className="text-danger fw-bold fs-4">
-                                {wafProbeCard.threads || '-'}
-                              </div>
-                              <div className="text-muted small">Threads</div>
-                              <div className="text-muted" style={{ fontSize: '0.68rem' }}>
-                                {wafProbeCard.threads ? 'concurrency knee' : 'not measured'}
-                              </div>
+                              <div className="text-muted small card-metric-label">Recommended Req/s</div>
                             </Col>
                             <Col>
                               <div className={`fw-bold fs-4 ${wafProbeCard.blockers ? 'text-danger' : 'text-secondary'}`}>
                                 {wafProbeCard.state === 'ok' ? wafProbeCard.blockers : '-'}
                               </div>
-                              <div className="text-muted small">Blockers</div>
-                              <div className="text-muted" style={{ fontSize: '0.68rem' }}>
-                                {wafProbeCard.blockers ? 'will break scans' : 'critical findings'}
-                              </div>
+                              <div className="text-muted small card-metric-label">Blockers</div>
+                              {wafProbeCard.blockers > 0 && (
+                                <div className="text-muted" style={{ fontSize: '0.68rem' }}>
+                                  will break scans
+                                </div>
+                              )}
                             </Col>
                           </Row>
                         </div>
 
-                        <div className="mt-auto">
+                        <div className="card-actions">
+                          {wafProbeRunError && (
+                            <Alert variant="danger" className="py-1 px-2 mb-2"
+                                   style={{ fontSize: '0.7rem' }}
+                                   dismissible onClose={() => setWafProbeRunError('')}>
+                              {wafProbeRunError}
+                            </Alert>
+                          )}
                           <div className="d-flex justify-content-center gap-2">
                             <Button
                               variant="outline-danger"
@@ -8816,7 +9347,11 @@ function App() {
                               variant="outline-danger"
                               className="flex-fill"
                               onClick={handleOpenWAFProbeResultsModal}
-                              disabled={!mostRecentWAFProbeScan?.result}
+                              // Any scan with a result is worth opening, not just the newest. In a
+                              // multi-endpoint run the newest scan is the LAST endpoint, which sits
+                              // pending while the earlier ones finish; keying off it alone disabled
+                              // this button for most of a run that already had results to show.
+                              disabled={!wafProbeScans.some((s) => s?.result)}
                             >
                               Results
                             </Button>
@@ -8828,6 +9363,7 @@ function App() {
                 </Row>
 
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Authentication</h4>
+                <HelpMeLearn section="urlAuthentication" />
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
@@ -8895,6 +9431,7 @@ function App() {
                 </Row>
 
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Authorization</h4>
+                <HelpMeLearn section="urlAuthorization" />
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
@@ -8972,25 +9509,37 @@ function App() {
                     {
                       name: 'Waybackurls',
                       link: 'https://github.com/tomnomnom/waybackurls',
-                      description: 'Fetch all the URLs that the Wayback Machine knows about for a domain. Queries the archive, never the target.',
+                      description: 'Fetch every URL the Wayback Machine knows about. Configure which hosts it asks about: by default the direct host and every in-scope adjacent host, queried one at a time. Queries the archive, never the target.',
                       isActive: true,
                       status: mostRecentWaybackURLsScanStatus,
                       isScanning: isWaybackURLsScanning,
                       onScan: startWaybackURLsScan,
                       onResults: handleOpenWaybackURLsResultsModal,
+                      onConfig: () => setCrawlerConfigTool('waybackurls'),
+                      secondaryLabel: 'Scan Targets',
+                      secondaryCount: (archiveHostCounts.waybackurls
+                        ? `${archiveHostCounts.waybackurls.selected} / ${archiveHostCounts.waybackurls.total}`
+                        : '-'),
                       resultCount: countURLToolEndpoints(mostRecentWaybackURLsScan),
                       resultLabel: 'Endpoints'
                     },
                     {
                       name: 'LinkFinder',
                       link: 'https://github.com/GerbenJavado/LinkFinder',
-                      description: 'Regex JavaScript bundles for endpoints and parameters. Configure it to read the JS that Katana, GoSpider and the manual crawl already discovered.',
+                      description: 'Reads crawled JS files',
                       isActive: true,
                       status: mostRecentLinkFinderURLScanStatus,
                       isScanning: isLinkFinderURLScanning,
                       onScan: startLinkFinderURLScan,
                       onResults: handleOpenLinkFinderURLResultsModal,
                       onConfig: () => setCrawlerConfigTool('linkfinder'),
+                      secondaryLabel: 'JS Files',
+                      // scanned / available, not available alone. LinkFinder reads discovered
+                      // JavaScript by default but stops at maxJsFiles and never says so, so the
+                      // ratio is the only place the truncation shows.
+                      secondaryCount: (linkFinderJS
+                        ? `${linkFinderJS.scanned} / ${linkFinderJS.available}`
+                        : '-'),
                       resultCount: countURLToolEndpoints(mostRecentLinkFinderURLScan),
                       resultLabel: 'Endpoints'
                     },
@@ -9003,6 +9552,11 @@ function App() {
                       isScanning: isGAUURLScanning,
                       onScan: startGAUURLScan,
                       onResults: handleOpenGAUURLResultsModal,
+                      onConfig: () => setCrawlerConfigTool('gau'),
+                      secondaryLabel: 'Scan Targets',
+                      secondaryCount: (archiveHostCounts.gau
+                        ? `${archiveHostCounts.gau.selected} / ${archiveHostCounts.gau.total}`
+                        : '-'),
                       resultCount: countURLToolEndpoints(mostRecentGAUURLScan),
                       resultLabel: 'Endpoints'
                     }
@@ -9068,11 +9622,11 @@ function App() {
                           </Alert>
                         )}
 
-                        <div className="my-3 py-2">
+                        <div className="mt-auto pt-3 mb-3">
                           <Row className="text-center align-items-start">
                             <Col>
                               <div className="text-danger fw-bold fs-4">{consolidatedEndpointCount}</div>
-                              <div className="text-muted small">Endpoints</div>
+                              <div className="text-muted small card-metric-label">Endpoints</div>
                               <div className="text-muted" style={{ fontSize: '0.68rem' }}>
                                 unique url + verb
                               </div>
@@ -9081,7 +9635,7 @@ function App() {
                               <div className="text-danger fw-bold fs-4">
                                 {verdictCount('valid')}
                               </div>
-                              <div className="text-muted small">Valid</div>
+                              <div className="text-muted small card-metric-label">Valid</div>
                               <div className="text-muted" style={{ fontSize: '0.68rem' }}>
                                 distinct real pages
                               </div>
@@ -9090,7 +9644,7 @@ function App() {
                               <div className="text-secondary fw-bold fs-4">
                                 {verdictCount('unverified')}
                               </div>
-                              <div className="text-muted small">Unverified</div>
+                              <div className="text-muted small card-metric-label">Unverified</div>
                               <div className="text-muted" style={{ fontSize: '0.68rem' }}>
                                 still tested
                               </div>
@@ -9099,7 +9653,7 @@ function App() {
                               <div className="text-secondary fw-bold fs-4">
                                 {verdictCount('ruled_out')}
                               </div>
-                              <div className="text-muted small">Ruled Out</div>
+                              <div className="text-muted small card-metric-label">Ruled Out</div>
                               <div className="text-muted" style={{ fontSize: '0.68rem' }}>
                                 catch-all or gone
                               </div>
@@ -9107,7 +9661,7 @@ function App() {
                           </Row>
                         </div>
 
-                        <div className="mt-auto">
+                        <div className="card-actions">
                           <div className="d-flex gap-2">
                             <Button
                               variant="outline-danger"
@@ -9180,7 +9734,7 @@ function App() {
                         <Card.Text className="text-white small fst-italic">
                           Brute-forces hidden HTTP parameters (GET/POST/JSON/XML) using a large built-in wordlist. Fast and accurate.
                         </Card.Text>
-                        <div className="my-3 py-2">
+                        <div className="mt-auto pt-3 mb-3">
                           <Row className="text-center align-items-center">
                             <Col>
                               <div className="text-danger fw-bold fs-4">
@@ -9188,17 +9742,17 @@ function App() {
                                   ? `${paramTargetCounts.arjun.enabled}/${paramTargetCounts.arjun.total}`
                                   : '-'}
                               </div>
-                              <div className="text-muted small">Targets Enabled</div>
+                              <div className="text-muted small card-metric-label">Targets Enabled</div>
                             </Col>
                             <Col>
                               <div className="text-danger fw-bold fs-4">
                                 {mostRecentArjunScan?.parameters_found || 0}
                               </div>
-                              <div className="text-muted small">Parameters Found</div>
+                              <div className="text-muted small card-metric-label">Parameters Found</div>
                             </Col>
                           </Row>
                         </div>
-                        <div className="mt-auto">
+                        <div className="card-actions">
                           {/* Config, Scan, Results: the order the operator actually works in. */}
                           <div className="d-flex justify-content-center gap-2">
                             <Button
@@ -9251,7 +9805,7 @@ function App() {
                         <Card.Text className="text-white small fst-italic">
                           Rust parameter fuzzer that injects candidates into the query, body, headers or cookies, learns the target's normal response variation, then bisects a batch to find which parameter caused a difference.
                         </Card.Text>
-                        <div className="my-3 py-2">
+                        <div className="mt-auto pt-3 mb-3">
                           <Row className="text-center align-items-center">
                             <Col>
                               {/* While a run is going this becomes the endpoint counter: a pass covers
@@ -9265,7 +9819,7 @@ function App() {
                                     ? `${paramTargetCounts.x8.enabled}/${paramTargetCounts.x8.total}`
                                     : '-'}
                               </div>
-                              <div className="text-muted small">
+                              <div className="text-muted small card-metric-label">
                                 {isX8Scanning && mostRecentX8Scan?.total_endpoints
                                   ? 'Endpoints Scanned' : 'Targets Enabled'}
                               </div>
@@ -9274,7 +9828,7 @@ function App() {
                               <div className="text-danger fw-bold fs-4">
                                 {mostRecentX8Scan?.parameters_found || 0}
                               </div>
-                              <div className="text-muted small">Parameters Found</div>
+                              <div className="text-muted small card-metric-label">Parameters Found</div>
                             </Col>
                           </Row>
                           {!isX8Scanning && mostRecentX8ScanStatus === 'partial' && (
@@ -9286,7 +9840,7 @@ function App() {
                             <div className="text-danger small text-center mt-2">Scan failed</div>
                           )}
                         </div>
-                        <div className="mt-auto">
+                        <div className="card-actions">
                           <div className="d-flex justify-content-center gap-2">
                             <Button
                               variant="outline-danger"
@@ -9349,7 +9903,7 @@ function App() {
                         <Card.Text className="text-white small fst-italic">
                           Fast web fuzzer written in Go. Brute force endpoints, parameters, directories, and more with custom wordlists and extensive filtering options.
                         </Card.Text>
-                        <div className="my-3 py-2">
+                        <div className="mt-auto pt-3 mb-3">
                           <Row className="text-center align-items-center">
                             <Col>
                               <div className="text-danger fw-bold fs-4">
@@ -9357,13 +9911,13 @@ function App() {
                                   ? `${ffufFlowSteps.enabled}/${ffufFlowSteps.total}`
                                   : '-'}
                               </div>
-                              <div className="text-muted small">Scans Enabled</div>
+                              <div className="text-muted small card-metric-label">Scans Enabled</div>
                             </Col>
                             <Col>
                               <div className="text-danger fw-bold fs-4">
                                 {ffufNotableCount === null ? (ffufFindingCount ?? 0) : ffufNotableCount}
                               </div>
-                              <div className="text-muted small">
+                              <div className="text-muted small card-metric-label">
                                 {ffufNotableCount !== null && ffufNotableCount !== ffufFindingCount
                                   ? `Worth Review (${ffufFindingCount} stored)`
                                   : 'Findings'}
@@ -9422,7 +9976,7 @@ function App() {
                             </div>
                           )}
                         </div>
-                        <div className="mt-auto">
+                        <div className="card-actions">
                           {/* Settings, Configure, Scan, Results: settings first because they apply to
                               every round the flow contains, so they are the thing to get right before
                               building any of them. One Scan button, because which of endpoints,
@@ -9475,6 +10029,7 @@ function App() {
                 </Row>
 
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Consolidate Attack Vectors</h4>
+                <HelpMeLearn section="urlConsolidateAttackVectors" />
                 <Row className="mb-4">
                   <Col md={12}>
                     <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
@@ -9488,23 +10043,39 @@ function App() {
                           single place a payload goes. Consolidate folds everything the crawls, the
                           archives, Arjun, x8 and FFUF found into one list of unique vectors to test.
                         </Card.Text>
-                        <div className="my-3 py-2">
-                          <Row className="text-center align-items-center">
-                            <Col>
-                              <div className="text-danger fw-bold fs-4">
-                                {attackVectorCounts.total ?? '-'}
-                              </div>
-                              <div className="text-muted small">Unique Attack Vectors</div>
-                            </Col>
-                            <Col>
-                              <div className="text-danger fw-bold fs-4">
-                                {attackVectorCounts.with_notes ?? '-'}
-                              </div>
-                              <div className="text-muted small">Unique Attack Vectors w/ Notes</div>
-                            </Col>
-                          </Row>
-                        </div>
+                        {/* Metrics and buttons in one bottom-pinned block so the label row sits the
+                            same distance above the buttons as it does on every other card. */}
                         <div className="mt-auto">
+                          {/* TOTAL first, then coverage BY INSERTION POINT. The five points sum to
+                              the total, so showing the total alongside them says how much work there
+                              is AND what it covers. A point at zero is greyed rather than explained:
+                              it is the reason every tool below will report nothing wrong with that
+                              insertion point. */}
+                          {attackVectorCoverage && (
+                            <Row className="text-center align-items-center mb-3">
+                              <Col>
+                                {/* The server's own total, not a client-side sum of the five points.
+                                    They do agree today, but a vector whose insertion point the
+                                    coverage endpoint does not enumerate would be silently dropped
+                                    from a summed figure while still being scanned. */}
+                                <div className={`fw-bold fs-4 ${attackVectorCounts.total > 0 ? 'text-danger' : 'text-secondary'}`}>
+                                  {attackVectorCounts.total ?? 0}
+                                </div>
+                                <div className="text-muted small card-metric-label">Total Vectors</div>
+                              </Col>
+                              {(attackVectorCoverage.points || []).map((point) => {
+                                const n = (attackVectorCoverage.by_insertion_point || {})[point] ?? 0;
+                                return (
+                                  <Col key={point}>
+                                    <div className={`fw-bold fs-4 ${n > 0 ? 'text-danger' : 'text-secondary'}`}>
+                                      {n}
+                                    </div>
+                                    <div className="text-muted small card-metric-label">{point}</div>
+                                  </Col>
+                                );
+                              })}
+                            </Row>
+                          )}
                           <Row className="g-2">
                             <Col>
                               <Button variant="outline-danger" className="w-100"
@@ -9554,6 +10125,10 @@ function App() {
                         </Button>
                       )}
                     </div>
+                    {/* Keyed off the same section key the cards come from, so adding a section to
+                        attackTools.js and adding its lessons is all it takes. An unknown key
+                        renders nothing rather than breaking the page. */}
+                    <HelpMeLearn section={`attackTools:${section.key}`} />
                     <Row className="mb-4">
                       {section.tools.map((tool) => (
                         <Col md={section.tools.length >= 3 ? 4 : 6} key={tool.key}>
@@ -9583,22 +10158,31 @@ function App() {
                         <Card.Text className="text-white small fst-italic">
                           Perform comprehensive threat modeling using the STRIDE methodology to identify security threats across six categories. The counts below reflect the threat-model details filled out for this target so far.
                         </Card.Text>
-                        <Row className="g-3 justify-content-center mt-1 mb-2">
-                          <Col xs={6} md={3}>
+                        {/* xs={2} md={5} rather than per-Col widths, because five equal columns do not
+                            divide into Bootstrap's twelve and md={2} would wrap the longer labels. */}
+                        <Row xs={2} md={5} className="g-3 justify-content-center mt-1 mb-2">
+                          <Col>
                             <div className="fs-3 fw-bold text-danger">{threatModelCounts.questions}</div>
                             <div className="text-white small pb-4">High-Level Questions</div>
                           </Col>
-                          <Col xs={6} md={3}>
+                          <Col>
                             <div className="fs-3 fw-bold text-danger">{threatModelCounts.mechanisms}</div>
                             <div className="text-white small pb-4">Mechanisms</div>
                           </Col>
-                          <Col xs={6} md={3}>
+                          <Col>
                             <div className="fs-3 fw-bold text-danger">{threatModelCounts.notableObjects}</div>
                             <div className="text-white small pb-4">Notable Objects</div>
                           </Col>
-                          <Col xs={6} md={3}>
+                          <Col>
                             <div className="fs-3 fw-bold text-danger">{threatModelCounts.securityControls}</div>
                             <div className="text-white small pb-4">Security Controls</div>
+                          </Col>
+                          {/* Derived from the results already loaded for the accordion below rather than
+                              counted by a separate request, so the two can never disagree and adding or
+                              deleting a threat in the modal moves this number on close. */}
+                          <Col>
+                            <div className="fs-3 fw-bold text-danger">{threatModelResultCount}</div>
+                            <div className="text-white small pb-4">Results</div>
                           </Col>
                         </Row>
                         <div className="mt-auto">
@@ -9656,6 +10240,7 @@ function App() {
                 </Row>
 
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Threat Model Results</h4>
+                <HelpMeLearn section="urlThreatModelResults" />
                 {[
                   { key: 'spoofing', label: '(S)poofing', desc: 'Impersonation of users, systems, or data' },
                   { key: 'tampering', label: '(T)ampering', desc: 'Malicious modification of data or code' },
@@ -9671,6 +10256,11 @@ function App() {
                           <div className="d-flex justify-content-between align-items-start mb-1">
                             <Card.Title className="text-danger mb-0">
                               {cat.label}
+                              {(threatModelResults[cat.key] || []).length > 0 && (
+                                <span className="text-white-50 ms-2" style={{ fontSize: '0.8rem', fontWeight: 400 }}>
+                                  {(threatModelResults[cat.key] || []).length} documented
+                                </span>
+                              )}
                             </Card.Title>
                             <Button
                               variant="outline-danger"
@@ -9683,10 +10273,241 @@ function App() {
                           <Card.Text className="text-white-50 small fst-italic mb-3">
                             {cat.desc}
                           </Card.Text>
-                          {/* Placeholder — populated dynamically as Threat Model items are added for this STRIDE category */}
-                          <div className="text-center text-white-50 py-4">
-                            There are currently no Threat Model results for this section.
-                          </div>
+                          {(threatModelResults[cat.key] || []).length === 0 ? (
+                            <div className="text-center text-white-50 py-4">
+                              There are currently no Threat Model results for this section.
+                            </div>
+                          ) : (
+                            <Accordion data-bs-theme="dark" alwaysOpen>
+                              {(threatModelResults[cat.key] || []).map((threat, threatIndex) => (
+                                <Accordion.Item
+                                  eventKey={String(threatIndex)}
+                                  key={threat.id || threatIndex}
+                                  className={threatTestStatus(threat.test_status).className}
+                                  style={{
+                                    // The glowing state owns its own border in CSS, so only the two
+                                    // quiet states set one here.
+                                    ...(threatTestStatus(threat.test_status).className
+                                      ? {}
+                                      : { border: `1px solid ${threatTestStatus(threat.test_status).border}` }),
+                                    marginBottom: '0.5rem',
+                                  }}
+                                >
+                                  <Accordion.Header>
+                                    <div className="d-flex justify-content-between align-items-start w-100 pe-2" style={{ gap: '12px' }}>
+                                      <div className="d-flex flex-column text-start">
+                                        {/* Severity and authentication sit side by side on one row above the
+                                            mechanism, so this strip lays out horizontally while the column
+                                            around it keeps stacking. It wraps rather than squeezing the
+                                            badges when the header is narrow. */}
+                                        {(threatSeverity(threat.severity) || typeof threat.authenticated === 'boolean') && (
+                                          <div className="d-flex flex-wrap align-items-center mb-1" style={{ gap: '0.25rem' }}>
+                                            {threatSeverity(threat.severity) && (
+                                              <span
+                                                style={{
+                                                  backgroundColor: threatSeverity(threat.severity).bg,
+                                                  color: threatSeverity(threat.severity).fg,
+                                                  fontSize: '0.68rem',
+                                                  fontWeight: 700,
+                                                  letterSpacing: '0.06em',
+                                                  padding: '0.15rem 0.5rem',
+                                                  borderRadius: '0.25rem',
+                                                  textTransform: 'uppercase',
+                                                }}
+                                              >
+                                                {threatSeverity(threat.severity).label}
+                                              </span>
+                                            )}
+                                            {/* Only a real boolean renders. A null means nobody has decided yet,
+                                                and a green "Unauthenticated" badge would assert the attack needs
+                                                no credential rather than admit the question is still open. */}
+                                            {typeof threat.authenticated === 'boolean' && (
+                                              <span
+                                                style={{
+                                                  backgroundColor: threat.authenticated ? '#7f1d1d' : '#14532d',
+                                                  color: threat.authenticated ? '#fecaca' : '#bbf7d0',
+                                                  fontSize: '0.68rem',
+                                                  fontWeight: 700,
+                                                  letterSpacing: '0.06em',
+                                                  padding: '0.15rem 0.5rem',
+                                                  borderRadius: '0.25rem',
+                                                  textTransform: 'uppercase',
+                                                }}
+                                                title={threat.authenticated
+                                                  ? 'The attacker must already hold an authenticated session'
+                                                  : 'Reachable with no credential at all'}
+                                              >
+                                                {threat.authenticated ? 'Auth Required' : 'Unauthenticated'}
+                                              </span>
+                                            )}
+                                          </div>
+                                        )}
+                                        <span className="text-danger" style={{ fontSize: '0.9rem' }}>
+                                          {threatTitle(threat)}
+                                        </span>
+                                        <span className="text-white-50" style={{ fontSize: '0.75rem', wordBreak: 'break-all' }}>
+                                          {threat.url}
+                                        </span>
+                                      </div>
+                                      <Badge
+                                        bg={threatTestStatus(threat.test_status).badge}
+                                        className="flex-shrink-0 d-flex align-items-center gap-1"
+                                        style={threat.test_status === 'validated'
+                                          ? {
+                                              // Explicit colour rather than bg="success": the glow uses the
+                                              // brighter #20c997 because #198754 barely reads on the dark
+                                              // card, and a badge in a different green to its own halo
+                                              // looks like a mistake.
+                                              backgroundColor: '#20c997',
+                                              color: '#04231a',
+                                              fontWeight: 600,
+                                              fontSize: '0.8rem',
+                                              padding: '0.4em 0.7em',
+                                              boxShadow: '0 0 12px rgba(32,201,151,0.95)',
+                                            }
+                                          : undefined}
+                                      >
+                                        {threat.test_status === 'validated' && (
+                                          <i className="bi bi-trophy-fill" />
+                                        )}
+                                        {threatTestStatus(threat.test_status).label}
+                                      </Badge>
+                                    </div>
+                                  </Accordion.Header>
+                                  <Accordion.Body className="bg-dark">
+                                    {/* Only the glowing state needs the panel; on a quiet item it would
+                                        be a box around nothing. */}
+                                    <div className={threatTestStatus(threat.test_status).className ? 'threat-body-panel' : ''}>
+                                    {/* Deliberately repeats the accordion header. Once the item is open the
+                                        header is easy to lose track of, especially on the long entries, so
+                                        the reader gets told again what they are looking at. Rendered on
+                                        every item, not just the glowing ones, so the layout does not
+                                        change shape depending on test status. */}
+                                    <div className="mb-3 pb-2 border-bottom border-secondary">
+                                      <div className="text-danger" style={{ fontSize: '0.95rem', fontWeight: 600 }}>
+                                        {threatTitle(threat)}
+                                      </div>
+                                    </div>
+                                    {/* The two reader-facing sections come FIRST. Before these, the only
+                                        way to learn what a threat actually was involved reading a
+                                        numbered attack procedure, which is a lot of work for a
+                                        question that deserves one line. */}
+                                    {threat.one_sentence && (
+                                      <div className="mb-3">
+                                        <div className="text-white-50 mb-1" style={{ fontSize: '0.72rem', letterSpacing: '0.04em' }}>
+                                          DESCRIBE THE ATTACK IN ONE SENTENCE
+                                        </div>
+                                        <div className="text-white" style={{ fontSize: '0.95rem', fontWeight: 500, lineHeight: 1.5 }}>
+                                          {threat.one_sentence}
+                                        </div>
+                                      </div>
+                                    )}
+                                    {threat.summary && (
+                                      <div className="mb-3">
+                                        <div className="text-white-50 mb-1" style={{ fontSize: '0.72rem', letterSpacing: '0.04em' }}>
+                                          SUMMARY
+                                        </div>
+                                        <div className="text-white" style={{ fontSize: '0.85rem', lineHeight: 1.6 }}>
+                                          {threat.summary}
+                                        </div>
+                                      </div>
+                                    )}
+                                    {threat.url && (
+                                      <div className="mb-3">
+                                        <div className="text-white-50 mb-1" style={{ fontSize: '0.72rem', letterSpacing: '0.04em' }}>
+                                          WHERE
+                                        </div>
+                                        <a
+                                          href={threat.url}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="text-info"
+                                          style={{ fontSize: '0.8rem', wordBreak: 'break-all' }}
+                                        >
+                                          {threat.url}
+                                        </a>
+                                      </div>
+                                    )}
+                                    {threat.steps.length > 0 && (
+                                      <div className="mb-3">
+                                        <div className="text-white-50 mb-1" style={{ fontSize: '0.72rem', letterSpacing: '0.04em' }}>
+                                          HOW THE ATTACK IS CARRIED OUT
+                                        </div>
+                                        <ol className="text-white ps-3 mb-0" style={{ fontSize: '0.82rem' }}>
+                                          {threat.steps.map((step, stepIndex) => (
+                                            <li key={stepIndex} className="mb-2">{step}</li>
+                                          ))}
+                                        </ol>
+                                      </div>
+                                    )}
+                                    {(threat.impact_customer_data || threat.impact_attacker_scope || threat.impact_company_reputation) && (
+                                      <div className="mb-3">
+                                        <div className="text-white-50 mb-2" style={{ fontSize: '0.72rem', letterSpacing: '0.04em' }}>
+                                          IMPACT
+                                        </div>
+                                        {[
+                                          { label: 'Customer data', text: threat.impact_customer_data },
+                                          { label: 'Attacker scope', text: threat.impact_attacker_scope },
+                                          { label: 'Company reputation', text: threat.impact_company_reputation },
+                                        ].filter((row) => row.text).map((row) => (
+                                          <div key={row.label} className="mb-2">
+                                            <div className="text-warning" style={{ fontSize: '0.74rem' }}>{row.label}</div>
+                                            <div className="text-white" style={{ fontSize: '0.82rem' }}>{row.text}</div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                    {threat.security_controls.length > 0 && (
+                                      <div>
+                                        <div className="text-white-50 mb-2" style={{ fontSize: '0.72rem', letterSpacing: '0.04em' }}>
+                                          SECURITY CONTROLS IN THE WAY
+                                        </div>
+                                        {threat.security_controls.map((sc, scIndex) => (
+                                          <div key={scIndex} className="mb-2">
+                                            <div className="text-warning" style={{ fontSize: '0.74rem' }}>
+                                              {sc.control || 'Unnamed control'}
+                                            </div>
+                                            {sc.explanation && (
+                                              <div className="text-white" style={{ fontSize: '0.82rem' }}>{sc.explanation}</div>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                    <div className="d-flex align-items-center gap-2 mt-3 pt-3 border-top border-secondary">
+                                      <span className="text-white-50" style={{ fontSize: '0.72rem', letterSpacing: '0.04em' }}>
+                                        TESTED?
+                                      </span>
+                                      <Button
+                                        variant={threat.test_status === 'validated' ? 'success' : 'outline-success'}
+                                        size="sm"
+                                        onClick={() => handleSetThreatTestStatus(threat.id, 'validated')}
+                                      >
+                                        Validate
+                                      </Button>
+                                      <Button
+                                        variant={threat.test_status === 'rejected' ? 'danger' : 'outline-danger'}
+                                        size="sm"
+                                        onClick={() => handleSetThreatTestStatus(threat.id, 'rejected')}
+                                      >
+                                        Reject
+                                      </Button>
+                                      {threat.test_status && threat.test_status !== 'untested' && (
+                                        <Button
+                                          variant="outline-secondary"
+                                          size="sm"
+                                          onClick={() => handleSetThreatTestStatus(threat.id, 'untested')}
+                                        >
+                                          Clear
+                                        </Button>
+                                      )}
+                                    </div>
+                                    </div>
+                                  </Accordion.Body>
+                                </Accordion.Item>
+                              ))}
+                            </Accordion>
+                          )}
                         </Card.Body>
                       </Card>
                     </Col>
@@ -9850,9 +10671,9 @@ function App() {
                     <div>
                       <span className="text-white">{domainData.domain}</span>
                       <br />
-                      <small className="text-white-50">
+                      <div className="text-muted small card-metric-label">
                         Added: {new Date(domainData.created_at).toLocaleDateString()}
-                      </small>
+                      </div>
                     </div>
                     <Button 
                       variant="outline-danger" 
@@ -9866,9 +10687,9 @@ function App() {
                 ))}
               </ListGroup>
               <div className="mt-3 text-center">
-                <small className="text-white-50">
+                <div className="text-muted small card-metric-label">
                   Total domains discovered: {googleDorkingDomains.length}
-                </small>
+                </div>
               </div>
             </div>
           )}
@@ -9906,9 +10727,9 @@ function App() {
                     <div>
                       <span className="text-white">{domainData.domain}</span>
                       <br />
-                      <small className="text-white-50">
+                      <div className="text-muted small card-metric-label">
                         Added: {new Date(domainData.created_at).toLocaleDateString()}
-                      </small>
+                      </div>
                     </div>
                     <Button 
                       variant="outline-danger" 
@@ -9922,9 +10743,9 @@ function App() {
                 ))}
               </ListGroup>
               <div className="mt-3 text-center">
-                <small className="text-white-50">
+                <div className="text-muted small card-metric-label">
                   Total domains discovered: {reverseWhoisDomains.length}
-                </small>
+                </div>
               </div>
             </div>
           )}
@@ -10210,6 +11031,9 @@ function App() {
         show={showWAFProbeConfigModal}
         handleClose={() => setShowWAFProbeConfigModal(false)}
         activeTarget={activeTarget}
+        // Saving is the only thing that changes the configured count, so the card is refreshed here
+        // rather than polled.
+        onSaved={() => void loadWAFProbeTargetCount()}
         onRunNow={(cfg) => startWAFProbeScan(cfg)}
       />
 
@@ -10218,6 +11042,7 @@ function App() {
         handleClose={() => setCrawlerConfigTool(null)}
         activeTarget={activeTarget}
         tool={crawlerConfigTool}
+        onSaved={() => fetchArchiveHostCounts()}
       />
 
       <ApplicationQuestionsModal
@@ -10382,6 +11207,44 @@ function App() {
         category={vectorTool ? VECTOR_TOOL_CATEGORY.get(vectorTool.key) : undefined}
       />
 
+      <WildcardToolConfigModal
+        show={wildcardConfigTool !== null}
+        handleClose={() => setWildcardConfigTool(null)}
+        activeTarget={activeTarget}
+        tool={wildcardConfigTool}
+        onDelegate={(store) => {
+          // A tool that already HAS a wired configuration store is linked to, never re-implemented.
+          // httpx_configs is the case: a second httpx vocabulary would be the drift this whole design
+          // exists to prevent.
+          if (store === 'httpx_configs') {
+            setWildcardConfigTool(null);
+            handleOpenConfigureHttpxModal();
+          }
+        }}
+      />
+
+      {/* The Company workflow's generic tool configuration. Same design as the Wildcard modal above:
+          it renders the server's vocabulary and keeps no list of its own, so this screen and the MCP
+          company tool cannot drift apart. Used by Amass Intel, Metabigor and Nuclei's Settings
+          button; the three tools that already own a target picker carry their settings as extra tabs
+          inside that picker instead. */}
+      <CompanyToolConfigModal
+        show={companyConfigTool !== null}
+        handleClose={() => setCompanyConfigTool(null)}
+        activeTarget={activeTarget}
+        tool={companyConfigTool}
+      />
+
+      <IPPortScanConfigModal
+        show={showIPPortScanConfigModal}
+        handleClose={() => setShowIPPortScanConfigModal(false)}
+        activeTarget={activeTarget}
+        // Removing a range at the source is the only thing that really changes what this scan
+        // touches, so the modal links to the screen that does it rather than growing a tick box the
+        // runner would not read.
+        onTrimNetworkRanges={handleTrimNetworkRanges}
+      />
+
       <SectionWebhookModal
         show={webhookSection !== null}
         handleClose={() => {
@@ -10455,6 +11318,15 @@ function App() {
         show={showWildcardNucleiHistoryModal}
         handleClose={handleCloseWildcardNucleiHistoryModal}
         scans={wildcardNucleiScans}
+      />
+
+      {/* Reached from the header rather than a target card, so it takes the whole target list and
+          picks its own. handleClose only flips the flag: the modal guards unsaved edits itself. */}
+      <NotesModal
+        show={showNotesModal}
+        handleClose={() => setShowNotesModal(false)}
+        scopeTargets={scopeTargets}
+        activeTarget={activeTarget}
       />
     </Container>
   );

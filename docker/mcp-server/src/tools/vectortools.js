@@ -16,10 +16,51 @@ const { apiGet, apiPost } = require('../api');
 // reports how many of the target's vectors each tool can test, and results lists the untested ones
 // with the reason, which is why both exist.
 
-const buildSchema = (tools) => z.object({
-  action: z.enum(['eligibility', 'option_reference', 'settings', 'save_settings',
-    'section_settings', 'save_section_settings',
-    'run', 'status', 'results', 'triage']).describe(
+// The "Targets tab" helper routes, which feed the UI's endpoint picker.
+//
+// MCP could read NONE of them. All twelve sections share manageVectorTools, whose action list is a
+// closed enum, so there was nowhere to put a per-section read. The UI reads all six from one shared
+// component (client/src/modals/GraphQLEndpointHelper.js), mounted wherever a tool declares an
+// "endpoints" setting, so an agent configuring those tools was working blind: it could WRITE the
+// endpoint list with save_settings but could not see the candidates the UI offers it.
+//
+// Worse, three of these routes are named in the tool DESCRIPTIONS in index.js, so an agent was told
+// the route existed and given no way to call it.
+//
+// Keyed by action, valued by the sections it exists on, because the switch below is shared by all
+// twelve and offering found_jwts on manage_xss would be a promise nothing can keep.
+const SECTION_TARGET_ACTIONS = {
+  candidate_endpoints: {
+    categories: ['graphql', 'sensitive-leak', 'exposed-git', 'access-bypass'],
+    path: (category, targetId) => `/${category}/${targetId}/candidate-endpoints`,
+  },
+  denied_endpoints: {
+    categories: ['access-bypass'],
+    path: (category, targetId) => `/access-bypass/${targetId}/denied-endpoints`,
+  },
+  known_endpoints: {
+    categories: ['graphql'],
+    path: (category, targetId) => `/graphql/${targetId}/known-endpoints`,
+  },
+  git_endpoints: {
+    categories: ['exposed-git'],
+    path: (category, targetId) => `/exposed-git/${targetId}/git-endpoints`,
+  },
+  upload_candidates: {
+    categories: ['misc'],
+    path: (category, targetId) => `/misc/${targetId}/upload-candidates`,
+  },
+  found_jwts: {
+    categories: ['misc'],
+    path: (category, targetId) => `/misc/${targetId}/found-jwts`,
+  },
+};
+
+const BASE_ACTIONS = ['eligibility', 'option_reference', 'settings', 'save_settings',
+  'section_settings', 'save_section_settings', 'run', 'status', 'results', 'triage'];
+
+const buildSchema = (tools, extraActions = []) => z.object({
+  action: z.enum([...BASE_ACTIONS, ...extraActions]).describe(
     'eligibility: how many of this target\'s attack vectors each tool can actually test, which ' +
     'insertion points it can reach, and which settings are currently blinding it. START HERE, ' +
     'because two of the three tools cover only query parameters and report clean for everything ' +
@@ -39,7 +80,21 @@ const buildSchema = (tools) => z.object({
     'run: scan every eligible attack vector with one tool, one vector at a time. ' +
     'status: how a run is going, including which vector of how many. ' +
     'results: the findings AND the vectors that were never sent, with the reason for each. ' +
-    'triage: mark one finding new, interesting or dismissed.'),
+    'triage: mark one finding new, interesting or dismissed. ' +
+    'THE TARGET LIST ACTIONS, on the sections that have them: these read the same candidate lists ' +
+    'the UI Targets tab offers, and are how you find out what to put in a tool\'s "endpoints" ' +
+    'setting before calling save_settings. ' +
+    'candidate_endpoints: every endpoint known for this target, optionally filtered by search. ' +
+    'denied_endpoints: the endpoints that already answered 401 or 403, which are the interesting ' +
+    'ones for a bypass, with a by_status summary. ' +
+    'known_endpoints: endpoints marked as GraphQL by another tool but not this one, so you can see ' +
+    'what a tool is about to skip. ' +
+    'git_endpoints: where a .git or .svn was already found, converted from the file that matched ' +
+    'to the containing directory the tools need, and deduplicated. ' +
+    'upload_candidates: the requests marked as file uploads, which are what Upload_Bypass takes. ' +
+    'found_jwts: every JSON Web Token found in captured traffic, deduplicated by token.'),
+  search: z.string().optional().describe(
+    'candidate_endpoints only: filter the candidate list, matched by the API as ?q=.'),
   target_id: z.string().optional().describe('Scope target id. Defaults to the active target.'),
   tool: z.enum(tools).optional().describe(
     'Which scanner. Required for everything except eligibility, which covers all of them when omitted.'),
@@ -64,6 +119,23 @@ async function manageVectorTools(category, tools, params) {
   const targetId = await resolveTargetId(params);
   if (!targetId && params.action !== 'option_reference' && params.action !== 'triage') {
     return { error: 'No target_id given and no active target set.' };
+  }
+
+  // The Targets tab reads. Handled before the switch because they are per-section rather than
+  // per-tool: they take no tool argument, and the section decides whether the action exists at all.
+  const targetList = SECTION_TARGET_ACTIONS[params.action];
+  if (targetList) {
+    if (!targetList.categories.includes(category)) {
+      return {
+        error: `${params.action} does not exist on this section. It is available on: `
+          + `${targetList.categories.join(', ')}.`,
+      };
+    }
+    let path = targetList.path(category, targetId);
+    if (params.action === 'candidate_endpoints' && params.search) {
+      path += `?q=${encodeURIComponent(params.search)}`;
+    }
+    return apiGet(path);
   }
 
   switch (params.action) {
@@ -189,6 +261,8 @@ const LEAK_TOOLS = ['snallygaster', 'mantra', 'trufflehog'];
 const GIT_TOOLS = ['git-dumper', 'gittools'];
 const MISC_TOOLS = ['upload-bypass', 'jwt-tool', 'pphack'];
 
+// Only the sections that HAVE a Targets tab get its actions. Adding them to the shared enum would
+// advertise found_jwts on manage_xss and eleven other places it means nothing.
 const manageXSSSchema = buildSchema(XSS_TOOLS);
 const manageSQLiSchema = buildSchema(SQLI_TOOLS);
 const manageCacheSchema = buildSchema(CACHE_TOOLS);
@@ -196,11 +270,11 @@ const manageCmdiSchema = buildSchema(CMDI_TOOLS);
 const manageRedirectSchema = buildSchema(REDIRECT_TOOLS);
 const manageLfiSchema = buildSchema(LFI_TOOLS);
 const manageSmugglingSchema = buildSchema(SMUGGLING_TOOLS);
-const manageBypassSchema = buildSchema(BYPASS_TOOLS);
-const manageGraphqlSchema = buildSchema(GRAPHQL_TOOLS);
-const manageLeakSchema = buildSchema(LEAK_TOOLS);
-const manageGitSchema = buildSchema(GIT_TOOLS);
-const manageMiscSchema = buildSchema(MISC_TOOLS);
+const manageBypassSchema = buildSchema(BYPASS_TOOLS, ['candidate_endpoints', 'denied_endpoints']);
+const manageGraphqlSchema = buildSchema(GRAPHQL_TOOLS, ['candidate_endpoints', 'known_endpoints']);
+const manageLeakSchema = buildSchema(LEAK_TOOLS, ['candidate_endpoints']);
+const manageGitSchema = buildSchema(GIT_TOOLS, ['candidate_endpoints', 'git_endpoints']);
+const manageMiscSchema = buildSchema(MISC_TOOLS, ['upload_candidates', 'found_jwts']);
 
 const manageXSS = (params) => manageVectorTools('xss', XSS_TOOLS, params);
 const manageSQLi = (params) => manageVectorTools('sqli', SQLI_TOOLS, params);

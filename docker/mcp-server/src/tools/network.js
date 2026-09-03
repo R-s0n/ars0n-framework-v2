@@ -1,6 +1,6 @@
 const { z } = require('zod');
 const { query } = require('../db');
-const { limitResults, clampLimit } = require('../utils/truncate');
+const { limitResults, limitFetched, clampLimit } = require('../utils/truncate');
 const { parseAmassRecord } = require('../utils/dns');
 
 const queryDnsRecordsSchema = z.object({
@@ -35,7 +35,7 @@ async function queryDnsRecords(params) {
       created_at: r.created_at,
     };
   });
-  return limitResults(parsed, lim);
+  return limitFetched(parsed, lim);
 }
 
 const queryDiscoveredIpsSchema = z.object({

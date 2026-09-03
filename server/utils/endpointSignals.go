@@ -52,26 +52,58 @@ type SignalInput struct {
 	Authenticated  bool
 }
 
+// vendorScriptPattern matches a third-party library shipped as its own file.
+//
+// Deliberately a list of known library filenames rather than "anything ending in .js". A first-party
+// application bundle is real attack surface and its contents are real evidence; a copy of React is
+// neither, and the distinction cannot be made from the extension.
+var vendorScriptPattern = regexp.MustCompile(`(?i)/(react(-dom)?(\.development|\.production\.min)?|` +
+	`angular(\.min)?|vue(\.min)?|jquery(-[\d.]+)?(\.min)?|bootstrap(\.bundle)?(\.min)?|` +
+	`lodash(\.min)?|moment(\.min)?|axios(\.min)?|polyfill[^/]*|runtime[.-][a-f0-9]+)\.js`)
+
+// isVendorScript reports whether this endpoint is a third-party library file.
+func isVendorScript(in SignalInput) bool {
+	return vendorScriptPattern.MatchString(in.URL)
+}
+
 // AnalyzeEndpoint runs every Tier 0 analyzer over one already-fetched response.
 func AnalyzeEndpoint(in SignalInput) []Signal {
 	var out []Signal
 	add := func(sigs ...Signal) { out = append(out, sigs...) }
 
+	// CONTENT-DERIVED SIGNALS ARE SUPPRESSED FOR THIRD-PARTY LIBRARY FILES.
+	//
+	// These analyzers read the response BODY and treat what they find as a fact about the
+	// application. That reasoning is sound for a page or a first-party bundle and wrong for a copy of
+	// React, whose text is the library's own source and says nothing whatsoever about this target.
+	//
+	// Measured on the reference target: all nine JavaScript bundles scored 100 to 160, ranking ABOVE
+	// every application page, driven by identifier_sequential and an api_schema_hint read out of
+	// React's own source. The three endpoints that actually carried enumerable identifiers, including
+	// the one with unauthenticated access to customer orders, scored 0 and sorted below every copy of
+	// a library. The ranking was not merely noisy, it was inverted.
+	//
+	// Header and transport analyzers still run: a cache header or a cookie on a static asset is a real
+	// fact about how this target serves that asset, whoever wrote the file.
+	contentIsOurs := !isVendorScript(in)
+
 	add(analyzeCSP(in)...)
 	add(analyzeCookieScope(in)...)
 	add(analyzeCacheBehaviour(in)...)
 	add(analyzeInfraLeak(in)...)
-	add(analyzeJWTs(in)...)
-	add(analyzeSecrets(in)...)
-	add(analyzeErrorVerbosity(in)...)
-	add(analyzeClientConfig(in)...)
-	add(analyzeScriptSurface(in)...)
-	add(analyzeComments(in)...)
-	add(analyzeIdentifiers(in)...)
-	add(analyzeRedirectParams(in)...)
-	add(analyzeReflection(in)...)
-	add(analyzeAPISurface(in)...)
-	add(analyzeUploadSurface(in)...)
+	if contentIsOurs {
+		add(analyzeJWTs(in)...)
+		add(analyzeSecrets(in)...)
+		add(analyzeErrorVerbosity(in)...)
+		add(analyzeClientConfig(in)...)
+		add(analyzeScriptSurface(in)...)
+		add(analyzeComments(in)...)
+		add(analyzeIdentifiers(in)...)
+		add(analyzeRedirectParams(in)...)
+		add(analyzeReflection(in)...)
+		add(analyzeAPISurface(in)...)
+		add(analyzeUploadSurface(in)...)
+	}
 
 	for i := range out {
 		if out[i].DedupeKey == "" {

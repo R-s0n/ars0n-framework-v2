@@ -1,6 +1,6 @@
 const { z } = require('zod');
 const { query } = require('../db');
-const { limitResults, clampLimit } = require('../utils/truncate');
+const { limitResults, limitFetched, clampLimit } = require('../utils/truncate');
 
 const queryLiveServersSchema = z.object({
   target_id: z.string().uuid().optional().describe('Filter by scope target UUID'),
@@ -46,7 +46,7 @@ async function queryLiveServers(params) {
   sql += ` ORDER BY last_checked DESC LIMIT ${lim + 1}`;
 
   const result = await query(sql, values);
-  return limitResults(result.rows, lim);
+  return limitFetched(result.rows, lim);
 }
 
 const queryTargetUrlsSchema = z.object({
@@ -94,7 +94,7 @@ async function queryTargetUrls(params) {
   sql += ` ORDER BY roi_score DESC NULLS LAST, created_at DESC LIMIT ${lim + 1}`;
 
   const result = await query(sql, values);
-  return limitResults(result.rows, lim);
+  return limitFetched(result.rows, lim);
 }
 
 module.exports = {

@@ -156,10 +156,10 @@ func parseGraphw00fOutput(stdout, report string, row vectorRow) []VectorFinding 
 	}
 
 	findings := []VectorFinding{{
-		VectorID:   row.ID,
-		Tool:       "graphw00f",
-		Kind:       "graphql-engine-identified",
-		Severity:   "info",
+		VectorID: row.ID,
+		Tool:     "graphw00f",
+		Kind:     "graphql-engine-identified",
+		Severity: "info",
 		Confidence: "not a vulnerability: this is which implementation is answering, and where its " +
 			"known weaknesses are documented. graphw00f ships no CVE data, so the Threat Matrix link " +
 			"is the starting point rather than a finding.",
@@ -281,10 +281,10 @@ func parseClairvoyanceSchema(stdout, report string, row vectorRow) []VectorFindi
 	}
 
 	return []VectorFinding{{
-		VectorID:   row.ID,
-		Tool:       "clairvoyance",
-		Kind:       "graphql-schema-recovered",
-		Severity:   "medium",
+		VectorID: row.ID,
+		Tool:     "clairvoyance",
+		Kind:     "graphql-schema-recovered",
+		Severity: "medium",
 		Confidence: "not a vulnerability in itself: the schema was reconstructed from the field " +
 			"suggestions in error messages, which is only possible because those suggestions are on. " +
 			"The schema is the map for everything else you test here.",

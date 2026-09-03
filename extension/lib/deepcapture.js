@@ -111,7 +111,16 @@ export async function detachAll() {
 }
 
 // Attaches to every open tab whose URL is in scope, and reports which ones refused.
-export async function syncAttachments(scopeHosts) {
+//
+// Takes either a host list or a predicate. The predicate form exists because scope can now be
+// authored as rules, and attaching the debugger by a boundary the capture path does not share would
+// put the "being debugged" banner on sites the operator has excluded.
+export async function syncAttachments(scopeHostsOrPredicate) {
+  const inScopeFor = typeof scopeHostsOrPredicate === 'function'
+    ? scopeHostsOrPredicate
+    : (host) => (scopeHostsOrPredicate || []).some(
+        (scope) => host === scope || host.endsWith('.' + scope));
+
   const errors = [];
   let tabs = [];
   try {
@@ -129,8 +138,7 @@ export async function syncAttachments(scopeHosts) {
     } catch (error) {
       continue;
     }
-    const inScope = scopeHosts.some((scope) => host === scope || host.endsWith('.' + scope));
-    if (!inScope) continue;
+    if (!inScopeFor(host)) continue;
 
     wanted.add(tab.id);
     const result = await attachToTab(tab.id);

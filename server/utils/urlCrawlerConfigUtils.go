@@ -127,7 +127,12 @@ func DefaultLinkFinderURLConfig() LinkFinderURLConfig {
 	return LinkFinderURLConfig{
 		// `both` by default because the old behaviour (target only) is what made this tool look
 		// useless, and scanning discovered bundles is the thing it was built to do.
-		InputSource: "both", DomainMode: true, MaxJSFiles: 50, RequestDelayMS: 0,
+		// MaxJSFiles 0 means NO cap. It was 50, which silently skipped 40 of 90 bundles on a
+		// real target and reported nothing about it: the scan summary counts endpoints found,
+		// not files read, so a truncated run looks identical to a complete one. A tool whose job
+		// is to read the JavaScript that was already discovered should read all of it by
+		// default; an operator who wants a ceiling sets one.
+		InputSource: "both", DomainMode: true, MaxJSFiles: 0, RequestDelayMS: 0,
 		Timeout: 10, UseFFUFAuth: true, IncludeRelative: true,
 	}
 }

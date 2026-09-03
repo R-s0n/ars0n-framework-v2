@@ -73,6 +73,15 @@ func ComposeSqlmap(v VectorInput, settings map[string]any, reportPath string) ([
 	args = append(args,
 		"--batch",            // no terminal to answer prompts from
 		"--disable-coloring", // escape codes corrupt stored evidence
+		// ALWAYS. sqlmap stores a session per target under --output-dir and RESTORES its verdict on
+		// the next run instead of sending anything. Measured against 10.0.0.18: /tmp/sqlmap-out held
+		// four host directories, some days old; four traces of one run were pure cache replays, six of
+		// seven findings were verdicts restored from a scan twenty hours earlier, and one stored GET
+		// ?q= injection was replayed as three findings across query, cookie and header vectors that
+		// never ran. The oracle canary was a replay too: it "passed" in 871ms without a test request,
+		// so the one control that proves sqlmap ran would pass identically with sqlmap broken or the
+		// oracle switched off. Third tool in this codebase with this defect, after commix and ghauri.
+		"--flush-session",
 		"--report-json", reportPath,
 		"--output-dir", "/tmp/sqlmap-out",
 		"-v", "0",

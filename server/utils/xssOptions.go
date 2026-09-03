@@ -72,7 +72,19 @@ var dalfoxOptions = map[string]VectorOptionMeta{
 	"remotePayloads":    {Kind: "csv", Group: "Payloads", Label: "Remote payload sets", Flag: "--remote-payloads", Placeholder: "none fetched", Choices: []string{"portswigger", "payloadbox"}},
 	"customAlertValue":  {Kind: "string", Group: "Payloads", Label: "Alert value", Flag: "--custom-alert-value", Placeholder: "1"},
 	"customAlertType":   {Kind: "enum", Group: "Payloads", Label: "Alert value type", Flag: "--custom-alert-type", Choices: []string{"none", "str"}, Placeholder: "none, meaning the value is used as written"},
-	"injectMarker":      {Kind: "string", Group: "Payloads", Label: "Injection marker", Flag: "--inject-marker", Placeholder: "unset. Works in query, body and headers. It does NOT work for a path segment; path is covered by dalfox's own path_segment discovery instead"},
+	// DO NOT SET THIS. It is listed so the form can explain it and so the blinding check below can
+	// refuse it, not because it is usable here. The framework builds every URL from the vector and
+	// never inserts your marker, so the marker is absent from every request and dalfox has nothing
+	// to substitute: it sends three or four requests and reports the target clean. Measured, one flag
+	// changed and nothing else, on a parameter dalfox finds in 28 requests without it:
+	//
+	//	-p q:query                          28 requests, V Query q
+	//	-p q:query --inject-marker FUZZ      3 requests, clean
+	//	-p sid:cookie --inject-marker FUZZ   4 requests, clean
+	//
+	// It does not work for a path segment either, with the marker written INTO the path, whether the
+	// target is given as a URL or as a raw HTTP request with -i raw-http: 3 requests, clean.
+	"injectMarker": {Kind: "string", Group: "Payloads", Label: "Injection marker", Flag: "--inject-marker", Placeholder: "unset, and leave it unset. The framework never writes your marker into the request, so setting one makes dalfox report every vector clean after three requests"},
 
 	// Blind XSS
 	"blind":                 {Kind: "string", Group: "Blind XSS", Label: "Blind callback URL", Flag: "-b", Placeholder: "no blind payloads sent"},
@@ -87,6 +99,15 @@ var dalfoxOptions = map[string]VectorOptionMeta{
 	"skipReflectionHeader": {Kind: "bool", Group: "Discovery", Label: "Skip header reflection checks", Flag: "--skip-reflection-header", Placeholder: "headers are checked. Turning this off blinds header vectors"},
 	"skipReflectionCookie": {Kind: "bool", Group: "Discovery", Label: "Skip cookie reflection checks", Flag: "--skip-reflection-cookie", Placeholder: "cookies are checked. Turning this off blinds cookie vectors"},
 	"skipReflectionPath":   {Kind: "bool", Group: "Discovery", Label: "Skip path reflection checks", Flag: "--skip-reflection-path", Placeholder: "path segments are checked. Turning this off blinds path vectors"},
+
+	// The three opt-in switches. No Flag, because these change WHICH VECTORS the runner sends rather
+	// than anything on dalfox's command line, which is exactly why they are not in dalfoxOwned.
+	"scanBodyVectors": {Kind: "bool", Group: "Scope", Label: "Also scan body vectors",
+		Placeholder: "off. dalfox reaches body vectors but does not spend its budget there by default"},
+	"scanHeaderVectors": {Kind: "bool", Group: "Scope", Label: "Also scan header vectors",
+		Placeholder: "off. Header vectors here are almost all Authorization, which is a credential rather than an input"},
+	"scanCookieVectors": {Kind: "bool", Group: "Scope", Label: "Also scan cookie vectors",
+		Placeholder: "off. Cookie vectors here are the browser's own jar, and 18 of them aborted on a 401 preflight"},
 
 	// Mining
 	"miningDictWord":  {Kind: "path", Group: "Mining", Label: "Parameter wordlist", Flag: "-W", Placeholder: "/app/wordlists/..."},
@@ -226,6 +247,14 @@ var xssFuzzOptions = map[string]VectorOptionMeta{
 //   - dalfox found all five. Query, Body, Header and Path come back labelled as such; a cookie
 //     finding comes back labelled "Header", because a cookie IS a header on the wire, so the stored
 //     insertion point has to be the one we asked for rather than the one dalfox echoes.
+//
+//     PATH IS NOT THE SAME KIND OF CLAIM as the other four. Those four are AIMED with -p and get
+//     tested whether or not they reflect. Path cannot be aimed at all: -p name:path is accepted and
+//     ignored byte for byte like an invalid token, and --inject-marker in a path segment collapses
+//     the scan to three requests reporting clean. dalfox's own path-reflection discovery is the
+//     entire mechanism, and it injects only where a random token placed in that segment comes back
+//     in the response, so an application that serves one page for every path gets zero payloads in
+//     the path and still exits clean. Every path vector is told this; see dalfoxPathIsUnaimable.
 //   - domdig fuzzes the query string and the hash. -c and -E set cookies and headers to STATIC
 //     values for authentication; there is no flag that fuzzes them, no method override and no body,
 //     so nothing else is reachable.
@@ -239,10 +268,28 @@ func init() {
 			Binary: "dalfox", Container: "ars0n-framework-v2-dalfox-1",
 			Groups: dalfoxGroups, Options: dalfoxOptions, OwnedFlags: dalfoxOwned,
 			InsertionPoints: VectorInsertionPoints,
-			UsesReportFile:  true,
-			Compose:         ComposeDalfox,
-			Parse:           parseDalfoxJSONL,
-			Incomplete:      dalfoxIncomplete,
+			// dalfox CAN reach all five points, which is why InsertionPoints stays complete. It does
+			// not TEST three of them unless asked. See the OptInPoints doc comment on VectorTool for
+			// the measurement: pointed at all 249 vectors it covered body 49/49, header 40/40 and
+			// cookie 39/57, then stalled having reached none of the 45 query or 58 path vectors.
+			//
+			// Query and path are where reflected XSS actually lives on a web application, and dalfox
+			// is the only tool in this section that reaches path at all. Spending it on cookie jars
+			// and Authorization headers first is spending it on the least likely places.
+			OptInPoints: map[string]string{
+				"body":   "scanBodyVectors",
+				"header": "scanHeaderVectors",
+				"cookie": "scanCookieVectors",
+			},
+			UsesReportFile: true,
+			Compose:        ComposeDalfox,
+			// parseDalfoxForVector, not parseDalfoxJSONL directly. It wraps it with one rule: a PATH
+			// vector keeps only findings dalfox labelled location "Path". A path vector is handed no
+			// -p, so dalfox also scans a query parameter it appends itself, and every one of the five
+			// false positives on the Juice Shop run was a finding on that parameter recorded as path
+			// coverage. See the doc comment in xssCompose.go.
+			Parse:      parseDalfoxForVector,
+			Incomplete: dalfoxIncomplete,
 			Blinding: map[string]string{
 				// Measured: a path vector reports 2 Path findings normally and 0 with either of these
 				// set, while the scan still exits 0. Path has no explicit -p form, so dalfox's own
@@ -251,6 +298,11 @@ func init() {
 				"skipReflectionPath": "path",
 				"skipXssScanning":    "all",
 				"onlyDiscovery":      "all",
+				// A marker the framework never writes into the request. dalfox switches to
+				// marker-substitution mode, finds no marker anywhere, and reports every target clean
+				// after three requests. Measured: -p q:query alone finds the bug in 28 requests; the
+				// same command with --inject-marker FUZZ sends 3 and reports clean.
+				"injectMarker": "all",
 				// dalfox 3.2.1 finds the reflection and then verifies NOTHING when a custom
 				// user agent is set. Measured, one flag changed and nothing else:
 				//

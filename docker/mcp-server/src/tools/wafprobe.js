@@ -79,6 +79,16 @@ const configureWafProbeSchema = z.object({
     'save: a full or partial config object merged over the preset. Use get_waf_probe_schema ' +
     'with section=defaults to see the shape. Common knobs live under "global": request_budget, ' +
     'trip_budget, max_rps, wall_clock_seconds.'),
+  targets: z.array(z.object({
+    url: z.string().describe('Must be an endpoint the manual crawl observed returning 200.'),
+    label: z.string().optional().describe('Shown against this endpoint in the results.'),
+  })).optional().describe(
+    'save: the endpoints to probe, one scan each, run one at a time. Pick one per distinct ' +
+    'application rather than one per host: a domain that routes several applications needs an ' +
+    'endpoint for each, because the edge, the WAF policy and the origin tier can differ per ' +
+    'route. Use list_waf_probe_targets to see what is eligible. Budgets under "global" are ' +
+    'TOTALS and are divided across these endpoints, so request_budget must be at least the ' +
+    'per-endpoint estimate times the number of targets.'),
 });
 
 async function configureWafProbe(params) {
@@ -90,8 +100,8 @@ async function configureWafProbe(params) {
       : { saved: false, note: 'No saved config for this target; the schema defaults apply.' };
   }
 
-  if (!params.preset && !params.config) {
-    return { error: 'save needs a preset, a config, or both' };
+  if (!params.preset && !params.config && !params.targets) {
+    return { error: 'save needs a preset, a config, targets, or any combination' };
   }
   // A preset must be expanded to its full config, not saved as a name.
   //
@@ -118,10 +128,16 @@ async function configureWafProbe(params) {
     // preset and then changed things", which changes how the result is reported.
     merged.preset_modified = !!params.config;
   }
+  // Targets survive a preset change: a preset selects what is measured, never what it is measured
+  // against. Applying one must not silently discard the endpoint list.
+  if (params.targets) merged.targets = params.targets;
+  else if (existing?.targets && !merged.targets) merged.targets = existing.targets;
+
   await apiPost(base, merged);
 
   const g = merged.global || {};
-  return {
+  const n = (merged.targets || []).length;
+  const out = {
     saved: true,
     preset: merged.preset,
     preset_modified: merged.preset_modified,
@@ -134,6 +150,77 @@ async function configureWafProbe(params) {
       wall_clock_seconds: g.wall_clock_seconds,
       go_context_timeout_seconds: g.go_context_timeout_seconds,
     },
+  };
+
+  if (n > 0) {
+    out.targets = merged.targets.map((t) => t.url);
+    out.endpoint_count = n;
+    // Stated rather than left to be discovered by a refusal: the budgets above are totals, and a
+    // per-endpoint share too small for the enabled tests gets every scan in the run refused.
+    out.budget_note = `request_budget ${g.request_budget} and trip_budget ${g.trip_budget} are `
+      + `TOTALS divided across these ${n} endpoints, giving each scan `
+      + `${Math.floor((g.request_budget || 0) / n)} requests and `
+      + `${Math.floor((g.trip_budget || 0) / n)} deliberate blocks. Use dry_run_waf_probe to get `
+      + `the per-endpoint request estimate and check the share covers it.`;
+  }
+  return out;
+}
+
+// === Targets ===================================================================================
+
+const listWafProbeTargetsSchema = z.object({
+  target_id: z.string().uuid().describe('The scope target UUID'),
+  host: z.string().optional().describe('Only endpoints on this host.'),
+  include_static: z.boolean().optional().describe(
+    'Include static assets (default false). A static asset is usually served by the edge cache ' +
+    'alone, so it characterises the CDN rather than the application behind it.'),
+  one_per_host: z.boolean().optional().describe(
+    'Return only the best candidate per host: the most-requested non-static endpoint. This is the ' +
+    'usual starting point for characterising an estate.'),
+  limit: z.number().optional().describe('Max rows (default 100).'),
+});
+
+// The eligible probe targets for this scope target: every endpoint the manual crawl saw answer 200
+// on an in-scope host. This is the only valid source. The probe cannot characterise a URL that has
+// never been observed returning 200, because it has no baseline to measure against, and it must not
+// touch a host outside the declared scope at all.
+async function listWafProbeTargets(params) {
+  const data = await apiGet(`/manual-crawl/probe-candidates/${params.target_id}`);
+  let rows = data.candidates || [];
+
+  if (!params.include_static) rows = rows.filter((c) => !c.is_static);
+  if (params.host) rows = rows.filter((c) => c.host === params.host);
+
+  if (params.one_per_host) {
+    const byHost = new Map();
+    // The list arrives ordered dynamic-first, direct-first, then by request count, so the first
+    // row seen for a host is already the best candidate for it.
+    rows.forEach((c) => { if (!byHost.has(c.host)) byHost.set(c.host, c); });
+    rows = [...byHost.values()];
+  }
+
+  const limit = params.limit || 100;
+  const hosts = [...new Set(rows.map((c) => c.host))];
+
+  return {
+    total_eligible: data.total,
+    host_count: data.host_count,
+    dynamic_host_count: data.dynamic_host_count,
+    hosts,
+    returned: Math.min(rows.length, limit),
+    truncated: rows.length > limit ? rows.length - limit : undefined,
+    candidates: rows.slice(0, limit).map((c) => ({
+      url: c.url,
+      host: c.host,
+      endpoint: c.endpoint,
+      method: c.method,
+      request_count: c.request_count,
+      is_static: c.is_static || undefined,
+      is_direct: c.is_direct || undefined,
+    })),
+    note: 'Pass these to configure_waf_probe{targets} or run_waf_probe{targets}. Pick one per '
+        + 'distinct application, not one per host: a domain that routes several applications needs '
+        + 'an endpoint for each. Endpoints are probed one at a time, never concurrently.',
   };
 }
 
@@ -188,16 +275,37 @@ const runWafProbeSchema = z.object({
     'Run with this preset without saving it as the target default.'),
   config: z.record(z.any()).optional().describe(
     'Inline config overrides for this run only, merged over the saved config.'),
+  targets: z.array(z.object({
+    url: z.string().describe('Must be an endpoint the manual crawl observed returning 200.'),
+    label: z.string().optional().describe('Shown against this endpoint in the results.'),
+  })).optional().describe(
+    'Probe these endpoints for this run only, one scan each, run one at a time. Omit to use the ' +
+    'targets saved on the config; omit both to probe the scope target root. Budgets under ' +
+    '"global" are TOTALS divided across these endpoints. Use list_waf_probe_targets for what is ' +
+    'eligible.'),
   wait: z.boolean().optional().describe('Wait for the run to finish (default true).'),
-  timeout_seconds: z.number().optional().describe('How long to wait (default 1200).'),
+  timeout_seconds: z.number().optional().describe(
+    'How long to wait (default 1200). Endpoints run sequentially, so a multi-endpoint run needs ' +
+    'roughly the per-endpoint estimate times the number of endpoints.'),
 });
 
 async function runWafProbe(params) {
-  const url = params.url || await resolveTargetURL(params.target_id);
-  if (!url) return { error: 'Could not resolve the URL for this scope target' };
-
   const config = { ...(params.config || {}) };
   if (params.preset) config.preset = params.preset;
+
+  // A run is multi-endpoint if this call names targets, or if the saved config does. Checking the
+  // saved config means run_waf_probe honours what configure_waf_probe set up, instead of quietly
+  // probing the scope target root and reporting that as the estate's behaviour.
+  let targets = params.targets || [];
+  if (!targets.length) {
+    const saved = await apiGet(`/waf-probe/config/${params.target_id}`).catch(() => ({}));
+    targets = (saved?.targets || []).filter((t) => t && t.url);
+  }
+
+  if (targets.length) return runWafProbeMulti(params, config, targets);
+
+  const url = params.url || await resolveTargetURL(params.target_id);
+  if (!url) return { error: 'Could not resolve the URL for this scope target' };
 
   let started;
   try {
@@ -207,9 +315,7 @@ async function runWafProbe(params) {
       config: Object.keys(config).length ? config : undefined,
     });
   } catch (err) {
-    const raw = String(err.message || err);
-    const m = raw.match(/failed \((\d+)\):\s*([\s\S]*)$/);
-    return { refused: true, http_status: m ? Number(m[1]) : undefined, reason: (m ? m[2] : raw).trim() };
+    return refusal(err);
   }
 
   const scanId = started.scan_id;
@@ -224,6 +330,100 @@ async function runWafProbe(params) {
     }
   }
   return { scan_id: scanId, status: 'timeout', note: 'Still running. Use get_waf_probe_status.' };
+}
+
+async function runWafProbeMulti(params, config, targets) {
+  let started;
+  try {
+    started = await apiPost('/waf-probe/run-multi', {
+      scope_target_id: params.target_id,
+      endpoints: targets.map((t) => ({ url: t.url, label: t.label || t.host || '' })),
+      config: Object.keys(config).length ? config : undefined,
+    });
+  } catch (err) {
+    return refusal(err);
+  }
+
+  const runId = started.run_id;
+  const base = {
+    run_id: runId,
+    endpoint_count: started.endpoint_count,
+    estimated_seconds_total: started.estimated_seconds_total,
+    estimated_requests_total: started.estimated_requests_total,
+  };
+
+  if (params.wait === false) {
+    return { ...base, status: 'started',
+             note: 'Endpoints are probed one at a time. Poll get_waf_probe_run.' };
+  }
+
+  // Default the wait to what the run actually costs. A fixed 1200s default silently returns
+  // "timeout" on a nine-endpoint run that is progressing perfectly well.
+  const budgetSeconds = params.timeout_seconds
+    || Math.max(1200, Math.ceil((started.estimated_seconds_total || 0) * 1.5));
+  const deadline = Date.now() + budgetSeconds * 1000;
+
+  while (Date.now() < deadline) {
+    await sleep(5000);
+    const run = await apiGet(`/waf-probe/run/${runId}/results`).catch(() => null);
+    if (run && !run.in_progress) return summariseRun(run, base);
+  }
+  return { ...base, status: 'timeout',
+           note: `Still running after ${budgetSeconds}s. Use get_waf_probe_run.` };
+}
+
+// A refused run is the guard working, not an outage, and the message names the knob and the number
+// that would clear it. Flattening it to "request failed" throws away the only actionable part.
+function refusal(err) {
+  const raw = String(err.message || err);
+  const m = raw.match(/failed \((\d+)\):\s*([\s\S]*)$/);
+  return {
+    refused: true,
+    http_status: m ? Number(m[1]) : undefined,
+    reason: (m ? m[2] : raw).trim(),
+  };
+}
+
+const getWafProbeRunSchema = z.object({
+  run_id: z.string().uuid().describe('The run UUID returned by run_waf_probe.'),
+});
+
+async function getWafProbeRun(params) {
+  const run = await apiGet(`/waf-probe/run/${params.run_id}/results`);
+  return summariseRun(run, { run_id: params.run_id, endpoint_count: run.endpoint_count });
+}
+
+// One row per endpoint with the verdict, never the result blobs: a single probe result carries a
+// several-hundred-entry transcript, and N of them would bury the comparison this view exists for.
+function summariseRun(run, base) {
+  const endpoints = (run.endpoints || []).map((e) => {
+    const parsed = parseResult(e);
+    return {
+      label: e.endpoint_label || undefined,
+      url: e.url,
+      scan_id: e.scan_id,
+      status: e.status,
+      posture: e.posture || (parsed?.verdict || {}).posture || undefined,
+      headline: (parsed?.verdict || {}).headline || undefined,
+      safe_rps: (parsed?.verdict || {}).safe_rps || undefined,
+      requests_sent: e.requests_sent,
+      trips_used: e.trips_used,
+      abort_reason: (parsed?.run || {}).abort_reason || undefined,
+      error: e.error || undefined,
+    };
+  });
+
+  return {
+    ...base,
+    in_progress: run.in_progress || undefined,
+    completed_count: run.completed_count,
+    total_requests_sent: run.total_requests_sent,
+    total_trips_used: run.total_trips_used,
+    endpoints,
+    note: 'Use get_waf_probe_results{scan_id} for any one endpoint in full. An aborted endpoint '
+        + 'still carries everything measured before the abort rule fired; that is the probe '
+        + 'stopping itself, not a failure.',
+  };
 }
 
 const getWafProbeStatusSchema = z.object({
@@ -467,6 +667,8 @@ module.exports = {
   configureWafProbeSchema, configureWafProbe,
   dryRunWafProbeSchema, dryRunWafProbe,
   runWafProbeSchema, runWafProbe,
+  listWafProbeTargetsSchema, listWafProbeTargets,
+  getWafProbeRunSchema, getWafProbeRun,
   getWafProbeStatusSchema, getWafProbeStatus,
   getWafProbeResultsSchema, getWafProbeResults,
   manageWafProbeSchema, manageWafProbe,

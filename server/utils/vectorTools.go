@@ -92,6 +92,21 @@ type VectorTool struct {
 	// and reports nothing. Keyed by setting, valued by the point it blinds, or "all".
 	Blinding map[string]string `json:"blinding,omitempty"`
 
+	// OptInPoints names insertion points the tool CAN reach but does not test unless the operator
+	// asks. Keyed by insertion point, valued by the boolean setting that turns it on.
+	//
+	// This is not the same as an unreachable point and must never be confused with one. Unreachable
+	// means the tool has no mechanism; opt-in means it has one and the default is not to spend the
+	// budget there. Both are reported as skipped, with different reasons, because an operator
+	// deciding whether a zero means anything needs to know which it was.
+	//
+	// dalfox is why this exists. It is the only XSS tool that can reach all five points, so it was
+	// pointed at all 249 vectors. Measured: it covered body 49/49 and header 40/40 and cookie 39/57
+	// and then stalled, having reached ZERO of the 45 query vectors and ZERO of the 58 path vectors.
+	// Query is where /rest/products/search?q= lives. It spent its entire budget on the three points
+	// least likely to carry reflected XSS and never reached the two most likely.
+	OptInPoints map[string]string `json:"opt_in_points,omitempty"`
+
 	// ReportPath is set when the tool writes its findings to a file rather than to stdout. The runner
 	// reads that file back out of the shared /tmp volume.
 	UsesReportFile bool `json:"-"`

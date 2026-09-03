@@ -90,6 +90,46 @@
             <div id="scopeHostList" class="d-flex flex-wrap gap-1"></div>
           </div>
 
+          <!-- Rules. When any exist they are the WHOLE boundary and the host list above is not
+               consulted, which the banner says out loud rather than leaving the two lists looking
+               like they add together. -->
+          <div id="scopeRulesBlock" class="mt-2">
+            <div class="d-flex align-items-center justify-content-between mb-1">
+              <span class="text-muted small">Scope rules</span>
+              <a href="#" id="scopeRulesHelpToggle" class="small text-decoration-none">syntax</a>
+            </div>
+
+            <div id="scopeRulesHelp" class="d-none small text-muted mb-2"
+                 style="font-size: 11px; line-height: 1.5;">
+              <div><code>example.com</code> host and every subdomain</div>
+              <div><code>*.example.com</code> subdomains only, <em>not</em> example.com</div>
+              <div><code>=api.example.com</code> that exact host only</div>
+              <div><code>~jivo</code> any host containing "jivo"</div>
+              <div><code>~jivo within acme.io</code> the same, bounded to one domain</div>
+              <div><code>re:prod-[0-9]+\.acme\.io</code> full-match regex</div>
+              <div><code>!cdn.example.com</code> <strong>deny</strong> that subtree</div>
+              <div class="mt-1">A deny always wins, whatever else matches.</div>
+            </div>
+
+            <div id="scopeRulesActive" class="d-none alert alert-warning py-1 px-2 mb-2"
+                 style="font-size: 11px;">
+              Rules are in force. The host list above is <strong>not</strong> consulted while any
+              rule exists.
+            </div>
+
+            <div id="scopeRulesDivergence" class="d-none alert alert-danger py-1 px-2 mb-2"
+                 style="font-size: 11px;"></div>
+
+            <div id="scopeRuleList" class="mb-2"></div>
+
+            <div class="input-group input-group-sm">
+              <input type="text" class="form-control" id="scopeRuleInput"
+                     placeholder="e.g. *.example.com or !cdn.example.com" autocomplete="off">
+              <button class="btn btn-outline-danger" id="scopeRuleAdd" type="button">Add</button>
+            </div>
+            <div id="scopeRulePreview" class="small mt-1" style="font-size: 11px; min-height: 16px;"></div>
+          </div>
+
           <div id="outOfScopeBlock" class="d-none">
             <div class="text-muted small mb-1 mt-2">
               Seen but <strong>not</strong> captured. Add any that belong to the target:

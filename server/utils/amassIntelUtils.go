@@ -97,15 +97,20 @@ func ExecuteAmassIntelScan(scanID, companyName string) {
 	log.Printf("[INFO] Starting Amass Intel scan for company %s (scan ID: %s)", companyName, scanID)
 	startTime := time.Now()
 
-	cmd := exec.Command(
-		"docker", "run", "--rm",
-		"caffix/amass",
-		"intel",
-		"-org", companyName,
-		"-whois",
-		"-active",
-		"-timeout", "120",
-	)
+	// The per-target Company settings, from the ONE store the Settings screen and the MCP company tool
+	// both write. Absent is the normal case and produces the command line this runner has always built:
+	// docker run --rm caffix/amass intel -org <company> -whois -active -timeout 120.
+	scopeTargetID := companyScopeTargetForScan(context.Background(), "amass_intel_scans", scanID, "amass_intel")
+	tool, settings, loadNotes := companyRunnerSettings(scopeTargetID, "amass_intel")
+	argv, configNotes := amassIntelCompanyCommandArgs(companyName, tool, settings)
+	notes := append(loadNotes, configNotes...)
+	if len(settings) > 0 {
+		log.Printf("[INFO] Amass Intel is running with stored Company settings for scope target %s: %s",
+			scopeTargetID, companySettingsSummary(settings))
+	}
+	companyLogNotes("AMASS-INTEL", notes)
+
+	cmd := exec.Command(argv[0], argv[1:]...)
 
 	log.Printf("[INFO] Executing command: %s", cmd.String())
 
@@ -116,10 +121,16 @@ func ExecuteAmassIntelScan(scanID, companyName string) {
 	err := cmd.Run()
 	execTime := time.Since(startTime).String()
 
+	// The stderr column is where an operator looks when an intel scan returns nothing, which for this
+	// tool is the usual outcome. When settings were applied it now begins with what was applied and
+	// what was withheld; with nothing stored the preamble is the empty string and the column is
+	// byte-identical to before.
+	storedStderr := companySettingsPreamble(tool, scopeTargetID, settings, notes) + stderr.String()
+
 	if err != nil {
 		log.Printf("[ERROR] Amass Intel scan failed for %s: %v", companyName, err)
 		log.Printf("[ERROR] stderr output: %s", stderr.String())
-		UpdateIntelScanStatus(scanID, "error", "", stderr.String(), cmd.String(), execTime)
+		UpdateIntelScanStatus(scanID, "error", "", storedStderr, cmd.String(), execTime)
 		return
 	}
 
@@ -135,7 +146,7 @@ func ExecuteAmassIntelScan(scanID, companyName string) {
 		log.Printf("[WARN] No output from Amass Intel scan for company %s", companyName)
 	}
 
-	UpdateIntelScanStatus(scanID, "success", "{}", stderr.String(), cmd.String(), execTime)
+	UpdateIntelScanStatus(scanID, "success", "{}", storedStderr, cmd.String(), execTime)
 	log.Printf("[INFO] Intel scan status updated for scan %s", scanID)
 }
 

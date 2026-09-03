@@ -288,8 +288,8 @@ func InvestigateFQDNs(w http.ResponseWriter, r *http.Request) {
 	executionTime := time.Since(startTime)
 
 	result := map[string]interface{}{
-		"enriched_fqdns": enrichedFqdns,
-		"execution_time": executionTime.String(),
+		"enriched_fqdns":  enrichedFqdns,
+		"execution_time":  executionTime.String(),
 		"investigated_at": time.Now(),
 	}
 

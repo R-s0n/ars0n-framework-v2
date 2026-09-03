@@ -602,34 +602,23 @@ func ExecuteAndParseAmassScan(scanID, domain string) {
 	rateLimit := GetAmassRateLimit()
 	log.Printf("[INFO] Using rate limit of %d for Amass scan", rateLimit)
 
-	cmd := exec.Command(
-		"docker", "run", "--rm",
-		"caffix/amass",
-		"enum", "-active", "-alts", "-brute", "-nocolor",
-		"-min-for-recursive", "2", "-timeout", "60",
-		"-d", domain,
-		"-r", "8.8.8.8",
-		"-r", "1.1.1.1",
-		"-r", "9.9.9.9",
-		"-r", "64.6.64.6",
-		"-r", "208.67.222.222",
-		"-r", "208.67.220.220",
-		"-r", "8.26.56.26",
-		"-r", "8.20.247.20",
-		"-r", "185.228.168.9",
-		"-r", "185.228.169.9",
-		"-r", "76.76.19.19",
-		"-r", "76.223.122.150",
-		"-r", "198.101.242.72",
-		"-r", "176.103.130.130",
-		"-r", "176.103.130.131",
-		"-r", "94.140.14.14",
-		"-r", "94.140.15.15",
-		"-r", "1.0.0.1",
-		"-r", "77.88.8.8",
-		"-r", "77.88.8.1",
-		"-rqps", fmt.Sprintf("%d", rateLimit),
-	)
+	// The per-target Wildcard configuration for this tool, if the operator has set any. Absent is the
+	// normal case and produces exactly the command line this runner has always built; see
+	// amassWildcardCommandArgs in wildcardWire.go for the composition and precedence rules.
+	ctx := context.Background()
+	stored, scopeTargetID := wildcardWireStoredSettings(ctx, "amass_scans", scanID, "amass")
+	args, configNotes := amassWildcardCommandArgs(domain, rateLimit, stored)
+	if len(stored) > 0 {
+		log.Printf("[INFO] Amass is using %d stored Wildcard setting(s) for scope target %s", len(stored), scopeTargetID)
+	}
+	// Anything the configuration asked for that did NOT reach the command line. Logged rather than
+	// swallowed: a setting that was dropped and never mentioned is the failure this wiring exists to
+	// end, and stderr on the scan row records the command that actually ran alongside it.
+	for _, note := range configNotes {
+		log.Printf("[WARN] Amass Wildcard configuration for scope target %s: %s", scopeTargetID, note)
+	}
+
+	cmd := exec.Command("docker", args...)
 
 	log.Printf("[INFO] Executing command: %s", cmd.String())
 

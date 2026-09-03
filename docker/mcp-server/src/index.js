@@ -14,13 +14,20 @@ const { findHighValueTargetsSchema, findHighValueTargets, searchAllSchema, searc
 // New tools
 const { addTargetSchema, addTarget, deleteTargetSchema, deleteTarget, activateTargetSchema, activateTarget, getTargetScansSchema, getTargetScans, updateRoiScoreSchema, updateRoiScore, deleteTargetUrlSchema, deleteTargetUrl } = require('./tools/scope');
 const { runScanSchema, runScan, checkScanStatusSchema, checkScanStatus, getScanHistorySchema, getScanHistory, cancelScanSchema, cancelScan } = require('./tools/scans');
+const { getToolOutputSchema, getToolOutput } = require('./tools/tooloutput');
 const { runWildcardWorkflowSchema, runWildcardWorkflow, runCompanyWorkflowSchema, runCompanyWorkflow, runUrlWorkflowSchema, runUrlWorkflow, consolidateDataSchema, consolidateData, startAutoScanSchema, startAutoScan, getAutoScanSessionsSchema, getAutoScanSessions } = require('./tools/workflows');
 const { getAttackSurfaceSchema, getAttackSurface, queryCloudAssetsSchema, queryCloudAssets, queryEndpointsSchema, queryEndpoints, queryParametersSchema, queryParameters, getScopeOverviewSchema, getScopeOverview, queryAttackSurfaceAssetsSchema, queryAttackSurfaceAssets } = require('./tools/recon');
 const { manageManualCrawlSchema, manageManualCrawl, captureManualCrawlSchema, captureManualCrawl } = require('./tools/manualcrawl');
+const { manageScopeRulesSchema, manageScopeRules } = require('./tools/scoperules');
+const { manageNotesSchema, manageNotes } = require('./tools/notes');
 const { manageParamEnumSchema, manageParamEnum } = require('./tools/paramenum');
 const { manageXSSSchema, manageXSS, manageSQLiSchema, manageSQLi, manageCacheSchema, manageCache, manageCmdiSchema, manageCmdi, manageRedirectSchema, manageRedirect, manageLfiSchema, manageLfi, manageSmugglingSchema, manageSmuggling, manageBypassSchema, manageBypass, manageGraphqlSchema, manageGraphql, manageLeakSchema, manageLeak, manageGitSchema, manageGit, manageMiscSchema, manageMisc } = require('./tools/vectortools');
 const { manageFuzzSchema, manageFuzz } = require('./tools/fuzz');
-const { manageToolConfigSchema, manageToolConfig, manageWordlistsSchema, manageWordlists } = require('./tools/toolconfigs');
+const methodology = require('./tools/methodology');
+const { manageToolConfigSchema, manageToolConfig, manageWordlistsSchema, manageWordlists,
+  getArchiveHostsSchema, getArchiveHosts } = require('./tools/toolconfigs');
+const { manageWildcardToolsSchema, manageWildcardTools } = require('./tools/wildcardtools');
+const { manageCompanyToolsSchema, manageCompanyTools } = require('./tools/companytools');
 const {
   queryAmassResultsSchema, queryAmassResults,
   listNucleiTemplatesSchema, listNucleiTemplates,
@@ -41,7 +48,7 @@ const { manageThreatModelSchema, manageThreatModel, manageThreatModelNotesSchema
 const { getDiscoveredEndpointsSchema, getDiscoveredEndpoints, manageAttackSurfaceAssetsSchema, manageAttackSurfaceAssets, manageClientIdentifiersSchema, manageClientIdentifiers } = require('./tools/urlresults');
 const { manageIdentityPatternsSchema, manageIdentityPatterns, managePolicyAccessSchema, managePolicyAccess, manageRoleAccessSchema, manageRoleAccess, manageDiscretionaryAccessSchema, manageDiscretionaryAccess, getAuthzSummarySchema, getAuthzSummary } = require('./tools/authz');
 const { manageAuthFlowsSchema, manageAuthFlows, manageAuthRecordingSchema, manageAuthRecording, manageSessionTokensSchema, manageSessionTokens, checkSessionTokensSchema, checkSessionTokens } = require('./tools/authsessions');
-const { getWafProbeSchemaSchema, getWafProbeSchema, configureWafProbeSchema, configureWafProbe, dryRunWafProbeSchema, dryRunWafProbe, runWafProbeSchema, runWafProbe, getWafProbeStatusSchema, getWafProbeStatus, getWafProbeResultsSchema, getWafProbeResults, manageWafProbeSchema, manageWafProbe } = require('./tools/wafprobe');
+const { getWafProbeSchemaSchema, getWafProbeSchema, configureWafProbeSchema, configureWafProbe, dryRunWafProbeSchema, dryRunWafProbe, runWafProbeSchema, runWafProbe, listWafProbeTargetsSchema, listWafProbeTargets, getWafProbeRunSchema, getWafProbeRun, getWafProbeStatusSchema, getWafProbeStatus, getWafProbeResultsSchema, getWafProbeResults, manageWafProbeSchema, manageWafProbe } = require('./tools/wafprobe');
 const { consolidateEndpointsSchema, consolidateEndpoints, runEndpointScanSchema, runEndpointScan, getEndpointScanStatusSchema, getEndpointScanStatus, getEndpointScanResultsSchema, getEndpointScanResults, manageEndpointsSchema, manageEndpoints, queryConsolidatedEndpointsSchema, queryConsolidatedEndpoints } = require('./tools/endpoints');
 const { manageAttackVectorsSchema, manageAttackVectors } = require('./tools/attackvectors');
 const { findSubdomainTakeoverSchema, findSubdomainTakeover, findExposedPanelsSchema, findExposedPanels, findApiEndpointsSchema, findApiEndpoints, findInterestingResponsesSchema, findInterestingResponses, findSensitiveFilesSchema, findSensitiveFiles, compareScansSchema, compareScans, getScopeStatsSchema, getScopeStats, findUniqueHostsSchema, findUniqueHosts, queryByCidrSchema, queryByCidr, queryByTechStackSchema, queryByTechStack, searchGlobalSchema, searchGlobal } = require('./tools/bugbounty');
@@ -223,6 +230,16 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
+  // Reading what a discovery tool PRINTED, which nothing here could do. LinkFinder failed four times
+  // against a live target with a usage message and the wrong argv both stored in its scan row, and
+  // neither was reachable: check_scan_status wants a scan id the workflow does not hand back, and
+  // most discovery status routes do not select stdout or stderr at all. This is the discovery
+  // equivalent of the vector scanners' trace records.
+  server.tool('get_tool_output', 'What a discovery scan actually ran and actually printed: the exact command, stdout, stderr and error for one run, or every run a target has executed with a diagnosis on each. Use this when a tool produced no results and you need to know whether it failed, rejected its own arguments, or genuinely found nothing. Read-only: it runs nothing and re-runs nothing.', getToolOutputSchema.shape, async (params) => {
+    const result = await getToolOutput(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
   // ============================================================
   // WORKFLOWS (new)
   // ============================================================
@@ -280,6 +297,11 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
+  server.tool('manage_scope_rules', 'Author and read the scope rules for a target: the pattern-capable boundary that decides what the crawl records and what the scanners may contact. Supports exact hosts, whole subtrees, subdomains-only (*.example.com), substring and regex matches, and denies that beat every allow. Start with action:"syntax", and always action:"preview" a rule before adding it.', manageScopeRulesSchema.shape, async (params) => {
+    const result = await manageScopeRules(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
   server.tool('capture_manual_crawl', 'Write observed requests into a manual crawl session, one at a time or in a batch. Separate from manage_manual_crawl because this adds traffic to the corpus that every later scan will act on.', captureManualCrawlSchema.shape, async (params) => {
     const result = await captureManualCrawl(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -325,9 +347,10 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_access_bypass', `Configure and run the 403 and access control bypass tools (nomore403, Forbidden). This section does NOT scan attack vectors: each tool carries its OWN hand-picked list of target URLs in its settings under the key "endpoints", one URL per line, set on the Targets tab. Set that before scanning or the tool has nothing to do, and the two lists are independent by design. GET /access-bypass/{scope_target_id}/denied-endpoints returns the URLs that ALREADY answered 401 or 403 to something an earlier tool sent, consolidated from the tables that record an HTTP status, and GET /access-bypass/{scope_target_id}/candidate-endpoints returns every endpoint this target has; both are there to make picking the list sane. Denied endpoints are the interesting ones for a bypass attempt. Both tools scan one URL per run. The hard part is false positives: a denial page served under status 200 is not a bypass, so leave nomore403 auto-calibration ON (measured, --no-calibrate took a clean report to three bypasses that did not exist) and leave Forbidden content-length filtering ON. Treat every reported bypass as a lead and confirm the response really contains what the 403 withheld.`, manageBypassSchema.shape, async (params) => {
+  server.tool('manage_access_bypass', `Configure and run the 403 and access control bypass tools (nomore403, Forbidden). This section does NOT scan attack vectors: each tool carries its OWN hand-picked list of target URLs in its settings under the key "endpoints", one URL per line, set on the Targets tab. Set that before scanning or the tool has nothing to do, and the two lists are independent by design. the denied_endpoints action returns the URLs that ALREADY answered 401 or 403 to something an earlier tool sent, consolidated from the tables that record an HTTP status, and the candidate_endpoints action returns every endpoint this target has; both are there to make picking the list sane. Denied endpoints are the interesting ones for a bypass attempt. Both tools scan one URL per run. The hard part is false positives: a denial page served under status 200 is not a bypass, so leave nomore403 auto-calibration ON (measured, --no-calibrate took a clean report to three bypasses that did not exist) and leave Forbidden content-length filtering ON. Treat every reported bypass as a lead and confirm the response really contains what the 403 withheld.`, manageBypassSchema.shape, async (params) => {
     const result = await manageBypass(params);
-    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    const guidance = await methodology.stepGuidance('access-bypass');
+    return { content: [{ type: 'text', text: JSON.stringify({ ...result, methodology: guidance }, null, 2) }] };
   });
 
   server.tool('manage_graphql', 'Configure and run the GraphQL tools (graphql-cop, clairvoyance, graphw00f). Targets are NOT discovered: each tool carries its OWN list of GraphQL endpoints in its own settings, under the key "endpoints", one URL per line. Set that before scanning or the tool has nothing to do. The three lists are independent by design, so an endpoint added to one is invisible to the others. graphql-cop: four of its twelve checks generate load (alias overloading sends 101 aliases, plus batching, directive overloading and circular introspection) and are OFF unless enabled; a finding of kind not-tested means it decided the endpoint is not GraphQL and skipped everything, which is not a clean result. Its field-suggestions check probes inside __schema, so it under-reports on endpoints where introspection is disabled but suggestions are on. clairvoyance rebuilds a schema from error-message suggestions and is only worth running when introspection is DISABLED; a result of kind not-recovered means the server returned no suggestions, which is the technique failing rather than the schema being empty. graphw00f names the engine and links its GraphQL Threat Matrix entry; it outputs no CVEs.', manageGraphqlSchema.shape, async (params) => {
@@ -340,18 +363,23 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_exposed_git', 'Configure and run the exposed git recovery tools (git-dumper, GitTools). This is what happens AFTER discovery: run snallygaster first, and GET /exposed-git/{scope_target_id}/git-endpoints returns the directories where a version control directory has already been found, converted from the file snallygaster matched (.../.git/config) to the directory the tools need (.../). Targets are set per tool under the key "endpoints" on the Targets tab. Point them at the directory CONTAINING the .git, not at the .git itself. Both download the whole object store, so a secret committed and later deleted is recoverable and is graded critical when found. Neither tool exit code distinguishes success from failure, so a finding is only recorded when files actually came back.', manageGitSchema.shape, async (params) => {
+  server.tool('manage_exposed_git', 'Configure and run the exposed git recovery tools (git-dumper, GitTools). This is what happens AFTER discovery: run snallygaster first, and the git_endpoints action returns the directories where a version control directory has already been found, converted from the file snallygaster matched (.../.git/config) to the directory the tools need (.../). Targets are set per tool under the key "endpoints" on the Targets tab. Point them at the directory CONTAINING the .git, not at the .git itself. Both download the whole object store, so a secret committed and later deleted is recoverable and is graded critical when found. Neither tool exit code distinguishes success from failure, so a finding is only recorded when files actually came back.', manageGitSchema.shape, async (params) => {
     const result = await manageGit(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_misc', `Configure and run the Miscellaneous tools (Upload_Bypass, jwt_tool, pphack). The three take three DIFFERENT kinds of target, and none of them scans attack vectors the way most sections do. UPLOAD_BYPASS: its targets are request IDs, not URLs, stored under the key "endpoints" on the Targets tab and listed by GET /misc/{scope_target_id}/upload-candidates. Only a person can say which request uploads a file, so nothing is marked automatically. It mutates a request that ALREADY uploads successfully, so pick one you know works. It needs the forbidden extension (extension, its -E) and exactly one way to recognise success (success, failure or statusCode), or the run is refused. The framework rewrites each marked request to carry the tool's *filename*, *data* and *mimetype* markers, and refuses any request it cannot rewrite: measured, an unmarked run re-sends the original bytes unchanged and reports a bypass for the first module while the server logs the original filename every time, so every such finding is invented. Web shell mode (exploit) leaves executable code on the target and is off unless set. JWT_TOOL: no targets are configured at all. Every JSON Web Token in this target's captured traffic is found automatically and deduplicated BY TOKEN, so the same token on forty endpoints is one thing to attack; GET /misc/{scope_target_id}/found-jwts lists what was found. Reading a token proves nothing, so the checks that matter need somewhere to send a forgery: set targetURL AND canaryValue. Without targetURL the scan modes are refused outright, because jwt_tool prints "cannot scan offline" and does nothing, while the exploits still forge tokens locally and confirm nothing against a server. Without canaryValue a forgery answered 2xx is reported as jwt-forgery-not-rejected at medium rather than as a bypass, because it cannot be told apart from an endpoint that answers 2xx to everything. A finding of kind jwt-observed is a description of the token, not a vulnerability. Its tamper and claim-injection modes are interactive and unavailable here. PPHACK: takes this target's GET attack vectors only. Client-side prototype pollution travels in the URL and is merged by the page's own JavaScript, so body, cookie and header vectors are reported as skipped with the reason rather than scanned and reported clean. It loads each page in headless Chrome and reads the injected value back off Object.prototype, so the pollution itself is proven rather than inferred, but it is a primitive rather than an impact: what the polluted property reaches decides whether it is worth reporting. It finds CLIENT-side pollution only; server-side prototype pollution is a different bug with different tooling.`, manageMiscSchema.shape, async (params) => {
+  server.tool('manage_misc', `Configure and run the Miscellaneous tools (Upload_Bypass, jwt_tool, pphack). The three take three DIFFERENT kinds of target, and none of them scans attack vectors the way most sections do. UPLOAD_BYPASS: its targets are request IDs, not URLs, stored under the key "endpoints" on the Targets tab and listed by the upload_candidates action. Only a person can say which request uploads a file, so nothing is marked automatically. It mutates a request that ALREADY uploads successfully, so pick one you know works. It needs the forbidden extension (extension, its -E) and exactly one way to recognise success (success, failure or statusCode), or the run is refused. The framework rewrites each marked request to carry the tool's *filename*, *data* and *mimetype* markers, and refuses any request it cannot rewrite: measured, an unmarked run re-sends the original bytes unchanged and reports a bypass for the first module while the server logs the original filename every time, so every such finding is invented. Web shell mode (exploit) leaves executable code on the target and is off unless set. JWT_TOOL: no targets are configured at all. Every JSON Web Token in this target's captured traffic is found automatically and deduplicated BY TOKEN, so the same token on forty endpoints is one thing to attack; the found_jwts action lists what was found. Reading a token proves nothing, so the checks that matter need somewhere to send a forgery: set targetURL AND canaryValue. Without targetURL the scan modes are refused outright, because jwt_tool prints "cannot scan offline" and does nothing, while the exploits still forge tokens locally and confirm nothing against a server. Without canaryValue a forgery answered 2xx is reported as jwt-forgery-not-rejected at medium rather than as a bypass, because it cannot be told apart from an endpoint that answers 2xx to everything. A finding of kind jwt-observed is a description of the token, not a vulnerability. Its tamper and claim-injection modes are interactive and unavailable here. PPHACK: takes this target's GET attack vectors only. Client-side prototype pollution travels in the URL and is merged by the page's own JavaScript, so body, cookie and header vectors are reported as skipped with the reason rather than scanned and reported clean. It loads each page in headless Chrome and reads the injected value back off Object.prototype, so the pollution itself is proven rather than inferred, but it is a primitive rather than an impact: what the polluted property reaches decides whether it is worth reporting. It finds CLIENT-side pollution only; server-side prototype pollution is a different bug with different tooling.`, manageMiscSchema.shape, async (params) => {
     const result = await manageMisc(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_tool_config', 'Read or write the saved configuration for any URL-workflow tool: ffuf, arjun, x8, nuclei, katana, gospider or linkfinder. Saves merge over the stored config rather than replacing it, because the underlying handlers full-replace and an omitted field would otherwise be blanked.', manageToolConfigSchema.shape, async (params) => {
+  server.tool('manage_tool_config', 'Read or write the saved configuration for any URL-workflow tool: ffuf, arjun, x8, nuclei, katana, gospider, linkfinder, waybackurls or gau. Saves merge over the stored config rather than replacing it, because the underlying handlers full-replace and an omitted field would otherwise be blanked.', manageToolConfigSchema.shape, async (params) => {
     const result = await manageToolConfig(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_archive_hosts', 'List the hosts the Waybackurls and GAU scans can be asked about for a URL target: the direct host plus every in-scope adjacent host the manual crawl observed. Shows which are currently selected. Pair with manage_tool_config{tool:"waybackurls"|"gau"} to change the selection.', getArchiveHostsSchema.shape, async (params) => {
+    const result = await getArchiveHosts(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
@@ -360,9 +388,54 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
+  server.tool('manage_wildcard_tools', `Read and change how every tool in the Wildcard workflow is configured: amass, sublist3r, assetfinder, gau, ctl, subfinder, httpx, shuffledns, cewl, gospider, subdomainizer, nuclei-screenshot, metadata and nuclei. ONE STORE, TWO EDITORS: this writes the same rows the Wildcard Settings screen writes, and both render the server's own option vocabulary rather than a copy, so a change made here shows up there and the other way round and the two cannot drift. Start with action tools, then option_reference for the tool you want. Option keys are UI identifiers, not flags: send "timeoutMinutes", not "-timeout".
+
+CHECK runner_reads_settings BEFORE YOU BELIEVE A SETTING TOOK EFFECT. The runners are being wired one at a time, so some tools read this store and some do not, and the field says which per tool rather than as a blanket claim that would go stale. Where it is false, the setting saves, validates and composes (the response shows would_add_args) while the next scan still runs the hardcoded command line: pending_wiring names exactly those tools on every read and every save, and for them a saved setting is a reviewed intention rather than applied scan behaviour.
+
+READ THE DANGER NOTES BEFORE CHANGING ANYTHING, because this workflow's tools do not fail loudly. The dominant failure is exit 0, empty output, and a row stored as a successful scan, which is indistinguishable from a target that genuinely had nothing. Measured examples: subfinder -recursive took a 23362-subdomain domain to exactly zero; a subfinder or gau proxy pointing at 127.0.0.1 means the CONTAINER, not your host, and returns zero with an empty stderr; gau --fp discards all output; gau --mc accepts one status code and returns zero for two; cewl -m 40 emits no words, so the brute force that follows runs on an empty wordlist; shuffledns exits 0 on a missing or empty wordlist; gospider --whitelist REPLACES the scope filter instead of narrowing it; nuclei -ni still reports 6824 templates loaded while excluding the entire blind class.
+
+AMASS SPECIFICALLY, all measured against the installed v4.2.0. -timeout is in MINUTES, not seconds, and the runner passes 60, meaning one hour: a value meant as seconds becomes a multi-hour scan. It also truncates silently, 15 results at -timeout 1 against 18 at -timeout 0, exit 0 both times with nothing marking the short run as partial. -silent is unreachable rather than merely off, because it produces zero bytes on stdout AND stderr and the runner stores that as status success. -exclude and -include parse and do nothing in this build, verified twice with all 45 sources still running, so there is deliberately no source picker. And amass runs as docker run --rm with no volume mount, so every file-path flag is unreachable and is owned with that reason.
+
+PROVENANCE IS ON EVERY OPTION AND MEANS THREE DIFFERENT THINGS. measured = probed against the real container with the behaviour observed. runner = the flag is on the command line the runner already executes, so the image accepts it, but what a different VALUE does was not measured. unverified = accepted, or read out of the installed source, with its semantics unproven. Do not treat the third as the first.
+
+OWNED FLAGS ARE NOT OPTIONS. A flag the runner sets itself is refused on save with the reason, because a setting that is stored and then displaced at run time is how someone comes to believe a scan did something it did not. Action owned_flags lists them; the reason says whether the flag is runner-set, blacklisted for what it does, broken in the installed build, or blocked on a volume mount that does not exist. An unknown key and an out-of-range value are refused the same way, and two target-aware refusals exist: an amass blacklist entry equal to or a parent of the scope target, and a subfinder proxy or resolver on loopback, both measured to empty a scan while it still exits 0. save_settings returns the server's refusal verbatim, which is the whole diagnostic.
+
+TWO TOOLS ARE DELIBERATELY DIFFERENT. httpx has NO vocabulary here and delegates to httpx_configs, which already exists and is already read by its runner; configure it with manage_tool_config. nuclei here is ENGINE FLAGS ONLY (pacing, timeouts, HTTP behaviour, OAST, headless); templates, tags, severities, exclusions and targets stay with nuclei_configs and its Configure modal. assetfinder and sublist3r have empty vocabularies as the measured answer rather than as a gap, and ctl has no command line at all, so its options need runner code and say so.`, manageWildcardToolsSchema.shape, async (params) => {
+    const result = await manageWildcardTools(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_company_tools', `Read and change how every tool in the Company workflow is configured: amass_intel, metabigor_company, ip_port_scan, ctl_company, securitytrails_company, github_recon, shodan_company, censys_company, amass_enum_company, dnsx_company, cloud_enum, katana_company and nuclei. ONE STORE, TWO EDITORS: this writes the same rows the Company Settings screen writes, and both render the server's own option vocabulary rather than a copy, so a change made here shows up there and the other way round and the two cannot drift. Start with action tools, then option_reference for the tool you want. Option keys are UI identifiers, not flags: send "timeoutMinutes", not "-timeout".
+
+THE ON-PREM LIVE WEB SERVER SCAN (ip_port_scan) IS NOT NMAP AND HAS NO COMMAND LINE. It is first-party Go inside the api container doing TCP connect scans with net.DialTimeout, established four ways: docker-compose.yml contains no nmap, masscan, rustscan or naabu, none of the running containers is a port scanner, there is no exec of an nmap binary anywhere in server/, and ipPortScanUtils.go implements host discovery, port scanning and service identification itself. Do not try to set nmap flags; they do not exist. What this scanner does NOT have: no SYN scan, no ICMP, no UDP, no service or version detection beyond reading the Server and X-Powered-By headers, no OS detection, no scripts, no retries anywhere, no rate limiting, no randomisation of host or port order, and no way to cancel a running scan. Its eight options are the hardcoded ScanConfig and port-list literals the runner reads directly.
+
+UNITS ARE NOT UNIFORM AND GETTING ONE WRONG IS EXPENSIVE. ip_port_scan's hostProbeTimeout, portScanTimeout and webServiceTimeout are MILLISECONDS (defaults 1000, 1000, 5000). amass_enum_company timeoutMinutes and amass_intel timeoutMinutes are MINUTES, and the amass enum runner hardcodes 300, which is FIVE HOURS PER DOMAIN in a sequential per-domain loop with no aggregate cap, so ten selected domains is a worst case of fifty hours while the modal estimates one minute per domain. katana_company crawlDurationSeconds is seconds; metabigor timeoutSeconds has a unit --help never states. Read the unit field, it is never dropped at either detail level.
+
+A PORT LIST THAT IS TOO NARROW MAKES LIVE HOSTS READ AS DEAD, AND IT IS ALREADY HAPPENING AT THE DEFAULTS. hostDiscoveryPorts is the gate: an address that does not answer on one of those ten ports is never port scanned, never probed for a web service and never appears in discovered_live_ips. 8080, 8443 and 3000 are in the default webPorts and in NONE of the default hostDiscoveryPorts, so a host serving only on 8443 is discarded one phase before the scanner that would have found it, and adding ports to webPorts does not fix it. 445 and 3389 are absent too. The settings response reports that mismatch as an advisory, which fires even with nothing configured. maxIpsPerRange defaults to 254 and takes the FIRST 254 addresses, so a /23 loses its entire second half and a /16 loses 99.6%, while the scan reports total_network_ranges equal to processed_network_ranges, which reads as complete coverage.
+
+READ THE DANGER NOTES BEFORE CHANGING ANYTHING, because these tools do not fail loudly. The dominant failure is exit 0, no output, and a row stored as a successful scan, indistinguishable from a company that genuinely had nothing. Measured: amass intel -org exited 0 with zero bytes on stdout AND stderr while metabigor found an ASN for the same company a second later; an invalid GitHub PAT produces exit 0 and zero bytes on both streams; shodan and censys do not percent-encode the query, so a TWO-WORD company returns HTTP 400 with an empty body on every query, all of which are swallowed, and the scan stores zero domains as success; cloud_enum's S3 enumeration is being SKIPPED on this host after its own rate-limit probe and still prints "All done, happy hacking!" and exits 0; ctl_company drops every domain containing the substring "inc" (principal.com, lincoln.com, incident.io, province.co.uk) and every TLD longer than 6 characters (.insurance, .technology); dnsx -retry 0 exits 1 and the runner skips the failed domain with continue, so a saved 0 would drop every domain and still store success; katana -fs notafield and -e ".*" both print nothing and exit 0; and shodan's root-domain reduction turns www.acme.co.uk into "co.uk", which consolidation will offer to promote into a Wildcard scope target.
+
+FIVE TOOLS HAVE NO COMMAND LINE AT ALL: ip_port_scan plus crt.sh, SecurityTrails, Shodan and Censys, which are single HTTP requests from Go. Their options carry no flag, compose no arguments, and would_add_args is correctly empty. Many of those options are marked NOT IMPLEMENTED in their danger note, meaning the runner does not read them yet either; that is stated per option rather than left to be inferred.
+
+CHECK runner_reads_settings BEFORE YOU BELIEVE A SETTING TOOK EFFECT. nuclei is the ONLY Company tool whose runner reads this configuration today, and its settings deliberately live in wildcard_tool_settings rather than company_tool_settings, because one nuclei runner serves both workflows and loads by scope target id alone without reading the target's type; storing them anywhere else would leave the runner reading an empty row. Every response says which store it used. For the other twelve, settings save, validate and compose (the response shows would_add_args) while the next scan still runs the hardcoded behaviour, and pending_wiring names exactly those tools.
+
+TARGET SELECTION IS A DIFFERENT STORE. Which domains, ranges or live servers a tool scans is answered by amass_enum_configs, dnsx_configs, katana_company_configs, amass_intel_configs, cloud_enum_configs or nuclei_configs, not here, and every flag those tables own is declared framework-owned so the same setting can never be written twice. cloud_enum is the one real overlap: twelve columns mapping to 23 flags, which is why its mutationsPreset and bruteListPreset carry no flag at all.
+
+PROVENANCE IS ON EVERY OPTION AND MEANS THREE DIFFERENT THINGS. measured = probed against the real container or live API with the behaviour observed. runner = the flag is on the command line the runner already executes, so it is accepted, but what a different VALUE does was not measured. unverified = accepted or read out of the installed source, semantics unproven. Four of these tools have no API key configured in this deployment and crt.sh answered 502 to every probe, so much of that vocabulary is unverified and says so. Do not treat the third as the first.
+
+OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reason on each says whether the flag is runner-set, blacklisted for what it does, absent from that subcommand (amass intel has no -silent and no -nocolor, both measured exiting 1, and copying the Wildcard amass vocabulary across would hard-error every intel scan), or measured to do nothing (amass -exclude and -include still queried every source; metabigor -x and --proxy were both silently ignored, and a dead proxy still returned full results). Unknown keys, out-of-range values and measured scan-killing values are refused the same way, with the reason verbatim.`, manageCompanyToolsSchema.shape, async (params) => {
+    const result = await manageCompanyTools(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  methodology.register(server);
+
   server.tool('manage_fuzz', 'The live ffuf fuzz flow: review what a run found, change what a step sends, price it, run it and follow it. This is the implementation the URL workflow actually executes; run_scan "ffuf_url" and manage_tool_config "ffuf" drive an older one whose tables are empty, so use this for anything ffuf. Start with action summary, which reports per step whether the findings are discoveries or one response repeated, and the option that would exclude that response.', manageFuzzSchema.shape, async (params) => {
     const result = await manageFuzz(params);
-    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    // Guidance rides along with the RESULT rather than waiting to be asked for. A caller who knew to
+    // ask already knew the thing; the failure this prevents is not knowing a step was missing at all.
+    const guidance = await methodology.stepGuidance('content-discovery');
+    return { content: [{ type: 'text', text: JSON.stringify({ ...result, methodology: guidance }, null, 2) }] };
   });
 
   server.tool('manage_company_domains', 'List, add, prune and consolidate the root domains the Company workflow discovered, per discovery tool. Pruning is the most consequential judgement in this workflow: every promoted Wildcard target and the whole attack surface inherit this list. Google Dorking and Reverse Whois are manual flows, so add is the only way their findings ever enter the system.', manageCompanyDomainsSchema.shape, async (params) => {
@@ -439,6 +512,11 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
+  server.tool('manage_notes', 'Create, read, update and delete free-text notes on a scope target: working theories, what has already been tried, what to come back to. Reach for it when something you worked out needs to outlive the conversation, or to catch up on a target somebody else was on. Nothing scans these and no other tool reads them, which is what makes them the place for reasoning that has no schema. list previews the bodies rather than returning them, so find the note there and then get it by id.', manageNotesSchema.shape, async (params) => {
+    const result = await manageNotes(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
   server.tool('get_discovered_endpoints', 'The endpoints one crawler scan found, which is what the Results screen for that tool shows. Give it a target and a tool name and it resolves the newest successful scan itself.', getDiscoveredEndpointsSchema.shape, async (params) => {
     const result = await getDiscoveredEndpoints(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -482,7 +560,8 @@ function createServer() {
 
   server.tool('manage_attack_vectors', 'Unique Attack Vectors: consolidate the list from everything the other tools found, read it, and correct it. A vector is one HTTP verb, host, path, parameter SET and payload insertion point (query, body, header, cookie or path); two requests differing only in the VALUE sent are the same vector. Consolidate sends no traffic at the target, and never rebuilds a vector the operator edited or deleted.', manageAttackVectorsSchema.shape, async (params) => {
     const result = await manageAttackVectors(params);
-    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    const guidance = await methodology.stepGuidance('consolidate-vectors');
+    return { content: [{ type: 'text', text: JSON.stringify({ ...result, methodology: guidance }, null, 2) }] };
   });
 
   // --- Authentication: auth flows, extension recording, and the session tokens they produce ----
@@ -522,8 +601,18 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('run_waf_probe', 'Run the Routing & WAF Probe. It characterises routing, caching, not-found behaviour, the auth wall and the WAF, and measures the safe request rate that Validate, Investigate and the fuzzers then pace against. Spends deliberate blocks, so price it with dry_run_waf_probe first.', runWafProbeSchema.shape, async (params) => {
+  server.tool('list_waf_probe_targets', 'The endpoints eligible for probing: every endpoint the manual crawl observed returning 200 on an in-scope host. The probe cannot characterise a URL nobody has seen return 200, so this is the only valid source of targets. Use one_per_host=true to get the usual starting set for an estate.', listWafProbeTargetsSchema.shape, async (params) => {
+    const result = await listWafProbeTargets(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('run_waf_probe', 'Run the Routing & WAF Probe. It characterises routing, caching, not-found behaviour, the auth wall and the WAF, and measures the safe request rate that Validate, Investigate and the fuzzers then pace against. Pass targets (or save them with configure_waf_probe) to probe several endpoints in one run, one at a time; budgets are totals divided across them. Spends deliberate blocks, so price it with dry_run_waf_probe first.', runWafProbeSchema.shape, async (params) => {
     const result = await runWafProbe(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_waf_probe_run', 'Progress and per-endpoint verdicts for a multi-endpoint probe run, one row per endpoint without the transcripts. Use this to compare hosts; use get_waf_probe_results for any one endpoint in full.', getWafProbeRunSchema.shape, async (params) => {
+    const result = await getWafProbeRun(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 

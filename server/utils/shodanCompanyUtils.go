@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -175,10 +176,24 @@ func ExecuteShodanCompanyScan(scanID, companyName string) {
 
 	log.Printf("[SHODAN-COMPANY] [INFO] Successfully retrieved Shodan API key")
 
-	domains, err := searchShodanForCompany(companyName, apiKey)
+	// The per-target Company settings, from the ONE store the Settings screen and the MCP company tool
+	// both write. Absent is the normal case and produces exactly the four queries, one page each, one
+	// second apart, with no client timeout, that this runner has always made.
+	scopeTargetID := companyScopeTargetForScan(
+		context.Background(), "shodan_company_scans", scanID, "shodan_company")
+	tool, settings, notes := companyRunnerSettings(scopeTargetID, "shodan_company")
+	plan := shodanCompanyPlanFor(companyName, settings)
+	if plan.Configured {
+		log.Printf("[SHODAN-COMPANY] [INFO] Running with stored Company settings for scope target %s: %s",
+			scopeTargetID, companySettingsSummary(settings))
+	}
+
+	domains, searchNotes, err := searchShodanForCompany(companyName, apiKey, plan)
+	notes = append(notes, searchNotes...)
+	companyLogNotes("SHODAN-COMPANY", notes)
 	if err != nil {
 		log.Printf("[SHODAN-COMPANY] [ERROR] Failed to search Shodan for company %s: %v", companyName, err)
-		UpdateShodanCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to search Shodan: %v", err), "", time.Since(startTime).String())
+		UpdateShodanCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to search Shodan: %v", err), shodanCompanyCommand(tool, plan, scopeTargetID, settings, notes), time.Since(startTime).String())
 		return
 	}
 
@@ -194,101 +209,224 @@ func ExecuteShodanCompanyScan(scanID, companyName string) {
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
 		log.Printf("[SHODAN-COMPANY] [ERROR] Failed to marshal result: %v", err)
-		UpdateShodanCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to marshal result: %v", err), "", time.Since(startTime).String())
+		UpdateShodanCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to marshal result: %v", err), shodanCompanyCommand(tool, plan, scopeTargetID, settings, notes), time.Since(startTime).String())
 		return
 	}
 
-	UpdateShodanCompanyScanStatus(scanID, "success", string(resultJSON), "", "", time.Since(startTime).String())
+	UpdateShodanCompanyScanStatus(scanID, "success", string(resultJSON), "", shodanCompanyCommand(tool, plan, scopeTargetID, settings, notes), time.Since(startTime).String())
 	log.Printf("[SHODAN-COMPANY] [INFO] Successfully completed Shodan Company scan for company %s (scan ID: %s)", companyName, scanID)
 }
 
-func searchShodanForCompany(companyName, apiKey string) ([]string, error) {
+// shodanCompanyCommand is what the scan row records as "what did this actually run". Empty unless
+// something was configured, so a default scan's row is unchanged.
+func shodanCompanyCommand(tool CompanyTool, plan shodanCompanyPlan, scopeTargetID string,
+	settings map[string]any, notes []string) string {
+	if len(settings) == 0 && len(notes) == 0 {
+		return ""
+	}
+	// The API key is deliberately NOT reconstructed into this string. It travels in the QUERY STRING of
+	// the real request, which is its own recorded defect (Shodan accepts it as a header and the runner
+	// should use that), and there is no reason to copy it into the database as well.
+	return "GET https://api.shodan.io/shodan/host/search?key=REDACTED&query=<each of: " +
+		strings.Join(plan.Queries, " | ") + ">\n" +
+		companySettingsPreamble(tool, scopeTargetID, settings, notes)
+}
+
+// searchShodanForCompany runs the configured queries and harvests names from the configured fields.
+//
+// IT NOW RETURNS A REAL ERROR, WHICH IT NEVER DID BEFORE. The old signature returned an error type
+// and every failure path inside the loop was a log line followed by continue or break, so the caller
+// always took the success branch. That is the headline finding for this tool: because the company
+// name is interpolated into the query string UNENCODED, a multi-word company produces four HTTP 400s
+// with empty bodies, all four are swallowed, and the scan is stored as 'success' with zero domains.
+// failWhenAllQueriesFail is the switch that makes it visible; it is OFF by default, so the default
+// behaviour is unchanged.
+func searchShodanForCompany(companyName, apiKey string, plan shodanCompanyPlan) ([]string, []string, error) {
 	log.Printf("[SHODAN-COMPANY] [INFO] Searching Shodan for company: %s", companyName)
 
 	domainSet := make(map[string]bool)
+	var notes []string
+	succeeded, failed := 0, 0
 
-	queries := []string{
-		fmt.Sprintf(`ssl.cert.subject.O:"%s"`, companyName),
-		fmt.Sprintf(`http.title:"%s"`, companyName),
-		fmt.Sprintf(`http.html:"%s"`, companyName),
-		fmt.Sprintf(`org:"%s"`, companyName),
-	}
+	// Timeout 0 is http.DefaultClient's behaviour: NO deadline at all. That is what this runner has
+	// always had and it is why a hung connection leaves the scan row stuck at 'running' forever with
+	// nothing in the framework to clean it up. requestTimeoutSeconds is how an operator fixes it.
+	client := &http.Client{Timeout: plan.Timeout}
 
-	for _, query := range queries {
-		log.Printf("[SHODAN-COMPANY] [INFO] Executing Shodan query: %s", query)
+	// A 429 ABANDONS EVERY REMAINING QUERY, not just the remaining pages of the current one. That is
+	// what the runner has always done - `break` out of the query loop - and it is the right behaviour:
+	// Shodan credits are a monthly allowance rather than a rate, so a 429 usually means the allowance
+	// is gone and the next three queries would fail identically. The labelled break is what keeps the
+	// per-page loop from quietly turning one abandoned scan into four more requests.
+queries:
+	for _, query := range plan.Queries {
+		queryFailed := false
+		rateLimited := false
 
-		url := fmt.Sprintf("https://api.shodan.io/shodan/host/search?key=%s&query=%s", apiKey, query)
+		for page := 1; page <= plan.MaxPages; page++ {
+			log.Printf("[SHODAN-COMPANY] [INFO] Executing Shodan query: %s (page %d)", query, page)
+			requestURL := shodanCompanyRequestURL(apiKey, query, page)
 
-		resp, err := http.Get(url)
-		if err != nil {
-			log.Printf("[SHODAN-COMPANY] [WARN] HTTP request failed for query '%s': %v", query, err)
-			continue
-		}
-		defer resp.Body.Close()
+			var body []byte
+			var attemptErr error
+			// The retry loop is a no-op at the default: plan.Retries is 0 unless somebody set it.
+			for attempt := 0; ; attempt++ {
+				body, rateLimited, attemptErr = shodanCompanyFetch(client, requestURL)
+				if attemptErr == nil || rateLimited || attempt >= plan.Retries {
+					break
+				}
+				notes = append(notes, fmt.Sprintf("Shodan query %q page %d attempt %d of %d failed and was "+
+					"retried.", query, page, attempt+1, plan.Retries+1))
+			}
 
-		if resp.StatusCode == 429 {
-			log.Printf("[SHODAN-COMPANY] [WARN] Rate limit exceeded, stopping search")
-			break
-		}
+			if rateLimited {
+				log.Printf("[SHODAN-COMPANY] [WARN] Rate limit exceeded, stopping search")
+				notes = append(notes, "Shodan returned 429. The remaining queries were ABANDONED. Query credits "+
+					"are a monthly allowance rather than a rate, so this is usually an exhausted allowance "+
+					"rather than a speed problem.")
+				if plan.TreatRateLimitAsError {
+					return nil, notes, fmt.Errorf("Shodan returned 429 and treatRateLimitAsError is on: this "+
+						"scan is PARTIAL, having completed %d of %d queries. Storing it as a success would make "+
+						"the next scan look like the company grew", succeeded, len(plan.Queries))
+				}
+				break queries
+			}
+			if attemptErr != nil {
+				log.Printf("[SHODAN-COMPANY] [WARN] Shodan query '%s' page %d failed: %v", query, page, attemptErr)
+				queryFailed = true
+				break
+			}
 
-		if resp.StatusCode != 200 {
-			body, _ := io.ReadAll(resp.Body)
-			log.Printf("[SHODAN-COMPANY] [WARN] Shodan API returned status %d for query '%s': %s", resp.StatusCode, query, string(body))
-			continue
-		}
+			var searchResp ShodanSearchResponse
+			if err := json.Unmarshal(body, &searchResp); err != nil {
+				log.Printf("[SHODAN-COMPANY] [WARN] Failed to parse JSON response for query '%s': %v", query, err)
+				queryFailed = true
+				break
+			}
 
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Printf("[SHODAN-COMPANY] [WARN] Failed to read response body for query '%s': %v", query, err)
-			continue
-		}
+			log.Printf("[SHODAN-COMPANY] [INFO] Query '%s' page %d returned %d matches of %d total",
+				query, page, len(searchResp.Matches), searchResp.Total)
 
-		var searchResp ShodanSearchResponse
-		if err := json.Unmarshal(body, &searchResp); err != nil {
-			log.Printf("[SHODAN-COMPANY] [WARN] Failed to parse JSON response for query '%s': %v", query, err)
-			continue
-		}
-
-		log.Printf("[SHODAN-COMPANY] [INFO] Query '%s' returned %d matches", query, len(searchResp.Matches))
-
-		for _, match := range searchResp.Matches {
-			if match.SSL != nil && match.SSL.Cert != nil {
-				if match.SSL.Cert.Subject != nil && match.SSL.Cert.Subject.CN != "" {
-					if domain := extractRootDomain(match.SSL.Cert.Subject.CN); domain != "" {
-						domainSet[domain] = true
+			for _, match := range searchResp.Matches {
+				if match.SSL != nil && match.SSL.Cert != nil {
+					if plan.harvests("ssl.cert.subject.CN") &&
+						match.SSL.Cert.Subject != nil && match.SSL.Cert.Subject.CN != "" {
+						for _, name := range shodanCompanyNames(plan, match.SSL.Cert.Subject.CN) {
+							domainSet[name] = true
+						}
+					}
+					if plan.harvests("ssl.cert.names") {
+						for _, san := range match.SSL.Cert.SubjectAltName {
+							for _, name := range shodanCompanyNames(plan, san) {
+								domainSet[name] = true
+							}
+						}
 					}
 				}
 
-				for _, san := range match.SSL.Cert.SubjectAltName {
-					if domain := extractRootDomain(san); domain != "" {
-						domainSet[domain] = true
+				if plan.harvests("hostnames") {
+					for _, hostname := range match.Hostnames {
+						for _, name := range shodanCompanyNames(plan, hostname) {
+							domainSet[name] = true
+						}
+					}
+				}
+
+				if plan.harvests("http.host") && match.HTTP != nil && match.HTTP.Host != "" {
+					for _, name := range shodanCompanyNames(plan, match.HTTP.Host) {
+						domainSet[name] = true
 					}
 				}
 			}
 
-			for _, hostname := range match.Hostnames {
-				if domain := extractRootDomain(hostname); domain != "" {
-					domainSet[domain] = true
-				}
+			// TRUNCATION IS RECORDED. searchResp.Total was decoded and thrown away before: not stored, not
+			// logged, so nothing anywhere said that a query matched 12,000 hosts and 100 were read.
+			if page >= plan.MaxPages && searchResp.Total > page*len(searchResp.Matches) && len(searchResp.Matches) > 0 {
+				notes = append(notes, fmt.Sprintf(
+					"TRUNCATED: Shodan reports %d total matches for %q and this scan read %d page(s) of up to "+
+						"100. Each further page is a separate billable query credit.",
+					searchResp.Total, query, page))
 			}
-
-			if match.HTTP != nil && match.HTTP.Host != "" {
-				if domain := extractRootDomain(match.HTTP.Host); domain != "" {
-					domainSet[domain] = true
-				}
+			// THE PAUSE HAPPENS AFTER EVERY REQUEST INCLUDING THE LAST ONE, which is what the hardcoded
+			// time.Sleep(1 * time.Second) did at the end of every loop iteration. Every scan therefore
+			// still pays a second it does not need, and that is deliberate: moving the sleep would change
+			// the pacing of every existing target's scan, and pacing is the difference between a scan that
+			// completes and one that 429s. perQueryDelaySeconds is how an operator changes it.
+			lastPage := len(searchResp.Matches) == 0 || page >= plan.MaxPages
+			if plan.Delay > 0 {
+				time.Sleep(plan.Delay)
+			}
+			if lastPage {
+				break
 			}
 		}
 
-		time.Sleep(1 * time.Second)
+		if rateLimited {
+			// Counted as neither a success nor a failure: the query was abandoned, not answered.
+			continue
+		}
+		if queryFailed {
+			failed++
+			continue
+		}
+		succeeded++
 	}
 
-	var domains []string
+	if failed > 0 {
+		notes = append(notes, fmt.Sprintf("%d of %d Shodan queries FAILED and were swallowed. The most likely "+
+			"cause is the unencoded company name: a query containing a space produces a request line with a "+
+			"raw space in it, which was MEASURED returning HTTP 400 with an empty body.",
+			failed, len(plan.Queries)))
+	}
+
+	// THE SAFETY NET. Off by default, so nothing changes for anybody who has not asked for it.
+	if plan.FailWhenAllQueriesFail && succeeded == 0 && len(plan.Queries) > 0 {
+		return nil, notes, fmt.Errorf("every one of the %d Shodan queries failed, so this scan read NOTHING. "+
+			"failWhenAllQueriesFail is on, so it is an error rather than a 'success' with zero domains. "+
+			"MEASURED CAUSE: the company name is interpolated into the query string unencoded, so any "+
+			"company whose name contains a space gets HTTP 400 with an empty body on every query",
+			len(plan.Queries))
+	}
+
+	domains := make([]string, 0, len(domainSet))
 	for domain := range domainSet {
 		domains = append(domains, domain)
 	}
+	// SORTED, where the original ranged a map and produced a different order on every run for the same
+	// input. Nothing can depend on a randomised order, and a stable one is what makes a scan-to-scan
+	// diff mean anything.
+	sort.Strings(domains)
 
 	log.Printf("[SHODAN-COMPANY] [INFO] Found %d unique domains for company: %s", len(domains), companyName)
-	return domains, nil
+	return domains, notes, nil
+}
+
+// shodanCompanyFetch performs one request and reports (body, error, rateLimited).
+//
+// rateLimited is separate from error because a 429 is not a failure of THIS query, it is a statement
+// about the account, and the two lead to different decisions.
+func shodanCompanyFetch(client *http.Client, requestURL string) (body []byte, rateLimited bool, err error) {
+	req, err := http.NewRequest("GET", requestURL, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 429 {
+		return nil, true, fmt.Errorf("shodan returned 429")
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, false, fmt.Errorf("shodan returned status %d: %s", resp.StatusCode, string(body))
+	}
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	return body, false, nil
 }
 
 func extractRootDomain(hostname string) string {

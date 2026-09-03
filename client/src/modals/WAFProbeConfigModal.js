@@ -35,7 +35,11 @@ export const WAFProbeConfigModal = ({ show, handleClose, activeTarget, onSaved, 
   const [estimating, setEstimating] = useState(false);
   const [tripLedger, setTripLedger] = useState(null);
   const [search, setSearch] = useState('');
-  const [activeTab, setActiveTab] = useState('presets');
+  const [activeTab, setActiveTab] = useState('targets');
+  const [candidates, setCandidates] = useState([]);
+  const [candidateMeta, setCandidateMeta] = useState(null);
+  const [candidateSearch, setCandidateSearch] = useState('');
+  const [showStatic, setShowStatic] = useState(false);
 
   // Memoised so the grouped/filtered test list below is not rebuilt on every unrelated render.
   const registry = useMemo(() => schema?.registry || [], [schema]);
@@ -69,6 +73,20 @@ export const WAFProbeConfigModal = ({ show, handleClose, activeTarget, onSaved, 
 
       const ledger = await fetch('/api/waf-probe/trip-ledger');
       if (ledger.ok) setTripLedger(await ledger.json());
+
+      // Every endpoint the crawl saw answer 200 on an in-scope host. This is the only source of
+      // probe targets: a URL nobody has observed returning 200 cannot be characterised, and one
+      // outside the declared scope must not be touched at all.
+      const cand = await fetch(`/api/manual-crawl/probe-candidates/${activeTarget.id}`);
+      if (cand.ok) {
+        const data = await cand.json();
+        setCandidates(data.candidates || []);
+        setCandidateMeta({
+          total: data.total || 0,
+          hostCount: data.host_count || 0,
+          dynamicHostCount: data.dynamic_host_count || 0,
+        });
+      }
     } catch (e) {
       setError('Could not load the probe configuration: ' + e.message);
     } finally {
@@ -78,7 +96,7 @@ export const WAFProbeConfigModal = ({ show, handleClose, activeTarget, onSaved, 
 
   useEffect(() => {
     if (show) load();
-    if (!show) { setSuccess(''); setError(''); setSearch(''); }
+    if (!show) { setSuccess(''); setError(''); setSearch(''); setCandidateSearch(''); }
   }, [show, load]);
 
   /* ---------------------------------------------------------------- estimate */
@@ -134,12 +152,52 @@ export const WAFProbeConfigModal = ({ show, handleClose, activeTarget, onSaved, 
       const preset = JSON.parse(JSON.stringify(schema.presets[name]));
       // A preset changes what is measured, never what is measured against.
       preset.target = prev ? prev.target : preset.target;
+      preset.targets = prev ? prev.targets : [];
       preset.preset = name;
       preset.preset_modified = false;
       return preset;
     });
     setSuccess('');
   };
+
+  /* ---------------------------------------------------------------- targets */
+
+  // Selecting a target is not a config edit in the preset_modified sense: it changes what is
+  // measured against, not what is measured, so it must not mark a clean preset as modified.
+  const mutateTargets = (mutator) => {
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const next = JSON.parse(JSON.stringify(prev));
+      next.targets = mutator(next.targets || []);
+      return next;
+    });
+    setSuccess('');
+  };
+
+  const selectedTargets = useMemo(() => config?.targets || [], [config]);
+  const selectedUrls = useMemo(
+    () => new Set(selectedTargets.map((t) => t.url)), [selectedTargets]);
+
+  const toggleTarget = (cand) => mutateTargets((list) => (
+    list.some((t) => t.url === cand.url)
+      ? list.filter((t) => t.url !== cand.url)
+      : [...list, { url: cand.url, label: cand.host, host: cand.host }]
+  ));
+
+  const setTargetLabel = (url, label) => mutateTargets(
+    (list) => list.map((t) => (t.url === url ? { ...t, label } : t)));
+
+  // One endpoint per host, preferring a dynamic endpoint over a static asset and the most-requested
+  // over the rest. This is the shape the tool is for: characterise each host once, then reason about
+  // the estate. The candidate list is already ordered dynamic-first, direct-first, by request count.
+  const selectOnePerHost = () => mutateTargets(() => {
+    const byHost = new Map();
+    candidates.forEach((c) => {
+      if (c.is_static) return;
+      if (!byHost.has(c.host)) byHost.set(c.host, c);
+    });
+    return [...byHost.values()].map((c) => ({ url: c.url, label: c.host, host: c.host }));
+  });
 
   /* ---------------------------------------------------------------- save */
 
@@ -177,8 +235,47 @@ export const WAFProbeConfigModal = ({ show, handleClose, activeTarget, onSaved, 
     return out;
   }, [registry, search]);
 
+  const groupedCandidates = useMemo(() => {
+    const out = {};
+    candidates.forEach((c) => {
+      if (!showStatic && c.is_static) return;
+      const q = candidateSearch.trim().toLowerCase();
+      if (q && !`${c.host} ${c.endpoint} ${c.method}`.toLowerCase().includes(q)) return;
+      (out[c.host] = out[c.host] || []).push(c);
+    });
+    return out;
+  }, [candidates, candidateSearch, showStatic]);
+
+  // The run divides the totals across the selected endpoints, so a budget that is ample for one is
+  // a refusal for nine. Mirroring that arithmetic here means the operator sees the shortfall while
+  // they can still fix it, rather than as a 400 after pressing Run.
+  const runMath = useMemo(() => {
+    const n = Math.max(selectedTargets.length, 1);
+    const reqTotal = config?.global?.request_budget || 0;
+    const tripTotal = config?.global?.trip_budget || 0;
+    const perReq = Math.floor(reqTotal / n);
+    const perTrip = Math.floor(tripTotal / n);
+    const need = estimate?.requests || 0;
+    return {
+      n,
+      perReq,
+      perTrip,
+      need,
+      requestShortfall: need > 0 && perReq < need,
+      minRequestBudget: need * n,
+      tripStarved: tripTotal > 0 && perTrip < 1,
+      totalRequests: need * selectedTargets.length,
+      totalSeconds: (estimate?.seconds || 0) * selectedTargets.length,
+    };
+  }, [selectedTargets, config, estimate]);
+
   const problems = estimate?.problems || [];
-  const blockedByProblems = problems.length > 0;
+  const noTargets = selectedTargets.length === 0;
+  // Selecting no targets is a valid run, not an error: it probes the scope target root, which is
+  // what this tool did before it could take a list and is the only thing available on a target with
+  // no crawl data yet. Only the budget-division guards, which apply solely to a divided run, block.
+  const blockedByProblems = problems.length > 0
+    || (!noTargets && (runMath.requestShortfall || runMath.tripStarved));
 
   return (
     <Modal data-bs-theme="dark" show={show} onHide={handleClose} size="xl"
@@ -212,15 +309,24 @@ export const WAFProbeConfigModal = ({ show, handleClose, activeTarget, onSaved, 
               ) : estimate ? (
                 <>
                   <span><strong>{formatDuration(estimate.seconds)}</strong>
-                    <span className="text-white-50 small"> wall clock</span></span>
+                    <span className="text-white-50 small"> per endpoint</span></span>
                   <span><strong>{estimate.requests}</strong>
-                    <span className="text-white-50 small"> requests</span></span>
+                    <span className="text-white-50 small"> requests each</span></span>
                   <span><strong>{estimate.tests_enabled}</strong>
                     <span className="text-white-50 small"> of {registry.length} tests</span></span>
                   <span><strong>{estimate.peak_concurrency}</strong>
                     <span className="text-white-50 small"> peak concurrency</span></span>
-                  <span><strong>{estimate.trip_budget}</strong>
-                    <span className="text-white-50 small"> deliberate blocks allowed</span></span>
+                  {selectedTargets.length > 0 && (
+                    <span className="ms-auto ps-3 border-start border-secondary">
+                      <Badge bg="dark" className="border border-danger me-2">
+                        &times;{selectedTargets.length} endpoints
+                      </Badge>
+                      <strong>{formatDuration(runMath.totalSeconds)}</strong>
+                      <span className="text-white-50 small"> and </span>
+                      <strong>{runMath.totalRequests}</strong>
+                      <span className="text-white-50 small"> requests in total</span>
+                    </span>
+                  )}
                 </>
               ) : (
                 <span className="text-white-50 small">Cost estimate unavailable.</span>
@@ -233,7 +339,171 @@ export const WAFProbeConfigModal = ({ show, handleClose, activeTarget, onSaved, 
               </Alert>
             ))}
 
+            {noTargets && (
+              <Alert variant="secondary" className="py-2 small">
+                <i className="bi bi-crosshair me-2" />
+                No endpoints selected, so this will probe the scope target root
+                (<code>{config.target?.url}</code>) as a single scan. Pick endpoints on the Targets
+                tab to characterise several hosts or several applications behind one domain.
+              </Alert>
+            )}
+
+            {runMath.requestShortfall && (
+              <Alert variant="warning" className="py-2 small">
+                <i className="bi bi-exclamation-triangle me-2" />
+                The request budget is split across the {runMath.n} selected endpoints, giving each
+                scan {runMath.perReq}. The enabled tests need about {runMath.need} each, so the probe
+                would refuse every scan in this run. Raise the request budget to at
+                least {runMath.minRequestBudget}, disable tests, or select fewer endpoints.
+              </Alert>
+            )}
+
+            {runMath.tripStarved && (
+              <Alert variant="warning" className="py-2 small">
+                <i className="bi bi-exclamation-triangle me-2" />
+                The trip budget is split across the {runMath.n} selected endpoints, giving each scan
+                zero deliberate blocks. Every test that needs one would be skipped and reported as
+                untested. Raise the trip budget to at least {runMath.n}, or select fewer endpoints.
+              </Alert>
+            )}
+
             <Tabs activeKey={activeTab} onSelect={(k) => setActiveTab(k)} className="mb-3">
+              {/* ------------------------------------------------ targets */}
+              <Tab eventKey="targets"
+                   title={`Targets (${selectedTargets.length})`}>
+                <p className="text-white-50 small">
+                  One endpoint per distinct application, not per host. A host that routes several
+                  applications behind one domain needs an endpoint for each, because the edge, the
+                  WAF policy and the origin tier can differ per route. The list below is every
+                  endpoint the manual crawl saw answer 200 on an in-scope host; nothing else can be
+                  probed, because an endpoint that has never been observed returning 200 gives the
+                  probe no baseline to measure against.
+                </p>
+
+                {candidateMeta && (
+                  <div className="mb-2 small text-white-50">
+                    {candidateMeta.total} candidate endpoints across {candidateMeta.hostCount} hosts
+                    {candidateMeta.dynamicHostCount > 0
+                      && `, ${candidateMeta.dynamicHostCount} of them serving something other than static assets`}.
+                  </div>
+                )}
+
+                <div className="d-flex flex-wrap gap-2 align-items-center mb-3">
+                  <Form.Control size="sm" style={{ maxWidth: '260px' }}
+                    placeholder="Filter by host, path or method…"
+                    value={candidateSearch}
+                    onChange={(e) => setCandidateSearch(e.target.value)} />
+                  <Button size="sm" variant="outline-danger" onClick={selectOnePerHost}
+                          disabled={!candidates.length}>
+                    <i className="bi bi-diagram-3 me-1" />One per host
+                  </Button>
+                  <Button size="sm" variant="outline-secondary"
+                          onClick={() => mutateTargets(() => [])}
+                          disabled={!selectedTargets.length}>
+                    Clear selection
+                  </Button>
+                  <Form.Check type="switch" id="show-static" className="small ms-2"
+                    label="Show static assets"
+                    checked={showStatic}
+                    onChange={(e) => setShowStatic(e.target.checked)} />
+                </div>
+
+                {selectedTargets.length > 0 && (
+                  <div className="rounded p-2 mb-3"
+                       style={{ border: '1px solid rgba(220,53,69,0.45)' }}>
+                    <div className="text-danger small fw-bold mb-2">
+                      Selected, and the order they will be probed in
+                    </div>
+                    <p className="text-white-50 mb-2" style={{ fontSize: '0.72rem' }}>
+                      Endpoints are probed one at a time, never concurrently. The probe measures
+                      latency baselines and a rate ceiling, and a second scan running against the
+                      same estate at the same time would perturb exactly those measurements. Give
+                      each a label you will recognise in the results.
+                    </p>
+                    {selectedTargets.map((t, i) => (
+                      <div key={t.url} className="d-flex align-items-center gap-2 mb-1">
+                        <Badge bg="secondary">{i + 1}</Badge>
+                        <Form.Control size="sm" style={{ maxWidth: '200px' }}
+                          value={t.label || ''}
+                          placeholder={t.host}
+                          onChange={(e) => setTargetLabel(t.url, e.target.value)} />
+                        <span className="text-white-50 text-truncate"
+                              style={{ fontSize: '0.72rem', flex: 1 }} title={t.url}>
+                          {t.url}
+                        </span>
+                        <Button size="sm" variant="link" className="text-danger p-0"
+                                onClick={() => toggleTarget(t)} title="Remove">
+                          <i className="bi bi-x-lg" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {!candidates.length && !loading && (
+                  <Alert variant="secondary" className="py-2 small">
+                    No crawl endpoints have returned 200 for this target yet. Run a manual crawl
+                    first: the probe deliberately has no way to invent a URL of its own.
+                  </Alert>
+                )}
+
+                <Accordion alwaysOpen>
+                  {Object.keys(groupedCandidates).sort().map((host) => {
+                    const rows = groupedCandidates[host];
+                    const chosen = rows.filter((c) => selectedUrls.has(c.url)).length;
+                    return (
+                      <Accordion.Item eventKey={host} key={host} className="border-secondary mb-2"
+                                      style={{ backgroundColor: '#2b2b2b' }}>
+                        <Accordion.Header>
+                          <span className="text-danger me-2">{host}</span>
+                          <span className="text-white-50 small">
+                            {rows.length} endpoint{rows.length === 1 ? '' : 's'}
+                            {chosen > 0 && ` · ${chosen} selected`}
+                          </span>
+                        </Accordion.Header>
+                        <Accordion.Body style={{ backgroundColor: '#2b2b2b' }}>
+                          {rows.map((c) => (
+                            <div key={`${c.method} ${c.url}`}
+                                 className="d-flex align-items-center gap-2 mb-1">
+                              <Form.Check
+                                type="checkbox"
+                                id={`cand-${c.method}-${c.url}`}
+                                checked={selectedUrls.has(c.url)}
+                                onChange={() => toggleTarget(c)}
+                              />
+                              <Badge bg="dark" className="border border-secondary text-white-50"
+                                     style={{ fontSize: '0.62rem' }}>
+                                {c.method}
+                              </Badge>
+                              <span className="text-white text-truncate"
+                                    style={{ fontSize: '0.75rem', flex: 1 }} title={c.url}>
+                                {c.endpoint}
+                              </span>
+                              {c.is_static && (
+                                <Badge bg="secondary" style={{ fontSize: '0.62rem' }}
+                                       title="A static asset is usually served by the edge cache alone, so it characterises the CDN rather than the application">
+                                  static
+                                </Badge>
+                              )}
+                              {c.is_direct && (
+                                <Badge bg="dark" className="border border-secondary text-white-50"
+                                       style={{ fontSize: '0.62rem' }}
+                                       title="Observed as a direct navigation rather than a subresource">
+                                  direct
+                                </Badge>
+                              )}
+                              <span className="text-white-50" style={{ fontSize: '0.68rem' }}>
+                                &times;{c.request_count}
+                              </span>
+                            </div>
+                          ))}
+                        </Accordion.Body>
+                      </Accordion.Item>
+                    );
+                  })}
+                </Accordion>
+              </Tab>
+
               {/* ------------------------------------------------ presets */}
               <Tab eventKey="presets" title="Presets & Budget">
                 <Row className="g-2 mb-4">
@@ -253,6 +523,17 @@ export const WAFProbeConfigModal = ({ show, handleClose, activeTarget, onSaved, 
                           {' '}{formatDuration(schema.presets[name].global.wall_clock_seconds)} ·
                           {' '}{schema.presets[name].global.trip_budget} trips
                         </div>
+                        {/* Named explicitly because most bug bounty programs prohibit load and
+                            stress testing outright, and the Load group is exactly that. It is the
+                            one preset difference that can breach a program's rules rather than
+                            just cost more. */}
+                        {countLoadTests(schema.presets[name]) > 0 && (
+                          <Badge bg="warning" text="dark" className="mt-2"
+                                 style={{ fontSize: '0.6rem' }}
+                                 title="Sustained load, burst and concurrency ramps. Most bug bounty programs prohibit load testing.">
+                            includes {countLoadTests(schema.presets[name])} load tests
+                          </Badge>
+                        )}
                       </div>
                     </Col>
                   ))}
@@ -427,7 +708,10 @@ export const WAFProbeConfigModal = ({ show, handleClose, activeTarget, onSaved, 
         <span className="text-white-50 small me-auto">
           {blockedByProblems
             ? 'Resolve the warnings above before running.'
-            : 'The estimate above is what this configuration will actually cost.'}
+            : noTargets
+              ? 'One scan against the scope target root.'
+              : `${selectedTargets.length} endpoint${selectedTargets.length === 1 ? '' : 's'}, `
+                + `probed one at a time, about ${formatDuration(runMath.totalSeconds)} in total.`}
         </span>
         <Button variant="outline-secondary" onClick={handleClose}>Cancel</Button>
         <Button variant="outline-danger" onClick={() => save({ run: false })}
@@ -436,7 +720,8 @@ export const WAFProbeConfigModal = ({ show, handleClose, activeTarget, onSaved, 
         </Button>
         <Button variant="danger" onClick={() => save({ run: true })}
                 disabled={saving || !config || blockedByProblems}>
-          <i className="bi bi-play-fill me-1" />Save &amp; Run
+          <i className="bi bi-play-fill me-1" />
+          Save &amp; Run{selectedTargets.length > 1 ? ` (${selectedTargets.length})` : ''}
         </Button>
       </Modal.Footer>
     </Modal>
@@ -570,6 +855,13 @@ const ToggleTextKnob = ({ label, help, enabled, onToggle, value, onChange, wide 
 
 function humanise(key) {
   return key.replace(/_/g, ' ');
+}
+
+// Load tests are identified by id prefix rather than by group, because this runs against a preset
+// blob from the container, which carries a tests map but not the registry's group labels.
+function countLoadTests(preset) {
+  return Object.entries(preset?.tests || {})
+    .filter(([id, block]) => id.startsWith('load_') && block?.enabled).length;
 }
 
 function formatDuration(seconds) {

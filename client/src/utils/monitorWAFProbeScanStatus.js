@@ -135,4 +135,67 @@ export const monitorActiveScan = async (
   poll();
 };
 
+// A multi-endpoint run is N scans worked through one at a time, so no single scan's status answers
+// "is the run finished". Polling the run instead does, and it lets the card show the most recent
+// finished endpoint while the remaining ones are still being probed, rather than pinning the card to
+// a scan that stays `pending` for most of the run and displays nothing.
+export const monitorProbeRun = async (
+  runId,
+  setIsWAFProbeScanning,
+  setWAFProbeScans,
+  setMostRecentWAFProbeScan,
+  setMostRecentWAFProbeScanStatus,
+  activeTarget = null
+) => {
+  const refreshList = async () => {
+    if (!activeTarget || !setWAFProbeScans) return;
+    try {
+      const res = await fetch(`/api/scopetarget/${activeTarget.id}/scans/waf-probe`);
+      if (!res.ok) return;
+      const scans = await res.json();
+      if (Array.isArray(scans)) setWAFProbeScans(scans);
+    } catch (error) {
+      console.error('Error refreshing WAF probe scan list:', error);
+    }
+  };
+
+  const poll = async () => {
+    try {
+      const res = await fetch(`/api/waf-probe/run/${runId}/results`);
+      if (!res.ok) throw new Error('Failed to fetch run status');
+
+      const run = await res.json();
+      const endpoints = Array.isArray(run.endpoints) ? run.endpoints : [];
+
+      // The last endpoint that actually produced something. Endpoints run in order, so this walks
+      // forward as the run progresses and the card always shows the newest real result.
+      const finished = endpoints.filter((e) => isTerminalProbeStatus(e.status) && e.result);
+      if (finished.length > 0) {
+        const latest = finished[finished.length - 1];
+        setMostRecentWAFProbeScan(latest);
+        setMostRecentWAFProbeScanStatus(latest.status);
+      }
+
+      await refreshList();
+
+      if (run.in_progress) {
+        setIsWAFProbeScanning(true);
+        pollTimeout(poll, 3000);
+        return;
+      }
+
+      setIsWAFProbeScanning(false);
+      console.log(`[WAF-PROBE] Run ${runId} finished: `
+        + `${run.completed_count}/${run.endpoint_count} endpoints, `
+        + `${run.total_requests_sent || 0} requests`);
+      return run;
+    } catch (error) {
+      console.error('Error monitoring WAF probe run:', error);
+      pollTimeout(poll, 3000);
+    }
+  };
+
+  poll();
+};
+
 export default monitorWAFProbeScanStatus;

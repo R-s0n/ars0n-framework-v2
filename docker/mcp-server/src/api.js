@@ -48,6 +48,19 @@ async function apiPut(path, body = {}) {
   return parseBody(res);
 }
 
+async function apiPatch(path, body = {}) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`API PATCH ${path} failed (${res.status}): ${text}`);
+  }
+  return parseBody(res);
+}
+
 async function apiDelete(path) {
   const res = await fetch(`${API_BASE}${path}`, { method: 'DELETE' });
   if (!res.ok) {
@@ -57,4 +70,4 @@ async function apiDelete(path) {
   return parseBody(res);
 }
 
-module.exports = { apiGet, apiPost, apiPut, apiDelete };
+module.exports = { apiGet, apiPost, apiPut, apiPatch, apiDelete };

@@ -85,6 +85,13 @@ var browserSetHeaders = map[string]bool{
 	"upgrade-insecure-requests": true, "user-agent": true, "via": true, "expect": true,
 	"if-modified-since": true, "if-none-match": true, "device-memory": true, "downlink": true,
 	"ect": true, "rtt": true, "save-data": true, "viewport-width": true, "width": true,
+	// Hop-by-hop headers, siblings of "connection" already above. "upgrade" is on this list because
+	// of a measured row rather than on principle: the Socket.IO handshake on Juice Shop produced a
+	// header vector whose single parameter was "upgrade", which is the value the browser writes to
+	// ask for a WebSocket. No application reads it as input, and it was one of only two distinct
+	// header names in a list of 43 header vectors.
+	"upgrade": true, "keep-alive": true, "proxy-connection": true, "transfer-encoding": true,
+	"alt-used": true,
 }
 
 // appControlledHeader reports whether a header is one the application put there rather than the
@@ -125,17 +132,41 @@ var longHexInName = regexp.MustCompile(`(?i)[0-9a-f]{16,}`)
 //
 // The prefix is preserved: user.{uuid} rather than {uuid}, because "this is a user id" is exactly the
 // fact an operator needs when deciding whether swapping it is worth trying.
+//
+// IT USED TO BE WRONG IN BOTH DIRECTIONS AND ONE RUN PROVED BOTH HALVES. Against Juice Shop:
+//
+//   - /api/Products/1, /api/Products/6, /api/Products/24, /api/Addresss/7, /api/Addresss/8,
+//     /api/Cards/8, /api/Quantitys/1, /rest/basket/6 and /rest/products/1/reviews were all left
+//     LITERAL, because classifyInputValue only calls a number an id at four digits or more. Nine
+//     ID-bearing paths carrying 31 vectors between them, one row per object the operator happened to
+//     click on, and no row for the route those objects share.
+//   - /rest/admin/application-configuration was templated to /rest/admin/{token}. That segment is a
+//     fixed route name somebody typed. It matched only because it is 25 characters of [A-Za-z-] and
+//     its Shannon entropy is 3.513.
+//
+// The second one is the dangerous one, and the sibling route says why. /rest/admin/application-version
+// has HIGHER entropy, 3.577, and survived untouched purely because it is 19 characters against a
+// 20-character floor. The rule was measuring LENGTH, not identity. Name that route
+// application-versions and the two would have collapsed into one /rest/admin/{token} row, and one of
+// two real admin routes would never have been tested at all.
+//
+// So the two errors are not symmetric and the rules below are not either. An identifier left literal
+// costs one extra row in a list; a route templated away DELETES a route.
 func templateVectorPath(path string) (templated string, signals []string) {
 	if path == "" {
 		return "/", nil
 	}
 	segments := strings.Split(path, "/")
 	seen := map[string]bool{}
+	// Counted over non-empty segments so that a leading "/" and a "//" typo do not shift what counts
+	// as the first segment.
+	position := 0
 	for i, seg := range segments {
 		if seg == "" {
 			continue
 		}
-		kind := classifyInputValue(seg)
+		kind := classifyPathSegment(seg, position)
+		position++
 		if kind == "" {
 			continue
 		}
@@ -155,6 +186,61 @@ func templateVectorPath(path string) (templated string, signals []string) {
 		}
 	}
 	return strings.Join(segments, "/"), signals
+}
+
+// classifyPathSegment decides whether one PATH SEGMENT is an identifier.
+//
+// classifyInputValue is deliberately not reused whole. It answers "does this value identify or
+// authorise something", which is the right question for a cookie value or a header value and the
+// wrong one for a route segment, where a name a developer typed has to survive intact. Two rules
+// differ:
+//
+//   - A run of digits is an identifier at ANY length once something precedes it, because a number
+//     under a collection segment is a REST id: /api/Products/1 and /api/Products/24 are one vector
+//     seen with two products. At position 0 there is nothing in front of it to make it an id, so the
+//     four-digit floor still applies there and a bare /2 style root is left alone.
+//   - The opaque-token fallback also asks for a digit, which is what keeps application-configuration
+//     a route. See pathSegmentIsRouteWord.
+func classifyPathSegment(seg string, position int) string {
+	switch {
+	case jwtValue.MatchString(seg):
+		return SignalJWT
+	case uuidValue.MatchString(seg):
+		return SignalUUID
+	case pathNumericSegment.MatchString(seg):
+		if position > 0 || numericID.MatchString(seg) {
+			return SignalNumericID
+		}
+		return ""
+	// Anchored and hex-only, so there is no word it can reach: nothing a developer types as a route
+	// name is sixteen or more characters drawn from abcdef0123456789 alone.
+	case longHexValue.MatchString(seg):
+		return SignalHighEntropy
+	case vectorBase64ish.MatchString(seg) && !pathSegmentIsRouteWord(seg) &&
+		shannonEntropy(seg) >= 3.2:
+		return SignalHighEntropy
+	}
+	return ""
+}
+
+var pathNumericSegment = regexp.MustCompile(`^[0-9]+$`)
+
+// pathSegmentIsRouteWord reports whether a segment is a name somebody TYPED rather than a value
+// somebody generated.
+//
+// The discriminator is a digit. Generated identifiers are drawn from an alphabet that includes digits
+// and, at the twenty characters the token fallback already requires, containing none of them is
+// vanishingly unlikely. Route names are words, and words do not contain digits.
+//
+// This is why application-configuration and applicationConfiguration stay literal. Both clear the
+// twenty-character length bar and both clear the 3.2 entropy bar, which between them used to be the
+// whole test. Real tokens are unaffected, because a JWT, a UUID and a long hex run each have a rule
+// of their own above and never reach this one.
+//
+// It errs towards leaving a segment literal on purpose, for the reason recorded on templateVectorPath:
+// under-templating adds a row, over-templating removes a route.
+func pathSegmentIsRouteWord(seg string) bool {
+	return !strings.ContainsAny(seg, "0123456789")
 }
 
 // appHeaderInputs returns the header names an application put on a request, and what their values
@@ -212,6 +298,104 @@ func cookieInputs(headersJSON string) (names []string, signals []string) {
 	sort.Strings(names)
 	sort.Strings(signals)
 	return names, signals
+}
+
+// echoedCookieInputs finds response cookies whose VALUE is a request parameter's value.
+//
+// THE GAP THIS CLOSES. A cookie a crawl records is one the browser happened to be carrying, so
+// cookie vectors are always the ones an application already had. A cookie the SERVER sets from a
+// request parameter is different: it is the same attacker-controlled input arriving by a second
+// route, and on the next request it arrives with no query string at all.
+//
+// Measured on the target this framework was developed against. Every GET /catalog?category=<value>
+// returned Set-Cookie: category=<the same value>, byte for byte, across five different values. The
+// category parameter is also the one with CONFIRMED SQL injection. So a second injection carrier for
+// a known-vulnerable input sat one insertion point away, and because the vector list held zero cookie
+// vectors, every scan correctly reported nothing wrong with cookies.
+//
+// It matters beyond that one bug. A payload in a cookie appears in no URL, so it is absent from
+// access logs, from the Referer header, and from anything that inspects query strings.
+func echoedCookieInputs(responseHeadersJSON, getParamsJSON, postParamsJSON string) (names, signals []string) {
+	setCookies := setCookieValues(responseHeadersJSON)
+	if len(setCookies) == 0 {
+		return nil, nil
+	}
+	// The values the CALLER supplied on this request. A response cookie matching one of these was
+	// built from caller-controlled input.
+	supplied := map[string]bool{}
+	for _, blob := range []string{getParamsJSON, postParamsJSON} {
+		var values map[string]any
+		if json.Unmarshal([]byte(blob), &values) != nil {
+			continue
+		}
+		for _, v := range values {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				supplied[s] = true
+			}
+		}
+	}
+	if len(supplied) == 0 {
+		return nil, nil
+	}
+
+	seenSignal := map[string]bool{}
+	for name, value := range setCookies {
+		if !supplied[value] {
+			continue
+		}
+		names = append(names, templateInputName(name))
+		if kind := classifyInputValue(value); kind != "" && !seenSignal[kind] {
+			seenSignal[kind] = true
+			signals = append(signals, kind)
+		}
+	}
+	if len(names) == 0 {
+		return nil, nil
+	}
+	// A signal of its own, because this cookie is not like the others in the jar: the operator should
+	// see at a glance that the server built it from something they sent.
+	signals = append(signals, "server_set")
+	sort.Strings(names)
+	sort.Strings(signals)
+	return names, signals
+}
+
+// setCookieValues pulls name/value pairs out of a response's Set-Cookie headers, which arrive either
+// as one string or as an array depending on how the capture was stored.
+func setCookieValues(responseHeadersJSON string) map[string]string {
+	var headers map[string]any
+	if json.Unmarshal([]byte(responseHeadersJSON), &headers) != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for key, raw := range headers {
+		if !strings.EqualFold(strings.TrimSpace(key), "set-cookie") {
+			continue
+		}
+		var lines []string
+		switch v := raw.(type) {
+		case string:
+			lines = append(lines, v)
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					lines = append(lines, s)
+				}
+			}
+		}
+		for _, line := range lines {
+			// Only the first segment is the pair; everything after a semicolon is an attribute.
+			pair, _, _ := strings.Cut(line, ";")
+			name, value, found := strings.Cut(strings.TrimSpace(pair), "=")
+			if !found {
+				continue
+			}
+			if name = strings.TrimSpace(name); name != "" {
+				out[name] = strings.TrimSpace(value)
+			}
+		}
+	}
+	return out
 }
 
 // inputSignalsFor reports what the VALUES of a set of parameters look like, so a query string

@@ -2,6 +2,7 @@ package utils
 
 import (
 	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -12,6 +13,17 @@ import (
 // whose response differs from a baseline, and on a real site most differences are not bypasses: a
 // WAF block page, a redirect to a login form, or a denial served under status 200 all differ from a
 // 403 without granting access to anything.
+//
+// NOTHING IN THIS FILE DECIDES ANYTHING ON ITS OWN ANY MORE. Both parsers now reduce a report to a
+// list of CANDIDATES and hand them to bypassControl.go, which re-sends each one alongside a
+// negative control and compares the two bodies. What survives is reported; what does not is counted
+// and explained on a single note rather than dropped. That split is deliberate: the reading of a
+// report and the judging of a claim were tangled together here, and the judging was wrong.
+//
+// The measurement that forced it: seven scanners against OWASP Juice Shop produced 165 findings, of
+// which 159 came from these two tools and every one was false. They died in two ways, and neither
+// is anything a report parser can see. A non-response was scored as access, and every surviving
+// candidate was compared against the original target url while the tool had requested a mutated one.
 
 // nomore403Result is one line of the --jsonl report. Captured verbatim from a real run:
 //
@@ -60,11 +72,15 @@ func parseNomore403Report(stdout, report string, row vectorRow) []VectorFinding 
 		return nil
 	}
 
-	// The unmodified request, which is the denial every other result is judged against.
+	// The unmodified request, which is the denial every other result is judged against, and also the
+	// only place nomore403 publishes the BASE headers of the run. Knowing them exactly is what lets
+	// the control strip the technique's headers and nothing else.
 	baselineHash, baselineLength, baselineStatus := "", -1, 0
+	var baseHeaders []string
 	for _, result := range results {
 		if result.Technique == "default" {
 			baselineHash, baselineLength, baselineStatus = result.BodyHash, result.ContentLength, result.StatusCode
+			baseHeaders = bypassHeadersFromCurl(result.ReproCurl)
 			break
 		}
 	}
@@ -93,7 +109,11 @@ func parseNomore403Report(stdout, report string, row vectorRow) []VectorFinding 
 		}}
 	}
 
-	var findings []VectorFinding
+	// Deduplicated FIRST, so the control phase costs a couple of requests per distinct result rather
+	// than per payload. Measured, one url with the default technique set produces dozens of records
+	// that are the same response reached by a different encoding of the same path.
+	var candidates []bypassCandidate
+	var raw []nomore403Result
 	seen := map[string]bool{}
 	for _, result := range results {
 		if result.Technique == "default" {
@@ -103,7 +123,9 @@ func parseNomore403Report(stdout, report string, row vectorRow) []VectorFinding 
 		if baselineHash != "" && result.BodyHash == baselineHash {
 			continue
 		}
-		// Nothing was granted: the variation was refused too.
+		// Nothing was granted: the variation was refused too. Status 0 is NOT filtered here, on
+		// purpose: it used to slip through this test and be reported as a bypass, and it now has to
+		// reach bypassPreScreen so it is rejected for the right reason and counted.
 		if result.StatusCode >= 400 {
 			continue
 		}
@@ -114,25 +136,89 @@ func parseNomore403Report(stdout, report string, row vectorRow) []VectorFinding 
 		}
 		seen[key] = true
 
+		headers := bypassHeadersFromCurl(result.ReproCurl)
+		candidates = append(candidates, bypassCandidate{
+			Technique:    result.Technique,
+			Method:       nomore403Method(result, row),
+			RequestedURL: nomore403RequestedURL(result, row),
+			OriginalURL:  row.EvidenceURL,
+			Headers:      headers,
+			BaseHeaders:  bypassBaseHeaders(headers, baseHeaders),
+			Status:       result.StatusCode,
+			Length:       result.ContentLength,
+			Curl:         result.ReproCurl,
+			Score:        result.Score,
+		})
+		raw = append(raw, result)
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	judgements := screenBypassCandidates(candidates)
+
+	var findings []VectorFinding
+	for i, judgement := range judgements {
+		if judgement.Verdict != bypassVerdictConfirmed {
+			continue
+		}
+		result := raw[i]
+		// The grade is left exactly as the tool's score and the length comparison against the original
+		// denial produced it. The control does not raise it: the two say different things, and a
+		// response the same length as the denial page is still suspicious even when a control did not
+		// reproduce it. What the control changes is whether the finding exists at all.
 		severity, confidence := nomore403Grade(result, baselineLength, baselineStatus, row.BaselineStatus)
 		findings = append(findings, VectorFinding{
-			VectorID:        row.ID,
-			Tool:            "nomore403",
-			Kind:            "access-control-bypass",
-			Severity:        severity,
-			Confidence:      confidence,
-			InsertionPoint:  row.InsertionPoint,
-			Method:          row.Method,
-			URL:             row.EvidenceURL,
-			Payload:         result.Payload,
+			VectorID:       row.ID,
+			Tool:           "nomore403",
+			Kind:           "access-control-bypass",
+			Severity:       severity,
+			Confidence:     confidence + " CONTROLLED: " + judgement.Reason,
+			InsertionPoint: row.InsertionPoint,
+			Method:         candidates[i].Method,
+			URL:            row.EvidenceURL,
+			Payload:        result.Payload,
 			Evidence: result.Technique + ": " + strconv.Itoa(baselineStatus) + " -> " +
 				strconv.Itoa(result.StatusCode) + ", " + strconv.Itoa(baselineLength) + "b -> " +
 				strconv.Itoa(result.ContentLength) + "b" + scoreText(result) + ". " + result.ReproCurl,
-			DetectionMethod: "nomore403 " + result.Technique,
+			DetectionMethod: "nomore403 " + result.Technique + " + " + judgement.ControlKind,
 			InjectType:      result.Technique,
+			RawRequest:      bypassRawRequest(judgement, candidates[i].RequestedURL),
+			RawResponse:     bypassEvidenceBlock(judgement),
 		})
 	}
+	if note := bypassRejectionNote("nomore403", row, candidates, judgements, len(findings)); note != nil {
+		findings = append(findings, *note)
+	}
 	return findings
+}
+
+// nomore403RequestedURL recovers the url the tool ACTUALLY requested, which is the only thing a
+// control can honestly be aimed at.
+//
+// The payload field is not it. It holds a url for the path and encoding techniques but a bare verb
+// for the verb techniques, so the curl is preferred and the payload is only used when it plainly
+// carries a url of its own.
+func nomore403RequestedURL(result nomore403Result, row vectorRow) string {
+	if fromCurl := bypassURLFromCurl(result.ReproCurl); fromCurl != "" {
+		return fromCurl
+	}
+	if strings.HasPrefix(result.Payload, "http://") || strings.HasPrefix(result.Payload, "https://") {
+		return result.Payload
+	}
+	return row.EvidenceURL
+}
+
+// nomore403Method recovers the verb, which for the verb-tampering techniques is the payload itself.
+func nomore403Method(result nomore403Result, row vectorRow) string {
+	if fromCurl := bypassMethodFromCurl(result.ReproCurl); fromCurl != "" {
+		return fromCurl
+	}
+	if payload := strings.TrimSpace(result.Payload); payload != "" && !strings.Contains(payload, "/") &&
+		payload == strings.ToUpper(payload) && len(payload) <= 10 {
+		return payload
+	}
+	return firstNonEmpty(row.Method, "GET")
 }
 
 // nomore403Grade turns the tool's score and the comparison against the original denial into a
@@ -227,31 +313,72 @@ func parseForbiddenReport(stdout, report string, row vectorRow) []VectorFinding 
 		}
 	}
 
-	var findings []VectorFinding
+	var candidates []bypassCandidate
+	var raw []forbiddenResult
 	seen := map[string]bool{}
 	for _, result := range results {
 		code := result.statusCode()
-		if code >= 400 || code == 0 {
+		// Refusals are not candidates. Status 0 IS kept, unlike before: a record with no status is a
+		// request that produced nothing, and skipping it here made it invisible. It now reaches
+		// bypassPreScreen, which rejects it by name and counts it.
+		if code >= 400 {
 			continue
 		}
 		length := anyToInt(result.Length)
 
-		// One finding per distinct (method, status, length). Measured: a single URL with six test
+		// One candidate per distinct (method, status, length). Measured: a single URL with six test
 		// families produced 1472 records, almost all of them the same response reached by a different
-		// encoding of the same path. Storing them one by one would bury the handful that differ.
+		// encoding of the same path. Screening them one by one would cost 1472 controls.
 		key := result.Method + "|" + strconv.Itoa(code) + "|" + strconv.Itoa(length)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
 
+		headers := forbiddenHeaders(result)
+		candidates = append(candidates, bypassCandidate{
+			Technique: forbiddenTestFamily(result),
+			Method: firstNonEmpty(strings.ToUpper(strings.TrimSpace(result.Method)),
+				bypassMethodFromCurl(result.Command), row.Method, "GET"),
+			RequestedURL: firstNonEmpty(result.URL, bypassURLFromCurl(result.Command), row.EvidenceURL),
+			OriginalURL:  row.EvidenceURL,
+			Headers:      headers,
+			// Forbidden publishes no unmodified-request row, so the base set is the identity
+			// allowlist rather than a measured one. It errs towards KEEPING credentials, because an
+			// anonymous control differs from an authenticated response for a reason that has nothing
+			// to do with the technique, and that difference would keep a candidate rather than kill it.
+			BaseHeaders: bypassBaseHeaders(headers, nil),
+			Status:      code,
+			Length:      length,
+			Body:        firstNonEmpty(result.Body, result.Response),
+			Curl:        result.Command,
+		})
+		raw = append(raw, result)
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	judgements := screenBypassCandidates(candidates)
+
+	var findings []VectorFinding
+	for i, judgement := range judgements {
+		if judgement.Verdict != bypassVerdictConfirmed {
+			continue
+		}
+		result := raw[i]
+		code := result.statusCode()
+		length := anyToInt(result.Length)
+
 		severity := "medium"
-		confidence := "Forbidden reached this with a request the original was refused for. It applies " +
-			"the ignore regex and length filters before reporting, so this survived them, but a " +
-			"status code is not access: confirm the body is the protected resource."
+		confidence := "Forbidden reached this with a request the original was refused for, and the " +
+			"same request WITHOUT the technique did not reproduce it. That is the comparison this " +
+			"section used to skip. It is still a candidate rather than a proven bypass: name the " +
+			"string in the body that the control did not return before reporting it."
 		if code >= 300 && code < 400 {
 			severity = "low"
-			confidence = "the response is a redirect, which is often a login flow rather than a bypass."
+			confidence = "the response is a redirect, which is often a login flow rather than a bypass, " +
+				"even though the control did not reproduce it."
 		}
 
 		evidence := result.Method + " -> " + strconv.Itoa(code) + ", " + strconv.Itoa(length) + "b"
@@ -264,16 +391,69 @@ func parseForbiddenReport(stdout, report string, row vectorRow) []VectorFinding 
 			Tool:            "forbidden",
 			Kind:            "access-control-bypass",
 			Severity:        severity,
-			Confidence:      confidence,
+			Confidence:      confidence + " CONTROLLED: " + judgement.Reason,
 			InsertionPoint:  row.InsertionPoint,
 			Method:          result.Method,
 			URL:             firstNonEmpty(result.URL, row.EvidenceURL),
 			Evidence:        evidence,
-			DetectionMethod: "forbidden",
-			RawResponse:     result.Response,
+			DetectionMethod: "forbidden + " + judgement.ControlKind,
+			InjectType:      candidates[i].Technique,
+			RawRequest:      bypassRawRequest(judgement, candidates[i].RequestedURL),
+			RawResponse:     bypassEvidenceBlock(judgement),
 		})
 	}
+	if note := bypassRejectionNote("forbidden", row, candidates, judgements, len(findings)); note != nil {
+		findings = append(findings, *note)
+	}
 	return findings
+}
+
+// forbiddenTestFamily reads which test family produced a record. Forbidden encodes it in the id,
+// which arrives as "1-ENCODINGS-1" or "2-METHOD-OVERRIDES-1", and the family decides whether the
+// request can be reproduced at all: its parser and protocol tests exist precisely because PycURL
+// sends request forms a Go client will not build.
+func forbiddenTestFamily(result forbiddenResult) string {
+	id := strings.TrimSpace(stringifySetting(result.ID))
+	parts := strings.Split(id, "-")
+	if len(parts) < 3 {
+		return ""
+	}
+	return strings.ToLower(strings.Join(parts[1:len(parts)-1], "-"))
+}
+
+// forbiddenHeaders recovers the headers a record was produced with. The curl command is preferred
+// because it is what Forbidden itself offers as the reproduction; the headers field is a fallback
+// and arrives in more than one shape across builds.
+func forbiddenHeaders(result forbiddenResult) []string {
+	if fromCurl := bypassHeadersFromCurl(result.Command); len(fromCurl) > 0 {
+		return fromCurl
+	}
+	switch t := result.Headers.(type) {
+	case string:
+		var out []string
+		for _, line := range strings.Split(t, "\n") {
+			if line = strings.TrimSpace(line); strings.Contains(line, ":") {
+				out = append(out, line)
+			}
+		}
+		return out
+	case []any:
+		var out []string
+		for _, item := range t {
+			if line, ok := item.(string); ok && strings.Contains(line, ":") {
+				out = append(out, strings.TrimSpace(line))
+			}
+		}
+		return out
+	case map[string]any:
+		var out []string
+		for name, value := range t {
+			out = append(out, strings.TrimSpace(name)+": "+stringifySetting(value))
+		}
+		sort.Strings(out)
+		return out
+	}
+	return nil
 }
 
 // anyToInt reads a value that may have arrived as a number or as a string, because Forbidden's

@@ -123,8 +123,8 @@ func (lw *logWriter) Write(p []byte) (n int, err error) {
 }
 
 type capturingLogWriter struct {
-	prefix  string
-	buf     bytes.Buffer
+	prefix string
+	buf    bytes.Buffer
 }
 
 func (cw *capturingLogWriter) Write(p []byte) (n int, err error) {
@@ -184,10 +184,82 @@ func getStringSliceConfig(config map[string]interface{}, key string) []string {
 	return nil
 }
 
+// nucleiWildcardBaseArity is the arity of every flag executeNucleiScan builds for itself, so the
+// Wildcard settings overlay can walk the vector and never mistake a value for a flag.
+//
+// Keep it in step with the args below. A flag missing from here is not a crash; it means the token
+// after it is inspected as though it were a flag, which only matters if a header value or a template
+// id happens to spell one.
+var nucleiWildcardBaseArity = map[string]int{
+	"-list": 1, "-jsonl": 0, "-nh": 0, "-o": 1,
+	"-c": 1, "-rl": 1, "-timeout": 1, "-retries": 1, "-bs": 1, "-mhe": 1,
+	"-fr": 0, "-fhr": 0, "-mr": 1, "-H": 1, "-proxy": 1,
+	"-ni": 0, "-iserver": 1, "-itoken": 1,
+	"-headless": 0, "-hbs": 1, "-headc": 1,
+	"-ss": 1, "-spm": 0, "-pt": 1, "-tc": 1, "-a": 1,
+	"-sr": 0, "-ldp": 0,
+	"-id": 1, "-tags": 1, "-eid": 1, "-etags": 1, "-severity": 1, "-t": 1,
+}
+
+// applyNucleiWildcardSettings overlays the per-target Wildcard settings onto the argument vector
+// this function has already built from nuclei_configs.advanced_config.
+//
+// PRECEDENCE, DECIDED AND STATED: THE WILDCARD SETTING WINS. Every engine option in the Wildcard
+// vocabulary declares a shadowed_by against an advanced_config key, and this runner emits -c, -rl,
+// -timeout, -retries, -bs and -mhe on EVERY scan whether or not anything is stored, falling back to
+// hardcoded defaults on a key miss. So if advanced_config won, a Wildcard rate limit could never
+// take effect under any circumstances: it would save successfully, appear in would_add_args, and be
+// displaced on every single run. There is no version of "the other store wins" that leaves this
+// screen honest, which is why the more specific per-target value takes it, in place, so the stored
+// command shows one value for one flag.
+//
+// THE OTHER HALF OF THAT DECISION IS THAT THE UI MUST SAY SO. The Configure modal's Advanced
+// Settings accordion still writes advanced_config, and an operator who tunes a rate limit there and
+// sees a different one on the scan deserves to know which store they are looking at.
+func applyNucleiWildcardSettings(args []string, scopeTargetID string) ([]string, []string) {
+	tool, settings := wildcardRunnerSettings(scopeTargetID, "nuclei")
+	return composeNucleiWildcardArgs(tool, settings, args)
+}
+
+// composeNucleiWildcardArgs is the pure half of the above, so the overlay can be proven without a
+// database. Everything that decides what the command line looks like lives here.
+func composeNucleiWildcardArgs(tool WildcardTool, settings map[string]any, args []string) ([]string, []string) {
+	if len(settings) == 0 {
+		return args, nil
+	}
+
+	overlay := wildcardOverlay{
+		tool:      tool,
+		settings:  settings,
+		baseArity: nucleiWildcardBaseArity,
+	}
+	out, notes := overlay.apply(args)
+
+	// MEASURED, and it is a defect rather than a preference: `nuclei -headless` without -sc starts
+	// downloading chrome-linux.zip, about 150MB, from storage.googleapis.com AT SCAN TIME, even though
+	// /usr/bin/google-chrome is already installed in this container; the same run with -sc completed
+	// RC=0 with no download. On an egress-filtered host that download is also how a headless scan
+	// comes to produce nothing. This only fires when the WILDCARD settings are what turned headless
+	// on, so a scan configured entirely through the existing Configure modal behaves exactly as it
+	// did before, and an operator who deliberately sets systemChrome to false is obeyed.
+	if truthySetting(settings["headless"]) {
+		if explicit, set := settings["systemChrome"].(bool); !set || explicit {
+			if wildcardFlagIndex(out, nucleiWildcardBaseArity, "-sc") < 0 {
+				out = append(out, "-sc")
+				notes = append(notes, "-sc was added alongside -headless. Measured on this exact container: "+
+					"headless without it downloads ~150MB of Chromium at scan time even though Chrome is already "+
+					"installed at /usr/bin/google-chrome. Set systemChrome to false to suppress this.")
+			}
+		}
+	}
+
+	return out, notes
+}
+
 func executeNucleiScan(targets []string, templates []string, severities []string,
 	templateIDs []string, excludeIDs []string, excludeTags []string,
 	uploadedTemplates []map[string]interface{}, advancedConfig map[string]interface{},
-	outputFile string, capturedStdout *bytes.Buffer) error {
+	outputFile string, capturedStdout *bytes.Buffer, scopeTargetID string) (string, error) {
 
 	log.Printf("[DEBUG] Starting Nuclei scan with %d targets", len(targets))
 	log.Printf("[DEBUG] Targets: %v", targets)
@@ -197,16 +269,23 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 	log.Printf("[DEBUG] ExcludeIDs: %v", excludeIDs)
 	log.Printf("[DEBUG] ExcludeTags: %v", excludeTags)
 
+	// The command as it was finally composed, returned to the caller so it can be written onto the
+	// scan row. "What did this actually run" is the question the whole diagnostic layer exists to
+	// answer, and until now nuclei answered it only into a log line that has already rotated by the
+	// time anyone asks. It is set as soon as there is a command, so an error path still reports the
+	// vector that failed.
+	var nucleiCommand string
+
 	tempFile, err := os.CreateTemp("", "nuclei_targets_*.txt")
 	if err != nil {
-		return fmt.Errorf("failed to create temp targets file: %v", err)
+		return nucleiCommand, fmt.Errorf("failed to create temp targets file: %v", err)
 	}
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
 
 	targetsContent := strings.Join(targets, "\n")
 	if _, err := tempFile.WriteString(targetsContent); err != nil {
-		return fmt.Errorf("failed to write targets to temp file: %v", err)
+		return nucleiCommand, fmt.Errorf("failed to write targets to temp file: %v", err)
 	}
 	tempFile.Close()
 
@@ -218,7 +297,7 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 		"ars0n-framework-v2-nuclei-1:/targets.txt",
 	)
 	if err := copyCmd.Run(); err != nil {
-		return fmt.Errorf("failed to copy targets file to container: %v", err)
+		return nucleiCommand, fmt.Errorf("failed to copy targets file to container: %v", err)
 	}
 
 	var args []string
@@ -370,7 +449,7 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 	if len(uploadedTemplates) > 0 {
 		mkdirCmd := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "mkdir", "-p", "/custom_templates")
 		if err := mkdirCmd.Run(); err != nil {
-			return fmt.Errorf("failed to create custom templates directory: %v", err)
+			return nucleiCommand, fmt.Errorf("failed to create custom templates directory: %v", err)
 		}
 
 		for i, template := range uploadedTemplates {
@@ -402,10 +481,19 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 		args = append(args, "-t", "/custom_templates")
 	}
 
+	// The ONE place the per-target Wildcard settings meet this command line. Everything above came
+	// from nuclei_configs; this is the store the Wildcard Settings screen and the MCP wildcard tool
+	// both write, and with nothing stored it returns args untouched.
+	args, wildcardNotes := applyNucleiWildcardSettings(args, scopeTargetID)
+	for _, note := range wildcardNotes {
+		log.Printf("[INFO] Nuclei wildcard settings: %s", note)
+	}
+
 	dockerArgs := []string{"exec", "-i", "ars0n-framework-v2-nuclei-1", "nuclei"}
 	dockerArgs = append(dockerArgs, args...)
 
-	log.Printf("[INFO] Executing Nuclei command: docker %s", strings.Join(dockerArgs, " "))
+	nucleiCommand = "docker " + strings.Join(dockerArgs, " ")
+	log.Printf("[INFO] Executing Nuclei command: %s", nucleiCommand)
 	dockerCmd := exec.Command("docker", dockerArgs...)
 
 	stdoutWriter := &capturingLogWriter{prefix: "[NUCLEI]"}
@@ -416,14 +504,14 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 
 	if err = dockerCmd.Start(); err != nil {
 		log.Printf("[ERROR] Failed to start Nuclei command: %v", err)
-		return fmt.Errorf("failed to start nuclei: %v", err)
+		return nucleiCommand, fmt.Errorf("failed to start nuclei: %v", err)
 	}
 
 	log.Printf("[INFO] Nuclei scan started, streaming output...")
 
 	if err = dockerCmd.Wait(); err != nil {
 		log.Printf("[ERROR] Nuclei command failed: %v", err)
-		return fmt.Errorf("nuclei execution failed: %v", err)
+		return nucleiCommand, fmt.Errorf("nuclei execution failed: %v", err)
 	}
 
 	log.Printf("[INFO] Nuclei scan completed successfully")
@@ -442,18 +530,18 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 		readOutputCmd := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "cat", "/output.jsonl")
 		if outputContent, readErr := readOutputCmd.Output(); readErr == nil {
 			if writeErr := os.WriteFile(outputFile, outputContent, 0644); writeErr != nil {
-				return fmt.Errorf("failed to copy output from container and write to host: %v", writeErr)
+				return nucleiCommand, fmt.Errorf("failed to copy output from container and write to host: %v", writeErr)
 			}
 			log.Printf("[INFO] Successfully read output directly from container")
 		} else {
 			log.Printf("[WARN] Fallback cat also failed: %v, using captured stdout", readErr)
 			if stdoutWriter.buf.Len() > 0 {
 				if writeErr := os.WriteFile(outputFile, stdoutWriter.buf.Bytes(), 0644); writeErr != nil {
-					return fmt.Errorf("failed to write captured stdout to output file: %v", writeErr)
+					return nucleiCommand, fmt.Errorf("failed to write captured stdout to output file: %v", writeErr)
 				}
 				log.Printf("[INFO] Successfully recovered output from captured stdout (%d bytes)", stdoutWriter.buf.Len())
 			} else {
-				return fmt.Errorf("failed to copy output file from container and no stdout captured: %v", err)
+				return nucleiCommand, fmt.Errorf("failed to copy output file from container and no stdout captured: %v", err)
 			}
 		}
 	}
@@ -477,7 +565,7 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 	cleanupCmd := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "rm", "-f", "/targets.txt", "/output.jsonl")
 	cleanupCmd.Run()
 
-	return nil
+	return nucleiCommand, nil
 }
 
 func parseNucleiResults(outputFile string) ([]NucleiFinding, error) {
@@ -540,9 +628,11 @@ func ExecuteNucleiScanForScopeTarget(scopeTargetID string, selectedTargets []str
 
 	outputFile := filepath.Join(outputDir, fmt.Sprintf("nuclei_scan_%s_%d.jsonl", scopeTargetID, time.Now().Unix()))
 
-	if err := executeNucleiScan(targets, selectedTemplates, selectedSeverities,
+	command, err := executeNucleiScan(targets, selectedTemplates, selectedSeverities,
 		templateIDs, excludeIDs, excludeTags,
-		uploadedTemplates, advancedConfig, outputFile, nil); err != nil {
+		uploadedTemplates, advancedConfig, outputFile, nil, scopeTargetID)
+	recordNucleiScanCommand(dbPool, scopeTargetID, command)
+	if err != nil {
 		return "", nil, fmt.Errorf("scan execution failed: %v", err)
 	}
 
@@ -554,12 +644,53 @@ func ExecuteNucleiScanForScopeTarget(scopeTargetID string, selectedTargets []str
 	return outputFile, findings, nil
 }
 
+// recordNucleiScanCommand writes the command that was actually composed onto the scan row.
+//
+// nuclei_scans has had a command column since it was created and nothing has ever written to it, so
+// the only record of what a scan ran was a log line. That is the one question the diagnostic layer
+// exists to answer, and it matters more now that a per-target settings store can change the flags.
+//
+// It targets the most recent RUNNING scan for the target whose command is still empty, because the
+// scan id lives in main.go's handler and is not passed down. That is a compromise, not a design:
+// plumbing the scan id into the runner is a one-line change in main.go and is reported as such.
+// Every failure here is swallowed, because a diagnostic write must never fail a scan.
+func recordNucleiScanCommand(pool *pgxpool.Pool, scopeTargetID, command string) {
+	if pool == nil || strings.TrimSpace(scopeTargetID) == "" || strings.TrimSpace(command) == "" {
+		return
+	}
+	_, err := pool.Exec(context.Background(), `
+		UPDATE nuclei_scans SET command = $1
+		WHERE scan_id = (
+			SELECT scan_id FROM nuclei_scans
+			WHERE scope_target_id = $2::uuid AND status = 'running' AND command IS NULL
+			ORDER BY created_at DESC LIMIT 1
+		)`, command, scopeTargetID)
+	if err != nil {
+		log.Printf("[WARN] Could not record the Nuclei command on the scan row: %v", err)
+	}
+}
+
+// ExecuteNucleiScanDirect is the httpx target mode.
+//
+// scopeTargetID is VARIADIC only so the existing call site keeps compiling. It should be passed:
+// without it this path cannot read the per-target Wildcard settings, so the same target configured
+// the same way behaves differently depending on which target mode is selected, which is precisely
+// the kind of invisible divergence this store exists to remove. The one-line change is reported.
 func ExecuteNucleiScanDirect(targets []string, selectedTemplates []string,
 	selectedSeverities []string, templateIDs []string, excludeIDs []string, excludeTags []string,
-	uploadedTemplates []map[string]interface{}, advancedConfig map[string]interface{}) (string, []NucleiFinding, error) {
+	uploadedTemplates []map[string]interface{}, advancedConfig map[string]interface{},
+	scopeTargetID ...string) (string, []NucleiFinding, error) {
 
 	if len(targets) == 0 {
 		return "", nil, fmt.Errorf("no targets provided")
+	}
+
+	targetID := ""
+	if len(scopeTargetID) > 0 {
+		targetID = scopeTargetID[0]
+	} else {
+		log.Printf("[WARN] ExecuteNucleiScanDirect was called without a scope target id, so the per-target " +
+			"Wildcard nuclei settings could not be read and this scan runs on nuclei_configs alone.")
 	}
 
 	outputDir := filepath.Join(os.TempDir(), "nuclei_scans")
@@ -569,9 +700,9 @@ func ExecuteNucleiScanDirect(targets []string, selectedTemplates []string,
 
 	outputFile := filepath.Join(outputDir, fmt.Sprintf("nuclei_scan_direct_%d.jsonl", time.Now().Unix()))
 
-	if err := executeNucleiScan(targets, selectedTemplates, selectedSeverities,
+	if _, err := executeNucleiScan(targets, selectedTemplates, selectedSeverities,
 		templateIDs, excludeIDs, excludeTags,
-		uploadedTemplates, advancedConfig, outputFile, nil); err != nil {
+		uploadedTemplates, advancedConfig, outputFile, nil, targetID); err != nil {
 		return "", nil, fmt.Errorf("scan execution failed: %v", err)
 	}
 

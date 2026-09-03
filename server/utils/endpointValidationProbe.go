@@ -36,30 +36,30 @@ type ProbeContext struct {
 	RateWithheld    string  `json:"rate_withheld_reason,omitempty"`
 
 	// Not-found behaviour: the single most useful thing Validate inherits.
-	NotFoundVerdict  string `json:"notfound_verdict,omitempty"`
-	NotFoundStatus   int    `json:"notfound_status"`
-	NotFoundSize     int    `json:"notfound_median_size"`
-	NotFoundSpread   int    `json:"notfound_size_spread"`
-	NotFoundFilter   bool   `json:"notfound_filterable"`
-	Distinguishable  bool   `json:"notfound_distinguishable"`
+	NotFoundVerdict string `json:"notfound_verdict,omitempty"`
+	NotFoundStatus  int    `json:"notfound_status"`
+	NotFoundSize    int    `json:"notfound_median_size"`
+	NotFoundSpread  int    `json:"notfound_size_spread"`
+	NotFoundFilter  bool   `json:"notfound_filterable"`
+	Distinguishable bool   `json:"notfound_distinguishable"`
 
 	// Stability governs how much size drift means nothing.
-	SizeTolerance   int  `json:"size_tolerance"`
-	UnstableBodies  bool `json:"unstable_bodies"`
+	SizeTolerance  int  `json:"size_tolerance"`
+	UnstableBodies bool `json:"unstable_bodies"`
 
 	// Routing and session behaviour
-	CanonicalBaseURL   string `json:"canonical_base_url,omitempty"`
-	ConfiguredCanonical bool  `json:"configured_is_canonical"`
-	ForceCacheBust     bool   `json:"force_cache_bust"`
-	ReuseSession       bool   `json:"reuse_session_recommended"`
+	CanonicalBaseURL    string `json:"canonical_base_url,omitempty"`
+	ConfiguredCanonical bool   `json:"configured_is_canonical"`
+	ForceCacheBust      bool   `json:"force_cache_bust"`
+	ReuseSession        bool   `json:"reuse_session_recommended"`
 
 	// Auth and blocking
-	AuthWallVerdict  string `json:"auth_wall_verdict,omitempty"`
-	BlockStatus      int    `json:"block_signature_status"`
-	BlockSize        int    `json:"block_signature_size"`
-	BlockUsable      bool   `json:"block_signature_usable"`
-	StealthSwap      bool   `json:"stealth_swap"`
-	StickyBlocking   bool   `json:"sticky_blocking"`
+	AuthWallVerdict string `json:"auth_wall_verdict,omitempty"`
+	BlockStatus     int    `json:"block_signature_status"`
+	BlockSize       int    `json:"block_signature_size"`
+	BlockUsable     bool   `json:"block_signature_usable"`
+	StealthSwap     bool   `json:"stealth_swap"`
+	StickyBlocking  bool   `json:"sticky_blocking"`
 
 	// What was actually present in the result, and what was not.
 	PresentTests []string `json:"present_tests"`
@@ -205,9 +205,9 @@ func LoadProbeContext(scopeTargetID string) ProbeContext {
 
 	// ---- stability ----------------------------------------------------------------------
 	var rs struct {
-		Verdict        string `json:"verdict"`
-		SizeTolerance  int    `json:"recommended_size_tolerance"`
-		AutoCalibrate  bool   `json:"auto_calibrate_recommended"`
+		Verdict       string `json:"verdict"`
+		SizeTolerance int    `json:"recommended_size_tolerance"`
+		AutoCalibrate bool   `json:"auto_calibrate_recommended"`
 	}
 	if raw, ok := doc.Results["response_stability"]; ok && json.Unmarshal(raw, &rs) == nil {
 		if rs.SizeTolerance > 0 {

@@ -239,3 +239,90 @@ func TestInvestigationHostExprStripsThePort(t *testing.T) {
 		t.Fatalf("the SQL expression must split on both the path and the port: %s", InvestigationHostExpr)
 	}
 }
+
+// An address target must not widen into a suffix, and this is the test for the traffic decision
+// rather than for the import decision.
+//
+// MEASURED on 2026-08-21. RegistrableDomain("10.0.0.18") returned "0.18", because the dotted quad
+// splits into four labels, "0.18" is not a known two-label public suffix, and the last two labels
+// came back. LoadScanScope put that in s.domains, so the boundary printed as "*.0.18, 10.0.0.18" in
+// every scan that described itself, and Allows() admitted anything ending in ".0.18" at a label
+// boundary. 110.0.0.18 is such a host. It is a different machine on a different network, and the
+// scanner would have sent it traffic.
+//
+// This is the only class of bug in this file that cannot be undone by re-running anything: an
+// unauthorised request has already left.
+func TestAnAddressTargetDoesNotWidenIntoASuffix(t *testing.T) {
+	if rd := RegistrableDomain("10.0.0.18"); rd != "10.0.0.18" {
+		t.Fatalf("RegistrableDomain(\"10.0.0.18\") = %q, want the address itself", rd)
+	}
+
+	// Built the way LoadScanScope builds it, minus the database read.
+	s := &ScanScope{primary: "10.0.0.18", domains: map[string]bool{}, extra: map[string]bool{},
+		refused: map[string]int{}}
+	if rd := RegistrableDomain(s.primary); rd != "" && !isIPLiteralHost(s.primary) {
+		s.domains[rd] = true
+	}
+
+	if len(s.domains) != 0 {
+		t.Errorf("an address target carries a domain boundary %v; there is no subdomain of an "+
+			"address for it to admit, and Describe() would print a wildcard that means nothing",
+			s.domains)
+	}
+	if !s.Allows("10.0.0.18") {
+		t.Error("the target's own address is out of its own scope")
+	}
+	// The escape, exactly as it was: every one of these ends in ".0.18" and is a different machine.
+	for _, host := range []string{"110.0.0.18", "1.2.0.18", "evil.0.18", "10.0.0.180"} {
+		if s.Allows(host) {
+			t.Errorf("%s is inside the boundary of a scan scoped to 10.0.0.18; that is "+
+				"unauthorised traffic to a third party", host)
+		}
+	}
+	if got := s.Describe(); strings.Contains(got, "*.") {
+		t.Errorf("the boundary describes itself as %q; a wildcard on an address is not a thing "+
+			"any host can match", got)
+	}
+}
+
+// The counterpart, so the fix cannot be over-applied: a NAMED host still admits its subdomains.
+// Removing the domain widening wholesale would silently drop every adjacent host on every ordinary
+// engagement, which is a much larger failure than the one being fixed.
+func TestANamedTargetStillAdmitsItsSubdomains(t *testing.T) {
+	s := &ScanScope{primary: "ginandjuice.shop", domains: map[string]bool{}, extra: map[string]bool{},
+		refused: map[string]int{}}
+	if rd := RegistrableDomain(s.primary); rd != "" && !isIPLiteralHost(s.primary) {
+		s.domains[rd] = true
+	}
+
+	for _, host := range []string{"ginandjuice.shop", "www.ginandjuice.shop", "api.ginandjuice.shop"} {
+		if !s.Allows(host) {
+			t.Errorf("%s was refused; the registrable-domain boundary is how adjacent hosts get "+
+				"scanned at all", host)
+		}
+	}
+	// Still a label-boundary check, not a suffix match.
+	if s.Allows("notginandjuice.shop") {
+		t.Error("notginandjuice.shop admitted; that is a different registration")
+	}
+}
+
+// Cookie bucketing, the second half of the same string. byDomain is keyed on RegistrableDomain, so
+// what this returns decides which hosts share a session cookie.
+//
+// Returning "" for an address would look tidier and be worse: every IP-literal host would collapse
+// into one bucket and one machine's cookies would be attached to requests to another.
+func TestEveryAddressGetsItsOwnCredentialBucket(t *testing.T) {
+	buckets := map[string]bool{}
+	for _, host := range []string{"10.0.0.18", "10.0.0.180", "110.0.0.18", "192.168.1.18", "::1"} {
+		key := RegistrableDomain(host)
+		if key == "" {
+			t.Fatalf("RegistrableDomain(%q) is empty; byDomain would put every address in one "+
+				"bucket and send one machine's cookies to the next", host)
+		}
+		if buckets[key] {
+			t.Errorf("%q shares a credential bucket (%q) with an address already seen", host, key)
+		}
+		buckets[key] = true
+	}
+}

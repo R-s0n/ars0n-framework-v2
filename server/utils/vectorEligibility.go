@@ -68,6 +68,49 @@ func vectorSkipReason(tool VectorTool, insertionPoint string) string {
 	return tool.Name + " cannot reach a " + insertionPoint + " insertion point."
 }
 
+// vectorPointNeedsOptIn reports whether this tool would reach the point but has not been asked to.
+//
+// Checked BEFORE the per-vector predicate and before the blinding rules, because "you did not ask
+// for this" is a cheaper and more honest answer than any of them, and because reporting a
+// deliberately-off point as "blinded by settings" would read as a misconfiguration.
+func vectorPointNeedsOptIn(tool VectorTool, insertionPoint string, settings map[string]any) bool {
+	setting, isOptIn := tool.OptInPoints[insertionPoint]
+	if !isOptIn {
+		return false
+	}
+	return !settingIsTrue(settings[setting])
+}
+
+// settingIsTrue reads a stored switch. Settings arrive from JSON, so a bool may have survived as a
+// bool, as a string, or as a number, and only an explicit true turns an opt-in point on.
+func settingIsTrue(value any) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		s := strings.ToLower(strings.TrimSpace(v))
+		return s == "true" || s == "1" || s == "yes" || s == "on"
+	case float64:
+		return v != 0
+	case int:
+		return v != 0
+	}
+	return false
+}
+
+// vectorOptInReason says the point was not tested BY CHOICE, names the switch that changes it, and
+// says what the default is protecting. An operator reading a zero has to be able to tell "off by
+// default" from "this tool cannot do that", and the two must never share wording.
+func vectorOptInReason(tool VectorTool, insertionPoint string) string {
+	setting := tool.OptInPoints[insertionPoint]
+	return tool.Name + " can reach a " + insertionPoint + " insertion point but does not by default, " +
+		"so nothing was sent here and this is not a clean result. Turn on \"" + setting + "\" to " +
+		"include " + insertionPoint + " vectors. The default is off because " + tool.Name +
+		" spends its budget in vector order: on a 249-vector corpus it covered body, header and " +
+		"cookie in full and never reached a single query or path vector, which are the two points " +
+		"most likely to carry a finding."
+}
+
 // BuildVectorEligibility works out what a scan with this tool would actually cover.
 //
 // alreadyFound holds the vector ids an earlier scan in this category has produced findings for, and
@@ -106,6 +149,8 @@ func BuildVectorEligibility(tool VectorTool, vectors []vectorRow, settings map[s
 		switch {
 		case !VectorToolCanReach(tool, v.InsertionPoint):
 			verdict.Reason = vectorSkipReason(tool, v.InsertionPoint)
+		case vectorPointNeedsOptIn(tool, v.InsertionPoint, settings):
+			verdict.Reason = vectorOptInReason(tool, v.InsertionPoint)
 		case !perVectorOK:
 			verdict.Reason = perVectorWhy
 		case tool.RequiresSectionSetting != "" &&

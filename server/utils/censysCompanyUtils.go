@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -140,62 +141,144 @@ func ExecuteCensysCompanyScan(scanID, companyName string) {
 
 	log.Printf("[CENSYS-COMPANY] [INFO] Successfully retrieved Censys API credentials")
 
-	client := &http.Client{Timeout: 60 * time.Second}
-
-	url := fmt.Sprintf("https://search.censys.io/api/v2/certificates/search?q=parsed.subject.organization:%%22%s%%22&per_page=100", companyName)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		log.Printf("[CENSYS-COMPANY] [ERROR] Failed to create HTTP request: %v", err)
-		UpdateCensysCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to create HTTP request: %v", err), "", time.Since(startTime).String())
-		return
+	// The per-target Company settings, from the ONE store the Settings screen and the MCP company tool
+	// both write. Absent is the normal case and produces exactly one GET to the certificates search
+	// endpoint with per_page=100, a 60-second client timeout, no retries and no pagination, and the
+	// names read from hits[].parsed.names - which is exactly what this runner has always done.
+	scopeTargetID := companyScopeTargetForScan(
+		context.Background(), "censys_company_scans", scanID, "censys_company")
+	tool, settings, notes := companyRunnerSettings(scopeTargetID, "censys_company")
+	plan := censysCompanyPlanFor(companyName, settings)
+	if plan.Configured {
+		log.Printf("[CENSYS-COMPANY] [INFO] Running with stored Company settings for scope target %s: %s",
+			scopeTargetID, companySettingsSummary(settings))
+	}
+	command := func() string {
+		if len(settings) == 0 && len(notes) == 0 {
+			return ""
+		}
+		return "GET " + censysCompanyRequestURL(plan, "") + "\n" +
+			companySettingsPreamble(tool, scopeTargetID, settings, notes)
 	}
 
-	req.SetBasicAuth(apiID, apiSecret)
-	req.Header.Set("Accept", "application/json")
-	log.Printf("[CENSYS-COMPANY] [INFO] Making request to Censys API: %s", url)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[CENSYS-COMPANY] [ERROR] Failed to make request to Censys API: %v", err)
-		UpdateCensysCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to make request to Censys API: %v", err), "", time.Since(startTime).String())
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 429 {
-		log.Printf("[CENSYS-COMPANY] [ERROR] Censys API rate limit exceeded")
-		UpdateCensysCompanyScanStatus(scanID, "error", "", "Censys API rate limit exceeded. Please upgrade your plan or try again later.", "", time.Since(startTime).String())
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		log.Printf("[CENSYS-COMPANY] [ERROR] Censys API returned non-200 status code: %d, body: %s", resp.StatusCode, string(body))
-		UpdateCensysCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Censys API returned status code: %d, body: %s", resp.StatusCode, string(body)), "", time.Since(startTime).String())
-		return
-	}
-
-	var response struct {
-		Result struct {
-			Hits []struct {
-				Parsed struct {
-					Names []string `json:"names"`
-				} `json:"parsed"`
-			} `json:"hits"`
-			Total int `json:"total"`
-		} `json:"result"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		log.Printf("[CENSYS-COMPANY] [ERROR] Failed to decode Censys API response: %v", err)
-		UpdateCensysCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to decode Censys API response: %v", err), "", time.Since(startTime).String())
-		return
-	}
+	client := &http.Client{Timeout: plan.Timeout}
 
 	domains := make(map[string]bool)
-	for _, hit := range response.Result.Hits {
-		for _, name := range hit.Parsed.Names {
-			domains[name] = true
+	total := 0
+	pagesFetched := 0
+	cursor := ""
+
+	for page := 1; page <= plan.MaxPages; page++ {
+		requestURL := censysCompanyRequestURL(plan, cursor)
+
+		var resp *http.Response
+		// The retry loop is a no-op at the default: plan.Retries is 0 unless somebody set it, so this
+		// makes exactly one request and takes exactly the paths it always took. Censys enforces a low
+		// request rate on free and community accounts, so a 429 is normal rather than exceptional when
+		// several company scans overlap, and today one destroys the whole scan.
+		for attempt := 0; ; attempt++ {
+			req, reqErr := http.NewRequest("GET", requestURL, nil)
+			if reqErr != nil {
+				log.Printf("[CENSYS-COMPANY] [ERROR] Failed to create HTTP request: %v", reqErr)
+				UpdateCensysCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to create HTTP request: %v", reqErr), command(), time.Since(startTime).String())
+				return
+			}
+			req.SetBasicAuth(apiID, apiSecret)
+			req.Header.Set("Accept", "application/json")
+			log.Printf("[CENSYS-COMPANY] [INFO] Making request to Censys API: %s", requestURL)
+
+			resp, err = client.Do(req)
+			retryable := err != nil || (resp != nil && (resp.StatusCode == 429 || resp.StatusCode >= 500))
+			if !retryable || attempt >= plan.Retries {
+				break
+			}
+			if resp != nil {
+				resp.Body.Close()
+			}
+			notes = append(notes, fmt.Sprintf("Censys page %d attempt %d of %d failed and was retried.",
+				page, attempt+1, plan.Retries+1))
+			if plan.RetryBackoff > 0 {
+				time.Sleep(plan.RetryBackoff)
+			}
+		}
+
+		if err != nil {
+			log.Printf("[CENSYS-COMPANY] [ERROR] Failed to make request to Censys API: %v", err)
+			UpdateCensysCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to make request to Censys API: %v", err), command(), time.Since(startTime).String())
+			return
+		}
+
+		if resp.StatusCode == 429 {
+			resp.Body.Close()
+			log.Printf("[CENSYS-COMPANY] [ERROR] Censys API rate limit exceeded")
+			UpdateCensysCompanyScanStatus(scanID, "error", "", "Censys API rate limit exceeded. Please upgrade your plan or try again later.", command(), time.Since(startTime).String())
+			return
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			log.Printf("[CENSYS-COMPANY] [ERROR] Censys API returned non-200 status code: %d, body: %s", resp.StatusCode, string(body))
+			UpdateCensysCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Censys API returned status code: %d, body: %s", resp.StatusCode, string(body)), command(), time.Since(startTime).String())
+			return
+		}
+
+		// The response struct decodes BOTH candidate name paths and the pagination cursor. Decoding an
+		// extra field cannot change behaviour: which path is READ is namesFieldPath, whose default is the
+		// original parsed.names, and the cursor is only used when maxPages is above 1.
+		var response struct {
+			Result struct {
+				Hits []struct {
+					Parsed struct {
+						// UNCHANGED from the original: a plain []string. Its tolerance is part of what an
+						// existing scan does with a malformed response and must not move.
+						Names   []string `json:"names"`
+						Subject struct {
+							CommonName censysFlexibleNames `json:"common_name"`
+						} `json:"subject"`
+					} `json:"parsed"`
+					// NEW, and decode-proof: see censysFlexibleNames. The live shape of the top-level names
+					// array was never observed, and a wrong guess must not be able to error every scan.
+					Names censysFlexibleNames `json:"names"`
+				} `json:"hits"`
+				Total int `json:"total"`
+				Links struct {
+					Next string `json:"next"`
+				} `json:"links"`
+			} `json:"result"`
+		}
+
+		decodeErr := json.NewDecoder(resp.Body).Decode(&response)
+		resp.Body.Close()
+		if decodeErr != nil {
+			log.Printf("[CENSYS-COMPANY] [ERROR] Failed to decode Censys API response: %v", decodeErr)
+			UpdateCensysCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to decode Censys API response: %v", decodeErr), command(), time.Since(startTime).String())
+			return
+		}
+
+		pagesFetched = page
+		total = response.Result.Total
+		for _, hit := range response.Result.Hits {
+			commonName := ""
+			if len(hit.Parsed.Subject.CommonName) > 0 {
+				commonName = hit.Parsed.Subject.CommonName[0]
+			}
+			for _, raw := range censysCompanyNamesFrom(plan, hit.Parsed.Names, hit.Names, commonName) {
+				if name := censysCompanyKeep(plan, raw); name != "" {
+					domains[name] = true
+				}
+			}
+		}
+
+		cursor = response.Result.Links.Next
+		if cursor == "" || len(response.Result.Hits) == 0 {
+			break
+		}
+		// Pacing, and it only exists once pagination does. rateLimitPerSecond declares RequiresKey
+		// maxPages in the vocabulary for exactly that reason, so companySafeSettings has already dropped
+		// it when pagination is off.
+		if plan.RateLimit > 0 && page < plan.MaxPages {
+			time.Sleep(time.Duration(float64(time.Second) / plan.RateLimit))
 		}
 	}
 
@@ -203,22 +286,55 @@ func ExecuteCensysCompanyScan(scanID, companyName string) {
 	for domain := range domains {
 		uniqueDomains = append(uniqueDomains, domain)
 	}
+	// SORTED, where the original ranged a map and produced a different order on every run for the same
+	// input. Nothing can depend on a randomised order.
+	sort.Strings(uniqueDomains)
+
+	// TRUNCATION IS RECORDED. result.total was already decoded and already stored as meta.total, which
+	// is exactly what made this defect invisible: a company with 48,000 matching certificates was
+	// stored with a healthy-looking total beside a list of 100, and nothing said so.
+	if total > 0 && len(uniqueDomains) > 0 && pagesFetched*plan.PerPage < total {
+		notes = append(notes, fmt.Sprintf(
+			"TRUNCATED: Censys reports %d matching certificates and this scan read %d page(s) of %d. The "+
+				"stored domain list is not the whole answer. Each further page is a billable query.",
+			total, pagesFetched, plan.PerPage))
+	}
+	// THE SUSPECTED SILENT-ZERO, MADE VISIBLE. A large total beside an empty domain list is the exact
+	// tell that hits[].parsed.names is the wrong path and the live shape is a TOP-LEVEL names array.
+	if total > 0 && len(uniqueDomains) == 0 {
+		notes = append(notes, fmt.Sprintf(
+			"Censys reports %d matching certificates and ZERO names were extracted. That combination is the "+
+				"documented tell that namesFieldPath is wrong: the v2 certificates index may expose a hit's "+
+				"DNS names as a TOP-LEVEL names array rather than under parsed. Try namesFieldPath=both.", total))
+	}
 
 	result := map[string]interface{}{
 		"domains": uniqueDomains,
 		"meta": map[string]interface{}{
-			"total": response.Result.Total,
+			"total": total,
 		},
 	}
 
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
 		log.Printf("[CENSYS-COMPANY] [ERROR] Failed to marshal result: %v", err)
-		UpdateCensysCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to marshal result: %v", err), "", time.Since(startTime).String())
+		UpdateCensysCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to marshal result: %v", err), command(), time.Since(startTime).String())
 		return
 	}
 
-	UpdateCensysCompanyScanStatus(scanID, "success", string(resultJSON), "", "", time.Since(startTime).String())
+	companyLogNotes("CENSYS-COMPANY", notes)
+
+	// THE ANTI-SILENT-NOTHING CONTROL, off by default. A response that parses into zero domains while
+	// meta.total is non-zero is not a clean result, it is a parser mismatch, and it should not be
+	// possible to store it as a success.
+	if plan.FailOnZeroDomains && len(uniqueDomains) == 0 {
+		errorMsg := fmt.Sprintf("Censys returned %d matching certificates and zero usable names. "+
+			"failOnZeroDomains is on, so this is recorded as an error rather than as a clean result.", total)
+		UpdateCensysCompanyScanStatus(scanID, "error", string(resultJSON), errorMsg, command(), time.Since(startTime).String())
+		return
+	}
+
+	UpdateCensysCompanyScanStatus(scanID, "success", string(resultJSON), "", command(), time.Since(startTime).String())
 	log.Printf("[CENSYS-COMPANY] [INFO] Successfully completed Censys Company scan for company %s (scan ID: %s)", companyName, scanID)
 }
 

@@ -238,7 +238,7 @@ func ComposeSSRFmap(v VectorInput, settings map[string]any, reportPath string) (
 	tool, _ := VectorToolByKey("ssrfmap")
 	var warnings []string
 
-	param := firstParam(v)
+	param := markableParam(v)
 	if param == "" {
 		return nil, []string{"SSRFmap needs a parameter name and this vector names none, so there is " +
 			"nothing for it to target."}

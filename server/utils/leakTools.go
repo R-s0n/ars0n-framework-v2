@@ -41,11 +41,11 @@ var snallygasterOwned = map[string]string{
 var mantraOptions = map[string]VectorOptionMeta{
 	"endpoints": {Kind: "csv", Group: "Targets", Label: "Endpoints to scan (one per line)",
 		Placeholder: "https://target/app.js"},
-	"threads":       {Kind: "int", Group: "Scan", Label: "Threads", Flag: "-t", Placeholder: "50"},
-	"detailed":      {Kind: "bool", Group: "Scan", Label: "Detailed output", Flag: "-d"},
-	"extraPattern":  {Kind: "string", Group: "Scan", Label: "Extra regex pattern", Flag: "-ep"},
-	"cookies":       {Kind: "string", Group: "Request", Label: "Cookies", Flag: "-c"},
-	"userAgent":     {Kind: "string", Group: "Request", Label: "User-Agent", Flag: "-ua", Placeholder: "Mantra"},
+	"threads":      {Kind: "int", Group: "Scan", Label: "Threads", Flag: "-t", Placeholder: "50"},
+	"detailed":     {Kind: "bool", Group: "Scan", Label: "Detailed output", Flag: "-d"},
+	"extraPattern": {Kind: "string", Group: "Scan", Label: "Extra regex pattern", Flag: "-ep"},
+	"cookies":      {Kind: "string", Group: "Request", Label: "Cookies", Flag: "-c"},
+	"userAgent":    {Kind: "string", Group: "Request", Label: "User-Agent", Flag: "-ua", Placeholder: "Mantra"},
 }
 
 var mantraOwned = map[string]string{
@@ -55,9 +55,9 @@ var mantraOwned = map[string]string{
 var truffleHogOptions = map[string]VectorOptionMeta{
 	"endpoints": {Kind: "csv", Group: "Targets", Label: "Endpoints to scan (one per line)",
 		Placeholder: "https://target/app.js"},
-	"results":        {Kind: "string", Group: "Scan", Label: "Result types", Flag: "--results", Placeholder: "verified,unverified,unknown"},
-	"noVerification": {Kind: "bool", Group: "Scan", Label: "Skip live verification", Flag: "--no-verification"},
-	"concurrency":    {Kind: "int", Group: "Scan", Label: "Concurrent workers", Flag: "--concurrency"},
+	"results":          {Kind: "string", Group: "Scan", Label: "Result types", Flag: "--results", Placeholder: "verified,unverified,unknown"},
+	"noVerification":   {Kind: "bool", Group: "Scan", Label: "Skip live verification", Flag: "--no-verification"},
+	"concurrency":      {Kind: "int", Group: "Scan", Label: "Concurrent workers", Flag: "--concurrency"},
 	"filterUnverified": {Kind: "bool", Group: "Scan", Label: "Only the first unverified result per chunk", Flag: "--filter-unverified"},
 	"includeDetectors": {Kind: "string", Group: "Scan", Label: "Only these detectors", Flag: "--include-detectors"},
 	"excludeDetectors": {Kind: "string", Group: "Scan", Label: "Exclude these detectors", Flag: "--exclude-detectors"},

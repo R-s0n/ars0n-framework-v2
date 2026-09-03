@@ -251,7 +251,12 @@ func ExecuteAndParseShuffleDNSScan(scanID, domain string) {
 		return
 	}
 
-	cmd := exec.Command(
+	shuffleSettings := wildcardStoredSettings(context.Background(),
+		wildcardScopeTargetID(context.Background(),
+			`SELECT scope_target_id::text FROM shuffledns_scans WHERE scan_id = $1`, scanID),
+		"shuffledns")
+
+	baseArgv := []string{
 		"docker", "exec",
 		"ars0n-framework-v2-shuffledns-1",
 		"shuffledns",
@@ -262,7 +267,32 @@ func ExecuteAndParseShuffleDNSScan(scanID, domain string) {
 		"-massdns", "/usr/local/bin/massdns",
 		"-t", fmt.Sprintf("%d", rateLimit),
 		"-mode", "bruteforce",
-	)
+	}
+
+	argv, configNotes := wildcardCommandWithSettings(baseArgv, "shuffledns", shuffleSettings)
+
+	// PRECEDENCE, DECIDED AND RECORDED RATHER THAN LEFT TO IMPLEMENTATION ORDER. -t exists in two
+	// places: user_settings.shuffledns_rate_limit (global, default 10000, what this runner has always
+	// passed) and the per-target concurrency option. THE PER-TARGET VALUE WINS, because it is the
+	// more specific of the two and because a target-level scan configuration that a global slider can
+	// silently displace is a control that reports success and does nothing. The global remains the
+	// default for every target with no per-target value, which is the no-settings path above.
+	//
+	// Worth repeating where an operator will see it: -t is NOT a rate limit. shuffledns' own help
+	// calls it "Number of concurrent massdns resolves" and it maps onto massdns --hashmap-size. The
+	// framework's own naming (GetShuffleDNSRateLimit, the shuffledns_rate_limit column, the Settings
+	// slider) is wrong, and someone typing 10 expecting 10 queries per second gets a 1000x slowdown
+	// across a 420,112-line wordlist.
+	if _, ok := shuffleSettings["concurrency"]; ok {
+		configNotes = append(configNotes, fmt.Sprintf(
+			"concurrency (per-target Wildcard setting) took precedence over user_settings.shuffledns_rate_limit, "+
+				"which is %d. Note that -t is in-flight concurrency, not queries per second.", rateLimit))
+	}
+	for _, note := range configNotes {
+		log.Printf("[WARN] [ShuffleDNS config] %s", note)
+	}
+
+	cmd := exec.Command(argv[0], argv[1:]...)
 
 	log.Printf("[INFO] Executing command: %s", cmd.String())
 
@@ -276,7 +306,7 @@ func ExecuteAndParseShuffleDNSScan(scanID, domain string) {
 	if err != nil {
 		log.Printf("[ERROR] ShuffleDNS scan failed for %s: %v", domain, err)
 		log.Printf("[ERROR] stderr output: %s", stderr.String())
-		UpdateShuffleDNSScanStatus(scanID, "error", "", stderr.String(), cmd.String(), execTime)
+		UpdateShuffleDNSScanStatus(scanID, "error", "", wildcardAnnotatedStderr(stderr.String(), configNotes), cmd.String(), execTime)
 		return
 	}
 
@@ -286,10 +316,10 @@ func ExecuteAndParseShuffleDNSScan(scanID, domain string) {
 
 	if result == "" {
 		log.Printf("[WARN] No output from ShuffleDNS scan")
-		UpdateShuffleDNSScanStatus(scanID, "completed", "", "No results found", cmd.String(), execTime)
+		UpdateShuffleDNSScanStatus(scanID, "completed", "", wildcardAnnotatedStderr("No results found", configNotes), cmd.String(), execTime)
 	} else {
 		log.Printf("[DEBUG] ShuffleDNS output: %s", result)
-		UpdateShuffleDNSScanStatus(scanID, "success", result, stderr.String(), cmd.String(), execTime)
+		UpdateShuffleDNSScanStatus(scanID, "success", result, wildcardAnnotatedStderr(stderr.String(), configNotes), cmd.String(), execTime)
 	}
 
 	log.Printf("[INFO] Scan status updated for scan %s", scanID)
@@ -476,6 +506,14 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 	customUserAgent, _ := GetCustomHTTPSettings() // CeWL only supports user agent
 	log.Printf("[DEBUG] Custom User Agent: %s", customUserAgent)
 
+	// The stored Wildcard configuration for BOTH tools this function drives. The scope target is read
+	// once up front rather than at the point the ShuffleDNS record is inserted, because the CeWL
+	// crawl happens first and needs it too.
+	scopeTargetID := wildcardScopeTargetID(context.Background(),
+		`SELECT scope_target_id::text FROM cewl_scans WHERE scan_id = $1`, scanID)
+	cewlSettings := wildcardStoredSettings(context.Background(), scopeTargetID, "cewl")
+	shuffleSettings := wildcardStoredSettings(context.Background(), scopeTargetID, "shuffledns")
+
 	// First, get all live web servers from the latest httpx scan
 	var httpxResults string
 	err := dbPool.QueryRow(context.Background(), `
@@ -512,6 +550,38 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 	wordlistFile := filepath.Join(tempDir, "combined-wordlist.txt")
 	wordSet := make(map[string]bool)
 
+	// excludePaths is the one CeWL option that composes no flag, because CeWL's --exclude takes a
+	// FILE of paths (cewl.rb:682-693 reads it line by line and compares each against
+	// a_url_parsed.request_uri). A comma-joined value on the command line would be read as a filename
+	// and match nothing at all, which is why the FLAG is runner owned while its CONTENT is the
+	// operator's. Writing the file is therefore the runner's job and is done here.
+	var configNotes []string
+	var excludeArgs []string
+	if raw, ok := cewlSettings["excludePaths"]; ok {
+		if paths, valid := listSetting(raw); valid && len(paths) > 0 {
+			excludeFile := filepath.Join(tempDir, "cewl-exclude.txt")
+			if err := os.WriteFile(excludeFile, []byte(strings.Join(paths, "\n")+"\n"), 0644); err != nil {
+				configNotes = append(configNotes, "excludePaths was NOT applied: the exclusion file could not be "+
+					"written on the host ("+err.Error()+"), so the crawl ran without it.")
+			} else {
+				copyExclude := exec.Command("docker", "cp", excludeFile,
+					"ars0n-framework-v2-cewl-1:/tmp/cewl-exclude.txt")
+				if err := copyExclude.Run(); err != nil {
+					configNotes = append(configNotes, "excludePaths was NOT applied: the exclusion file could not "+
+						"be copied into the CeWL container ("+err.Error()+"), so the crawl ran without it.")
+				} else {
+					excludeArgs = []string{"--exclude", "/tmp/cewl-exclude.txt"}
+					log.Printf("[DEBUG] CeWL exclusion list written with %d paths", len(paths))
+				}
+			}
+		}
+	}
+
+	// Every command actually executed, recorded on the scan row. UpdateCeWLScanStatus was previously
+	// passed an empty string here, so a CeWL run stored no record of what it ran at all: with the
+	// crawl now configurable, "what did this actually run" has to be answerable.
+	var executedCommands []string
+
 	// Process each URL
 	for _, line := range urls {
 		if line == "" {
@@ -534,7 +604,7 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 		cleanURL := strings.Replace(result.URL, "www.", "", 1)
 
 		// Build CeWL command
-		cmdArgs := []string{
+		baseArgs := []string{
 			"docker", "exec",
 			"ars0n-framework-v2-cewl-1",
 			"timeout", "600",
@@ -548,8 +618,20 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 
 		// Add custom user agent if specified
 		if customUserAgent != "" {
-			cmdArgs = append(cmdArgs, "--ua", customUserAgent)
+			baseArgs = append(baseArgs, "--ua", customUserAgent)
 		}
+		baseArgs = append(baseArgs, excludeArgs...)
+
+		cmdArgs, urlNotes := wildcardCommandWithSettings(baseArgs, "cewl", cewlSettings)
+		if len(executedCommands) == 0 {
+			// The notes are identical for every URL in the loop, so they are logged and recorded once
+			// rather than once per live host.
+			for _, note := range urlNotes {
+				log.Printf("[WARN] [CeWL config] %s", note)
+			}
+			configNotes = append(configNotes, urlNotes...)
+		}
+		executedCommands = append(executedCommands, strings.Join(cmdArgs, " "))
 
 		cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 
@@ -655,20 +737,18 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 		log.Printf("[DEBUG] Wordlist in container size: %d bytes", len(checkOutput.String()))
 	}
 
-	// Store the wordlist in CeWL results
-	UpdateCeWLScanStatus(scanID, "success", strings.Join(wordlist, "\n"), "", "", time.Since(startTime).String())
+	// Store the wordlist in CeWL results, WITH the commands that produced it. This column held an
+	// empty string before, so a CeWL run left no record of what it ran.
+	UpdateCeWLScanStatus(scanID, "success", strings.Join(wordlist, "\n"),
+		wildcardAnnotatedStderr("", configNotes), strings.Join(executedCommands, "\n"),
+		time.Since(startTime).String())
 
 	// Start ShuffleDNS custom scan
 	shuffleDNSScanID := uuid.New().String()
 	log.Printf("[DEBUG] Starting ShuffleDNS custom scan with ID: %s", shuffleDNSScanID)
 
-	// Get scope target ID
-	var scopeTargetID string
-	err = dbPool.QueryRow(context.Background(),
-		`SELECT scope_target_id FROM cewl_scans WHERE scan_id = $1`,
-		scanID).Scan(&scopeTargetID)
-	if err != nil {
-		log.Printf("[ERROR] Failed to get scope target ID: %v", err)
+	if scopeTargetID == "" {
+		log.Printf("[ERROR] Failed to get scope target ID for CeWL scan %s", scanID)
 		return
 	}
 
@@ -697,8 +777,33 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 		log.Printf("[ERROR] Failed to read resolvers file: %v", err)
 	}
 
-	// Run ShuffleDNS with the combined wordlist
-	shuffleCmd := exec.Command(
+	// Run ShuffleDNS with the combined wordlist.
+	//
+	// THIS IS THE SECOND OF SHUFFLEDNS' TWO CALL SITES, and until now it honoured nothing at all: it
+	// passes no -t, so it always ran at massdns' default 10000 whatever the operator chose, and any
+	// config work that covered only bruteForceUtils.go:254 would leave half the runs ignoring it.
+	//
+	// -w IS RUNNER OWNED HERE SPECIFICALLY. /tmp/wordlist.txt is the wordlist CeWL just produced and
+	// copied in, and it is the entire point of this invocation; a stored wordlist path would replace
+	// it and silently turn the CeWL chain into an ordinary brute force against a different list.
+	// Every other shuffledns setting applies normally.
+	cewlShuffleSettings := shuffleSettings
+	var shuffleNotes []string
+	if _, ok := cewlShuffleSettings["wordlist"]; ok {
+		trimmed := make(map[string]any, len(cewlShuffleSettings))
+		for k, v := range cewlShuffleSettings {
+			if k == "wordlist" {
+				continue
+			}
+			trimmed[k] = v
+		}
+		cewlShuffleSettings = trimmed
+		shuffleNotes = append(shuffleNotes, "The stored shuffledns wordlist was NOT applied to this run: "+
+			"this invocation brute forces the wordlist CeWL just generated (/tmp/wordlist.txt), which is "+
+			"what the CeWL step exists to produce. It applies to the standalone ShuffleDNS scan instead.")
+	}
+
+	baseShuffleArgv := []string{
 		"docker", "exec",
 		"ars0n-framework-v2-shuffledns-1",
 		"shuffledns",
@@ -708,7 +813,14 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 		"-silent",
 		"-massdns", "/usr/local/bin/massdns",
 		"-mode", "bruteforce",
-	)
+	}
+	shuffleArgv, composedShuffleNotes := wildcardCommandWithSettings(baseShuffleArgv, "shuffledns", cewlShuffleSettings)
+	shuffleNotes = append(shuffleNotes, composedShuffleNotes...)
+	for _, note := range shuffleNotes {
+		log.Printf("[WARN] [ShuffleDNS config] CeWL-fed run: %s", note)
+	}
+
+	shuffleCmd := exec.Command(shuffleArgv[0], shuffleArgv[1:]...)
 
 	var shuffleStdout, shuffleStderr bytes.Buffer
 	shuffleCmd.Stdout = &shuffleStdout
@@ -722,7 +834,7 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 		log.Printf("[ERROR] ShuffleDNS custom scan failed: %v", err)
 		log.Printf("[DEBUG] ShuffleDNS stderr: %s", shuffleStderr.String())
 		log.Printf("[DEBUG] ShuffleDNS stdout: %s", shuffleStdout.String())
-		UpdateShuffleDNSCustomScanStatus(shuffleDNSScanID, "error", "", shuffleStderr.String(), shuffleCmd.String(), shuffleExecTime)
+		UpdateShuffleDNSCustomScanStatus(shuffleDNSScanID, "error", "", wildcardAnnotatedStderr(shuffleStderr.String(), shuffleNotes), shuffleCmd.String(), shuffleExecTime)
 		return
 	}
 
@@ -734,10 +846,10 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 
 	if shuffleResult == "" {
 		log.Printf("[WARN] No results found from ShuffleDNS scan")
-		UpdateShuffleDNSCustomScanStatus(shuffleDNSScanID, "completed", "", "No results found", shuffleCmd.String(), shuffleExecTime)
+		UpdateShuffleDNSCustomScanStatus(shuffleDNSScanID, "completed", "", wildcardAnnotatedStderr("No results found", shuffleNotes), shuffleCmd.String(), shuffleExecTime)
 	} else {
 		log.Printf("[INFO] ShuffleDNS found results")
-		UpdateShuffleDNSCustomScanStatus(shuffleDNSScanID, "success", shuffleResult, shuffleStderr.String(), shuffleCmd.String(), shuffleExecTime)
+		UpdateShuffleDNSCustomScanStatus(shuffleDNSScanID, "success", shuffleResult, wildcardAnnotatedStderr(shuffleStderr.String(), shuffleNotes), shuffleCmd.String(), shuffleExecTime)
 	}
 
 	log.Printf("[DEBUG] ====== Completed CeWL + ShuffleDNS Process ======")

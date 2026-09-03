@@ -240,7 +240,10 @@ const LINKFINDER_FIELDS = {
   baseUrl: 'scheme://host[:port]. Empty uses the scope target.',
   inputSource: '"both" (default), "discovered_js" or "target". LinkFinder is a regex over text: pointed at a target URL it reads one page, which on an SPA is an empty shell. discovered_js feeds it the bundles Katana, GoSpider and the manual crawl already found, which is the job it exists for.',
   domainMode: 'Follow the script tags on the target page (-d). Only meaningful for the target arm.',
-  maxJsFiles: 'Cap on JavaScript files fetched. Each one is a request, and this is the whole cost of the scan.',
+  maxJsFiles: 'Ceiling on JavaScript files fetched. 0 means NO limit and is the default: every ' +
+    'file discovered so far is read. Any other value drops the excess newest-first with nothing ' +
+    'recorded about it, so a truncated run is indistinguishable from a complete one. Each file ' +
+    'is one request, so this is the whole cost of the scan.',
   requestDelayMs: 'Milliseconds between files. LinkFinder has no pacing of its own, so the framework waits this long, and this is what the probe writes.',
   timeout: 'Per-request timeout in seconds.',
   regexFilter: 'Only keep endpoints matching this regex (-r), e.g. ^/api/.',
@@ -368,6 +371,47 @@ const CLOUD_ENUM_FIELDS = {
   resolver_file_path: 'Path to a resolver list.',
 };
 
+
+// The two archive tools. Their interesting setting is not a rate limit (neither touches the target)
+// but WHICH HOSTS to ask the archives about. Before this existed both were hardcoded to the scope
+// target's own host, so an adjacent host on another registrable domain -- usually where the API
+// lives -- was never queried by either.
+const ARCHIVE_HOST_FIELDS = {
+  hostMode: '"default" scans the direct host plus every in-scope adjacent host, resolved fresh at ' +
+    'run time so a newly crawled host is picked up without editing this. "custom" scans exactly ' +
+    'selectedHosts. A string rather than an empty array because "nothing chosen yet" and "the ' +
+    'operator chose none" must not look identical.',
+  selectedHosts: 'Hosts to query, used only when hostMode is "custom". Array of authorities ' +
+    '("api.example.com", or "example.com:8443" when a non-default port is in play). A URL is ' +
+    'accepted and reduced to its authority, port included. Read the candidates from ' +
+    'get_archive_hosts; a host that is not a candidate is ignored, and selecting none makes the ' +
+    'scan refuse rather than report zero endpoints.',
+  includeSubdomains: 'Ask the archive about subdomains too (archivefetch drops -no-subs, gau adds ' +
+    '--subs). Ignored for any host carrying a non-default port: the CDX index cannot match a ' +
+    'wildcard in front of a host:port authority, so the port always wins.',
+  timeoutMinutes: 'Bound on EACH host\'s query, not the run. Hosts are queried one at a time, so a ' +
+    'run over twelve hosts can take twelve times this.',
+};
+
+const WAYBACKURLS_FIELDS = {
+  ...ARCHIVE_HOST_FIELDS,
+};
+
+const GAU_FIELDS = {
+  ...ARCHIVE_HOST_FIELDS,
+  providers: 'Archive providers, any of wayback, commoncrawl, otx, urlscan. Defaults to all four. ' +
+    'Dropping wayback on the assumption that the Waybackurls scan covers it measured as an 85% ' +
+    'loss of archive surface (29 URLs versus 187). An unrecognised name is dropped rather than ' +
+    'passed on, because gau exits on one.',
+  threads: 'gau --threads, workers to spawn.',
+  timeoutSeconds: 'gau --timeout, its own HTTP client timeout per request. Not the process bound; ' +
+    'that is timeoutMinutes.',
+  retries: 'gau --retries for its HTTP client.',
+  blacklist: 'gau --blacklist, file extensions to skip. Array, leading dots optional.',
+  fromDate: 'gau --from, YYYYMM. Earliest crawl date to accept.',
+  toDate: 'gau --to, YYYYMM. Latest crawl date to accept.',
+};
+
 const TOOLS = {
   amass_intel: { path: 'amass-intel-config', fields: AMASS_INTEL_FIELDS, headerShape: 'none' },
   amass_enum_company: { path: 'amass-enum-config', fields: AMASS_ENUM_COMPANY_FIELDS, headerShape: 'none' },
@@ -387,6 +431,8 @@ const TOOLS = {
   katana: { path: 'katana-url-config', fields: KATANA_FIELDS, headerShape: 'pair' },
   gospider: { path: 'gospider-url-config', fields: GOSPIDER_FIELDS, headerShape: 'pair' },
   linkfinder: { path: 'linkfinder-url-config', fields: LINKFINDER_FIELDS, headerShape: 'pair' },
+  waybackurls: { path: 'waybackurls-url-config', fields: WAYBACKURLS_FIELDS, headerShape: 'none' },
+  gau: { path: 'gau-url-config', fields: GAU_FIELDS, headerShape: 'none' },
 };
 
 // === manage_tool_config ========================================================================
@@ -402,7 +448,8 @@ const manageToolConfigSchema = z.object({
     'only the keys you name change. Set replace:true if wiping the rest is genuinely what you want.'),
 
   tool: z.enum(['amass_intel', 'amass_enum_company', 'dnsx_company', 'katana_company', 'cloud_enum',
-    'httpx', 'ffuf', 'arjun', 'x8', 'nuclei', 'katana', 'gospider', 'linkfinder'])
+    'httpx', 'ffuf', 'arjun', 'x8', 'nuclei', 'katana', 'gospider', 'linkfinder',
+    'waybackurls', 'gau'])
     .describe(
       'Which tool\'s configuration. The first five are Company-workflow selections rather than ' +
       'tuning knobs: amass_intel picks which network ranges carry forward, and ' +
@@ -416,7 +463,9 @@ const manageToolConfigSchema = z.object({
       'headers and cookie, which the crawlers reuse through their useFFUFAuth switch. ' +
       'arjun / x8: parameter discovery, two tools with different tradeoffs. ' +
       'nuclei: template selection and runtime tuning. ' +
-      'katana / gospider / linkfinder: the three crawlers, which share one Configure modal in the UI.'),
+      'katana / gospider / linkfinder: the three crawlers, which share one Configure modal in the UI. ' +
+      'waybackurls / gau: the two archive tools, whose main setting is which hosts to query. ' +
+      'Pair with get_archive_hosts to see the candidates first.'),
 
   target_id: z.string().uuid().describe('The scope target UUID. Configs are stored per target.'),
 
@@ -756,7 +805,46 @@ function str(v) {
   return v === null || v === undefined ? '' : String(v);
 }
 
+
+// === get_archive_hosts =========================================================================
+
+// The candidate list the two archive tools draw from, so a caller can see what "default" resolves
+// to before deciding whether to narrow it. Candidates are the scope target's own host plus the
+// adjacent hosts the manual crawl observed and the operator left in scope; an out-of-scope host is
+// absent entirely rather than present and unticked, because an archive query being passive is not a
+// reason to widen the engagement boundary.
+const getArchiveHostsSchema = z.object({
+  target_id: z.string().uuid().describe('The URL scope target UUID.'),
+  tool: z.enum(['waybackurls', 'gau']).describe(
+    'Which saved selection to reflect in the `selected` flags. The candidate list itself is ' +
+    'the same for both.'),
+});
+
+async function getArchiveHosts(params) {
+  const res = await apiGet(`/archive-hosts/${params.tool}/${params.target_id}`);
+  if (res.error) return res;
+  return {
+    tool: res.tool,
+    host_mode: res.host_mode,
+    total: res.total,
+    adjacent_count: res.adjacent_count,
+    selected_count: res.selected_count,
+    targets: (res.targets || []).map((t) => ({
+      host: t.host,
+      url: t.url,
+      is_direct: t.is_direct,
+      selected: t.selected,
+      crawl_requests: t.requests,
+    })),
+    note: res.host_mode === 'default'
+      ? 'hostMode is "default", so every candidate is queried and a newly crawled host joins ' +
+        'automatically. Switch to "custom" with manage_tool_config to narrow it.'
+      : 'hostMode is "custom": only the hosts flagged selected are queried.',
+  };
+}
+
 module.exports = {
   manageToolConfigSchema, manageToolConfig,
   manageWordlistsSchema, manageWordlists,
+  getArchiveHostsSchema, getArchiveHosts,
 };

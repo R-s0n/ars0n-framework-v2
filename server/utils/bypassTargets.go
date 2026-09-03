@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/url"
 	"strings"
 )
@@ -134,6 +135,50 @@ func identityFor(id string, isBypass, isGraphQL, isLeak bool, targetURL string) 
 	return out
 }
 
+// RecordDeniedEndpoint remembers a URL that refused the framework, so the bypass section has
+// something to work on.
+//
+// WHY THIS EXISTS, and what it does NOT fix. The access bypass section was empty on the reference
+// target, and the obvious diagnosis was that observed 4xx were not being plumbed through to it. That
+// diagnosis was wrong: DeniedEndpoints already unions six tables, it works, and it correctly offered
+// 57 x 404 and 70 x 405. There were ZERO 401 or 403 anywhere in the database, because nothing in the
+// framework had ever requested a path that returns one. /admin was not in discovered_endpoints, not
+// in endpoint_validation_results, not in fuzz_findings and not in consolidated_url_endpoints. The
+// only 403 that was ever seen came from a request typed by hand.
+//
+// So this closes a real gap, and the gap it closes is NOT the one that hid /admin. A 401 or 403 the
+// framework happens to observe now becomes a bypass target instead of being discarded as just another
+// status code. What still has to happen for /admin specifically is DISCOVERY: a path nothing ever
+// requests cannot refuse anything, and no amount of plumbing downstream changes that.
+//
+// Writes are additive and never resurrect a deletion, the same invariant the attack vector and
+// endpoint tables hold: an operator who removes a target must not have it reappear on the next scan.
+func RecordDeniedEndpoint(ctx context.Context, scopeTargetID, rawURL string, statusCode int, source string) {
+	// Only the codes that mean "this exists and you may not have it". A 404 is what a directory brute
+	// force emits by the thousand and a 405 is a verb mismatch; neither is a denial worth a bypass
+	// attempt, and folding them in would bury the handful that are.
+	if statusCode != 401 && statusCode != 403 {
+		return
+	}
+	if strings.TrimSpace(rawURL) == "" || strings.TrimSpace(scopeTargetID) == "" {
+		return
+	}
+	if _, err := dbPool.Exec(ctx, `
+		INSERT INTO access_bypass_targets (scope_target_id, url, status_code, sources)
+		VALUES ($1, $2, $3, ARRAY[$4]::TEXT[])
+		ON CONFLICT (scope_target_id, url) DO UPDATE
+		SET last_seen = NOW(),
+		    status_code = EXCLUDED.status_code,
+		    sources = (
+		        SELECT array_agg(DISTINCT s ORDER BY s)
+		        FROM unnest(access_bypass_targets.sources || EXCLUDED.sources) AS s
+		    )
+		WHERE access_bypass_targets.deleted_at IS NULL`,
+		scopeTargetID, rawURL, statusCode, source); err != nil {
+		log.Printf("[BYPASS] recording denied endpoint %s: %v", rawURL, err)
+	}
+}
+
 // vectorIdentityColumns decides which identity column an id belongs in.
 //
 // vector_id has a foreign key onto attack_vectors, so a bypass target's id written there fails the
@@ -204,4 +249,3 @@ func vectorFindingIdentity(f VectorFinding) (vectorID, bypassTargetID any) {
 func vectorFindingLeakID(f VectorFinding) any {
 	return identityFor(f.VectorID, f.IsBypassTarget, f.IsGraphQLTarget, f.IsLeakTarget, "").LeakID
 }
-

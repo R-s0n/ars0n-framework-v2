@@ -147,6 +147,18 @@ func ExecuteKatanaCompanyScan(scanID string, domains []string, scopeTargetID str
 	var allCloudAssets []KatanaCloudAsset
 	var commandsExecuted []string
 
+	// The per-target Company settings, from the ONE store the Settings screen and the MCP company tool
+	// both write. Absent is the normal case and produces the exact command this runner has always
+	// built. Loaded ONCE, outside the per-domain loop, so every domain in a scan is configured
+	// identically.
+	tool, settings, notes := companyRunnerSettings(scopeTargetID, "katana_company")
+	if len(settings) > 0 {
+		log.Printf("[KATANA-COMPANY] [INFO] Running with stored Company settings for scope target %s: %s",
+			scopeTargetID, companySettingsSummary(settings))
+	}
+	settingsRecorded := false
+	failedDomains := 0
+
 	for i, domain := range domains {
 		log.Printf("[KATANA-COMPANY] [INFO] Processing domain %d/%d: %s", i+1, len(domains), domain)
 
@@ -156,21 +168,13 @@ func ExecuteKatanaCompanyScan(scanID string, domains []string, scopeTargetID str
 			targetURL = "https://" + domain
 		}
 
-		cmd := exec.Command(
-			"docker", "exec", "ars0n-framework-v2-katana-1",
-			"katana",
-			"-u", targetURL,
-			"-d", "3",
-			"-jc",
-			"-j",
-			"-v",
-			"-timeout", "120",
-			"-c", "20",
-			"-p", "20",
-			"-retry", "3",
-			"-rd", "1",
-			"-rl", "10",
-		)
+		argv, configNotes := katanaCompanyCommandArgs(targetURL, tool, settings)
+		if !settingsRecorded {
+			notes = append(notes, configNotes...)
+			companyLogNotes("KATANA-COMPANY", notes)
+			settingsRecorded = true
+		}
+		cmd := exec.Command(argv[0], argv[1:]...)
 
 		commandsExecuted = append(commandsExecuted, cmd.String())
 		log.Printf("[KATANA-COMPANY] [INFO] Executing command: %s", cmd.String())
@@ -181,6 +185,10 @@ func ExecuteKatanaCompanyScan(scanID string, domains []string, scopeTargetID str
 
 		err := cmd.Run()
 		if err != nil {
+			// Fails open at the domain level: the domain is skipped and the scan is still finalised as a
+			// success, so a run in which every domain failed is stored identically to a run that found
+			// nothing. The count is now recorded on the scan row.
+			failedDomains++
 			log.Printf("[KATANA-COMPANY] [ERROR] Katana scan failed for domain %s: %v", domain, err)
 			log.Printf("[KATANA-COMPANY] [ERROR] stderr output: %s", stderr.String())
 			continue
@@ -235,6 +243,14 @@ func ExecuteKatanaCompanyScan(scanID string, domains []string, scopeTargetID str
 	resultJSON, _ := json.Marshal(result)
 	execTime := time.Since(startTime).String()
 	commandsStr := strings.Join(commandsExecuted, "; ")
+
+	if note := companyDomainLoopNote("katana_company", failedDomains, len(domains)); note != "" {
+		notes = append(notes, note)
+		log.Printf("[KATANA-COMPANY] [WARN] %s", note)
+	}
+	if preamble := companySettingsPreamble(tool, scopeTargetID, settings, notes); preamble != "" {
+		commandsStr += "\n" + preamble
+	}
 
 	UpdateKatanaCompanyScanStatus(scanID, "success", string(resultJSON), "", commandsStr, execTime)
 	scanCompleted = true // Mark scan as completed

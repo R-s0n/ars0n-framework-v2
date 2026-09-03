@@ -1,5 +1,14 @@
 const { z } = require('zod');
 const { apiGet, apiPost, apiPut, apiDelete } = require('../api');
+const { DETAIL_LEVELS, isFull, dropEmpty, withoutHeavy, pick, detailDescription } = require('../utils/detail');
+
+// What a findings row needs to be worth reading: which step produced it, what was sent, what came
+// back and how that compares to the baseline. The other ten columns the API returns are second order
+// (response_words, response_lines, first_seen, baseline sizes, the step NAME as well as its ordinal),
+// and at the default limit of 200 rows they are most of the response. Sixty one rows already came to
+// 41565 characters on the Juice Shop target, before the MCP layer pretty prints it.
+const FUZZ_FINDING_COMPACT = ['id', 'step_ordinal', 'url', 'method', 'payload', 'http_status',
+  'response_size', 'content_type', 'triage', 'times_seen', 'baseline_verdict', 'has_evidence'];
 
 // The ffuf fuzz flow: the steps a target is set up to fuzz, what a run of them found, and what to
 // change before running them again.
@@ -20,8 +29,18 @@ const { apiGet, apiPost, apiPut, apiDelete } = require('../api');
 
 const manageFuzzSchema = z.object({
   action: z.enum(['summary', 'findings', 'finding', 'triage', 'steps', 'option_reference',
-    'seed_endpoints', 'save_step', 'delete_step', 'preview', 'run', 'status', 'cancel',
-    'settings', 'save_settings']).describe(
+    'seed_endpoints', 'seed', 'save_step', 'delete_step', 'reorder_steps', 'preview', 'run',
+    'status', 'cancel', 'settings', 'save_settings',
+    'flows', 'create_flow', 'update_flow', 'delete_flow']).describe(
+    'flows: every saved fuzz flow on this target, with the catalogue of what ffuf is actually used ' +
+    'for. ffuf is the Burp Intruder of this framework, and Intruder is not one thing: content ' +
+    'discovery ' +
+    'fuzzes the PATH, name enumeration fuzzes the NAME of a parameter or header or cookie while ' +
+    'holding the value constant, value fuzzing fuzzes the VALUE of an input already known to exist, ' +
+    'and identifier enumeration walks an id space. Those want different wordlists, insertion points ' +
+    'and filters, so they belong in different flows. create_flow: a new named flow, optionally ' +
+    'copying an existing one via copy_from_id. update_flow: rename, re-describe or make default. ' +
+    'delete_flow: remove one, refused on the default. '  +
     'summary: the shape of the stored findings per step, with an assessment of whether each step ' +
     'measured discoveries or one repeated response, and the option that would exclude that ' +
     'response. START HERE. ' +
@@ -31,8 +50,15 @@ const manageFuzzSchema = z.object({
     'option_reference: every option key a step honours and what each does, including ffuf\'s ' +
     'default matcher, which is the usual reason a scan reports one finding per word. ' +
     'seed_endpoints: discovered endpoints a new step can be seeded from. ' +
+    'seed: ONE endpoint rendered as the exact raw request bytes a step seeded from it would carry. ' +
+    'Read only, creates nothing, and is the same renderer behind the raw request pane in Manage ' +
+    'Endpoints. Use it to see what you would be fuzzing before committing a step to the flow. ' +
     'save_step: create a step, or MERGE a patch into an existing one when step_id is given. ' +
     'delete_step: remove a step. Its findings survive with no step attached. ' +
+    'reorder_steps: set the order the steps run in. Send step_ids as the COMPLETE list of the ' +
+    'flow step ids in the order you want; a partial list is refused here, because the server ' +
+    'renumbers only the ids it is given and a collision with the unique ordinal leaves the flow ' +
+    'half-renumbered. ' +
     'preview: the exact ffuf command and request bytes a step will send, plus its request count and ' +
     'every reason it would refuse to run. Costs nothing, so use it before run. ' +
     'run: execute every enabled ffuf step in order. ' +
@@ -53,8 +79,8 @@ const manageFuzzSchema = z.object({
     'send a key as null to clear it.'),
 
   target_id: z.string().uuid().optional().describe(
-    'The scope target UUID. Required for every action except preview, delete_step and status, which ' +
-    'identify their subject directly.'),
+    'The scope target UUID. Required for every action except preview, delete_step, seed and status, ' +
+    'which identify their subject directly.'),
 
   // --- findings / summary -----------------------------------------------------------------------
   step_id: z.string().uuid().optional().describe(
@@ -77,6 +103,8 @@ const manageFuzzSchema = z.object({
     'triage: the findings to mark. Takes a list because dismissing a page of noise one row at a ' +
     'time is a workflow nobody finishes.'),
   notes: z.string().optional().describe('triage: a note stored against every finding named.'),
+  step_ids: z.array(z.string().uuid()).optional().describe(
+    'reorder_steps: the COMPLETE list of the flow step ids, in the order they should run.'),
   settings: z.record(z.any()).optional().describe(
     'save_settings: the flow-wide ffuf option keys to change, e.g. {"threads": 5, "filterStatus": ' +
     '"404"}. Same vocabulary a step takes in its own options; see option_reference. A key sent as ' +
@@ -87,6 +115,12 @@ const manageFuzzSchema = z.object({
     'not named. Default false.'),
   limit: z.number().optional().describe('findings: rows to return, default 200, max 2000.'),
   offset: z.number().optional().describe('findings: rows to skip.'),
+  detail: z.enum(DETAIL_LEVELS).optional().describe(detailDescription(
+    'is what findings and steps return: twelve columns per finding, and steps without their raw ' +
+    'request bytes (raw_request_chars instead).',
+    'returns every column on a finding and the whole raw request on every step. At the default ' +
+    'limit of 200 findings that is several times the output cap, so narrow the rows first with ' +
+    'step_id, status or search.')),
 
   // --- save_step --------------------------------------------------------------------------------
   raw_request: z.string().optional().describe(
@@ -95,7 +129,8 @@ const manageFuzzSchema = z.object({
     'scope on every save and every run. A token in the text with no matching position is an error ' +
     'rather than literal text, and a position whose token is not in the text does nothing.'),
   seed_endpoint_id: z.string().uuid().optional().describe(
-    'save_step: build the raw request from a discovered endpoint instead of writing it by hand. ' +
+    'save_step / seed: build the raw request from a discovered endpoint instead of writing it by ' +
+    'hand, or with the seed action just LOOK at those bytes without creating anything. ' +
     'BEWARE: the seed freezes the captured request, including any Authorization header, which will ' +
     'expire. A step whose token has expired returns the same auth error to every payload and that ' +
     'reads as thousands of findings.'),
@@ -128,6 +163,12 @@ const manageFuzzSchema = z.object({
     'run: proceed even though the flow is over the request ceiling. Read the refusal first; it ' +
     'reports the count.'),
   run_id: z.string().uuid().optional().describe('status: which run.'),
+  flow_id: z.string().optional().describe('Which saved flow to act on. Omit for the default flow of this target.'),
+  flow_name: z.string().optional().describe('create_flow/update_flow: the flow name, unique per target.'),
+  flow_purpose: z.enum(['content-discovery','name-enumeration','value-fuzzing','identifier-enumeration','auth-bruteforce','vhost-discovery','custom']).optional().describe('What this flow is for. Decides the guidance and the sensible wordlist.'),
+  flow_description: z.string().optional(),
+  copy_from_id: z.string().optional().describe('create_flow: duplicate the steps of this flow into the new one.'),
+  make_default: z.boolean().optional().describe('update_flow: make this the flow an unqualified scan runs.'),
 });
 
 async function manageFuzz(params) {
@@ -186,6 +227,24 @@ async function manageFuzz(params) {
       return apiPost(`/fuzz/runs/${runID}/cancel`, {});
     }
 
+    case 'flows':
+      return apiGet(`/fuzz/${needTarget()}/flows`);
+    case 'create_flow':
+      return apiPost(`/fuzz/${needTarget()}/flows`, {
+        name: params.flow_name,
+        description: params.flow_description || '',
+        purpose: params.flow_purpose || 'custom',
+        copy_from_id: params.copy_from_id || '',
+      });
+    case 'update_flow':
+      return apiPut(`/fuzz/flow/${params.flow_id}`, {
+        name: params.flow_name,
+        description: params.flow_description,
+        purpose: params.flow_purpose,
+        make_default: params.make_default,
+      });
+    case 'delete_flow':
+      return apiDelete(`/fuzz/flow/${params.flow_id}`);
     case 'summary': {
       // limit=1 because the summary is computed over the whole filtered set server-side; the rows
       // are not the point here and pulling 200 of them to ignore them is waste.
@@ -203,21 +262,49 @@ async function manageFuzz(params) {
 
     case 'findings': {
       const res = await apiGet(`/fuzz/${needTarget()}/findings${buildFindingsQuery(params)}`);
-      return res;
+      const full = isFull(params);
+      const rows = Array.isArray(res.findings) ? res.findings : [];
+      return {
+        ...res,
+        detail: full ? 'full' : 'compact',
+        findings: full ? rows : rows.map((f) => dropEmpty(pick(f, FUZZ_FINDING_COMPACT))),
+        detail_note: full
+          ? 'Every column, including the baseline sizes and the word and line counts.'
+          : 'Twelve columns per row. detail:"full" adds response_words, response_lines, ' +
+            'baseline_http_status, baseline_response_size, step_name, position_token, host, tool ' +
+            'and the first_seen / last_seen timestamps. Use action "finding" for one row with its ' +
+            'evidence rather than raising the detail on all of them.',
+      };
     }
 
     case 'steps': {
-      const res = await apiGet(`/fuzz/${needTarget()}/flow?tool=ffuf`);
+      // flow_id is forwarded so a NAMED flow's steps can be read. Without it every read returned the
+      // target's default flow no matter which flow was named, so a non-default flow was invisible.
+      const fq = params.flow_id ? `&flow_id=${encodeURIComponent(params.flow_id)}` : '';
+      const res = await apiGet(`/fuzz/${needTarget()}/flow?tool=ffuf${fq}`);
       const steps = (res.steps || []).filter((s) => !stepID || s.id === stepID);
+      // A step carries a whole raw HTTP request, so a flow of ten steps is ten requests wide. Asking
+      // for one step by id, or detail:"full", is how you get the bytes; the default answers the
+      // question a step list is actually read for, which is what the flow is set up to do.
+      const full = isFull(params) || Boolean(stepID);
       return {
         flow_id: res.flow_id,
         scope: res.scope,
-        steps: steps.map((s) => ({
-          ...s,
-          // Called out because it is the failure that looks like success: a frozen credential makes
-          // every payload return the same response and the run reports it as findings.
-          carries_authorization: /^\s*(authorization|cookie|x-api-key)\s*:/im.test(s.raw_request || ''),
-        })),
+        detail: full ? 'full' : 'compact',
+        steps: steps.map((s) => {
+          const row = {
+            ...s,
+            // Called out because it is the failure that looks like success: a frozen credential makes
+            // every payload return the same response and the run reports it as findings.
+            carries_authorization: /^\s*(authorization|cookie|x-api-key)\s*:/im.test(s.raw_request || ''),
+          };
+          return full ? row : withoutHeavy(row, ['raw_request']);
+        }),
+        detail_note: full
+          ? 'raw_request is included verbatim on every step.'
+          : 'raw_request is omitted and reported as raw_request_chars. Pass step_id for one step, ' +
+            'or detail:"full", to see the bytes. carries_authorization is computed from the real ' +
+            'request either way.',
         note: steps.length === 0
           ? 'This target has no ffuf steps. Use seed_endpoints then save_step.'
           : 'options {} means no matcher and no filter, so ffuf uses its default matcher of ' +
@@ -229,9 +316,27 @@ async function manageFuzz(params) {
     case 'seed_endpoints':
       return apiGet(`/fuzz/${needTarget()}/endpoints`);
 
+    // Read-only, and deliberately NOT behind needTarget(): the route is keyed on the endpoint id
+    // alone, so requiring a target here would invent a constraint the API does not have.
+    //
+    // Without this the only way to see an endpoint's request bytes was to CREATE a step from it and
+    // delete it again, because the renderer's only other caller is CreateFuzzStep. That means a
+    // read-only question mutated the target's shared fuzz flow. There is no fallback either:
+    // query_consolidated_endpoints returns neither headers nor request body, so the bytes could not
+    // be approximated.
+    case 'seed': {
+      if (!params.seed_endpoint_id) {
+        throw new Error('seed requires seed_endpoint_id, from the seed_endpoints action');
+      }
+      return apiGet(`/fuzz/seed/${params.seed_endpoint_id}`);
+    }
+
     case 'save_step': {
       const body = {
         tool: 'ffuf',
+        // Which flow this step belongs to. Omitted means the target's default, so existing callers
+        // are unaffected; named means the step actually lands where the caller asked.
+        flow_id: params.flow_id || '',
         name: params.name,
         raw_request: params.raw_request,
         seed_endpoint_id: params.seed_endpoint_id,
@@ -264,6 +369,32 @@ async function manageFuzz(params) {
     case 'delete_step': {
       if (!stepID) throw new Error('delete_step requires step_id');
       return apiDelete(`/fuzz/steps/${stepID}`);
+    }
+
+    case 'reorder_steps': {
+      if (!Array.isArray(params.step_ids) || params.step_ids.length === 0) {
+        throw new Error('reorder_steps requires step_ids, the complete list of step ids in order');
+      }
+      // The completeness check lives HERE because the server does not have one. ReorderFuzzSteps
+      // renumbers only the ids it is handed, so a partial list can collide with the unique
+      // (flow_id, ordinal) index and fail part way through, leaving the steps it already moved
+      // parked on their temporary high ordinals. Refusing costs one GET the flow already makes.
+      const flow = await apiGet(`/fuzz/${needTarget()}/flow?tool=ffuf`);
+      const known = (flow.steps || []).map((s) => s.id);
+      const given = params.step_ids;
+      const missing = known.filter((id) => !given.includes(id));
+      const unknown = given.filter((id) => !known.includes(id));
+      if (missing.length || unknown.length || given.length !== new Set(given).size) {
+        return {
+          error: 'step_ids must be every step of the flow exactly once, in the order you want them '
+            + 'to run. A partial or duplicated list can leave the flow half renumbered.',
+          missing,
+          unknown,
+          flow_step_ids: known,
+        };
+      }
+      const res = await apiPost(`/fuzz/${needTarget()}/steps/reorder`, { step_ids: given });
+      return { reordered: true, order: given, ...res };
     }
 
     case 'preview': {

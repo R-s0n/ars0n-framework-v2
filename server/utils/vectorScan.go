@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/exec"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -32,17 +33,13 @@ import (
 // is not something to trigger from a checkbox that then sweeps every eligible vector unattended. An
 // operator who needs those runs sqlmap directly against the one vector that warrants it.
 
-// VectorScanProgress is what a card polls while a scan runs.
-type VectorScanProgress struct {
-	ScanID      string `json:"scan_id"`
-	Tool        string `json:"tool"`
-	Status      string `json:"status"`
-	Total       int    `json:"total"`
-	Completed   int    `json:"completed"`
-	Findings    int    `json:"findings"`
-	CurrentHost string `json:"current_host,omitempty"`
-	Error       string `json:"error,omitempty"`
-}
+// vectorSessionCheckEvery is how many vectors run between session liveness probes.
+//
+// Not every vector: the probe is two requests (the credential arm and the control arm) and a scan
+// of sixty vectors would pay a hundred and twenty extra requests for a session that almost never
+// dies mid-run. Not once at the start either, which is what every tool already effectively does and
+// is exactly what missed it. Every eight is close enough that at most eight vectors are wasted.
+const vectorSessionCheckEvery = 8
 
 // StartVectorScan kicks off a scan and returns immediately with its id. The work runs in a goroutine
 // because a scan over sixty vectors takes minutes and an HTTP request that waits for it times out at
@@ -105,6 +102,32 @@ func StartVectorScan(ctx context.Context, scopeTargetID, toolKey string) (string
 func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vectorRow,
 	report VectorEligibilityReport, settings, sectionSettings map[string]any) {
 
+	// A scan must never be able to kill the API.
+	//
+	// This runs as a bare `go runVectorScan(...)`, and Go takes the whole process down when a
+	// goroutine panics. There was no recover anywhere in the vector path, while five other long
+	// runners in this package already have one (endpointConsolidationRun, endpointScanRun,
+	// endpointValidation, katanaCompanyUtils, wafProbeUtils).
+	//
+	// It was not hypothetical. A nil *HostBudget in the new bypass negative control panicked on the
+	// first live control of the first real bypass scan, and that would have taken the api process
+	// down with it, killing every other running scan and every request in flight. The ordering bug is
+	// fixed; this is the guard that means the next one costs one scan instead of the service.
+	//
+	// The scan is marked failed rather than left running, because a scan row stuck at "running" with
+	// no process behind it is the exact fail-open this section keeps producing.
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[VECTOR] PANIC in %s scan %s: %v\n%s", tool.Key, scanID, rec, debug.Stack())
+			_, _ = dbPool.Exec(context.Background(), `
+				UPDATE vector_scans SET status = 'error', completed_at = NOW(),
+				    error = $2
+				WHERE id = $1 AND status NOT IN ('completed','error')`,
+				scanID, fmt.Sprintf("UNTESTED: this scan crashed (%v). Every vector it had not "+
+					"reached was never sent, so their results are unknown, not clean. Re-run it.", rec))
+		}
+	}()
+
 	ctx := context.Background()
 	eligible := map[string]bool{}
 	for _, v := range report.Vectors {
@@ -133,8 +156,74 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 		shared[key] = append(shared[key], vector.ID)
 	}
 
+	// THE POSITIVE CONTROL runs FIRST, before a single request reaches the real target.
+	//
+	// First because the answer changes what the rest of the run is worth, and an operator watching a
+	// three hour scan should learn in the first thirty seconds that it is not going to count. It is
+	// also the cheapest possible ordering: a broken tool is discovered before it wastes the afternoon.
+	//
+	// It is composed, executed, parsed and recorded through exactly the same path as every other
+	// vector. That is deliberate and is the only reason this control is worth anything: the defects it
+	// exists to catch have lived in the option table, in argv construction, in a settings value and in
+	// the API's NULL handling, none of which a liveness check on the binary would have touched.
+	canary := runCanaryControl(ctx, scanID, scopeTargetID, tool, settings, sectionSettings,
+		targetHeaderWords, targetParamWords, len(order))
+
 	completed, found := 0, 0
 	for _, vector := range order {
+		// CANCELLATION, checked between vectors. A cancelled scan is explicitly NOT clean: everything
+		// it did not reach is recorded UNTESTED, for the same reason the session check below does it.
+		// An operator who stops a scan and later reads "0 findings" would otherwise be looking at a
+		// result that was never produced.
+		if vectorScanCancelled(ctx, scanID) {
+			reason := fmt.Sprintf("UNTESTED: the scan was cancelled after %d of %d vectors. "+
+				"Everything from here on is unknown, not clean.", completed, len(order))
+			for _, remaining := range order[completed:] {
+				if dbErr := recordScanTargetIdentity(ctx, scanID,
+					identityFor(remaining.ID, remaining.IsBypassTarget, remaining.IsGraphQLTarget,
+						remaining.IsLeakTarget, remaining.EvidenceURL),
+					"error", reason, 0); dbErr != nil {
+					log.Printf("[VECTOR] recording cancelled vector %s: %v", remaining.ID, dbErr)
+				}
+			}
+			if _, dbErr := dbPool.Exec(ctx, `
+				UPDATE vector_scans SET error = COALESCE(NULLIF(error, ''), $2) WHERE id = $1`,
+				scanID, reason); dbErr != nil {
+				log.Printf("[VECTOR] recording cancellation: %v", dbErr)
+			}
+			break
+		}
+
+		// THE SESSION CHECK. A long scan cannot tell a clean result from a dead session: once the
+		// credential stops being honoured every response becomes the same logged-out page, and every
+		// vector after that point looks identically uninteresting. sqlmap ran 2h44m and ghauri 3h49m
+		// against a target whose session expires in under an hour, and 102 vectors were recorded clean
+		// with nothing to separate them from vectors that were genuinely tested.
+		//
+		// Checked every vectorSessionCheckEvery vectors rather than every vector, because the probe
+		// costs two requests and noticing within a handful of vectors is enough. The remaining vectors
+		// are left UNTESTED rather than clean, which is the whole point.
+		if completed > 0 && completed%vectorSessionCheckEvery == 0 {
+			if alive, why := SessionStillHonoured(ctx, scopeTargetID); !alive {
+				log.Printf("[VECTOR] %s: session lost after %d vectors: %s", tool.Key, completed, why)
+				reason := fmt.Sprintf("UNTESTED: the scan stopped after %d of %d vectors because the "+
+					"session stopped being honoured (%s). Everything from here on is unknown, not "+
+					"clean. Refresh the session and re-run.", completed, len(order), why)
+				for _, remaining := range order[completed:] {
+					if dbErr := recordScanTargetIdentity(ctx, scanID,
+						identityFor(remaining.ID, remaining.IsBypassTarget, remaining.IsGraphQLTarget,
+							remaining.IsLeakTarget, remaining.EvidenceURL), "error", reason, 0); dbErr != nil {
+						log.Printf("[VECTOR] recording untested vector %s: %v", remaining.ID, dbErr)
+					}
+				}
+				if _, dbErr := dbPool.Exec(ctx,
+					`UPDATE vector_scans SET error = $2 WHERE id = $1`, scanID, reason); dbErr != nil {
+					log.Printf("[VECTOR] recording session loss: %v", dbErr)
+				}
+				break
+			}
+		}
+
 		key := vector.ID
 		if tool.DedupeKey != nil {
 			key = tool.DedupeKey(vector.toInput())
@@ -142,7 +231,7 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 		siblings := shared[key]
 
 		findings, warnings, err := runVectorOnce(ctx, scanID, scopeTargetID, tool, vector, settings,
-			sectionSettings, targetHeaderWords, targetParamWords)
+			sectionSettings, targetHeaderWords, targetParamWords, 1)
 
 		// A FLAKY detector gets more than one go before its silence is believed. Findings end the
 		// retries, so a tool that works pays nothing for this. See AttemptsWhenEmpty: pphack hit 3
@@ -150,7 +239,7 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 		// half of everything it could find was being recorded clean.
 		for attempt := 2; attempt <= tool.AttemptsWhenEmpty && err == nil && len(findings) == 0; attempt++ {
 			findings, warnings, err = runVectorOnce(ctx, scanID, scopeTargetID, tool, vector, settings,
-				sectionSettings, targetHeaderWords, targetParamWords)
+				sectionSettings, targetHeaderWords, targetParamWords, attempt)
 			if len(findings) > 0 {
 				warnings = append(warnings, fmt.Sprintf("Found on attempt %d of %d; this detector is "+
 					"not deterministic, so a single clean run of it means little.",
@@ -176,7 +265,10 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 				log.Printf("[VECTOR] recording vector %s: %v", id, dbErr)
 			}
 		}
-		found += storeVectorFindings(ctx, scanID, findings)
+		// The vector goes in with the findings so that a tool which reported no request bytes still
+		// leaves something an operator can send: the request is composed from this row's captured
+		// bytes, which is where the real cookies and headers are.
+		found += storeVectorFindings(ctx, scanID, vector, findings)
 
 		if _, dbErr := dbPool.Exec(ctx, `
 			UPDATE vector_scans SET completed_vectors = $2, finding_count = $3, current_host = $4
@@ -196,10 +288,165 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 		}
 	}
 
+	// A FAILED CONTROL WITHHOLDS THE VERDICT. Written last so it cannot be overwritten by the session
+	// check, and written with COALESCE so it never clobbers a session-loss message that is already
+	// there: both mean the run does not count, and the first one to notice is the one worth reading.
+	if canary.Ran && !canary.Passed {
+		if _, err := dbPool.Exec(ctx, `
+			UPDATE vector_scans SET error = COALESCE(NULLIF(error, ''), $2) WHERE id = $1`,
+			scanID, canary.Detail); err != nil {
+			log.Printf("[VECTOR] recording failed control for %s: %v", tool.Key, err)
+		}
+	}
+
 	if _, err := dbPool.Exec(ctx, `
 		UPDATE vector_scans SET status = 'completed', completed_at = NOW(), current_host = ''
 		WHERE id = $1`, scanID); err != nil {
 		log.Printf("[VECTOR] completing scan %s: %v", scanID, err)
+	}
+	pruneVectorTraces(ctx, scopeTargetID, tool.Key)
+}
+
+// vectorTraceScansKept is how many runs of one tool on one target keep their stored output.
+//
+// Traces exist to diagnose a run you do not believe, and that is nearly always a recent one. Keeping
+// every run forever would grow without bound: one row per vector per run, up to 64 KB each, on a
+// table nothing ever deletes from. Three is enough to compare a suspicious run against the two before
+// it, which is the actual diagnostic question.
+//
+// Only the OUTPUT is dropped. The verdict rows in vector_scan_vectors and the findings are untouched,
+// so scan history stays complete and only the bulky forensic detail ages out.
+const vectorTraceScansKept = 3
+
+func pruneVectorTraces(ctx context.Context, scopeTargetID, toolKey string) {
+	if _, err := dbPool.Exec(ctx, `
+		DELETE FROM vector_scan_traces
+		WHERE scan_id IN (
+			SELECT id FROM vector_scans
+			WHERE scope_target_id = $1 AND tool = $2
+			ORDER BY created_at DESC OFFSET $3
+		)`, scopeTargetID, toolKey, vectorTraceScansKept); err != nil {
+		log.Printf("[VECTOR] pruning traces for %s: %v", toolKey, err)
+	}
+}
+
+// runCanaryControl runs one tool against the oracle and reports whether it worked.
+//
+// Everything here is the ordinary path: canaryVectorRow produces a vectorRow, runVectorOnce composes
+// and executes it, and the result is recorded against the scan like any other target. The findings it
+// produces are stored, deliberately, so an operator can SEE the control that passed rather than being
+// asked to take the verdict on trust.
+func runCanaryControl(ctx context.Context, scanID, scopeTargetID string, tool VectorTool,
+	settings, sectionSettings map[string]any, targetHeaderWords, targetParamWords []string,
+	targetVectors int) CanaryOutcome {
+
+	spec, defined := vectorCanaryFor(tool.Key)
+	if !defined {
+		return CanaryOutcome{Ran: false}
+	}
+
+	// "The oracle is down" and "the scanner is broken" produce the same zero and deserve different
+	// messages. Claiming a tool is broken when the control target is simply not running is how a
+	// safety mechanism loses the operator's trust, after which it may as well not exist.
+	if !canaryReachable(ctx) {
+		detail := "The positive control could not run because the canary oracle at " + canaryHost() +
+			" did not answer, so this scan is UNVERIFIED: nothing here confirms " + tool.Key +
+			" was working. Bring the oracle service up and re-run."
+		if err := recordScanTargetIdentity(ctx, scanID,
+			identityFor("", false, true, false, "http://"+canaryHost()+spec.Path),
+			"error", detail, 0); err != nil {
+			log.Printf("[VECTOR] recording unreachable control: %v", err)
+		}
+		return CanaryOutcome{Ran: true, Passed: false, Detail: detail}
+	}
+
+	row := canaryVectorRow(scopeTargetID, tool.Key, spec)
+	findings, _, err := runVectorOnce(ctx, scanID, scopeTargetID, tool, row,
+		canarySettings(tool, settings), sectionSettings, targetHeaderWords, targetParamWords, 1)
+	outcome := evaluateCanary(spec, true, len(findings), err)
+
+	status, reason := "findings", "Positive control PASSED: "+tool.Key+" found the known vulnerability "+
+		"on the canary oracle, so this run was genuinely testing something."
+	if !outcome.Passed {
+		status, reason = "error", canaryFailureMessage(tool.Key, spec, targetVectors)
+		log.Printf("[VECTOR] %s FAILED its positive control", tool.Key)
+	}
+	if dbErr := recordScanTargetIdentity(ctx, scanID,
+		identityFor(row.ID, row.IsBypassTarget, row.IsGraphQLTarget, row.IsLeakTarget, row.EvidenceURL),
+		status, reason, len(findings)); dbErr != nil {
+		log.Printf("[VECTOR] recording control verdict: %v", dbErr)
+	}
+	storeVectorFindings(ctx, scanID, row, findings)
+
+	if !outcome.Passed {
+		outcome.Detail = reason
+	}
+	return outcome
+}
+
+// vectorScanCancelled reports whether an operator has asked this run to stop.
+//
+// A failed read returns false. Losing a cancellation to a transient database error costs the operator
+// a few more vectors; treating a failed read as a cancellation would silently abandon working scans,
+// which is much worse.
+func vectorScanCancelled(ctx context.Context, scanID string) bool {
+	var requested bool
+	if err := dbPool.QueryRow(ctx,
+		`SELECT COALESCE(cancel_requested, FALSE) FROM vector_scans WHERE id = $1`,
+		scanID).Scan(&requested); err != nil {
+		return false
+	}
+	return requested
+}
+
+// vectorTraceStdoutLimit is the per-run cap on stored output.
+//
+// 64 KB is chosen against what these tools actually print. sqlmap at high verbosity and WCVS on a
+// large wordlist run to megabytes, almost all of it progress lines; the diagnostic content, the
+// argument-parser complaint, the usage banner, the "cannot scan offline" refusal, is at one end or
+// the other. Keeping both ends and dropping the middle preserves what a diagnosis needs at a size the
+// row can hold.
+const vectorTraceStdoutLimit = 64 * 1024
+
+// recordVectorTrace stores one docker exec verbatim: what was run, what came back, how long it took.
+//
+// Failures here are logged and swallowed. A scan must not die because its audit trail could not be
+// written, and this table is diagnostic rather than load-bearing.
+func recordVectorTrace(ctx context.Context, scanID string, vector vectorRow, tool VectorTool,
+	run string, attempt int, execArgs []string, output []byte, err error, timedOut bool,
+	elapsed time.Duration) {
+
+	full := len(output)
+	body := stripANSI(string(output))
+	truncated := false
+	if len(body) > vectorTraceStdoutLimit {
+		// Both ends, because the two things worth reading sit at opposite ones: an argument-parser
+		// refusal is printed immediately, and a summary line or a crash is printed last.
+		half := vectorTraceStdoutLimit / 2
+		body = body[:half] + "\n\n... [" + fmt.Sprintf("%d", len(body)-vectorTraceStdoutLimit) +
+			" characters omitted from the middle] ...\n\n" + body[len(body)-half:]
+		truncated = true
+	}
+
+	// Postgres TEXT cannot hold a NUL byte and rejects the whole insert if one is present. Scanner
+	// output is arbitrary bytes, frequently including a target's binary response, so this is not a
+	// theoretical concern: without it the trace for exactly the runs worth studying would be the ones
+	// that fail to store.
+	body = sanitizeForPostgres(body)
+
+	// The command is stored as it was actually executed, so it can be pasted into a shell and re-run.
+	// This is the field that would have made the ghauri and Forbidden defects a thirty second read
+	// rather than an afternoon of reconstruction.
+	command := "docker " + strings.Join(execArgs, " ")
+
+	if _, dbErr := dbPool.Exec(ctx, `
+		INSERT INTO vector_scan_traces (scan_id, vector_id, target_url, run_label, attempt,
+		    command, stdout, stdout_bytes, stdout_truncated, exit_detail, timed_out, duration_ms)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		scanID, vector.ID, vector.EvidenceURL, run, attempt,
+		sanitizeForPostgres(clipText(command, 8000)), body, full, truncated,
+		exitDescription(err), timedOut, elapsed.Milliseconds()); dbErr != nil {
+		log.Printf("[VECTOR] recording trace for %s: %v", tool.Key, dbErr)
 	}
 }
 
@@ -242,7 +489,7 @@ func collectWebhookFindings(ctx context.Context, scanID string, tool VectorTool,
 		if !ok {
 			continue
 		}
-		stored += storeVectorFindings(ctx, scanID, []VectorFinding{{
+		stored += storeVectorFindings(ctx, scanID, vector, []VectorFinding{{
 			VectorID: vector.ID,
 			Tool:     tool.Key,
 			Kind:     "blind-ssrf",
@@ -264,9 +511,11 @@ func collectWebhookFindings(ctx context.Context, scanID string, tool VectorTool,
 }
 
 // runVectorOnce executes one tool against one vector and parses whatever it produced.
+// attempt is passed in rather than derived because the retry loop lives in the caller, and the trace
+// row is only useful if it can say which of a flaky detector's runs it came from.
 func runVectorOnce(ctx context.Context, scanID, scopeTargetID string, tool VectorTool, vector vectorRow,
 	settings, sectionSettings map[string]any,
-	targetHeaderWords, targetParamWords []string) ([]VectorFinding, []string, error) {
+	targetHeaderWords, targetParamWords []string, attempt int) ([]VectorFinding, []string, error) {
 
 	if tool.Compose == nil || tool.Parse == nil {
 		return nil, nil, fmt.Errorf("%s has no runner wired up", tool.Key)
@@ -429,9 +678,16 @@ func runVectorOnce(ctx context.Context, scanID, scopeTargetID string, tool Vecto
 		runCtx, cancel := context.WithTimeout(ctx, limit)
 		execArgs := append([]string{"exec", tool.Container, tool.Binary}, args...)
 		cmd := exec.CommandContext(runCtx, "docker", execArgs...)
+		startedAt := time.Now()
 		output, err := cmd.CombinedOutput()
+		elapsed := time.Since(startedAt)
 		timedOut := runCtx.Err() == context.DeadlineExceeded
 		cancel()
+
+		// Written BEFORE any of the branches below, all of which can return. A run that refused its
+		// arguments, timed out, or produced nothing is the run whose output is worth reading, so the
+		// trace has to survive the early exits rather than being recorded at the happy-path end.
+		recordVectorTrace(ctx, scanID, vector, tool, run, attempt, execArgs, output, err, timedOut, elapsed)
 
 		// A timeout is the NORMAL end of a CacheBoom deception run: it prints its finding and then
 		// blocks on a queue join that nothing will ever satisfy. Treating that as an error would
@@ -468,13 +724,28 @@ func runVectorOnce(ctx context.Context, scanID, scopeTargetID string, tool Vecto
 		// with "argument --delay: invalid int value: '0.5'" and all fifty three vectors were recorded
 		// clean in forty seconds, which reads exactly like "there is no SQL injection here".
 		//
-		// Only a refusal is promoted to an error, not any non-zero exit, because several of these
-		// tools exit non-zero as their ordinary way of saying they found nothing. Failing those would
-		// trade one silent clean for a wall of false errors, and an operator who learns to ignore
-		// errors is back where they started.
-		if err != nil && !timedOut && refusedItsCommandLine(string(output)) {
-			return all, warnings, fmt.Errorf("%s rejected the command line it was given, so nothing "+
-				"was tested: %s", tool.Key, tailOf(string(output)))
+		// THE EXIT CODE IS NOT THE SIGNAL. A tool can refuse its arguments and still exit ZERO:
+		// Forbidden answers a malformed argv with
+		//
+		//	Missing a mandatory option (-u, -t) and/or optional (-ip, -ir, -v, ...)
+		//	Use -h or --help for more info
+		//
+		// on stdout, exit 0, having written no report. Exit 0 plus no report file is indistinguishable
+		// from a clean scan, and that is how ginandjuice.shop was reported to have no 403 bypass on
+		// /admin twice, while GET /about with "X-Original-URL: /admin" was returning the admin panel
+		// to an anonymous caller.
+		//
+		// So the MESSAGE decides, and the exit code only widens it. The pairing with "produced
+		// nothing" is what stops this firing on a scan that merely quotes such a phrase back out of a
+		// target's response: a run that produced a report or a finding plainly ran.
+		//
+		// Still only a refusal is promoted, never any non-zero exit, because several of these tools
+		// exit non-zero as their ordinary way of saying they found nothing, and an operator who
+		// learns to ignore errors is back where they started.
+		producedNothing := err != nil || (tool.UsesReportFile && strings.TrimSpace(report) == "")
+		if !timedOut && producedNothing && refusedItsCommandLine(string(output)) {
+			return all, warnings, fmt.Errorf("%s rejected the command line it was given and exited "+
+				"%s, so nothing was tested: %s", tool.Key, exitDescription(err), tailOf(string(output)))
 		}
 
 		// A tool that says its own run was INCOMPLETE is not a clean result. Checked before parsing so
@@ -560,9 +831,55 @@ func writeContainerFile(ctx context.Context, container, path, content string) er
 	return cmd.Run()
 }
 
-func storeVectorFindings(ctx context.Context, scanID string, findings []VectorFinding) int {
+// vectorFindingRequestLimit caps the composed request bytes stored on a finding.
+//
+// A vector's captured request can carry a multi-megabyte upload body, and a scan that finds fifty
+// things would store fifty copies of it. 32 KB holds every ordinary request whole, and the vector
+// itself still has the full bytes for anyone who needs them.
+const vectorFindingRequestLimit = 32 * 1024
+
+// withFindingEvidence gives a finding request bytes when its tool reported none.
+//
+// This is the fix for the dominant complaint about the last campaign: 33 of 42 findings carried no
+// request and no response, so nobody could tell a real one from a false positive, reproduce it, or
+// write it up. Only six of the parsers record an exchange, and the rest are not going to grow one,
+// but the framework already knows the vector it aimed and the payload the tool reported, and that is
+// enough to render the request the scan was asked to send.
+//
+// It NEVER overwrites bytes a tool reported. A capture is the better evidence and the whole point of
+// this is to keep the two apart: the composed request goes in behind a banner saying it was composed.
+func withFindingEvidence(f VectorFinding, vector vectorRow) VectorFinding {
+	if strings.TrimSpace(f.RawRequest) != "" {
+		return f
+	}
+	raw, note := ComposeFindingRequest(FindingForRepro{
+		Tool:              f.Tool,
+		Kind:              f.Kind,
+		Method:            firstNonEmpty(f.Method, vector.Method),
+		InsertionPoint:    firstNonEmpty(f.InsertionPoint, vector.InsertionPoint),
+		Param:             f.Param,
+		Payload:           f.Payload,
+		URL:               firstNonEmpty(f.URL, vector.EvidenceURL),
+		Evidence:          f.Evidence,
+		VectorRawRequest:  vector.RawRequest,
+		VectorEvidenceURL: vector.EvidenceURL,
+	})
+	if strings.TrimSpace(raw) == "" {
+		// Nothing to compose from: no captured request, no URL on the finding and none on the vector.
+		// Left empty rather than filled with something invented, and the API reports the origin as
+		// none so the gap is visible instead of being papered over.
+		return f
+	}
+	f.RawRequest = MarkReconstructedRequest(f.Tool, note, clipText(raw, vectorFindingRequestLimit))
+	return f
+}
+
+func storeVectorFindings(ctx context.Context, scanID string, vector vectorRow,
+	findings []VectorFinding) int {
+
 	stored := 0
 	for _, f := range findings {
+		f = withFindingEvidence(f, vector)
 		vectorID, bypassID := vectorFindingIdentity(f)
 		if _, err := dbPool.Exec(ctx, `
 			INSERT INTO vector_findings (scan_id, vector_id, bypass_target_id, leak_target_id, tool,
@@ -627,6 +944,16 @@ func lastURLIn(line string) string {
 	return ""
 }
 
+// exitDescription renders an exec error as something an operator can act on. "exit status 0" reads
+// as a contradiction next to a refusal message, which is exactly the point worth making: the tool
+// reported success and did nothing.
+func exitDescription(err error) string {
+	if err == nil {
+		return "0 (success, which is why this was previously recorded as clean)"
+	}
+	return err.Error()
+}
+
 // refusedItsCommandLine reports whether output is a command line tool complaining about its own
 // arguments rather than reporting the result of a scan.
 //
@@ -648,6 +975,11 @@ func refusedItsCommandLine(output string) bool {
 		"unknown flag",                  // cobra, clap
 		"unexpected argument",           // clap
 		"unknown option",                // getopt, commander
+		// Hand-rolled validators, which are the ones that exit 0. Forbidden prints exactly this and
+		// returns success, so nothing about the process says it refused except these words.
+		"missing a mandatory option",
+		"mandatory option",
+		"use -h or --help",
 	} {
 		if strings.Contains(lower, marker) {
 			return true

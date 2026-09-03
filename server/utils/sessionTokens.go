@@ -1882,3 +1882,58 @@ func rawRequestBaseURL(raw string) string {
 	}
 	return scheme + "://" + host + path
 }
+
+// SessionStillHonoured reports whether this target's stored credential is still being accepted.
+//
+// This exists because a long vector scan cannot tell a clean result from a dead session. sqlmap ran
+// for 2h44m and ghauri for 3h49m against ginandjuice.shop, whose session expires in well under an
+// hour under load, and neither tool checks. Once the session dies every response becomes the same
+// logged-out page, every vector after that point looks identically uninteresting, and 102 vectors
+// were recorded clean with nothing to distinguish them from vectors that were genuinely tested.
+//
+// A target with NO stored credential returns true: an unauthenticated scan has no session to lose,
+// and reporting "dead" there would stop every anonymous scan in the framework.
+//
+// Companion values are skipped for the same reason validation skips them: a load balancer affinity
+// cookie is not graded on its own.
+func SessionStillHonoured(ctx context.Context, scopeTargetID string) (alive bool, reason string) {
+	rows, err := dbPool.Query(ctx,
+		`SELECT `+sessionTokenCols+sessionTokenFrom+
+			`WHERE t.scope_target_id = $1 AND COALESCE(t.is_active,false)
+			   AND COALESCE(t.token_role,'credential') <> 'companion'
+			 ORDER BY t.created_at ASC`, scopeTargetID)
+	if err != nil {
+		// A database problem is not evidence that the session died, and stopping a four hour scan
+		// over one failed query would be worse than the thing this guards against.
+		return true, ""
+	}
+	defer rows.Close()
+
+	var tokens []SessionToken
+	for rows.Next() {
+		token, scanErr := scanSessionToken(rows)
+		if scanErr == nil {
+			tokens = append(tokens, token)
+		}
+	}
+	if len(tokens) == 0 {
+		return true, ""
+	}
+
+	for _, token := range tokens {
+		status, detail, _ := runSessionTokenValidation(token)
+		switch status {
+		case tokenStatusActive, tokenStatusCompanion:
+			return true, ""
+		case tokenStatusError:
+			// Could not be graded, which is not the same as being refused. Try the next credential
+			// and, if that was the only one, let the scan continue rather than killing it on a
+			// probe that failed for its own reasons.
+			continue
+		default:
+			return false, fmt.Sprintf("the stored credential %q validated as %q: %s",
+				token.Name, status, detail)
+		}
+	}
+	return true, ""
+}

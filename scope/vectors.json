@@ -1,0 +1,956 @@
+{
+  "authorities": [
+    {
+      "input": "https://app.example.com/path?q=1",
+      "scheme": "",
+      "expect": {
+        "host": "app.example.com",
+        "port": 443,
+        "isIP": false
+      }
+    },
+    {
+      "input": "http://app.example.com/",
+      "scheme": "",
+      "expect": {
+        "host": "app.example.com",
+        "port": 80,
+        "isIP": false
+      }
+    },
+    {
+      "input": "app.example.com",
+      "scheme": "",
+      "expect": {
+        "host": "app.example.com",
+        "port": 0,
+        "isIP": false
+      }
+    },
+    {
+      "input": "app.example.com",
+      "scheme": "https",
+      "expect": {
+        "host": "app.example.com",
+        "port": 443,
+        "isIP": false
+      }
+    },
+    {
+      "input": "https://app.example.com:8443/x",
+      "scheme": "",
+      "expect": {
+        "host": "app.example.com",
+        "port": 8443,
+        "isIP": false
+      }
+    },
+    {
+      "input": "HTTPS://APP.Example.COM/",
+      "scheme": "",
+      "expect": {
+        "host": "app.example.com",
+        "port": 443,
+        "isIP": false
+      }
+    },
+    {
+      "input": "https://app.example.com./",
+      "scheme": "",
+      "expect": {
+        "host": "app.example.com",
+        "port": 443,
+        "isIP": false
+      }
+    },
+    {
+      "input": "https://user@evil.test/x",
+      "scheme": "",
+      "expect": {
+        "host": "evil.test",
+        "port": 443,
+        "isIP": false
+      }
+    },
+    {
+      "input": "https://user:pass@evil.test/x",
+      "scheme": "",
+      "expect": {
+        "host": "evil.test",
+        "port": 443,
+        "isIP": false
+      }
+    },
+    {
+      "input": "https://jivo@attacker.test/",
+      "scheme": "",
+      "expect": {
+        "host": "attacker.test",
+        "port": 443,
+        "isIP": false
+      }
+    },
+    {
+      "input": "https://a@b@real.test/",
+      "scheme": "",
+      "expect": {
+        "host": "real.test",
+        "port": 443,
+        "isIP": false
+      }
+    },
+    {
+      "input": "http://10.0.0.18:8891/x",
+      "scheme": "",
+      "expect": {
+        "host": "10.0.0.18",
+        "port": 8891,
+        "isIP": true
+      }
+    },
+    {
+      "input": "https://[2001:db8::5]:9443/",
+      "scheme": "",
+      "expect": {
+        "host": "2001:db8:0:0:0:0:0:5",
+        "port": 9443,
+        "isIP": true
+      }
+    },
+    {
+      "input": "https://[2001:0db8:0000::0005]/",
+      "scheme": "",
+      "expect": {
+        "host": "2001:db8:0:0:0:0:0:5",
+        "port": 443,
+        "isIP": true
+      }
+    },
+    {
+      "input": "",
+      "scheme": "",
+      "expect": null
+    },
+    {
+      "input": "https:///path",
+      "scheme": "",
+      "expect": null
+    },
+    {
+      "input": "https://exa mple.com/",
+      "scheme": "",
+      "expect": null
+    },
+    {
+      "input": "https://exämple.com/",
+      "scheme": "",
+      "expect": null
+    },
+    {
+      "input": "https://2001:db8::5/",
+      "scheme": "",
+      "expect": null
+    },
+    {
+      "input": "https://app.example.com:99999/",
+      "scheme": "",
+      "expect": null
+    },
+    {
+      "input": "https://app.example.com:0/",
+      "scheme": "",
+      "expect": null
+    },
+    {
+      "input": "localhost",
+      "scheme": "",
+      "expect": null
+    },
+    {
+      "input": "https://-lead.example.com/",
+      "scheme": "",
+      "expect": null
+    },
+    {
+      "input": "https://trail-.example.com/",
+      "scheme": "",
+      "expect": null
+    }
+  ],
+  "rules": [
+    {
+      "typed": "example.com",
+      "expect": {
+        "effect": "allow",
+        "kind": "subtree",
+        "value": "example.com",
+        "port": null,
+        "within": null,
+        "blast": "bounded"
+      }
+    },
+    {
+      "typed": "*.example.com",
+      "expect": {
+        "effect": "allow",
+        "kind": "subdomains",
+        "value": "example.com",
+        "port": null,
+        "within": null,
+        "blast": "bounded"
+      }
+    },
+    {
+      "typed": "=api.example.com",
+      "expect": {
+        "effect": "allow",
+        "kind": "host",
+        "value": "api.example.com",
+        "port": null,
+        "within": null,
+        "blast": "narrow"
+      }
+    },
+    {
+      "typed": "=app.example.com:8443",
+      "expect": {
+        "effect": "allow",
+        "kind": "host",
+        "value": "app.example.com",
+        "port": 8443,
+        "within": null,
+        "blast": "narrow"
+      }
+    },
+    {
+      "typed": "~jivo",
+      "expect": {
+        "effect": "allow",
+        "kind": "contains",
+        "value": "jivo",
+        "port": null,
+        "within": null,
+        "blast": "wide"
+      }
+    },
+    {
+      "typed": "~jivo within acme.io",
+      "expect": {
+        "effect": "allow",
+        "kind": "contains",
+        "value": "jivo",
+        "port": null,
+        "within": "acme.io",
+        "blast": "bounded"
+      }
+    },
+    {
+      "typed": "contains:jivo",
+      "expect": {
+        "effect": "allow",
+        "kind": "contains",
+        "value": "jivo",
+        "port": null,
+        "within": null,
+        "blast": "wide"
+      }
+    },
+    {
+      "typed": "re:(prod|stage)-api-[0-9]{1,3}\\.acme-edge\\.net",
+      "expect": {
+        "effect": "allow",
+        "kind": "regex",
+        "value": "(prod|stage)-api-[0-9]{1,3}\\.acme-edge\\.net",
+        "port": null,
+        "within": null,
+        "blast": "wide"
+      }
+    },
+    {
+      "typed": "!cdn.example.com",
+      "expect": {
+        "effect": "deny",
+        "kind": "subtree",
+        "value": "cdn.example.com",
+        "port": null,
+        "within": null,
+        "blast": "narrow"
+      }
+    },
+    {
+      "typed": "!=cdn.example.com",
+      "expect": {
+        "effect": "deny",
+        "kind": "host",
+        "value": "cdn.example.com",
+        "port": null,
+        "within": null,
+        "blast": "narrow"
+      }
+    },
+    {
+      "typed": "!*.cdn.example.com",
+      "expect": {
+        "effect": "deny",
+        "kind": "subdomains",
+        "value": "cdn.example.com",
+        "port": null,
+        "within": null,
+        "blast": "narrow"
+      }
+    },
+    {
+      "typed": "=10.0.0.18",
+      "expect": {
+        "effect": "allow",
+        "kind": "host",
+        "value": "10.0.0.18",
+        "port": null,
+        "within": null,
+        "blast": "narrow"
+      }
+    },
+    {
+      "typed": "  example.com  ",
+      "expect": {
+        "effect": "allow",
+        "kind": "subtree",
+        "value": "example.com",
+        "port": null,
+        "within": null,
+        "blast": "bounded"
+      }
+    },
+    {
+      "typed": "",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "typed": "!",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "typed": "~ab",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "typed": "~www",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "typed": "~....",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "typed": "*.10.0.0.18",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "typed": "=not a host",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "typed": "re:(?:[a-z0-9-]{1,15}){1,15}\\.example\\.com",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "typed": "re:[a-z]+\\s+",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "typed": "re:(?=x)y",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "typed": "re:[A-Z]+\\.example\\.com",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "typed": "example.com within acme.io",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "typed": "re:^prod-[0-9]+\\.acme\\.io$",
+      "expect": {
+        "effect": "allow",
+        "kind": "regex",
+        "value": "prod-[0-9]+\\.acme\\.io",
+        "port": null,
+        "within": null,
+        "blast": "wide"
+      }
+    },
+    {
+      "typed": "=2001:db8::5",
+      "expect": {
+        "error": true
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "rules": [
+        "example.com",
+        "!cdn.example.com"
+      ],
+      "subject": "https://cdn.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "rule_deny"
+      }
+    },
+    {
+      "rules": [
+        "!cdn.example.com",
+        "example.com"
+      ],
+      "subject": "https://cdn.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "rule_deny"
+      }
+    },
+    {
+      "rules": [
+        "example.com",
+        "!cdn.example.com"
+      ],
+      "subject": "https://eu.cdn.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "rule_deny"
+      }
+    },
+    {
+      "rules": [
+        "example.com",
+        "!cdn.example.com"
+      ],
+      "subject": "https://api.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "~jivo",
+        "!=analytics.jivosite.com"
+      ],
+      "subject": "https://analytics.jivosite.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "rule_deny"
+      }
+    },
+    {
+      "rules": [
+        "~jivo",
+        "!=analytics.jivosite.com"
+      ],
+      "subject": "https://api.jivosite.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "example.com"
+      ],
+      "subject": "https://notexample.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "example.com"
+      ],
+      "subject": "https://example.com.evil.test/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "example.com"
+      ],
+      "subject": "https://xexample.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "*.example.com"
+      ],
+      "subject": "https://notexample.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "=api.example.com"
+      ],
+      "subject": "https://api.example.com.evil.test/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "=api.example.com"
+      ],
+      "subject": "https://notapi.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "re:prod-[0-9]{1,3}\\.acme\\.io"
+      ],
+      "subject": "https://prod-7.acme.io/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "re:prod-[0-9]{1,3}\\.acme\\.io"
+      ],
+      "subject": "https://prod-7.acme.io.evil.test/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "re:prod-[0-9]{1,3}\\.acme\\.io"
+      ],
+      "subject": "https://x.prod-7.acme.io/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "~jivo"
+      ],
+      "subject": "https://myjivo-clone.attacker.test/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "~jivo within acme.io"
+      ],
+      "subject": "https://myjivo-clone.attacker.test/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "~jivo within acme.io"
+      ],
+      "subject": "https://jivo-widget.acme.io/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "*.example.com"
+      ],
+      "subject": "https://example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "*.example.com"
+      ],
+      "subject": "https://api.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "*.example.com"
+      ],
+      "subject": "https://eu.api.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "example.com"
+      ],
+      "subject": "https://example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "example.com"
+      ],
+      "subject": "https://api.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [],
+      "subject": "https://anything.test/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "example.com"
+      ],
+      "subject": "https://exämple.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "unnormalisable"
+      }
+    },
+    {
+      "rules": [
+        "example.com"
+      ],
+      "subject": "",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "unnormalisable"
+      }
+    },
+    {
+      "rules": [
+        "example.com"
+      ],
+      "subject": "https://seen.other.test/",
+      "admitObserved": true,
+      "observed": [
+        "seen.other.test:443"
+      ],
+      "expect": {
+        "allowed": true,
+        "reason": "observed"
+      }
+    },
+    {
+      "rules": [
+        "example.com"
+      ],
+      "subject": "https://unseen.other.test/",
+      "admitObserved": true,
+      "observed": [
+        "seen.other.test:443"
+      ],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "!seen.other.test"
+      ],
+      "subject": "https://seen.other.test/",
+      "admitObserved": true,
+      "observed": [
+        "seen.other.test:443"
+      ],
+      "expect": {
+        "allowed": false,
+        "reason": "rule_deny"
+      }
+    },
+    {
+      "rules": [
+        "=app.example.com:8443"
+      ],
+      "subject": "https://app.example.com:8443/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "=app.example.com:8443"
+      ],
+      "subject": "https://app.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "=app.example.com:8443"
+      ],
+      "subject": "http://app.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "=app.example.com:8443"
+      ],
+      "subject": "https://app.example.com:8080/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "=app.example.com:8443"
+      ],
+      "subject": "app.example.com",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "example.com",
+        "!=app.example.com:9444"
+      ],
+      "subject": "app.example.com",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "example.com",
+        "!=app.example.com:9444"
+      ],
+      "subject": "https://app.example.com:9444/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "rule_deny"
+      }
+    },
+    {
+      "rules": [
+        "=10.0.0.18"
+      ],
+      "subject": "http://10.0.0.18:8891/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "=10.0.0.18"
+      ],
+      "subject": "http://10.0.0.180/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "=10.0.0.18"
+      ],
+      "subject": "https://host-10.0.0.18.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "example.com"
+      ],
+      "subject": "http://10.0.0.18/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "~0.18"
+      ],
+      "subject": "http://10.0.0.18/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    },
+    {
+      "rules": [
+        "=[2001:db8::5]"
+      ],
+      "subject": "https://[2001:0db8::0005]/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "=[2001:db8::5]:9443"
+      ],
+      "subject": "https://[2001:db8::5]:9443/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow"
+      }
+    },
+    {
+      "rules": [
+        "=[2001:db8::5]:9443"
+      ],
+      "subject": "https://[2001:db8::5]/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny"
+      }
+    }
+  ]
+}

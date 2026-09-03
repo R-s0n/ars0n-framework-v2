@@ -254,13 +254,42 @@ func ExecuteAndParseCloudEnumScan(scanID, companyName string) {
 		}
 	}
 
-	log.Printf("[CLOUD-ENUM] [DEBUG] Executing command: %v", command)
+	// The per-target Company settings, from the ONE store the Settings screen and the MCP company tool
+	// both write, overlaid onto the command cloud_enum_configs just produced.
+	//
+	// THIS IS THE ONE TOOL IN THE WORKFLOW WITH A REAL OVERLAP between the two stores, and it is
+	// resolved by OWNERSHIP rather than by duplication: every flag the modal emits above is declared
+	// framework-owned in the vocabulary, so a setting can never name one. What is left is the coverage
+	// switch, the keyword logic, verbosity, the three AWS credential flags and the two wordlist
+	// presets - and the presets carry no flag precisely because -m and -b belong to the modal.
+	tool, settings, notes := companyRunnerSettings(scopeTargetID, "cloud_enum")
+	if len(settings) > 0 {
+		log.Printf("[CLOUD-ENUM] [INFO] Running with stored Company settings for scope target %s: %s",
+			scopeTargetID, companySettingsSummary(settings))
+	}
+	command, configNotes := cloudEnumApplySettings(
+		command, config.MutationsFilePath != "", config.BruteFilePath != "", tool, settings)
+	notes = append(notes, configNotes...)
+	companyLogNotes("CLOUD-ENUM", notes)
+
+	// WHAT GETS STORED IN THE command COLUMN. The AWS credential VALUES are redacted out of it: they
+	// are argv elements, so UpdateCloudEnumScanStatus would otherwise write a live AWS secret access
+	// key into the database in plaintext on every scan that used them. The executed command is
+	// unchanged; only the stored copy is redacted. (They are still visible in the container's process
+	// table for the duration of the scan - passing them by environment variable is the runner change
+	// that fixes that, and it is not this one.)
+	storedCommand := cloudEnumRedactCredentials(strings.Join(command, " "), settings)
+	if preamble := companySettingsPreamble(tool, scopeTargetID, settings, notes); preamble != "" {
+		storedCommand += "\n" + preamble
+	}
+
+	log.Printf("[CLOUD-ENUM] [DEBUG] Executing command: %v", storedCommand)
 	cmd := exec.Command(command[0], command[1:]...)
 
 	stdout, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("[CLOUD-ENUM] [ERROR] Failed to execute cloud_enum: %v", err)
-		UpdateCloudEnumScanStatus(scanID, "error", "", fmt.Sprintf("Failed to execute cloud_enum: %v", err), strings.Join(command, " "), time.Since(startTime).String())
+		UpdateCloudEnumScanStatus(scanID, "error", "", fmt.Sprintf("Failed to execute cloud_enum: %v", err), storedCommand, time.Since(startTime).String())
 		return
 	}
 
@@ -271,7 +300,7 @@ func ExecuteAndParseCloudEnumScan(scanID, companyName string) {
 	resultOutput, err := catCmd.Output()
 	if err != nil {
 		log.Printf("[CLOUD-ENUM] [ERROR] Failed to read results file: %v", err)
-		UpdateCloudEnumScanStatus(scanID, "error", "", fmt.Sprintf("Failed to read results file: %v", err), strings.Join(command, " "), time.Since(startTime).String())
+		UpdateCloudEnumScanStatus(scanID, "error", "", fmt.Sprintf("Failed to read results file: %v", err), storedCommand, time.Since(startTime).String())
 		return
 	}
 
@@ -297,12 +326,12 @@ func ExecuteAndParseCloudEnumScan(scanID, companyName string) {
 	resultJSON, err := json.Marshal(cloudEnumResults)
 	if err != nil {
 		log.Printf("[CLOUD-ENUM] [ERROR] Failed to marshal results: %v", err)
-		UpdateCloudEnumScanStatus(scanID, "error", "", fmt.Sprintf("Failed to marshal results: %v", err), strings.Join(command, " "), time.Since(startTime).String())
+		UpdateCloudEnumScanStatus(scanID, "error", "", fmt.Sprintf("Failed to marshal results: %v", err), storedCommand, time.Since(startTime).String())
 		return
 	}
 
 	log.Printf("[CLOUD-ENUM] [DEBUG] Processed %d cloud resources", len(cloudEnumResults))
-	UpdateCloudEnumScanStatus(scanID, "success", string(resultJSON), "", strings.Join(command, " "), time.Since(startTime).String())
+	UpdateCloudEnumScanStatus(scanID, "success", string(resultJSON), "", storedCommand, time.Since(startTime).String())
 	log.Printf("[CLOUD-ENUM] [INFO] Cloud Enum scan completed and results stored successfully for company %s", companyName)
 }
 

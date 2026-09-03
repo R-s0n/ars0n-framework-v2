@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os/exec"
@@ -137,40 +136,31 @@ func ExecuteAmassEnumCompanyScan(scanID string, domains []string, scopeTargetID 
 	var allDNSRecords []AmassEnumDNSRecord
 	var commandsExecuted []string
 
+	// The per-target Company settings, from the ONE store the Settings screen and the MCP company tool
+	// both write. Absent is the normal case and produces the exact command this runner has always
+	// built, eighteen resolvers and five-hour per-domain timeout included. Loaded ONCE, outside the
+	// per-domain loop, so every domain in a scan is configured identically.
+	tool, settings, notes := companyRunnerSettings(scopeTargetID, "amass_enum_company")
+	if len(settings) > 0 {
+		log.Printf("[AMASS-ENUM-COMPANY] [INFO] Running with stored Company settings for scope target %s: %s",
+			scopeTargetID, companySettingsSummary(settings))
+	}
+	settingsRecorded := false
+	failedDomains := 0
+
 	for i, domain := range domains {
 		log.Printf("[AMASS-ENUM-COMPANY] [INFO] Processing domain %d/%d: %s", i+1, len(domains), domain)
 
 		rateLimit := GetAmassRateLimit()
 		log.Printf("[AMASS-ENUM-COMPANY] [INFO] Using rate limit of %d for Amass scan", rateLimit)
 
-		cmd := exec.Command(
-			"docker", "run", "--rm",
-			"caffix/amass",
-			"enum", "-passive", "-alts", "-brute", "-nocolor",
-			"-min-for-recursive", "2", "-timeout", "300",
-			"-d", domain,
-			// Primary public DNS resolvers
-			"-r", "8.8.8.8", // Google
-			"-r", "8.8.4.4", // Google Secondary
-			"-r", "1.1.1.1", // Cloudflare
-			"-r", "1.0.0.1", // Cloudflare Secondary
-			"-r", "9.9.9.9", // Quad9
-			"-r", "149.112.112.112", // Quad9 Secondary
-			"-r", "64.6.64.6", // Verisign
-			"-r", "64.6.65.6", // Verisign Secondary
-			// Additional reliable resolvers
-			"-r", "208.67.222.222", // OpenDNS
-			"-r", "208.67.220.220", // OpenDNS Secondary
-			"-r", "76.76.19.19", // Alternate DNS
-			"-r", "76.223.100.101", // Alternate DNS Secondary
-			"-r", "8.26.56.26", // Comodo Secure DNS
-			"-r", "8.20.247.20", // Comodo Secure DNS Secondary
-			"-r", "185.228.168.9", // CleanBrowsing
-			"-r", "185.228.169.9", // CleanBrowsing Secondary
-			"-r", "77.88.8.8", // Yandex DNS
-			"-r", "77.88.8.1", // Yandex DNS Secondary
-			"-rqps", fmt.Sprintf("%d", rateLimit),
-		)
+		argv, configNotes := amassEnumCompanyCommandArgs(domain, rateLimit, tool, settings)
+		if !settingsRecorded {
+			notes = append(notes, configNotes...)
+			companyLogNotes("AMASS-ENUM-COMPANY", notes)
+			settingsRecorded = true
+		}
+		cmd := exec.Command(argv[0], argv[1:]...)
 
 		commandsExecuted = append(commandsExecuted, cmd.String())
 		log.Printf("[AMASS-ENUM-COMPANY] [INFO] Executing command: %s", cmd.String())
@@ -181,6 +171,12 @@ func ExecuteAmassEnumCompanyScan(scanID string, domains []string, scopeTargetID 
 
 		err := cmd.Run()
 		if err != nil {
+			// THE RUNNER FAILS OPEN AT THE DOMAIN LEVEL, and this is where it happens: the domain is
+			// skipped and the whole scan is still finalised as 'success' with whatever the other domains
+			// produced. Any setting that can make amass exit non-zero therefore removes a domain from the
+			// results without removing it from the apparent coverage, which is why the count is now
+			// recorded on the scan row rather than only in the log.
+			failedDomains++
 			log.Printf("[AMASS-ENUM-COMPANY] [ERROR] Amass scan failed for domain %s: %v", domain, err)
 			log.Printf("[AMASS-ENUM-COMPANY] [ERROR] stderr output: %s", stderr.String())
 			continue
@@ -235,6 +231,16 @@ func ExecuteAmassEnumCompanyScan(scanID string, domains []string, scopeTargetID 
 	resultJSON, _ := json.Marshal(result)
 	execTime := time.Since(startTime).String()
 	commandsStr := strings.Join(commandsExecuted, "; ")
+
+	if note := companyDomainLoopNote("amass_enum_company", failedDomains, len(domains)); note != "" {
+		notes = append(notes, note)
+		log.Printf("[AMASS-ENUM-COMPANY] [WARN] %s", note)
+	}
+	// The command column already records every command that ran. The preamble is appended only when
+	// settings were applied, so a target that configured nothing stores exactly what it stored before.
+	if preamble := companySettingsPreamble(tool, scopeTargetID, settings, notes); preamble != "" {
+		commandsStr += "\n" + preamble
+	}
 
 	UpdateAmassEnumCompanyScanStatus(scanID, "success", string(resultJSON), "", commandsStr, execTime)
 

@@ -86,10 +86,10 @@ type validationRun struct {
 	// References measured in phase 0 under Validate's own recipe, never inherited as bytes from
 	// the probe. Comparing a cache-busted response against the probe's non-busted median is how
 	// everything ends up looking real.
-	notFound      ResponseFingerprint
-	notFoundOK    bool
-	login         ResponseFingerprint
-	loginOK       bool
+	notFound   ResponseFingerprint
+	notFoundOK bool
+	login      ResponseFingerprint
+	loginOK    bool
 	baseline   ResponseFingerprint
 	isSPAShell bool
 	baselineMS int64
@@ -1358,21 +1358,21 @@ func finishValidation(scanID, status, errMsg string, started time.Time, run *val
 			"baseline_ms": run.baselineMS,
 			// The number the degradation ladder actually compares against, which is not baseline_ms.
 			// Reporting only the base-URL probe is how an abort came to name a value no rule used.
-			"working_baseline_ms":  run.budget.WorkingBaseline(run.baseHost),
-			"not_found_measured":   run.notFoundOK,
-			"not_found_status":     run.notFound.Status,
-			"not_found_size":       run.notFound.DecodedSize,
-			"login_fingerprinted":  run.loginOK,
-			"spa_shell":            run.isSPAShell,
+			"working_baseline_ms": run.budget.WorkingBaseline(run.baseHost),
+			"not_found_measured":  run.notFoundOK,
+			"not_found_status":    run.notFound.Status,
+			"not_found_size":      run.notFound.DecodedSize,
+			"login_fingerprinted": run.loginOK,
+			"spa_shell":           run.isSPAShell,
 			// Null when it could not be established, which the UI renders as no claim at all
 			// rather than as a failed session.
 			"credentials_honoured":  run.credsHonoured,
 			"credentials_probe_url": run.credsProbeURL,
-			"control_families":     len(run.controls),
-			"control_cap_hit":      run.controlCapHit,
-			"unstable_families":    len(run.controlBad),
-			"scope":                run.scope.Describe(),
-			"out_of_scope_hosts":   len(run.scope.Refused()),
+			"control_families":      len(run.controls),
+			"control_cap_hit":       run.controlCapHit,
+			"unstable_families":     len(run.controlBad),
+			"scope":                 run.scope.Describe(),
+			"out_of_scope_hosts":    len(run.scope.Refused()),
 		})
 		requests = run.requests
 		abortReason = run.budget.Aborted()

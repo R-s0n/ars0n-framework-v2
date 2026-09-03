@@ -149,7 +149,7 @@ func upsertAttackVector(ctx context.Context, scopeTargetID string, v attackVecto
 		        FROM unnest(attack_vectors.signals || EXCLUDED.signals) AS g
 		    ),
 		    evidence_url = COALESCE(attack_vectors.evidence_url, EXCLUDED.evidence_url),
-		    raw_request = COALESCE(attack_vectors.raw_request, EXCLUDED.raw_request)
+		    raw_request = COALESCE(NULLIF(attack_vectors.raw_request, ''), NULLIF(EXCLUDED.raw_request, ''))
 		RETURNING (xmax = 0)`,
 		scopeTargetID, v.key(), strings.ToUpper(v.Method), v.MethodConfidence, v.Scheme,
 		strings.ToLower(v.Domain), v.Port, v.Path, v.InsertionPoint, v.InsertionConfidence,
@@ -204,12 +204,23 @@ func ConsolidateAttackVectors(w http.ResponseWriter, r *http.Request) {
 		added += r.Added
 	}
 
+	// The count next to what the count is made of. A total on its own reads as input variety and is
+	// not: see attackVectorDiversity.
+	diversity := attackVectorDiversity(ctx, scopeTargetID)
+	summary := fmt.Sprintf("%d unique vectors across %d host(s); %d new this run.",
+		total, hosts, added)
+	for _, d := range diversity {
+		if d.Note != "" {
+			summary += " " + d.Note
+		}
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"total": total, "hosts": hosts, "manual": manual, "with_notes": withNotes,
-		"added": added,
-		"by_source": results,
-		"summary": fmt.Sprintf("%d unique vectors across %d host(s); %d new this run.",
-			total, hosts, added),
+		"added":              added,
+		"by_source":          results,
+		"by_insertion_point": diversity,
+		"summary":            summary,
 	})
 }
 
@@ -230,7 +241,11 @@ func vectorsFromManualCrawl(ctx context.Context, scopeTargetID string) (vectorSo
 	rows, err := dbPool.Query(ctx, `
 		SELECT url, upper(COALESCE(method,'GET')),
 		       COALESCE(get_params::text,'{}'), COALESCE(post_params::text,'{}'),
-		       COALESCE(headers::text,'{}')
+		       COALESCE(headers::text,'{}'),
+		       COALESCE(post_data,''), COALESCE(body_type,''),
+		       -- Response headers, for the echoed-cookie check. A cookie the server builds from a
+		       -- request parameter is that parameter arriving by a second, untested route.
+		       COALESCE(response_headers::text,'{}')
 		FROM manual_crawl_captures
 		WHERE scope_target_id = $1
 		  -- Preflights and HEAD carry no user input worth testing and duplicate the real request that
@@ -241,90 +256,284 @@ func vectorsFromManualCrawl(ctx context.Context, scopeTargetID string) (vectorSo
 	}
 	defer rows.Close()
 
+	store := func(v attackVector) {
+		if ins, err := upsertAttackVector(ctx, scopeTargetID, v); err == nil && ins {
+			out.Added++
+		}
+	}
+
+	// Cookie and header vectors are not stored as they are met. They go here instead, and only the
+	// maximal observation of each endpoint's jar survives to the end of the scan. See ambientHold.
+	held := &ambientHold{}
+
 	for rows.Next() {
-		var rawURL, method, getParams, postParams, headers string
-		if rows.Scan(&rawURL, &method, &getParams, &postParams, &headers) != nil {
+		var rawURL, method, getParams, postParams, headers, postData, bodyType string
+		var responseHeaders string
+		if rows.Scan(&rawURL, &method, &getParams, &postParams, &headers,
+			&postData, &bodyType, &responseHeaders) != nil {
 			continue
 		}
 		out.Seen++
-		u, err := url.Parse(rawURL)
-		if err != nil || u.Host == "" {
+		immediate, ambient, ok := manualCrawlCaptureVectors(manualCrawlCapture{
+			Method: method, URL: rawURL, GetParams: getParams, PostParams: postParams,
+			Headers: headers, PostData: postData, BodyType: bodyType,
+			ResponseHeaders: responseHeaders,
+		})
+		if !ok {
 			out.Excluded++
 			continue
 		}
-		domain, port := splitHostPort(u)
-		rawPath := u.EscapedPath()
-		if rawPath == "" {
-			rawPath = "/"
-		}
-		// The path is TEMPLATED before it becomes an identity. /users/user.dedc6ad0-... and
-		// /users/user.ea064fd5-... are one vector seen with two account ids, not two vectors, and
-		// keeping them apart would put a row in the list for every object the operator happened to
-		// open while browsing.
-		path, pathSignals := templateVectorPath(rawPath)
-
-		base := attackVector{
-			Method: method, MethodConfidence: "observed",
-			Scheme: u.Scheme, Domain: domain, Port: port, Path: path,
-			InsertionConfidence: "observed", ParametersOrigin: "observed",
-			Sources: []string{"manual_crawl"}, EvidenceURL: rawURL,
-		}
-
-		store := func(v attackVector) {
-			if ins, err := upsertAttackVector(ctx, scopeTargetID, v); err == nil && ins {
-				out.Added++
-			}
-		}
-
-		for point, blob := range map[string]string{"query": getParams, "body": postParams} {
-			names := usefulParameterNames(jsonObjectKeys(blob))
-			if len(names) == 0 || vectorIsNoise(path, names) {
-				continue
-			}
-			v := base
-			v.InsertionPoint = point
-			v.Parameters = names
-			v.Signals = inputSignalsFor(blob, names)
+		for _, v := range immediate {
 			store(v)
 		}
-
-		// A static file gets cookies and headers because the BROWSER attaches them to everything, not
-		// because the file reads them. Those are the one case where the presence of an input proves
-		// nothing, so they are skipped here while a query or body parameter on the same path is still
-		// judged on what it carries.
-		staticPath := vectorPathIsStaticAsset(path)
-
-		// An identifier IN THE PATH is user-controlled input the application reads, and swapping it is
-		// the whole of an access-control test. Without this the richest vectors on a real target,
-		// /global-wallet/v1/accounts/{uuid} among them, were not in the list at all.
-		if len(pathSignals) > 0 && !staticPath {
-			v := base
-			v.InsertionPoint = "path"
-			v.Signals = pathSignals
-			store(v)
-		}
-
-		// Headers the application invented, and the cookies inside them. A JWT in an Authorization
-		// header or a session cookie is the highest-value input on most targets and is not a parameter
-		// by any reading.
-		headerNames, headerSignals := appHeaderInputs(headers)
-		if len(headerNames) > 0 && !staticPath {
-			v := base
-			v.InsertionPoint = "header"
-			v.Parameters = headerNames
-			v.Signals = headerSignals
-			store(v)
-		}
-		cookieNames, cookieSignals := cookieInputs(headers)
-		if len(cookieNames) > 0 && !staticPath {
-			v := base
-			v.InsertionPoint = "cookie"
-			v.Parameters = cookieNames
-			v.Signals = cookieSignals
-			store(v)
+		for _, v := range ambient {
+			held.add(v)
 		}
 	}
+
+	for _, v := range held.vectors() {
+		store(v)
+	}
+	if subsumed := held.subsumed(); subsumed > 0 {
+		out.Notes = append(out.Notes, fmt.Sprintf(
+			"%d cookie or header observation(s) were the same endpoint's jar earlier in the session, "+
+				"carrying a strict subset of the names another capture of that endpoint already "+
+				"carries, so they add no name that is not already testable there.", subsumed))
+	}
 	return out, nil
+}
+
+// manualCrawlCapture is one row of manual_crawl_captures, as the builder below needs it.
+type manualCrawlCapture struct {
+	Method          string
+	URL             string
+	GetParams       string
+	PostParams      string
+	Headers         string
+	PostData        string
+	BodyType        string
+	ResponseHeaders string
+}
+
+// manualCrawlCaptureVectors turns one capture into the vectors it produces, split by whether each one
+// can be stored on sight or has to be held.
+//
+// SEPARATE FROM THE QUERY FOR THE SAME REASON manualCrawlVector IS. The note on that function records
+// that the builder was easy to cover and the WIRING was not, and that the gap let 10 body vectors be
+// scanned with no body at all. The identical gap opened here the moment cookie and header rows
+// stopped being stored on sight: a mutation that sent every held observation straight to the database
+// passed every test, because the tests reached the subsumption rule directly and nothing reached the
+// call to it. Which bucket a vector goes in is a return value now, so a test can hold the routing to
+// it without a database.
+//
+// The ambient bucket is cookie and header only, which are the two containers the BROWSER fills.
+func manualCrawlCaptureVectors(c manualCrawlCapture) (immediate, ambient []attackVector, ok bool) {
+	base, pathSignals, ok := manualCrawlVector(c.Method, c.URL, c.Headers, c.PostData, c.BodyType)
+	if !ok {
+		return nil, nil, false
+	}
+	path := base.Path
+
+	for point, blob := range map[string]string{"query": c.GetParams, "body": c.PostParams} {
+		names := usefulParameterNames(jsonObjectKeys(blob))
+		if len(names) == 0 || vectorIsNoise(path, names) {
+			continue
+		}
+		v := base
+		v.InsertionPoint = point
+		v.Parameters = names
+		v.Signals = inputSignalsFor(blob, names)
+		immediate = append(immediate, v)
+	}
+	// Map iteration order is random in Go, so without this query and body arrive in either order and
+	// a test that reads the slice is flaky one run in two.
+	sort.Slice(immediate, func(i, j int) bool {
+		return immediate[i].InsertionPoint < immediate[j].InsertionPoint
+	})
+
+	// A static file gets cookies and headers because the BROWSER attaches them to everything, not
+	// because the file reads them. Those are the one case where the presence of an input proves
+	// nothing, so they are skipped here while a query or body parameter on the same path is still
+	// judged on what it carries.
+	staticPath := vectorPathIsStaticAsset(path)
+
+	// An identifier IN THE PATH is user-controlled input the application reads, and swapping it is
+	// the whole of an access-control test. Without this the richest vectors on a real target,
+	// /global-wallet/v1/accounts/{uuid} among them, were not in the list at all.
+	if len(pathSignals) > 0 && !staticPath {
+		v := base
+		v.InsertionPoint = "path"
+		v.Signals = pathSignals
+		immediate = append(immediate, v)
+	}
+
+	// Headers the application invented, and the cookies inside them. A JWT in an Authorization
+	// header or a session cookie is the highest-value input on most targets and is not a parameter
+	// by any reading.
+	headerNames, headerSignals := appHeaderInputs(c.Headers)
+	if len(headerNames) > 0 && !staticPath {
+		v := base
+		v.InsertionPoint = "header"
+		v.Parameters = headerNames
+		v.Signals = headerSignals
+		ambient = append(ambient, v)
+	}
+	cookieNames, cookieSignals := cookieInputs(c.Headers)
+	if len(cookieNames) > 0 && !staticPath {
+		v := base
+		v.InsertionPoint = "cookie"
+		v.Parameters = cookieNames
+		v.Signals = cookieSignals
+		ambient = append(ambient, v)
+	}
+	// A cookie the SERVER built from a request parameter, which is the same attacker-controlled
+	// input arriving by a route nothing tests. Emitted as its own vector rather than folded into
+	// the one above, because the two are different propositions: the jar's cookies are whatever
+	// the browser was carrying, and this one is a value the caller chose.
+	//
+	// IMMEDIATE, not ambient, and the difference matters. A server-set cookie name is very often ALSO
+	// in the jar on the next request, so holding it would let the jar's larger set swallow the one
+	// cookie vector on the row that is worth having. Subsumption is about repeated observations of
+	// the same ambient jar, and this is not one of those.
+	echoedNames, echoedSignals := echoedCookieInputs(c.ResponseHeaders, c.GetParams, c.PostParams)
+	if len(echoedNames) > 0 && !staticPath {
+		v := base
+		v.InsertionPoint = "cookie"
+		v.Parameters = echoedNames
+		v.Signals = echoedSignals
+		immediate = append(immediate, v)
+	}
+	return immediate, ambient, true
+}
+
+// ambientHold accumulates cookie and header observations and drops any whose name set another
+// observation of the SAME verb, host, path and insertion point already contains.
+//
+// WHAT THIS IS NOT. It is not a change to what counts as one vector. Identity is still verb + host +
+// path + parameter SET + insertion point, and the same cookie jar on two different endpoints is still
+// two vectors, correctly: a payload in that cookie has to be sent to each endpoint separately and the
+// two will not answer the same way. Collapsing those would understate the work rather than overstate
+// the coverage, and that definition is the methodology's, not this file's, to change.
+//
+// WHAT IT REMOVES. One endpoint recorded three times because the JAR GREW while the operator browsed.
+// Measured against Juice Shop: 77 cookie vectors sat on 55 distinct verb-and-path pairs. GET /,
+// GET /api/Challenges/, GET /rest/products/search and seven others each appeared three times, with
+//
+//	{continueCode, language, welcomebanner_status}
+//	{continueCode, cookieconsent_status, language, welcomebanner_status}
+//	{continueCode, cookieconsent_status, language, token, welcomebanner_status}
+//
+// which is the consent banner being dismissed and then a login, not three combinations. Each set is a
+// strict subset of the next, so the largest already puts a payload in every name the other two would.
+// Twenty-two rows that cannot find anything the rows beside them cannot.
+//
+// WHY THE SAME REASONING DOES NOT REACH QUERY OR BODY. There the CALLER chose which parameters to
+// send, so ?q= and ?q=&page= are two propositions and the smaller one can behave differently. Here
+// the browser attached whatever it happened to be holding; the operator never chose, and no request
+// they can compose corresponds to the smaller set except by clearing cookies first.
+//
+// A covered set is DROPPED, never merged into a union. These rows carry parameters_origin 'observed'
+// and a union would be a combination that was never sent.
+//
+// Incremental rather than buffer-then-filter because a long crawl is thousands of captures and every
+// held vector carries its own request bytes. Keeping only the maximal set as it goes bounds this at a
+// few rows per endpoint instead of two per capture.
+type ambientHold struct {
+	groups map[string][]attackVector
+	order  []string
+	seen   int
+}
+
+// add applies the subsumption rule WITHIN one verb, host, path and insertion point, and never across
+// them. That boundary is the whole safety of this: comparing every held vector against every other
+// would collapse two endpoints carrying the same jar into one row, which is exactly the redefinition
+// of identity that must not happen.
+func (a *ambientHold) add(v attackVector) {
+	if a.groups == nil {
+		a.groups = map[string][]attackVector{}
+	}
+	a.seen++
+	key := ambientVectorGroupKey(v)
+	group, exists := a.groups[key]
+	if !exists {
+		a.order = append(a.order, key)
+	}
+	incoming := ambientNameSet(v)
+	kept := group[:0]
+	for _, existing := range group {
+		// An observation already here that covers the new one makes the new one redundant. Equality
+		// counts as covering, so the first sighting of a jar stands in for every repeat of it and a
+		// run of identical jars cannot delete itself.
+		if ambientNamesContain(ambientNameSet(existing), incoming) {
+			a.groups[key] = group
+			return
+		}
+		// The reverse: the new observation covers an older one, which is the jar having grown.
+		if !ambientNamesContain(incoming, ambientNameSet(existing)) {
+			kept = append(kept, existing)
+		}
+	}
+	a.groups[key] = append(kept, v)
+}
+
+// vectors returns the survivors in the order their endpoint was first seen, so re-running the same
+// crawl stores the same rows in the same order.
+func (a *ambientHold) vectors() []attackVector {
+	out := make([]attackVector, 0, a.seen)
+	for _, key := range a.order {
+		out = append(out, a.groups[key]...)
+	}
+	return out
+}
+
+// subsumed is how many observations were dropped as covered by another on the same endpoint.
+func (a *ambientHold) subsumed() int {
+	return a.seen - len(a.vectors())
+}
+
+func ambientNameSet(v attackVector) map[string]bool {
+	set := make(map[string]bool, len(v.Parameters))
+	for _, name := range v.Parameters {
+		set[strings.ToLower(strings.TrimSpace(name))] = true
+	}
+	return set
+}
+
+// maximalAmbientObservations is ambientHold applied to a whole batch at once. Consolidation feeds
+// rows in one at a time; this is the same rule in the form a test can read.
+func maximalAmbientObservations(observations []attackVector) []attackVector {
+	hold := &ambientHold{}
+	for _, v := range observations {
+		hold.add(v)
+	}
+	return hold.vectors()
+}
+
+// ambientVectorGroupKey is the identity MINUS the parameter set: verb, host, path, insertion point.
+//
+// Only maximalAmbientObservations uses it. It is deliberately not attackVector.key with the
+// parameters removed, because that key IS the identity and nothing else may be tempted to weaken it.
+func ambientVectorGroupKey(v attackVector) string {
+	host := v.Domain
+	if v.Port > 0 {
+		host = fmt.Sprintf("%s:%d", v.Domain, v.Port)
+	}
+	return strings.Join([]string{
+		strings.ToUpper(v.Method), strings.ToLower(host), v.Path, v.InsertionPoint,
+	}, "\x00")
+}
+
+// ambientNamesContain reports whether outer holds every name in inner.
+func ambientNamesContain(outer, inner map[string]bool) bool {
+	if len(inner) > len(outer) {
+		return false
+	}
+	for name := range inner {
+		if !outer[name] {
+			return false
+		}
+	}
+	return true
 }
 
 // vectorsFromEndpoints covers live crawling, archive and JavaScript mining, which are all
@@ -618,9 +827,17 @@ func fuzzInsertionPoint(role, raw, payload string) (point, name string) {
 	}
 	if at := strings.LastIndex(before, "="); at >= 0 {
 		seg := before[:at]
-		if start := strings.LastIndexAny(seg, "?&\n"); start >= 0 {
+		// ';' belongs in this set because cookies are separated by "; " INSIDE one header line.
+		// Without it the search ran back to the start of the line and produced the parameter name
+		//
+		//	Cookie: session=s7KgQhXLHEoN4hbvdDBoaH4daz4DO7LC; AWSALB
+		//
+		// which is most of a header rather than a cookie name. That single row then carried a stale
+		// session token into every scan that read it: dalfox aborted on SESSION_LOST and 35 of its
+		// vectors were left with no verdict at all, across two separate runs.
+		if start := strings.LastIndexAny(seg, "?&;\n"); start >= 0 {
 			if key := strings.TrimSpace(seg[start+1:]); key != "" {
-				return point, key
+				return point, stripHeaderPrefix(key)
 			}
 		}
 	}
@@ -632,6 +849,20 @@ func fuzzInsertionPoint(role, raw, payload string) (point, name string) {
 		}
 	}
 	return point, word
+}
+
+// stripHeaderPrefix removes a "Header-Name: " prefix from a key pulled out of a raw request.
+//
+// The FIRST cookie in a Cookie header has no ';' in front of it, so even with ';' in the delimiter
+// set above the search runs back to the start of the line and takes "Cookie: " with it. A cookie
+// name cannot contain a colon, so whatever follows one is the name.
+func stripHeaderPrefix(key string) string {
+	if at := strings.Index(key, ":"); at >= 0 {
+		if rest := strings.TrimSpace(key[at+1:]); rest != "" {
+			return rest
+		}
+	}
+	return key
 }
 
 // --- helpers ---------------------------------------------------------------------------------
@@ -696,6 +927,104 @@ func attackVectorTotals(ctx context.Context, scopeTargetID string) (total, hosts
 		FROM attack_vectors WHERE scope_target_id = $1 AND deleted_at IS NULL`,
 		scopeTargetID).Scan(&total, &hosts, &manual, &withNotes)
 	return total, hosts, manual, withNotes
+}
+
+// attackVectorPointDiversity is one insertion point's count reported next to what that count is made
+// of.
+type attackVectorPointDiversity struct {
+	InsertionPoint string   `json:"insertion_point"`
+	Vectors        int      `json:"vectors"`
+	Endpoints      int      `json:"endpoints"`
+	DistinctNames  int      `json:"distinct_names"`
+	Names          []string `json:"names,omitempty"`
+	Note           string   `json:"note,omitempty"`
+}
+
+// attackVectorDiversity reports, per insertion point, how many vectors there are AND how many
+// distinct parameter names they carry between them.
+//
+// WHY THE SECOND NUMBER HAD TO EXIST. The Juice Shop run produced 202 vectors, of which 77 were
+// cookie and 43 header. Those two numbers read as the healthiest part of the list, because the
+// coverage endpoint's own warning is about a ZERO at an insertion point and neither of these is zero.
+// Between them the 77 cookie vectors carry five names, language, welcomebanner_status, continueCode,
+// cookieconsent_status and token, and the 43 header vectors carry one, authorization. So a clean
+// result across all 120 rules out six things, and the count invites the reader to believe it ruled
+// out a hundred and twenty.
+//
+// This is reported rather than fixed by collapsing rows, and that is the deliberate choice. The 120
+// requests are all real and all have to be sent: authorization on /rest/user/whoami and authorization
+// on /api/Challenges are two tests with two answers. The count is honest about the WORK. It is the
+// diversity that was missing, so the diversity is what gets added, and the identity that the rest of
+// this framework is built on is left exactly as the methodology defines it.
+func attackVectorDiversity(ctx context.Context, scopeTargetID string) []attackVectorPointDiversity {
+	rows, err := dbPool.Query(ctx, `
+		WITH v AS (
+		    SELECT insertion_point, method, path, parameters
+		    FROM attack_vectors
+		    WHERE scope_target_id = $1 AND deleted_at IS NULL
+		), names AS (
+		    SELECT v.insertion_point,
+		           array_agg(DISTINCT lower(n) ORDER BY lower(n)) AS names
+		    FROM v, unnest(v.parameters) AS n
+		    WHERE COALESCE(n,'') <> ''
+		    GROUP BY v.insertion_point
+		)
+		SELECT v.insertion_point, count(*), count(DISTINCT (v.method, v.path)),
+		       COALESCE(names.names, '{}')
+		FROM v LEFT JOIN names ON names.insertion_point = v.insertion_point
+		GROUP BY v.insertion_point, names.names
+		ORDER BY count(*) DESC`, scopeTargetID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	out := []attackVectorPointDiversity{}
+	for rows.Next() {
+		var d attackVectorPointDiversity
+		var names []string
+		if rows.Scan(&d.InsertionPoint, &d.Vectors, &d.Endpoints, &names) != nil {
+			continue
+		}
+		d.DistinctNames = len(names)
+		// Enough names to recognise the list, not so many that a query point with two hundred of them
+		// buries the numbers beside it.
+		if len(names) > attackVectorNamesShown {
+			d.Names = append([]string(nil), names[:attackVectorNamesShown]...)
+		} else {
+			d.Names = names
+		}
+		d.Note = attackVectorDiversityNote(d)
+		out = append(out, d)
+	}
+	return out
+}
+
+const attackVectorNamesShown = 20
+
+// attackVectorReplicationFloor is where a count stops describing inputs and starts describing
+// endpoints. Three vectors per distinct name is the point at which the Juice Shop cookie list, at
+// fifteen per name, is called out and an ordinary query list, where most names appear once or twice,
+// is not.
+const attackVectorReplicationFloor = 3
+
+func attackVectorDiversityNote(d attackVectorPointDiversity) string {
+	if d.DistinctNames == 0 {
+		if d.InsertionPoint == "path" {
+			return ""
+		}
+		return fmt.Sprintf("%d %s vector(s) carry no parameter name at all.", d.Vectors, d.InsertionPoint)
+	}
+	if d.Vectors < attackVectorReplicationFloor*d.DistinctNames {
+		return ""
+	}
+	return fmt.Sprintf(
+		"%d %s vector(s) carrying only %d distinct name(s) across %d endpoint(s). That is %d input(s) "+
+			"replicated, not %d, so a clean result here rules out %d thing(s). The requests are still "+
+			"all worth sending, because the same name on two endpoints reaches two pieces of code, but "+
+			"the count measures endpoints reached rather than input variety found.",
+		d.Vectors, d.InsertionPoint, d.DistinctNames, d.Endpoints,
+		d.DistinctNames, d.Vectors, d.DistinctNames)
 }
 
 // usefulParameterNames drops names that are not parameters an application reads.
@@ -788,4 +1117,124 @@ func attackVectorSkippedMethod(method string) bool {
 		return true
 	}
 	return false
+}
+
+// manualCrawlVector maps one capture row onto the vector every insertion point is then derived from.
+//
+// Pure, and separate from the query, for one reason: the RawRequest line below was missing for the
+// whole life of this function, and no test could see it because the only caller needs a database.
+// The builder was easy to cover and the WIRING was not, which is the shape of gap that let 10 body
+// vectors be scanned with no body at all. Now both are reachable from a test.
+func manualCrawlVector(method, rawURL, headers, postData, bodyType string) (attackVector, []string, bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return attackVector{}, nil, false
+	}
+	domain, port := splitHostPort(u)
+	rawPath := u.EscapedPath()
+	if rawPath == "" {
+		rawPath = "/"
+	}
+	// The path is TEMPLATED before it becomes an identity. /users/user.dedc6ad0-... and
+	// /users/user.ea064fd5-... are one vector seen with two account ids, not two vectors, and
+	// keeping them apart would put a row in the list for every object the operator happened to
+	// open while browsing.
+	path, pathSignals := templateVectorPath(rawPath)
+
+	return attackVector{
+		Method: method, MethodConfidence: "observed",
+		Scheme: u.Scheme, Domain: domain, Port: port, Path: path,
+		InsertionConfidence: "observed", ParametersOrigin: "observed",
+		Sources: []string{"manual_crawl"}, EvidenceURL: rawURL,
+		// The request bytes as captured. toInput reads the body, the content type and the real
+		// cookie and header VALUES back out of this, so a vector without it is tested with an
+		// empty body and a canary in place of every token.
+		RawRequest: buildRawRequest(method, rawURL, headers, postData, bodyType),
+	}, pathSignals, true
+}
+
+// buildRawRequest reconstructs the request bytes from a manual-crawl capture.
+//
+// This is the single input behind three things the runner reads back out of raw_request in
+// vectorRow.toInput: VectorInput.Body, VectorInput.ContentType, and the OBSERVED VALUES of cookies
+// and headers. Without it:
+//
+//   - every body vector is handed an empty body, so dalfox posted nothing at all and sqlmap and
+//     ghauri fell back to a synthesised name=rs0n pair. All 10 body vectors on ginandjuice.shop
+//     were in that state, including POST /catalog/product/stock, whose XML body is the one
+//     plausible route to XXE on the target.
+//   - every cookie vector loses its real token and gets the canary instead, so a scanner tests
+//     TrackingId=rs0n against an application that base64-decodes that value and gives up long
+//     before the payload reaches a query.
+//
+// The capture already holds all of it: post_data is stored untruncated alongside the headers.
+// Nothing was missing except the code to assemble it, because RawRequest was only ever set by the
+// fuzz source.
+//
+// The shape is exactly what rawRequestBody and observedRequestValues parse: a request line, one
+// header per line, a blank line, then the body. Header order is sorted so the same capture always
+// produces the same bytes, which matters because the upsert compares them.
+func buildRawRequest(method, rawURL, headersJSON, postData, bodyType string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	target := u.EscapedPath()
+	if target == "" {
+		target = "/"
+	}
+	if u.RawQuery != "" {
+		target += "?" + u.RawQuery
+	}
+
+	headers := map[string]string{}
+	if headersJSON != "" {
+		var decoded map[string]any
+		if json.Unmarshal([]byte(headersJSON), &decoded) == nil {
+			for name, value := range decoded {
+				name = strings.TrimSpace(name)
+				// HTTP/2 pseudo-headers are not headers on the wire and would be parsed as a header
+				// named ":method". Content-Length is dropped because every tool recomputes it and a
+				// stale one makes the request unparseable.
+				if name == "" || strings.HasPrefix(name, ":") ||
+					strings.EqualFold(name, "content-length") ||
+					strings.EqualFold(name, "host") {
+					continue
+				}
+				if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+					headers[name] = strings.TrimSpace(text)
+				}
+			}
+		}
+	}
+	// A recorded body with no recorded content type is unparseable by the receiver, so the capture's
+	// own body_type stands in. It is only ever a fallback: a real Content-Type header wins.
+	if strings.TrimSpace(bodyType) != "" {
+		hasCT := false
+		for name := range headers {
+			if strings.EqualFold(name, "content-type") {
+				hasCT = true
+				break
+			}
+		}
+		if !hasCT {
+			headers["Content-Type"] = strings.TrimSpace(bodyType)
+		}
+	}
+
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteString(strings.ToUpper(method) + " " + target + " HTTP/1.1\n")
+	b.WriteString("Host: " + u.Host + "\n")
+	for _, name := range names {
+		b.WriteString(name + ": " + headers[name] + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(postData)
+	return b.String()
 }

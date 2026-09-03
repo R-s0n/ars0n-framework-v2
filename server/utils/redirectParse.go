@@ -203,7 +203,7 @@ func parseSSRFmapOutput(stdout, report string, row vectorRow) []VectorFinding {
 			Severity:        "high",
 			Confidence:      "reached through the SSRF the detector already confirmed on this vector",
 			InsertionPoint:  row.InsertionPoint,
-			Param:           firstParam(row.toInput()),
+			Param:           markableParam(row.toInput()),
 			Method:          row.Method,
 			URL:             row.EvidenceURL,
 			Evidence:        trimmed,

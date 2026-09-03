@@ -17,7 +17,22 @@ import (
 // Measured against a decoy that answers 200 to every variation with an "Access Denied" body,
 // nomore403 with calibration disabled reported three separate bypasses of it.
 
-var nomore403Groups = []string{"Targets", "Techniques", "Request", "Calibration", "Output"}
+var nomore403Groups = []string{"Targets", "Safety", "Techniques", "Request", "Calibration", "Output"}
+
+// bypassWriteOption is the state-changing switch, offered identically by both tools.
+//
+// It is a bool with a label that says what it does in words rather than in jargon, because the
+// consequence of it is rows appearing in the operator's own application. It is off unless it is
+// explicitly turned on, and nothing else can turn writing on in its place: bypassCompose.go filters
+// the technique switches, the test switches, the forced HTTP method and the operator's own extra
+// headers against it.
+var bypassWriteOption = VectorOptionMeta{
+	Kind: "bool", Group: "Safety",
+	Label: bypassWriteWarningLabel + ": lets this tool send POST, PUT, PATCH, DELETE and " +
+		"method-override requests. Those CREATE, CHANGE and DELETE data in the application you are " +
+		"scanning. A measured run with these on created 24 rows in a live target. Leave it off " +
+		"unless you have permission to write.",
+}
 
 // The 23 techniques nomore403 ships, taken from the default list in its own --help. Each is a switch
 // so the framework can only ever emit a name the binary accepts.
@@ -54,9 +69,19 @@ var nomore403Techniques = []struct {
 var nomore403Options = map[string]VectorOptionMeta{
 	"endpoints": {Kind: "csv", Group: "Targets", Label: "URLs to test (one per line)",
 		Placeholder: "https://target/admin"},
-	"bypassIp":      {Kind: "string", Group: "Request", Label: "IP to inject into headers", Flag: "-i", Placeholder: "127.0.0.1"},
-	"httpMethod":    {Kind: "string", Group: "Request", Label: "HTTP method", Flag: "-t", Placeholder: "GET"},
-	"headers":       {Kind: "string", Group: "Request", Label: "Extra header", Flag: "-H", Repeatable: true, Placeholder: "Authorization: Bearer ..."},
+	"bypassIp": {Kind: "string", Group: "Request", Label: "IP to inject into headers", Flag: "-i", Placeholder: "127.0.0.1"},
+	"httpMethod": {Kind: "string", Group: "Request", Label: "HTTP method (GET, HEAD, OPTIONS or TRACE " +
+		"unless state-changing requests are allowed)", Flag: "-t", Placeholder: "GET"},
+
+	// Named extraHeaders, NOT headers, and the rename is load bearing.
+	//
+	// "headers" is also the key of the Header injection TECHNIQUE, and nomore403OptionsWithTechniques
+	// merges the technique switches over this map, so the technique won and this option did not exist.
+	// The Config modal therefore had no extra header field for this tool at all, and a session token
+	// typed into a stored "headers" setting was read as a bool, found not to be the string "true", and
+	// dropped without a word. Every bypass scan this section has ever run was anonymous.
+	"extraHeaders": {Kind: "string", Group: "Request", Label: "Extra header", Flag: "-H", Repeatable: true, Placeholder: "Authorization: Bearer ..."},
+
 	"userAgent":     {Kind: "string", Group: "Request", Label: "User-Agent", Flag: "-a", Placeholder: "nomore403"},
 	"randomAgent":   {Kind: "bool", Group: "Request", Label: "Random User-Agent", Flag: "--random-agent"},
 	"proxy":         {Kind: "string", Group: "Request", Label: "Proxy", Flag: "-x", Placeholder: "http://127.0.0.1:8080"},
@@ -70,13 +95,13 @@ var nomore403Options = map[string]VectorOptionMeta{
 	"retryBackoff":  {Kind: "int", Group: "Request", Label: "Retry backoff (ms)", Flag: "--retry-backoff-ms", Placeholder: "500"},
 
 	// The false positive controls, and the reason this section is usable at all.
-	"noCalibrate":     {Kind: "bool", Group: "Calibration", Label: "Disable auto-calibration (NOT recommended)", Flag: "--no-calibrate"},
-	"strictCalibrate": {Kind: "bool", Group: "Calibration", Label: "Strict calibration (also compares body hash and key headers)", Flag: "--strict-calibrate"},
-	"statusFilter":    {Kind: "string", Group: "Output", Label: "Only these status codes", Flag: "--status", Placeholder: "200,301"},
-	"unique":          {Kind: "bool", Group: "Output", Label: "Unique results only", Flag: "--unique"},
-	"topScoreMin":     {Kind: "int", Group: "Output", Label: "Minimum score for top findings", Flag: "--top-score-min", Placeholder: "55"},
+	"noCalibrate":       {Kind: "bool", Group: "Calibration", Label: "Disable auto-calibration (NOT recommended)", Flag: "--no-calibrate"},
+	"strictCalibrate":   {Kind: "bool", Group: "Calibration", Label: "Strict calibration (also compares body hash and key headers)", Flag: "--strict-calibrate"},
+	"statusFilter":      {Kind: "string", Group: "Output", Label: "Only these status codes", Flag: "--status", Placeholder: "200,301"},
+	"unique":            {Kind: "bool", Group: "Output", Label: "Unique results only", Flag: "--unique"},
+	"topScoreMin":       {Kind: "int", Group: "Output", Label: "Minimum score for top findings", Flag: "--top-score-min", Placeholder: "55"},
 	"variationScoreMin": {Kind: "int", Group: "Output", Label: "Minimum score for interesting variations", Flag: "--variation-score-min", Placeholder: "25"},
-	"verbose":         {Kind: "bool", Group: "Output", Label: "Verbose request logging", Flag: "-v"},
+	"verbose":           {Kind: "bool", Group: "Output", Label: "Verbose request logging", Flag: "-v"},
 }
 
 var nomore403Owned = map[string]string{
@@ -84,27 +109,27 @@ var nomore403Owned = map[string]string{
 	// where it appends the string "raw-http" to a list of flag names printed in verbose mode. It
 	// gates no technique. raw-duplicates, raw-authority and raw-desync are in the default -k set and
 	// run with or without it, so offering this would tell an operator they had enabled something.
-	"--raw-http": "Inert: it gates nothing. The raw techniques run either way.",
-	"-u":             "The target is one URL from the consolidated 4xx list, so a finding can be attributed to it.",
-	"--uri":          "The target is one URL from the consolidated 4xx list, so a finding can be attributed to it.",
-	"-o":             "The report path is per scan, and is how findings are read back.",
-	"--output":       "The report path is per scan, and is how findings are read back.",
-	"--jsonl":        "Findings are read from the JSON Lines report, so the format is fixed.",
-	"--json":         "Findings are read from the JSON Lines report, so the format is fixed.",
-	"--no-banner":    "The banner is noise in a captured report.",
-	"-k":             "Built from the individual technique switches.",
-	"--technique":    "Built from the individual technique switches.",
-	"-f":             "Pointed at the payload directory in the image explicitly; the tool's own default is relative to the working directory and an empty one makes it test almost nothing.",
-	"--folder":       "Pointed at the payload directory in the image explicitly; the tool's own default is relative to the working directory and an empty one makes it test almost nothing.",
-	"--request-file": "The framework drives nomore403 from a URL, not a saved request.",
-	"--http":         "Only applies to a request file, which the framework does not use.",
-	"-p":             "The payload marker is for hand-built URLs; the framework scans the URL as recorded.",
+	"--raw-http":         "Inert: it gates nothing. The raw techniques run either way.",
+	"-u":                 "The target is one URL from the consolidated 4xx list, so a finding can be attributed to it.",
+	"--uri":              "The target is one URL from the consolidated 4xx list, so a finding can be attributed to it.",
+	"-o":                 "The report path is per scan, and is how findings are read back.",
+	"--output":           "The report path is per scan, and is how findings are read back.",
+	"--jsonl":            "Findings are read from the JSON Lines report, so the format is fixed.",
+	"--json":             "Findings are read from the JSON Lines report, so the format is fixed.",
+	"--no-banner":        "The banner is noise in a captured report.",
+	"-k":                 "Built from the individual technique switches.",
+	"--technique":        "Built from the individual technique switches.",
+	"-f":                 "Pointed at the payload directory in the image explicitly; the tool's own default is relative to the working directory and an empty one makes it test almost nothing.",
+	"--folder":           "Pointed at the payload directory in the image explicitly; the tool's own default is relative to the working directory and an empty one makes it test almost nothing.",
+	"--request-file":     "The framework drives nomore403 from a URL, not a saved request.",
+	"--http":             "Only applies to a request file, which the framework does not use.",
+	"-p":                 "The payload marker is for hand-built URLs; the framework scans the URL as recorded.",
 	"--payload-position": "The payload marker is for hand-built URLs; the framework scans the URL as recorded.",
-	"--top":          "The summary sections are for a human reading a terminal; findings come from the report.",
-	"--version":      "Version only.",
+	"--top":              "The summary sections are for a human reading a terminal; findings come from the report.",
+	"--version":          "Version only.",
 }
 
-var forbiddenGroups = []string{"Targets", "Tests", "Request", "False positives", "Output"}
+var forbiddenGroups = []string{"Targets", "Safety", "Tests", "Request", "False positives", "Output"}
 
 // Forbidden's test modes, from its own --help. Switches for the same reason nomore403's are.
 var forbiddenTests = []struct {
@@ -136,8 +161,15 @@ var forbiddenTests = []struct {
 var forbiddenOptions = map[string]VectorOptionMeta{
 	"endpoints": {Kind: "csv", Group: "Targets", Label: "URLs to test (one per line)",
 		Placeholder: "https://target/admin"},
-	"force":            {Kind: "string", Group: "Request", Label: "Force HTTP method", Flag: "-f", Placeholder: "GET"},
-	"headers":          {Kind: "string", Group: "Request", Label: "Extra header", Flag: "-H", Repeatable: true},
+	"force": {Kind: "string", Group: "Request", Label: "Force HTTP method (GET, HEAD, OPTIONS or TRACE " +
+		"unless state-changing requests are allowed)", Flag: "-f", Placeholder: "GET"},
+
+	// extraHeaders rather than headers, for the same reason as nomore403's: "headers" is the key of
+	// the Header injection TEST, the test switches are merged over this map, and the option was being
+	// clobbered. Forbidden has never carried an operator's session token either.
+	"extraHeaders": {Kind: "string", Group: "Request", Label: "Extra header", Flag: "-H", Repeatable: true,
+		Placeholder: "Authorization: Bearer ..."},
+
 	"cookies":          {Kind: "string", Group: "Request", Label: "Cookie", Flag: "-b", Repeatable: true},
 	"userAgent":        {Kind: "string", Group: "Request", Label: "User-Agent", Flag: "-a", Placeholder: "Forbidden/13.4"},
 	"proxy":            {Kind: "string", Group: "Request", Label: "Proxy", Flag: "-x"},
@@ -147,29 +179,43 @@ var forbiddenOptions = map[string]VectorOptionMeta{
 	"ignoreParameters": {Kind: "bool", Group: "Request", Label: "Ignore the query string and fragment", Flag: "-ip"},
 	"ignoreRequests":   {Kind: "bool", Group: "Request", Label: "Use PycURL rather than Requests", Flag: "-ir"},
 	"values":           {Kind: "string", Group: "Request", Label: "Header values to test (file or single value)", Flag: "-v"},
-	"path":             {Kind: "string", Group: "Request", Label: "Known-accessible path for path-overrides", Flag: "-p", Placeholder: "/robots.txt"},
-	"evil":             {Kind: "string", Group: "Request", Label: "Collaborator URL for host-override and redirect tests", Flag: "-e", Placeholder: "https://github.com"},
+
+	// What this setting is FOR, since it produced 28 false findings by being misunderstood.
+	//
+	// Two of Forbidden's three path override record sets request a URL that is NOT the endpoint under
+	// test: one requests this path, and one requests the site root, both carrying X-Original-URL and
+	// its siblings pointed at the endpoint. That is the correct shape for the attack. What makes the
+	// result meaningful is comparing it against the ordinary response of the URL that was requested,
+	// which is what -l path does, and -l path only covers THIS path. Left unset the framework pins it
+	// to the site root so that one filter covers both record sets.
+	"path": {Kind: "string", Group: "Request", Label: "Accessible path the path-override tests request " +
+		"(defaults to the site root, which is what lets their results be compared against it)",
+		Flag: "-p", Placeholder: "/"},
+
+	"evil": {Kind: "string", Group: "Request", Label: "Collaborator URL for host-override and redirect tests", Flag: "-e", Placeholder: "https://github.com"},
 
 	// Forbidden's answer to the soft-403 problem, and it is better than most: a regex and a set of
 	// content lengths, either of which removes a 200 that is really a denial.
-	"ignore":         {Kind: "string", Group: "False positives", Label: "Regex filtering out fake 200s", Flag: "-i", Placeholder: "Access Denied"},
-	"contentLengths": {Kind: "string", Group: "False positives", Label: "Content lengths to filter out", Flag: "-l", Placeholder: "initial"},
-	"statusCodes":    {Kind: "string", Group: "False positives", Label: "Status codes to include", Flag: "-sc", Placeholder: "2xx,3xx"},
+	"ignore": {Kind: "string", Group: "False positives", Label: "Regex filtering out fake 200s", Flag: "-i", Placeholder: "Access Denied"},
+	"contentLengths": {Kind: "string", Group: "False positives", Label: "Extra content lengths to filter " +
+		"out (\"initial\", this target's denial, and \"path\", the accessible page, are always sent)",
+		Flag: "-l", Placeholder: "1934"},
+	"statusCodes": {Kind: "string", Group: "False positives", Label: "Status codes to include", Flag: "-sc", Placeholder: "2xx,3xx"},
 
 	"debug": {Kind: "bool", Group: "Output", Label: "Debug output", Flag: "-dbg"},
 }
 
 var forbiddenOwned = map[string]string{
-	"-u":         "The target is one URL from the consolidated 4xx list.",
-	"--url":      "The target is one URL from the consolidated 4xx list.",
-	"-t":         "Built from the individual test switches.",
-	"--tests":    "Built from the individual test switches.",
-	"-o":         "The report path is per scan, and is how findings are read back.",
-	"--out":      "The report path is per scan, and is how findings are read back.",
-	"-st":        "The table format is for a wide terminal; findings are read from the JSON report.",
+	"-u":           "The target is one URL from the consolidated 4xx list.",
+	"--url":        "The target is one URL from the consolidated 4xx list.",
+	"-t":           "Built from the individual test switches.",
+	"--tests":      "Built from the individual test switches.",
+	"-o":           "The report path is per scan, and is how findings are read back.",
+	"--out":        "The report path is per scan, and is how findings are read back.",
+	"-st":          "The table format is for a wide terminal; findings are read from the JSON report.",
 	"--show-table": "The table format is for a wide terminal; findings are read from the JSON report.",
-	"-dmp":       "Dump writes the test list and runs NOTHING, which would report a clean scan of a target never touched.",
-	"--dump":     "Dump writes the test list and runs NOTHING, which would report a clean scan of a target never touched.",
+	"-dmp":         "Dump writes the test list and runs NOTHING, which would report a clean scan of a target never touched.",
+	"--dump":       "Dump writes the test list and runs NOTHING, which would report a clean scan of a target never touched.",
 }
 
 func init() {
@@ -188,7 +234,14 @@ func init() {
 			// Measured at eight to eleven seconds for one URL with the default 22 techniques and fifty
 			// goroutines, so a few hundred targets is an hour rather than a minute.
 			Timeout: 15 * time.Minute,
-			Limitation: "nomore403 tries twenty-three families of bypass against one URL and reports the " +
+			Limitation: "By default this runs NINETEEN of nomore403's twenty-three techniques. verbs, " +
+				"verbs-case, method-override and raw-desync are left out because they send POST, PUT, " +
+				"PATCH and DELETE: measured against a live target, they created 20 rows in it through " +
+				"POST -> 201 on /api/Users and /api/SecurityAnswers, which is not something a read-only " +
+				"access control check may do. Measured again against a decoy, the default run went from " +
+				"1274 requests carrying every write verb in the payload list to 1056 carrying none. " +
+				"Turn on \"" + bypassWriteWarningLabel + "\" to include them. " +
+				"nomore403 tries twenty-three families of bypass against one URL and reports the " +
 				"variations whose response differs from a baseline it establishes first. Leave " +
 				"auto-calibration on for most targets: measured against a decoy that answers 200 to " +
 				"every variation with an \"Access Denied\" body, calibration on reported thirteen " +
@@ -212,15 +265,22 @@ func init() {
 			ScanUnit:        "URL",
 			Compose:         ComposeForbidden,
 			Parse:           parseForbiddenReport,
+			Incomplete:      forbiddenIncomplete,
 			Timeout:         20 * time.Minute,
 			Limitation: "Forbidden takes ONE URL per run and works through the test families you select. " +
 				"It is built on PycURL so it can send request forms the Python standard library " +
-				"refuses to build, which is what makes its parser and protocol tests worth having. Its " +
-				"false positive controls are the ones that matter: the ignore regex and the content " +
-				"length filter both remove a 200 that is really a denial page, and the framework " +
-				"supplies the length of the original 403 as a filter by default. Its host-override, " +
-				"redirect and parser tests send requests referencing an EXTERNAL collaborator URL, " +
-				"which defaults to github.com unless you set your own.",
+				"refuses to build, which is what makes its parser and protocol tests worth having. " +
+				"THREE of its families are off by default because they write: methods sends whatever " +
+				"OPTIONS advertises, method-overrides smuggles 45 verbs and hardcodes a POST body, and " +
+				"uploads sends PUT /pentest.txt into every directory of the path. Turn on \"" +
+				bypassWriteWarningLabel + "\" to include them. Its false positive controls are the ones " +
+				"that matter: the ignore regex and the content length filter both remove a 200 that is " +
+				"really a denial page, and the framework always supplies two lengths, the original " +
+				"denial's and the accessible page's, because two of its three path override record sets " +
+				"request a URL that is not the endpoint under test and their ordinary responses were " +
+				"otherwise reported as bypasses of it. Its host-override, redirect and parser tests send " +
+				"requests referencing an EXTERNAL collaborator URL, which defaults to github.com unless " +
+				"you set your own.",
 		},
 	)
 	VectorCategories = append(VectorCategories, struct {
@@ -229,24 +289,40 @@ func init() {
 	}{"access-bypass", "403 & Access Control Bypass"})
 }
 
+// The technique and test switches are merged OVER the option map, so any option sharing a key with
+// one of them is silently replaced. That is not hypothetical: both tools' "headers" extra-header
+// option was lost that way, which is why they are called extraHeaders now, and why
+// TestBypassOptionKeysDoNotCollideWithTechniqueKeys exists.
 func nomore403OptionsWithTechniques() map[string]VectorOptionMeta {
-	out := make(map[string]VectorOptionMeta, len(nomore403Options)+len(nomore403Techniques))
+	out := make(map[string]VectorOptionMeta, len(nomore403Options)+len(nomore403Techniques)+1)
 	for key, meta := range nomore403Options {
 		out[key] = meta
 	}
 	for _, technique := range nomore403Techniques {
-		out[technique.Key] = VectorOptionMeta{Kind: "bool", Group: "Techniques", Label: technique.Label}
+		label := technique.Label
+		if reason := nomore403WritingTechniques[technique.Flag]; reason != "" {
+			label += ". WRITES TO THE TARGET: it " + reason +
+				". Skipped unless state-changing requests are allowed."
+		}
+		out[technique.Key] = VectorOptionMeta{Kind: "bool", Group: "Techniques", Label: label}
 	}
+	out[bypassWriteSetting] = bypassWriteOption
 	return out
 }
 
 func forbiddenOptionsWithTests() map[string]VectorOptionMeta {
-	out := make(map[string]VectorOptionMeta, len(forbiddenOptions)+len(forbiddenTests))
+	out := make(map[string]VectorOptionMeta, len(forbiddenOptions)+len(forbiddenTests)+1)
 	for key, meta := range forbiddenOptions {
 		out[key] = meta
 	}
 	for _, test := range forbiddenTests {
-		out[test.Key] = VectorOptionMeta{Kind: "bool", Group: "Tests", Label: test.Label}
+		label := test.Label
+		if reason := forbiddenWritingTests[test.Flag]; reason != "" {
+			label += ". WRITES TO THE TARGET: it " + reason +
+				". Skipped unless state-changing requests are allowed."
+		}
+		out[test.Key] = VectorOptionMeta{Kind: "bool", Group: "Tests", Label: label}
 	}
+	out[bypassWriteSetting] = bypassWriteOption
 	return out
 }

@@ -8,8 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
-	"sort"
 	"strings"
 	"time"
 
@@ -114,31 +112,97 @@ func ExecuteAndParseCTLCompanyScan(scanID, companyName string) {
 	log.Printf("[CTL-COMPANY] [INFO] Starting CTL Company scan execution for company %s (scan ID: %s)", companyName, scanID)
 	startTime := time.Now()
 
-	encodedCompanyName := url.QueryEscape(companyName)
-	requestURL := fmt.Sprintf("https://crt.sh/?O=%s&output=json", encodedCompanyName)
+	// The per-target Company settings, from the ONE store the Settings screen and the MCP company tool
+	// both write. Absent is the normal case and produces exactly the request and exactly the filters
+	// this runner has always used.
+	scopeTargetID := companyScopeTargetForScan(context.Background(), "ctl_company_scans", scanID, "ctl_company")
+	tool, settings, notes := companyRunnerSettings(scopeTargetID, "ctl_company")
+	plan := ctlCompanyPlanFor(companyName, settings)
+	if plan.Configured {
+		log.Printf("[CTL-COMPANY] [INFO] Running with stored Company settings for scope target %s: %s",
+			scopeTargetID, companySettingsSummary(settings))
+	}
+	companyLogNotes("CTL-COMPANY", notes)
+
+	// storedCommand is what the scan row records as "what did this actually run". It has always been
+	// `GET <url>`; when settings were applied the preamble is appended so the request AND the runner
+	// behaviour that is not visible in the URL are both on the record.
+	//
+	// It reads `notes` through the closure rather than taking a copy, so a note appended after a retry
+	// or after the name filter is in whichever call happens later. There is deliberately no second
+	// place notes are added from.
+	requestURL := plan.RequestURL
+	command := func() string {
+		out := fmt.Sprintf("GET %s", requestURL)
+		if preamble := companySettingsPreamble(tool, scopeTargetID, settings, notes); preamble != "" {
+			out += "\n" + preamble
+		}
+		return out
+	}
+	// The ERROR paths stored an EMPTY command column before this change, and they still do for a target
+	// that configured nothing. Only the success path has ever recorded the request, and adding one to
+	// the error rows of every existing install would be a change nobody asked for.
+	errorCommand := func() string {
+		if companySettingsPreamble(tool, scopeTargetID, settings, notes) == "" {
+			return ""
+		}
+		return command()
+	}
+
 	log.Printf("[CTL-COMPANY] [DEBUG] Requesting URL: %s", requestURL)
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := &http.Client{Timeout: plan.Timeout}
 
 	req, err := http.NewRequest("GET", requestURL, nil)
 	if err != nil {
 		log.Printf("[CTL-COMPANY] [ERROR] Failed to create HTTP request: %v", err)
-		UpdateCTLCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to create HTTP request: %v", err), "", time.Since(startTime).String())
+		UpdateCTLCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to create HTTP request: %v", err), errorCommand(), time.Since(startTime).String())
 		return
 	}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", plan.UserAgent)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	// MEASURED CLIENT-SIDE TRAP, which is why this one header is switchable and the rest are not. Go's
+	// http.Transport only transparently decompresses a response when IT set Accept-Encoding itself;
+	// setting the header by hand hands the raw gzip bytes to json.Unmarshal. ON by default because
+	// that is what this runner has always sent.
+	if plan.SendAcceptEncoding {
+		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	}
 	req.Header.Set("DNT", "1")
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 
-	resp, err := client.Do(req)
+	// THE RETRY LOOP IS A NO-OP AT THE DEFAULT. plan.Retries is 0 unless somebody set it, so this runs
+	// the request exactly once and takes exactly the paths it always took. crt.sh 5xx responses were
+	// measured coming back in 0.52 to 0.67 seconds, so three retries would add under two seconds to a
+	// healthy run - and ctl_company, unlike the Wildcard ctl step, has NO certspotter fallback, so a
+	// single 502 is a total zero for certificate-transparency root-domain discovery.
+	//
+	// A transport failure is retried on the same budget as a 5xx. It is at least as transient and it
+	// currently ends the scan outright.
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		resp, err = client.Do(req)
+		retryable := err != nil || (resp != nil && resp.StatusCode >= 500)
+		if !retryable || attempt >= plan.Retries {
+			break
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		log.Printf("[CTL-COMPANY] [INFO] crt.sh attempt %d/%d failed (retryable); waiting %s before retrying.",
+			attempt+1, plan.Retries+1, plan.RetryBackoff)
+		notes = append(notes, fmt.Sprintf("crt.sh attempt %d of %d failed and was retried.",
+			attempt+1, plan.Retries+1))
+		if plan.RetryBackoff > 0 {
+			time.Sleep(plan.RetryBackoff)
+		}
+	}
 	if err != nil {
 		log.Printf("[CTL-COMPANY] [ERROR] Failed to make request to crt.sh: %v", err)
-		UpdateCTLCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to make request to crt.sh: %v", err), "", time.Since(startTime).String())
+		UpdateCTLCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to make request to crt.sh: %v", err), errorCommand(), time.Since(startTime).String())
 		return
 	}
 	defer resp.Body.Close()
@@ -162,14 +226,14 @@ func ExecuteAndParseCTLCompanyScan(scanID, companyName string) {
 			errorMsg = fmt.Sprintf("crt.sh returned unexpected status code %d. This is an unusual error that may indicate:\n\n• New error condition not yet handled by our system\n• Temporary technical issues with crt.sh\n• Network connectivity problems\n\nRecommendations:\n• Try again in a few minutes\n• Check if crt.sh is accessible at https://crt.sh\n• Contact support if the issue persists", resp.StatusCode)
 		}
 
-		UpdateCTLCompanyScanStatus(scanID, "error", "", errorMsg, "", time.Since(startTime).String())
+		UpdateCTLCompanyScanStatus(scanID, "error", "", errorMsg, errorCommand(), time.Since(startTime).String())
 		return
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("[CTL-COMPANY] [ERROR] Failed to read response body: %v", err)
-		UpdateCTLCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to read response body: %v", err), "", time.Since(startTime).String())
+		UpdateCTLCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to read response body: %v", err), errorCommand(), time.Since(startTime).String())
 		return
 	}
 
@@ -180,13 +244,14 @@ func ExecuteAndParseCTLCompanyScan(scanID, companyName string) {
 		strings.Contains(bodyString, "crt.sh  Certificate Search") {
 		log.Printf("[CTL-COMPANY] [WARN] crt.sh returned error page indicating too many results for company: %s", companyName)
 		errorMsg := fmt.Sprintf("crt.sh query for '%s' returned too many results. The search was terminated by crt.sh because it would produce an excessive number of results. Try using a more specific company name or consider that this company may have too many certificates to process efficiently.", companyName)
-		UpdateCTLCompanyScanStatus(scanID, "error", "", errorMsg, "", time.Since(startTime).String())
+		UpdateCTLCompanyScanStatus(scanID, "error", "", errorMsg, errorCommand(), time.Since(startTime).String())
 		return
 	}
 
-	var results []struct {
-		CommonName string `json:"common_name"`
-	}
+	// name_value carries the certificate's SAN list and is decoded unconditionally, because decoding a
+	// field costs nothing. It is only READ when includeSanNames is on, so the default result set is
+	// byte-identical to before: common_name and nothing else.
+	var results []ctlCompanyNames
 
 	if err := json.Unmarshal(bodyBytes, &results); err != nil {
 		log.Printf("[CTL-COMPANY] [ERROR] Failed to decode crt.sh response: %v", err)
@@ -195,51 +260,34 @@ func ExecuteAndParseCTLCompanyScan(scanID, companyName string) {
 			logLength = len(bodyString)
 		}
 		log.Printf("[CTL-COMPANY] [DEBUG] Response body (first %d chars): %s", logLength, bodyString[:logLength])
-		UpdateCTLCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to decode crt.sh response: %v. Response may not be valid JSON.", err), "", time.Since(startTime).String())
+		UpdateCTLCompanyScanStatus(scanID, "error", "", fmt.Sprintf("Failed to decode crt.sh response: %v. Response may not be valid JSON.", err), errorCommand(), time.Since(startTime).String())
 		return
 	}
 
 	log.Printf("[CTL-COMPANY] [DEBUG] Received %d certificate entries from crt.sh", len(results))
 
-	uniqueDomains := make(map[string]bool)
-	for _, result := range results {
-		domain := strings.ToLower(strings.TrimPrefix(result.CommonName, "*."))
-		log.Printf("[CTL-COMPANY] [DEBUG] Processing domain: %s", domain)
-
-		if domain == "" {
-			continue
-		}
-
-		if strings.Contains(domain, " ") || strings.Contains(domain, ",") || strings.Contains(domain, "inc") {
-			log.Printf("[CTL-COMPANY] [DEBUG] Skipping non-domain entry: %s", domain)
-			continue
-		}
-
-		parts := strings.Split(domain, ".")
-		if len(parts) >= 2 {
-			lastPart := parts[len(parts)-1]
-			if len(lastPart) >= 2 && len(lastPart) <= 6 {
-				log.Printf("[CTL-COMPANY] [DEBUG] Keeping full domain: %s", domain)
-				uniqueDomains[domain] = true
-			} else {
-				log.Printf("[CTL-COMPANY] [DEBUG] Skipping invalid TLD: %s", domain)
-			}
-		} else {
-			log.Printf("[CTL-COMPANY] [DEBUG] Skipping entry without valid domain structure: %s", domain)
-		}
-	}
-
-	var domains []string
-	for domain := range uniqueDomains {
-		domains = append(domains, domain)
-	}
-	sort.Strings(domains)
+	domains, filterNotes := ctlCompanyFilterDomains(plan, results)
+	notes = append(notes, filterNotes...)
+	companyLogNotes("CTL-COMPANY", filterNotes)
 
 	result := strings.Join(domains, "\n")
 	log.Printf("[CTL-COMPANY] [DEBUG] Final processed result contains %d unique domains", len(domains))
 	log.Printf("[CTL-COMPANY] [DEBUG] Domains found: %v", domains)
 
-	UpdateCTLCompanyScanStatus(scanID, "success", result, "", fmt.Sprintf("GET %s", requestURL), time.Since(startTime).String())
+	// THE ANTI-SILENT-NOTHING CONTROL, off by default because it changes a success into an error.
+	// crt.sh answers a company it has never seen with HTTP 200 and a valid empty array, and the
+	// filters above can empty a non-empty response, and both land today as a 'success' row with an
+	// empty result column that consolidation then reads and contributes nothing from.
+	if plan.FailOnZeroDomains && len(domains) == 0 {
+		errorMsg := fmt.Sprintf("crt.sh returned %d certificate entries and none survived the name filters, "+
+			"so this scan found zero root domains. failOnZeroDomains is on, so it is recorded as an error "+
+			"rather than as a clean result: a scan that SAW nothing and a scan that FOUND nothing are not "+
+			"the same answer.", len(results))
+		UpdateCTLCompanyScanStatus(scanID, "error", "", errorMsg, errorCommand(), time.Since(startTime).String())
+		return
+	}
+
+	UpdateCTLCompanyScanStatus(scanID, "success", result, "", command(), time.Since(startTime).String())
 	log.Printf("[CTL-COMPANY] [INFO] CTL Company scan completed and results stored successfully for company %s", companyName)
 }
 

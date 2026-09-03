@@ -207,6 +207,115 @@ body {
   }
 }
 
+/* A validated threat is one the operator actually landed, and it should read as a win the moment the
+   section loads rather than being something you find by reading badges. The glow breathes instead of
+   flashing: a hard blink on a list that can hold dozens of entries stops being triumphant and starts
+   being an irritation you want to scroll past. */
+.threat-validated {
+  border: 2px solid #20c997 !important;
+  border-radius: 0.375rem;
+  background: linear-gradient(180deg, rgba(32, 201, 151, 0.14) 0%, rgba(32, 201, 151, 0.05) 100%);
+  animation: threatValidatedGlow 2.4s ease-in-out infinite;
+  position: relative;
+  overflow: hidden;
+}
+
+/* The accordion header and body carry Bootstrap's own dark backgrounds, which would sit on top of the
+   gradient above and hide it entirely. Clearing them lets the win colour through the whole item. */
+.threat-validated .accordion-item,
+.threat-validated .accordion-header,
+.threat-validated .accordion-button,
+.threat-validated .accordion-collapse,
+.threat-validated .accordion-body {
+  background-color: transparent !important;
+}
+
+/* Bootstrap gives the open accordion button its own box-shadow and a blue focus ring; both fight the
+   glow. The collapsed arrow is also near-invisible against green, so it gets recoloured. */
+.threat-validated .accordion-button:not(.collapsed) {
+  box-shadow: none !important;
+  color: #20c997 !important;
+}
+.threat-validated .accordion-button:focus {
+  box-shadow: none !important;
+  border-color: transparent !important;
+}
+.threat-validated .accordion-button::after {
+  filter: brightness(0) saturate(100%) invert(72%) sepia(45%) saturate(600%) hue-rotate(115deg);
+}
+
+@keyframes threatValidatedGlow {
+  0%, 100% {
+    box-shadow:
+      0 0 6px 1px rgba(32, 201, 151, 0.45),
+      inset 0 0 10px rgba(32, 201, 151, 0.10);
+  }
+  50% {
+    box-shadow:
+      0 0 22px 5px rgba(32, 201, 151, 0.85),
+      inset 0 0 18px rgba(32, 201, 151, 0.22);
+  }
+}
+
+/* The expanded body is prose that has to be read, and neither the gradient wash nor the moving sweep
+   belongs behind running text. The content gets its own opaque panel lifted above both, so the glow
+   frames the item rather than competing with the words inside it. */
+.threat-validated .threat-body-panel {
+  position: relative;
+  z-index: 1;
+  background-color: #16191c;
+  border: 1px solid rgba(32, 201, 151, 0.3);
+  border-radius: 0.375rem;
+  padding: 1rem;
+}
+
+/* A sweep of light that crosses the item once every cycle, timed to the glow. This is the part that
+   makes it read as celebratory rather than merely coloured. It is pointer-events: none so it can
+   never intercept a click on the accordion header underneath, and z-index 0 keeps it behind the
+   body panel above. */
+.threat-validated::after {
+  content: '';
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  left: -60%;
+  width: 40%;
+  height: 100%;
+  background: linear-gradient(
+    100deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(32, 201, 151, 0.28) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  transform: skewX(-18deg);
+  pointer-events: none;
+  animation: threatValidatedSweep 3.6s ease-in-out infinite;
+}
+
+@keyframes threatValidatedSweep {
+  0%, 62% {
+    left: -60%;
+  }
+  100% {
+    left: 130%;
+  }
+}
+
+/* Anyone who has asked not to see motion gets the colour and the border and none of the movement.
+   The win still reads; it just stops moving. */
+@media (prefers-reduced-motion: reduce) {
+  .threat-validated {
+    animation: none;
+    box-shadow:
+      0 0 16px 3px rgba(32, 201, 151, 0.7),
+      inset 0 0 14px rgba(32, 201, 151, 0.18);
+  }
+  .threat-validated::after {
+    animation: none;
+    display: none;
+  }
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -228,4 +337,63 @@ body {
 * {
   scrollbar-width: thin;
   scrollbar-color: #666 transparent;
+}
+
+/* ------------------------------------------------------------------ card metrics
+   One shape for every number on every workflow card.
+
+   Two rules, both of which existed only by accident before:
+
+   1. The metric block lives inside the card's bottom-pinned region, so the gap between a label and
+      the buttons is identical on every card. Previously the metrics sat after the description, so a
+      card with a three-line description pushed its numbers down relative to the card beside it and
+      the row looked ragged.
+
+   2. A LABEL IS ALWAYS ONE LINE. A wrapped label changes the card's height, which moves the buttons,
+      which is the same raggedness by another route. Labels shrink to fit rather than wrap. */
+.card-metric .text-muted,
+.card-metric-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Long labels ("Eligible Attack Vectors", "Targets Configured") in a narrow column would otherwise
+   wrap. Stepping the size down at narrow widths keeps them on one line without shrinking the ones
+   that already fit. */
+@media (max-width: 1400px) {
+  .card-metric .text-muted,
+  .card-metric-label {
+    font-size: 0.75rem;
+  }
+}
+@media (max-width: 1200px) {
+  .card-metric .text-muted,
+  .card-metric-label {
+    font-size: 0.7rem;
+  }
+}
+
+/* ------------------------------------------------------------------ scrape tool buttons
+   Config / Scan / Results on the Subdomain Scraping cards, all three as icons.
+
+   These sit five-across (row-cols-5), which leaves roughly 65px per button and about 41px of that
+   for content once Bootstrap's .btn padding is taken. That is not enough for the word "Results" at
+   a readable size, which is why all three are glyphs.
+
+   flex: 1 1 0 rather than flex-fill, because flex-fill distributes by CONTENT and the three glyphs
+   have different natural widths. A zero basis makes them exactly equal thirds. */
+.btn-scrape {
+  flex: 1 1 0;
+  min-width: 0;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+}
+
+/* One size for all three glyphs, so the row reads as a set rather than three unrelated marks.
+   Fixed rather than responsive: an icon that shrinks with the viewport stops being legible long
+   before it stops fitting. */
+.btn-scrape .bi {
+  font-size: 1.05rem;
+  vertical-align: -0.08em;
 }

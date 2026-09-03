@@ -30,13 +30,113 @@ func GetAttackVectorSummary(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetAttackVectors answers GET /attack-vectors/{scope_target_id}.
-func GetAttackVectors(w http.ResponseWriter, r *http.Request) {
+// GetAttackVectorCoverage answers GET /attack-vectors/{scope_target_id}/coverage: how many vectors
+// exist at each of the five insertion points.
+//
+// WHY A ZERO HERE IS THE MOST IMPORTANT NUMBER ON THE PAGE. Every scan is bounded by this list. If
+// there are no header vectors then every tool will report nothing wrong with headers, not because
+// headers are safe but because nothing was ever sent to one, and the results modal will say "clean"
+// in exactly the same words it uses for a genuine negative.
+//
+// This is not hypothetical. On the target this framework was developed against the list held zero
+// header vectors and zero path vectors, so every report about headers and paths was accurate and
+// completely misleading.
+//
+// AND A NON-ZERO COUNT IS NOT COVERAGE EITHER, which is the subtler half. That same target had 19
+// cookie vectors, which looks healthy. Every one of them was a cookie the BROWSER was carrying,
+// because that is all a crawl can observe. The cookie that mattered was the one the SERVER set from
+// the category parameter, mirrored back byte for byte, on the one input with confirmed SQL injection.
+// A second injection carrier sat one insertion point away, the count said 19, and nothing tested it.
+//
+// The structural cause is recorded here rather than left for the reader to rediscover:
+// vectorsFromEndpoints CANNOT produce header, cookie or path vectors at all, because consolidation
+// only ever writes param_type 'query' or 'body'. So on any target whose vectors come mostly from
+// endpoint discovery, three of the five points are empty by construction.
+func GetAttackVectorCoverage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	scopeTargetID := mux.Vars(r)["scope_target_id"]
-	ctx := context.Background()
-	q := r.URL.Query()
 
+	counts := map[string]int{}
+	for _, point := range VectorInsertionPoints {
+		counts[point] = 0
+	}
+	rows, err := dbPool.Query(context.Background(), `
+		SELECT insertion_point, count(*)
+		FROM attack_vectors
+		WHERE scope_target_id = $1 AND deleted_at IS NULL
+		GROUP BY insertion_point`, scopeTargetID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var point string
+			var n int
+			if rows.Scan(&point, &n) == nil {
+				counts[point] = n
+			}
+		}
+	}
+
+	// The gaps are named explicitly rather than left as zeroes for a caller to notice. A number a
+	// reader has to interpret is a number a reader skips.
+	gaps := []map[string]string{}
+	for _, point := range VectorInsertionPoints {
+		if counts[point] > 0 {
+			continue
+		}
+		gaps = append(gaps, map[string]string{
+			"insertion_point": point,
+			"consequence": "No " + point + " vectors exist, so every tool in every section will " +
+				"report nothing wrong with " + point + " input on this target. That is a gap in " +
+				"coverage, not a clean result.",
+			"why": insertionPointGapReason(point),
+		})
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"by_insertion_point": counts,
+		"gaps":               gaps,
+		"points":             VectorInsertionPoints,
+	})
+}
+
+// insertionPointGapReason explains why a point is usually empty, in terms of how this framework
+// discovers vectors rather than in terms of the target.
+func insertionPointGapReason(point string) string {
+	switch point {
+	case "header":
+		return "Header vectors only come from a manual crawl, and a browser sends an unremarkable " +
+			"set of headers, so a crawl rarely produces one. Endpoint discovery cannot produce them " +
+			"at all. Add them by hand on endpoints that log, cache, or build URLs from a header."
+	case "cookie":
+		return "Cookie vectors come only from a manual crawl. Endpoint discovery cannot produce " +
+			"them. Look for any response cookie whose value echoes a request parameter: that is the " +
+			"same input arriving by a second route that nothing has tested."
+	case "path":
+		return "Path vectors need a segment that was observed varying. Add them by hand on routes " +
+			"that end in an identifier, a filename or a template name."
+	case "body":
+		return "Body vectors come from requests that were actually submitted. A form nobody " +
+			"submitted during the crawl produces none, and neither does a widget that posts JSON " +
+			"without being a form element."
+	default:
+		return "Query vectors are the easiest to discover, so an empty count here usually means " +
+			"consolidation has not been run rather than that the target has no query parameters."
+	}
+}
+
+// attackVectorListFilters turns the list query string into a WHERE clause and its bind values.
+//
+// PULLED OUT OF THE HANDLER BECAUSE THAT IS WHERE THE BUG COULD HIDE. The search filter bound one
+// value and wrote THREE %d verbs, so Sprintf produced
+// `path ILIKE '%'||$5||'%' OR domain ILIKE '%'||%!d(MISSING)`, and every list call carrying search
+// alongside any other filter answered 500 with `syntax error at or near "$"`. It then "repaired" the
+// numbering with a strings.Replace whose old and new arguments were built by identical Sprintf
+// calls, so it replaced the text with itself and did nothing at all.
+//
+// Measured on the Juice Shop target on 2026-08-21: insertion_point=path&search=/ returned 500. None
+// of this was reachable from a test while it lived inline in an http.HandlerFunc that needs a live
+// Postgres, which is the reason it survived.
+func attackVectorListFilters(scopeTargetID string, q url.Values) (string, []interface{}) {
 	where := "scope_target_id = $1"
 	args := []interface{}{scopeTargetID}
 	if q.Get("deleted") == "true" {
@@ -44,6 +144,9 @@ func GetAttackVectors(w http.ResponseWriter, r *http.Request) {
 	} else {
 		where += " AND deleted_at IS NULL"
 	}
+	// add binds ONE value and fills ONE placeholder. A clause carrying more than one %d silently
+	// becomes malformed SQL, because Sprintf writes %!d(MISSING) for every verb past the first
+	// argument. TestAttackVectorFiltersNeverEmitAMalformedPlaceholder is what keeps that true.
 	add := func(clause string, value interface{}) {
 		args = append(args, value)
 		where += fmt.Sprintf(clause, len(args))
@@ -61,13 +164,25 @@ func GetAttackVectors(w http.ResponseWriter, r *http.Request) {
 		add(" AND $%d = ANY(sources)", v)
 	}
 	if v := strings.TrimSpace(q.Get("search")); v != "" {
-		add(" AND (path ILIKE '%%'||$%d||'%%' OR domain ILIKE '%%'||$%d||'%%' "+
-			"OR array_to_string(parameters,',') ILIKE '%%'||$%d||'%%')", v)
-		// One value, three placeholders: repeat it so the numbering stays right.
-		args = append(args, v, v)
-		where = strings.Replace(where, fmt.Sprintf("$%d||'%%' OR domain", len(args)-2),
-			fmt.Sprintf("$%d||'%%' OR domain", len(args)-2), 1)
+		// One value, three columns, ONE placeholder referenced three times. Postgres allows reusing
+		// $n, so there is nothing to renumber and nothing to repair afterwards.
+		args = append(args, v)
+		n := len(args)
+		where += fmt.Sprintf(
+			" AND (path ILIKE '%%'||$%d||'%%' OR domain ILIKE '%%'||$%d||'%%'"+
+				" OR array_to_string(parameters,',') ILIKE '%%'||$%d||'%%')", n, n, n)
 	}
+	return where, args
+}
+
+// GetAttackVectors answers GET /attack-vectors/{scope_target_id}.
+func GetAttackVectors(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	scopeTargetID := mux.Vars(r)["scope_target_id"]
+	ctx := context.Background()
+	q := r.URL.Query()
+
+	where, args := attackVectorListFilters(scopeTargetID, q)
 
 	rows, err := dbPool.Query(ctx, `
 		SELECT id::text, method, method_confidence, scheme, domain, port, path, insertion_point,

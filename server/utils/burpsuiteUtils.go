@@ -16,12 +16,12 @@ func PopulateBurpsuite(urls []string) error {
 	}
 
 	proxyIP, proxyPort := GetBurpSuiteProxySettings()
-	
+
 	if proxyIP == "127.0.0.1" || proxyIP == "localhost" || proxyIP == "::1" {
 		proxyIP = "host.docker.internal"
 		log.Printf("[INFO] Detected localhost proxy IP, using host.docker.internal to access host machine")
 	}
-	
+
 	proxyURL, err := url.Parse(fmt.Sprintf("http://%s:%d", proxyIP, proxyPort))
 	if err != nil {
 		return fmt.Errorf("failed to parse proxy URL: %v", err)
@@ -81,4 +81,3 @@ func PopulateBurpsuite(urls []string) error {
 
 	return nil
 }
-

@@ -1,9 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Modal, Button, Form, Alert, Spinner, Row, Col, Badge } from 'react-bootstrap';
 
-// One modal, three tools. Katana, GoSpider and LinkFinder differ in their flags but not in what an
-// operator does here: load the saved config, change some values, save. Three near-identical files
-// would drift, and the drift would land on whichever one was edited least.
+// One modal, five tools. Katana, GoSpider, LinkFinder, Waybackurls and GAU differ in their flags
+// but not in what an operator does here: load the saved config, change some values, save. Five
+// near-identical files would drift, and the drift would land on whichever one was edited least.
+//
+// The two archive tools are the odd ones. They never touch the target, so the probe banner, the
+// FFUF session switch and the base URL override are all meaningless for them and are hidden
+// rather than shown-and-ignored. What they get instead is the host picker: the question that
+// matters for an archive tool is which hosts to ask about, not how fast to go.
 //
 // The probe banner at the top is the point of this modal existing. These three tools crawl the live
 // target, so a rate the probe measured has to reach them or it was never applied to anything.
@@ -98,7 +103,9 @@ export const CrawlerConfigModal = ({ show, handleClose, activeTarget, tool, onSa
     }));
 
   const applyAll = () => suggestions.forEach((s) => s.apply());
-  const title = { katana: 'Katana', gospider: 'GoSpider', linkfinder: 'LinkFinder' }[tool] || tool;
+  const title = { katana: 'Katana', gospider: 'GoSpider', linkfinder: 'LinkFinder',
+                  waybackurls: 'Waybackurls', gau: 'GAU' }[tool] || tool;
+  const isArchiveTool = tool === 'waybackurls' || tool === 'gau';
 
   return (
     <Modal data-bs-theme="dark" show={show} onHide={handleClose} size="lg" scrollable>
@@ -113,6 +120,14 @@ export const CrawlerConfigModal = ({ show, handleClose, activeTarget, tool, onSa
 
         {config && (
           <>
+            {isArchiveTool ? (
+              <div className="rounded p-2 mb-3" style={{ border: '1px solid rgba(220,53,69,0.45)' }}>
+                <span className="text-white-50 small">
+                  This tool queries public archives and never sends a request to the target, so the
+                  probe&apos;s measured rate does not apply to it. Hosts below are queried one at a time.
+                </span>
+              </div>
+            ) : (
             <div className="rounded p-2 mb-3" style={{ border: '1px solid rgba(220,53,69,0.45)' }}>
               {probe?.measured?.safe_rps ? (
                 <>
@@ -154,11 +169,19 @@ export const CrawlerConfigModal = ({ show, handleClose, activeTarget, tool, onSa
                 </span>
               )}
             </div>
+            )}
 
             {tool === 'katana' && <KatanaFields config={config} set={set} />}
             {tool === 'gospider' && <GoSpiderFields config={config} set={set} />}
             {tool === 'linkfinder' && <LinkFinderFields config={config} set={set} />}
+            {isArchiveTool && (
+              <ArchiveHostPicker activeTarget={activeTarget} tool={tool} config={config} set={set} />
+            )}
+            {tool === 'waybackurls' && <WaybackurlsFields config={config} set={set} />}
+            {tool === 'gau' && <GauFields config={config} set={set} />}
 
+            {!isArchiveTool && (
+            <>
             <h6 className="text-danger mt-4">Authentication</h6>
             <Form.Check
               type="switch"
@@ -178,6 +201,8 @@ export const CrawlerConfigModal = ({ show, handleClose, activeTarget, tool, onSa
                 onChange={(v) => set('baseUrl', v)}
                 help="Set by the probe when the configured URL redirects elsewhere. Empty means use the scope target." />
             </Row>
+            </>
+            )}
           </>
         )}
       </Modal.Body>
@@ -297,9 +322,9 @@ const LinkFinderFields = ({ config, set }) => (
     </Form.Text>
 
     <Row className="g-3">
-      <NumField label="Max JS files" value={config.maxJsFiles} min={1} max={500}
+      <NumField label="Max JS files (0 = no limit)" value={config.maxJsFiles} min={0} max={5000}
         onChange={(v) => set('maxJsFiles', v)}
-        help="Each file is one fetch. A large bundle set is the main cost of this scan." />
+        help="0 reads every JavaScript file discovered so far, which is the default. Any other value is a ceiling, and files past it are dropped newest-first without a warning, so prefer 0 unless a run is taking too long." />
       <NumField label="Delay between files (ms)" value={config.requestDelayMs} min={0} max={10000}
         onChange={(v) => set('requestDelayMs', v)} help={RATE_HELP.linkfinder} />
       <NumField label="Timeout (s)" value={config.timeout} min={1} max={120}
@@ -323,6 +348,204 @@ const LinkFinderFields = ({ config, set }) => (
 );
 
 /* ------------------------------------------------------------------ inputs */
+
+
+/* ------------------------------------------------------------------ archive host picker */
+
+// Which hosts the archive tools will be asked about.
+//
+// Default means the direct host plus every in-scope adjacent host, resolved when the scan runs
+// rather than frozen here, so a host discovered by a later crawl is picked up without anyone
+// remembering to revisit this modal. Custom freezes exactly what is ticked.
+//
+// Out-of-scope hosts never appear. An archive query does not touch the host, but the scope boundary
+// is a decision about what this engagement covers, and widening it for one tool because that tool
+// happens to be passive is how a boundary stops meaning anything.
+const ArchiveHostPicker = ({ activeTarget, tool, config, set }) => {
+  const [targets, setTargets] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (!activeTarget || !tool) return;
+      setLoading(true);
+      setErr('');
+      try {
+        const res = await fetch(`/api/archive-hosts/${tool}/${activeTarget.id}`);
+        if (!res.ok) throw new Error('Could not load the host list');
+        const data = await res.json();
+        if (!cancelled) setTargets(data.targets || []);
+      } catch (e) {
+        if (!cancelled) setErr(e.message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    run();
+    return () => { cancelled = true; };
+  }, [activeTarget, tool]);
+
+  const custom = config.hostMode === 'custom';
+  const selected = new Set(config.selectedHosts || []);
+
+  const toggle = (host) => {
+    const next = new Set(selected);
+    if (next.has(host)) next.delete(host); else next.add(host);
+    set('selectedHosts', Array.from(next));
+  };
+
+  // Switching to custom carries the current effective selection across, so the operator narrows a
+  // full list rather than starting from nothing and accidentally saving a scan of one host.
+  const setMode = (mode) => {
+    if (mode === 'custom' && !(config.selectedHosts || []).length) {
+      set('selectedHosts', targets.map((t) => t.host));
+    }
+    set('hostMode', mode);
+  };
+
+  const adjacent = targets.filter((t) => !t.is_direct).length;
+  const chosen = custom ? targets.filter((t) => selected.has(t.host)).length : targets.length;
+
+  return (
+    <>
+      <h6 className="text-danger mt-4">Hosts to query</h6>
+      {err && <Alert variant="warning" className="py-2">{err}</Alert>}
+      {loading && <Spinner size="sm" animation="border" variant="danger" />}
+
+      <Form.Check
+        type="radio"
+        id={`${tool}-hosts-default`}
+        name={`${tool}-hostmode`}
+        checked={!custom}
+        onChange={() => setMode('default')}
+        label={<span className="small">
+          Direct host and all in-scope adjacent hosts
+          <span className="text-white-50"> ({targets.length} right now, {adjacent} adjacent)</span>
+        </span>}
+      />
+      <Form.Check
+        type="radio"
+        id={`${tool}-hosts-custom`}
+        name={`${tool}-hostmode`}
+        checked={custom}
+        onChange={() => setMode('custom')}
+        label={<span className="small">Only the hosts I pick</span>}
+      />
+      <Form.Text className="text-white-50 d-block mb-2">
+        {custom
+          ? 'Frozen to this list. A host discovered by a later crawl will not be added on its own.'
+          : 'Resolved when the scan runs, so a host a later crawl discovers is included automatically.'}
+      </Form.Text>
+
+      {targets.length > 0 && (
+        <div className="rounded p-2" style={{ border: '1px solid rgba(255,255,255,0.12)', maxHeight: '260px', overflowY: 'auto' }}>
+          {targets.map((t) => (
+            <div key={t.host} className="d-flex align-items-center gap-2 py-1">
+              <Form.Check
+                type="checkbox"
+                id={`${tool}-host-${t.host}`}
+                checked={custom ? selected.has(t.host) : true}
+                disabled={!custom}
+                onChange={() => toggle(t.host)}
+                label={<span className="small">{t.host}</span>}
+              />
+              {t.is_direct
+                ? <Badge bg="danger">direct</Badge>
+                : <Badge bg="secondary">adjacent</Badge>}
+              {t.crawl_requests > 0 && (
+                <span className="text-white-50" style={{ fontSize: '0.75rem' }}>
+                  {t.crawl_requests} crawl requests
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {custom && chosen === 0 && (
+        <Alert variant="warning" className="py-2 mt-2 mb-0 small">
+          Nothing is selected, so this scan will refuse to run rather than report zero endpoints.
+        </Alert>
+      )}
+      {targets.length === 0 && !loading && !err && (
+        <Form.Text className="text-white-50">
+          No hosts yet. The direct host appears once this target has one, and adjacent hosts appear
+          after a manual crawl has observed them.
+        </Form.Text>
+      )}
+    </>
+  );
+};
+
+const WaybackurlsFields = ({ config, set }) => (
+  <>
+    <h6 className="text-danger mt-4">Query</h6>
+    <SwitchField id="wb-subs" label="Include subdomains of each host"
+      value={config.includeSubdomains} onChange={(v) => set('includeSubdomains', v)} />
+    <Form.Text className="text-white-50 d-block mb-2">
+      Asks the CDX index for *.host/* instead of host/*. Ignored for any host carrying a non-default
+      port, where the wildcard is not a pattern the index can match.
+    </Form.Text>
+    <Row className="g-3">
+      <NumField label="Timeout per host (minutes)" value={config.timeoutMinutes} min={1} max={60}
+        onChange={(v) => set('timeoutMinutes', v)}
+        help="Applies to each host separately. Hosts are queried one at a time, so a twelve-host run can take twelve times this." />
+    </Row>
+  </>
+);
+
+const GauFields = ({ config, set }) => {
+  const providers = config.providers || [];
+  const toggleProvider = (name) => {
+    const next = providers.includes(name)
+      ? providers.filter((p) => p !== name)
+      : [...providers, name];
+    set('providers', next);
+  };
+  return (
+    <>
+      <h6 className="text-danger mt-4">Providers</h6>
+      <div className="d-flex flex-wrap gap-3">
+        {['wayback', 'commoncrawl', 'otx', 'urlscan'].map((name) => (
+          <Form.Check key={name} type="checkbox" id={`gau-provider-${name}`}
+            checked={providers.includes(name)}
+            onChange={() => toggleProvider(name)}
+            label={<span className="small">{name}</span>} />
+        ))}
+      </div>
+      <Form.Text className="text-white-50 d-block mb-2">
+        Leaving all four unticked falls back to all four. Dropping wayback measured as an 85% loss of
+        archive surface, and duplicates are folded by consolidation anyway.
+      </Form.Text>
+
+      <h6 className="text-danger mt-4">Query</h6>
+      <SwitchField id="gau-subs" label="Include subdomains of each host"
+        value={config.includeSubdomains} onChange={(v) => set('includeSubdomains', v)} />
+      <Form.Text className="text-white-50 d-block mb-2">
+        Sends --subs. Ignored for any host carrying a non-default port.
+      </Form.Text>
+      <Row className="g-3">
+        <NumField label="Threads" value={config.threads} min={1} max={50}
+          onChange={(v) => set('threads', v)} help="gau --threads." />
+        <NumField label="HTTP timeout (seconds)" value={config.timeoutSeconds} min={1} max={600}
+          onChange={(v) => set('timeoutSeconds', v)} help="gau --timeout, per request to a provider." />
+        <NumField label="Retries" value={config.retries} min={0} max={10}
+          onChange={(v) => set('retries', v)} help="gau --retries." />
+        <NumField label="Timeout per host (minutes)" value={config.timeoutMinutes} min={1} max={60}
+          onChange={(v) => set('timeoutMinutes', v)}
+          help="Bounds the whole gau process for one host, unlike the HTTP timeout above." />
+        <TextField label="Skip extensions" wide value={(config.blacklist || []).join(', ')}
+          onChange={(v) => set('blacklist', v.split(',').map((x) => x.trim()).filter(Boolean))}
+          help="gau --blacklist. Comma separated, e.g. png, jpg, woff2." />
+        <TextField label="From (YYYYMM)" value={config.fromDate} onChange={(v) => set('fromDate', v)}
+          help="gau --from. Earliest crawl date to accept." />
+        <TextField label="To (YYYYMM)" value={config.toDate} onChange={(v) => set('toDate', v)}
+          help="gau --to. Latest crawl date to accept." />
+      </Row>
+    </>
+  );
+};
 
 const NumField = ({ label, value, min, max, onChange, help }) => (
   <Col md={4}>

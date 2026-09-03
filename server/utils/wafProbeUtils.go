@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -89,6 +90,26 @@ func RunWAFProbeScan(w http.ResponseWriter, r *http.Request) {
 // resolveProbeConfig merges, in order: probe defaults, the target's saved config, an inline
 // override from the request, and the target's saved FFUF auth material.
 func resolveProbeConfig(scopeTargetID, url string, inline json.RawMessage) ([]byte, error) {
+	return resolveProbeConfigForRun(scopeTargetID, url, inline, 1)
+}
+
+// resolveProbeConfigForRun is resolveProbeConfig with the run's endpoint count, so the budgets can be
+// divided before the config reaches the container.
+//
+// WHY THE DIVISION EXISTS. request_budget and trip_budget are enforced only inside the probe
+// container, by a Governor constructed fresh for each `docker exec`. Nothing in Go reads them. So
+// before fan-out, one configured budget meant one scan's worth of cost and the numbers in the modal
+// were true. After fan-out they would silently mean "per endpoint": a 10-endpoint run on the Standard
+// preset would spend 9000 requests and 40 deliberate blocks rather than 900 and 4.
+//
+// Trips are the half that actually matters. A deliberate block is charged against the egress IP's
+// reputation across EVERY target, not just this one, and that cost outlives the run. Multiplying it
+// by the number of endpoints without saying so would spend something the operator cannot get back.
+//
+// So the configured budget is treated as a budget for the RUN and sliced between the endpoints. That
+// matches what an operator means when they type a number into a box marked "budget", and it keeps the
+// figure on screen honest without asking them to do arithmetic.
+func resolveProbeConfigForRun(scopeTargetID, url string, inline json.RawMessage, endpointCount int) ([]byte, error) {
 	cfg := map[string]interface{}{}
 
 	var saved []byte
@@ -111,9 +132,335 @@ func resolveProbeConfig(scopeTargetID, url string, inline json.RawMessage) ([]by
 	}
 	target["url"] = url
 
+	if endpointCount > 1 {
+		divideRunBudgets(cfg, endpointCount)
+	}
+
 	attachFFUFAuth(scopeTargetID, target)
 
 	return json.Marshal(cfg)
+}
+
+// divideRunBudgets slices the run-level budgets into one endpoint's share. Integer division floors,
+// which is the direction that errs towards spending less than the operator authorised rather than
+// more. planProbeRun refuses the run outright when a share would floor to something unusable, so this
+// never has to invent a minimum of its own.
+func divideRunBudgets(cfg map[string]interface{}, endpointCount int) {
+	global, _ := cfg["global"].(map[string]interface{})
+	if global == nil {
+		return
+	}
+	for _, key := range []string{"request_budget", "trip_budget"} {
+		if n, ok := numberFromConfig(global[key]); ok {
+			global[key] = n / endpointCount
+		}
+	}
+}
+
+// numberFromConfig reads a config number that may have arrived as a JSON float, an int, or a string.
+// JSON decoding into interface{} always produces float64, but a config hand-edited or round-tripped
+// through the MCP layer can carry either of the other two.
+func numberFromConfig(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i), true
+		}
+	case string:
+		if i, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// probeRunEndpoint is one selected endpoint in a multi-endpoint run.
+type probeRunEndpoint struct {
+	URL   string `json:"url"`
+	Label string `json:"label"`
+	Host  string `json:"host"`
+}
+
+// probeEstimate is what the container's --dry-run reports a single scan will cost.
+type probeEstimate struct {
+	Requests     int `json:"requests"`
+	Seconds      int `json:"seconds"`
+	TestsEnabled int `json:"tests_enabled"`
+}
+
+// estimateProbeCost asks the probe container what one scan of this config would cost, and whether
+// it would accept it at all.
+//
+// The server deliberately does not reimplement these rules. The container's validate_config refuses
+// a run for reasons that live entirely in its own schema: the request estimate exceeding
+// request_budget, the seconds estimate exceeding wall_clock_seconds, wall clock not fitting inside
+// the backend timeout, no tests enabled, an enabled-but-empty attribution header. An earlier version
+// of this function guessed a flat floor of 60 requests per endpoint; the Standard preset actually
+// needs 667, so every scan in a divided run was refused with "enabled tests need about 667 requests
+// but the budget is 200" while the planner reported the run as fine. Asking the component that
+// enforces the rules is the only version of this check that cannot drift from them.
+//
+// Pass the config exactly as the scan will receive it, budget division included, or this validates
+// something the run will not use.
+func estimateProbeCost(cfgJSON []byte) (probeEstimate, []string, error) {
+	var est struct {
+		Estimate probeEstimate `json:"estimate"`
+		Problems []string      `json:"problems"`
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "exec", "-i", wafProbeContainer,
+		"python", "/app/waf_probe.py", "--config", "-", "--dry-run")
+	cmd.Stdin = bytes.NewReader(cfgJSON)
+
+	out, err := cmd.Output()
+	if err != nil {
+		return probeEstimate{}, nil, fmt.Errorf("probe container is not reachable for an estimate: %w", err)
+	}
+	if err := json.Unmarshal(out, &est); err != nil {
+		return probeEstimate{}, nil, fmt.Errorf("could not read the probe estimate: %w", err)
+	}
+	return est.Estimate, est.Problems, nil
+}
+
+// planProbeRun validates the selected endpoints and works out what the run will cost.
+//
+// Two checks, both of which exist because the failure they prevent is expensive and silent.
+//
+// FIRST, every endpoint must be one the manual crawl actually recorded returning 200 on a host that
+// is still in scope. This replaces the old guard, which required the url to equal the scope target's
+// own url exactly and therefore made adjacent hosts unprobeable - the single thing this feature is
+// for. Sourcing from the crawl is a stronger check than the one it replaces, not a weaker one: an
+// arbitrary url can no longer be posted to this endpoint at all, and a host the operator excluded
+// stays excluded.
+//
+// SECOND, the run-level budget has to divide into shares that can still do something. Refusing here
+// with a number the operator can act on is better than running ten scans that each give up early.
+func planProbeRun(scopeTargetID string, requested []probeRunEndpoint, inline json.RawMessage) ([]probeRunEndpoint, probeEstimate, error) {
+	var est probeEstimate
+	if len(requested) == 0 {
+		return nil, est, fmt.Errorf("no endpoints selected")
+	}
+
+	rows, err := dbPool.Query(context.Background(), `
+		SELECT DISTINCT c.url, capture_host(c.url) AS host
+		FROM manual_crawl_captures c
+		LEFT JOIN scope_target_scope_hosts h
+		       ON h.scope_target_id = c.scope_target_id
+		      AND h.host = capture_host(c.url)
+		WHERE c.scope_target_id = $1
+		  AND c.status_code = 200
+		  AND COALESCE(h.in_scope, TRUE)
+		  AND UPPER(c.method) <> 'OPTIONS'`, scopeTargetID)
+	if err != nil {
+		return nil, est, fmt.Errorf("could not read crawl endpoints: %w", err)
+	}
+	defer rows.Close()
+
+	allowed := map[string]string{}
+	for rows.Next() {
+		var u, host string
+		if err := rows.Scan(&u, &host); err != nil {
+			continue
+		}
+		allowed[u] = host
+	}
+
+	planned := make([]probeRunEndpoint, 0, len(requested))
+	seen := map[string]bool{}
+	for _, ep := range requested {
+		if ep.URL == "" || seen[ep.URL] {
+			continue
+		}
+		host, ok := allowed[ep.URL]
+		if !ok {
+			return nil, est, fmt.Errorf("endpoint is not a crawl-observed 200 response on an in-scope host: %s", ep.URL)
+		}
+		seen[ep.URL] = true
+		ep.Host = host
+		if ep.Label == "" {
+			ep.Label = host
+		}
+		planned = append(planned, ep)
+	}
+	if len(planned) == 0 {
+		return nil, est, fmt.Errorf("no usable endpoints selected")
+	}
+
+	n := len(planned)
+
+	// Resolve the config exactly as the first scan will receive it, budget division included, and
+	// let the container rule on that. Validating an undivided config would pass a run whose scans
+	// are then refused one by one, which is the failure this replaced.
+	effective, err := resolveProbeConfigForRun(scopeTargetID, planned[0].URL, inline, n)
+	if err != nil {
+		return nil, est, err
+	}
+	var probe struct {
+		Global map[string]interface{} `json:"global"`
+	}
+	_ = json.Unmarshal(effective, &probe)
+
+	// The undivided config, read only so the error messages can quote the totals the operator
+	// actually set. Multiplying a share back up does not recover them: integer division floors, so
+	// a trip_budget of 3 across 6 endpoints is a share of 0, and 0*6 would report the total as 0.
+	totals := map[string]interface{}{}
+	if undivided, err := resolveProbeConfigForRun(scopeTargetID, planned[0].URL, inline, 1); err == nil {
+		var whole struct {
+			Global map[string]interface{} `json:"global"`
+		}
+		if json.Unmarshal(undivided, &whole) == nil {
+			totals = whole.Global
+		}
+	}
+
+	est, problems, err := estimateProbeCost(effective)
+	if err != nil {
+		return nil, est, err
+	}
+	if len(problems) > 0 {
+		// The container's own words, which name the failing knob and its numbers. What the operator
+		// still cannot see from those is that the number being complained about is a share: they set
+		// a total and the run divided it. So name the division and the total that would clear it.
+		msg := strings.Join(problems, "; ")
+		if n == 1 {
+			return nil, est, fmt.Errorf("the probe would refuse this run: %s", msg)
+		}
+		detail := fmt.Sprintf(
+			"request_budget is split across the %d selected endpoints, so each scan gets 1/%d of the total you set",
+			n, n)
+		perScan, okShare := numberFromConfig(probe.Global["request_budget"])
+		if total, ok := numberFromConfig(totals["request_budget"]); ok && okShare && est.Requests > 0 {
+			detail = fmt.Sprintf(
+				"request_budget %d is split across the %d selected endpoints, giving each scan %d; the %d enabled tests need about %d each, so the total must be at least %d",
+				total, n, perScan, est.TestsEnabled, est.Requests, est.Requests*n)
+		}
+		return nil, est, fmt.Errorf("the probe would refuse this run: %s. %s; raise the budget, disable tests, or select fewer endpoints", msg, detail)
+	}
+
+	// Not a container rule: trip_budget is not one of the things it refuses over. It is a framework
+	// guard, because a share of zero silently skips every test that needs a deliberate block and the
+	// run would report those as untested rather than as unaffordable.
+	//
+	// probe.Global is the resolved config for ONE scan, so this value is already the per-scan share.
+	// Dividing by n here would divide a second time.
+	if perScanTrips, ok := numberFromConfig(probe.Global["trip_budget"]); ok && perScanTrips < 1 {
+		total, _ := numberFromConfig(totals["trip_budget"])
+		return nil, est, fmt.Errorf(
+			"trip_budget %d split across %d endpoints gives 0 deliberate blocks each, so every test that needs one would be skipped; raise trip_budget to at least %d or select fewer endpoints",
+			total, n, n)
+	}
+
+	return planned, est, nil
+}
+
+// RunWAFProbeMultiScan handles POST /waf-probe/run-multi. It creates one scan per selected endpoint,
+// all sharing a run_id, and works through them ONE AT A TIME.
+//
+// Sequential is not a simplification, it is a correctness requirement. The probe measures latency
+// baselines, a load ramp and a rate ceiling; a second probe running against the same host at the same
+// time perturbs exactly those measurements and both results become fiction. Every scan also leaves
+// the same egress IP, so concurrency would concentrate the reputation cost rather than spread it.
+func RunWAFProbeMultiScan(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		ScopeTargetID string             `json:"scope_target_id"`
+		Endpoints     []probeRunEndpoint `json:"endpoints"`
+		Config        json.RawMessage    `json:"config"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.ScopeTargetID == "" {
+		http.Error(w, "Invalid request body. `scope_target_id` is required.", http.StatusBadRequest)
+		return
+	}
+
+	// Endpoints may be posted inline or left to the saved config, so the AI can run what the operator
+	// already configured without restating it.
+	if len(payload.Endpoints) == 0 {
+		payload.Endpoints = savedProbeTargets(payload.ScopeTargetID)
+	}
+
+	planned, est, err := planProbeRun(payload.ScopeTargetID, payload.Endpoints, payload.Config)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	runID := uuid.New().String()
+	type queued struct {
+		scanID string
+		ep     probeRunEndpoint
+		cfg    []byte
+	}
+	batch := make([]queued, 0, len(planned))
+
+	for _, ep := range planned {
+		cfgJSON, err := resolveProbeConfigForRun(payload.ScopeTargetID, ep.URL, payload.Config, len(planned))
+		if err != nil {
+			http.Error(w, "Failed to resolve probe config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		scanID := uuid.New().String()
+		insert := `INSERT INTO waf_probe_scans
+		           (scan_id, url, status, scope_target_id, config, schema_version, run_id, endpoint_label)
+		           VALUES ($1, $2, $3, $4, $5, 2, $6, $7)`
+		if _, err := dbPool.Exec(context.Background(), insert, scanID, ep.URL, "pending",
+			payload.ScopeTargetID, cfgJSON, runID, ep.Label); err != nil {
+			log.Printf("[PROBE] Failed to create scan record for %s: %v", ep.URL, err)
+			http.Error(w, "Failed to create scan record.", http.StatusInternalServerError)
+			return
+		}
+		batch = append(batch, queued{scanID: scanID, ep: ep, cfg: cfgJSON})
+	}
+
+	// Every scan is already recorded as pending, so the run is visible in the UI immediately and a
+	// backend restart leaves rows the stuck-scan sweeper can resolve.
+	go func() {
+		for _, q := range batch {
+			log.Printf("[PROBE] run %s: starting %s (%s)", runID, q.ep.URL, q.ep.Label)
+			ExecuteAndParseWAFProbeScan(q.scanID, q.ep.URL, payload.ScopeTargetID, q.cfg)
+		}
+		log.Printf("[PROBE] run %s: all %d endpoints finished", runID, len(batch))
+	}()
+
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"run_id":         runID,
+		"endpoint_count": len(batch),
+		// The endpoints run one after another, so the run takes the sum of their durations rather
+		// than the longest. On a nine-host estate that is over an hour, which the operator should be
+		// told before they walk away from it rather than after.
+		"estimated_seconds_total":  est.Seconds * len(batch),
+		"estimated_requests_total": est.Requests * len(batch),
+		"estimated_seconds_each":   est.Seconds,
+		"estimated_requests_each":  est.Requests,
+		"scan_ids": func() []string {
+			ids := make([]string, 0, len(batch))
+			for _, q := range batch {
+				ids = append(ids, q.scanID)
+			}
+			return ids
+		}(),
+	})
+}
+
+// savedProbeTargets reads the endpoint list out of the target's saved probe config.
+func savedProbeTargets(scopeTargetID string) []probeRunEndpoint {
+	var saved []byte
+	if err := dbPool.QueryRow(context.Background(),
+		`SELECT config FROM waf_probe_configs WHERE scope_target_id = $1`, scopeTargetID).Scan(&saved); err != nil {
+		return nil
+	}
+	var cfg struct {
+		Targets []probeRunEndpoint `json:"targets"`
+	}
+	if json.Unmarshal(saved, &cfg) != nil {
+		return nil
+	}
+	return cfg.Targets
 }
 
 // attachFFUFAuth reuses the target's saved FFUF headers and cookies so the probe characterises the
@@ -520,9 +867,12 @@ func GetWAFProbeScanStatus(w http.ResponseWriter, r *http.Request) {
 func GetWAFProbeScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	scopeTargetID := mux.Vars(r)["id"]
 
+	// run_id and endpoint_label are returned so the UI can group a multi-endpoint run back together.
+	// Both are nullable: every scan taken before multi-endpoint probing existed was a real
+	// single-endpoint run and is left alone rather than backfilled into a Run that never happened.
 	query := `SELECT scan_id, url, status, result, error, command, execution_time, created_at,
 	                 COALESCE(posture,''), COALESCE(requests_sent,0), COALESCE(trips_used,0),
-	                 COALESCE(schema_version,1)
+	                 COALESCE(schema_version,1), COALESCE(run_id::text,''), COALESCE(endpoint_label,'')
 	          FROM waf_probe_scans WHERE scope_target_id = $1 ORDER BY created_at DESC`
 	rows, err := dbPool.Query(context.Background(), query, scopeTargetID)
 	if err != nil {
@@ -538,9 +888,10 @@ func GetWAFProbeScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			result, scanErr, command, execTime *string
 			createdAt                          time.Time
 			requestsSent, tripsUsed, schemaVer int
+			runID, endpointLabel               string
 		)
 		if err := rows.Scan(&scanID, &url, &status, &result, &scanErr, &command, &execTime,
-			&createdAt, &posture, &requestsSent, &tripsUsed, &schemaVer); err != nil {
+			&createdAt, &posture, &requestsSent, &tripsUsed, &schemaVer, &runID, &endpointLabel); err != nil {
 			continue
 		}
 		scans = append(scans, map[string]interface{}{
@@ -548,11 +899,82 @@ func GetWAFProbeScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			"error": scanErr, "command": command, "execution_time": execTime,
 			"created_at": createdAt, "posture": posture, "requests_sent": requestsSent,
 			"trips_used": tripsUsed, "schema_version": schemaVer,
+			"run_id": runID, "endpoint_label": endpointLabel,
 		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(scans)
+}
+
+// GetWAFProbeRunResults handles GET /waf-probe/run/{run_id}/results: every endpoint's scan from one
+// multi-endpoint run, in the order they were executed, plus the run's aggregate cost.
+//
+// The aggregate matters more than it looks. Because the run's budget is divided between the
+// endpoints, the only number that can be compared against what the operator authorised is the SUM
+// across the run. A per-scan figure read on its own now understates the run by a factor of N, which
+// is exactly the misreading this endpoint exists to prevent.
+func GetWAFProbeRunResults(w http.ResponseWriter, r *http.Request) {
+	runID := mux.Vars(r)["run_id"]
+	if runID == "" {
+		http.Error(w, "run_id is required", http.StatusBadRequest)
+		return
+	}
+
+	query := `SELECT scan_id, url, COALESCE(endpoint_label,''), status, result, error,
+	                 execution_time, created_at, COALESCE(posture,''),
+	                 COALESCE(requests_sent,0), COALESCE(trips_used,0)
+	          FROM waf_probe_scans WHERE run_id = $1 ORDER BY created_at ASC`
+	rows, err := dbPool.Query(context.Background(), query, runID)
+	if err != nil {
+		http.Error(w, "Failed to fetch run", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	endpoints := make([]map[string]interface{}, 0)
+	totalRequests, totalTrips, done := 0, 0, 0
+	for rows.Next() {
+		var (
+			scanID, url, label, status, posture string
+			result, scanErr, execTime           *string
+			createdAt                           time.Time
+			requestsSent, tripsUsed             int
+		)
+		if err := rows.Scan(&scanID, &url, &label, &status, &result, &scanErr, &execTime,
+			&createdAt, &posture, &requestsSent, &tripsUsed); err != nil {
+			continue
+		}
+		totalRequests += requestsSent
+		totalTrips += tripsUsed
+		// pending and running are the only states still to come; everything else is terminal,
+		// including error and aborted, which are finished outcomes rather than progress.
+		if status != "pending" && status != "running" {
+			done++
+		}
+		endpoints = append(endpoints, map[string]interface{}{
+			"scan_id": scanID, "url": url, "endpoint_label": label, "status": status,
+			"result": result, "error": scanErr, "execution_time": execTime,
+			"created_at": createdAt, "posture": posture,
+			"requests_sent": requestsSent, "trips_used": tripsUsed,
+		})
+	}
+
+	if len(endpoints) == 0 {
+		http.Error(w, "Run not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"run_id":              runID,
+		"endpoints":           endpoints,
+		"endpoint_count":      len(endpoints),
+		"completed_count":     done,
+		"in_progress":         done < len(endpoints),
+		"total_requests_sent": totalRequests,
+		"total_trips_used":    totalTrips,
+	})
 }
 
 func UpdateWAFProbeScanStatus(scanID, status, result, errorMsg, stdout, stderr, command, execTime string) {
@@ -752,4 +1174,3 @@ func maxInt(a, b int) int {
 	}
 	return b
 }
-

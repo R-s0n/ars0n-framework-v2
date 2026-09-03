@@ -37,18 +37,18 @@ import (
 var wcvsGroups = []string{"Tests", "Detection", "Request", "Wordlists", "Crawling", "Pacing", "Output"}
 
 var wcvsOwned = map[string]string{
-	"--url":             "The URL is built per vector, and one scan runs per distinct URL.",
-	"-u":                "The URL is built per vector, and one scan runs per distinct URL.",
-	"--generatereport":  "Always set. The JSON report is how findings are read back; without it there is nothing to parse.",
-	"-gr":               "Always set. The JSON report is how findings are read back; without it there is nothing to parse.",
-	"--generatepath":    "The report path is per scan and per URL.",
-	"-gp":               "The report path is per scan and per URL.",
-	"--nocolor":         "Always set. Escape codes corrupt the stored evidence.",
-	"-nc":               "Always set. Escape codes corrupt the stored evidence.",
-	"--nostatusline":    "Always set. A redrawing status line is not parseable and fills the log with control characters.",
-	"-ns":               "Always set. A redrawing status line is not parseable and fills the log with control characters.",
+	"--url":               "The URL is built per vector, and one scan runs per distinct URL.",
+	"-u":                  "The URL is built per vector, and one scan runs per distinct URL.",
+	"--generatereport":    "Always set. The JSON report is how findings are read back; without it there is nothing to parse.",
+	"-gr":                 "Always set. The JSON report is how findings are read back; without it there is nothing to parse.",
+	"--generatepath":      "The report path is per scan and per URL.",
+	"-gp":                 "The report path is per scan and per URL.",
+	"--nocolor":           "Always set. Escape codes corrupt the stored evidence.",
+	"-nc":                 "Always set. Escape codes corrupt the stored evidence.",
+	"--nostatusline":      "Always set. A redrawing status line is not parseable and fills the log with control characters.",
+	"-ns":                 "Always set. A redrawing status line is not parseable and fills the log with control characters.",
 	"--generatecompleted": "The framework tracks which URLs completed, in the database.",
-	"--generatelog":     "The framework captures the run's output itself.",
+	"--generatelog":       "The framework captures the run's output itself.",
 }
 
 var wcvsOptions = map[string]VectorOptionMeta{
@@ -65,28 +65,28 @@ var wcvsOptions = map[string]VectorOptionMeta{
 	// Detection
 	"force": {Kind: "bool", Group: "Detection", Label: "Test even without a cache", Flag: "--force",
 		Placeholder: "off, and WITHOUT this a URL where no cache or cachebuster was found is not tested at all"},
-	"cacheheader":  {Kind: "string", Group: "Detection", Label: "Custom cache header", Flag: "--cacheheader", Placeholder: "detected automatically from the response"},
-	"cachebuster":  {Kind: "string", Group: "Detection", Label: "Cachebuster", Flag: "--cachebuster", Placeholder: "cbwcvs"},
-	"reasontypes":  {Kind: "csv", Group: "Detection", Label: "What counts as poisoned", Flag: "--reasontypes", Choices: []string{"body", "header", "status", "length"}, Placeholder: "body,header,status,length. Drop `status` against a target that is rate limited or under load: any 502 or 429 during the scan is then read as a status change and reported as poisoning. Measured, a stressed origin produced nine such findings in one run"},
-	"ignorestatus": {Kind: "string", Group: "Detection", Label: "Ignore status code", Flag: "--ignorestatus"},
+	"cacheheader":             {Kind: "string", Group: "Detection", Label: "Custom cache header", Flag: "--cacheheader", Placeholder: "detected automatically from the response"},
+	"cachebuster":             {Kind: "string", Group: "Detection", Label: "Cachebuster", Flag: "--cachebuster", Placeholder: "cbwcvs"},
+	"reasontypes":             {Kind: "csv", Group: "Detection", Label: "What counts as poisoned", Flag: "--reasontypes", Choices: []string{"body", "header", "status", "length"}, Placeholder: "body,header,status,length. Drop `status` against a target that is rate limited or under load: any 502 or 429 during the scan is then read as a status change and reported as poisoning. Measured, a stressed origin produced nine such findings in one run"},
+	"ignorestatus":            {Kind: "string", Group: "Detection", Label: "Ignore status code", Flag: "--ignorestatus"},
 	"contentlengthdifference": {Kind: "int", Group: "Detection", Label: "Body length difference threshold", Flag: "--contentlengthdifference", Placeholder: "5000. 0 disables. Low values are prone to false positives"},
 	"hitmissdifference":       {Kind: "int", Group: "Detection", Label: "Hit/miss time threshold", Flag: "--hitmissdifference", Placeholder: "30 milliseconds"},
 	"skiptimebased":           {Kind: "bool", Group: "Detection", Label: "Skip time-based cache detection", Flag: "--skiptimebased"},
 	"skipwordlistcachbuster":  {Kind: "bool", Group: "Detection", Label: "Skip wordlist cachebuster search", Flag: "--skipwordlistcachbuster", Placeholder: "off. Skipping is faster but a URL whose cachebuster is not the default may then be reported as having no cache"},
 
 	// Request
-	"setheaders":     {Kind: "string", Group: "Request", Label: "Headers", Flag: "--setheaders", Repeatable: true, Placeholder: "Name: value. Sent with every request, for authentication"},
-	"setcookies":     {Kind: "string", Group: "Request", Label: "Cookies", Flag: "--setcookies", Repeatable: true, Placeholder: "name=value"},
-	"setparameters":  {Kind: "string", Group: "Request", Label: "Query parameters", Flag: "--setparameters", Repeatable: true, Placeholder: "name=value"},
-	"setbody":        {Kind: "string", Group: "Request", Label: "Body", Flag: "--setbody"},
-	"post":           {Kind: "bool", Group: "Request", Label: "Use POST", Flag: "--post", Placeholder: "GET. The framework sets this from the vector's method"},
-	"contenttype":    {Kind: "string", Group: "Request", Label: "Content type", Flag: "--contenttype", Placeholder: "application/x-www-form-urlencoded"},
-	"declineCookies": {Kind: "bool", Group: "Request", Label: "Do not keep response cookies", Flag: "--declineCookies"},
-	"usehttp":        {Kind: "bool", Group: "Request", Label: "Use http for scheme-less URLs", Flag: "--usehttp"},
-	"useragentchrome": {Kind: "bool", Group: "Request", Label: "Send Chrome's user agent", Flag: "--useragentchrome", Placeholder: "WebCacheVulnerabilityScanner v2.0.0, which some WAFs block on sight"},
+	"setheaders":         {Kind: "string", Group: "Request", Label: "Headers", Flag: "--setheaders", Repeatable: true, Placeholder: "Name: value. Sent with every request, for authentication"},
+	"setcookies":         {Kind: "string", Group: "Request", Label: "Cookies", Flag: "--setcookies", Repeatable: true, Placeholder: "name=value"},
+	"setparameters":      {Kind: "string", Group: "Request", Label: "Query parameters", Flag: "--setparameters", Repeatable: true, Placeholder: "name=value"},
+	"setbody":            {Kind: "string", Group: "Request", Label: "Body", Flag: "--setbody"},
+	"post":               {Kind: "bool", Group: "Request", Label: "Use POST", Flag: "--post", Placeholder: "GET. The framework sets this from the vector's method"},
+	"contenttype":        {Kind: "string", Group: "Request", Label: "Content type", Flag: "--contenttype", Placeholder: "application/x-www-form-urlencoded"},
+	"declineCookies":     {Kind: "bool", Group: "Request", Label: "Do not keep response cookies", Flag: "--declineCookies"},
+	"usehttp":            {Kind: "bool", Group: "Request", Label: "Use http for scheme-less URLs", Flag: "--usehttp"},
+	"useragentchrome":    {Kind: "bool", Group: "Request", Label: "Send Chrome's user agent", Flag: "--useragentchrome", Placeholder: "WebCacheVulnerabilityScanner v2.0.0, which some WAFs block on sight"},
 	"parameterseparator": {Kind: "string", Group: "Request", Label: "Parameter separator", Flag: "--parameterseparator", Placeholder: "&"},
-	"useproxy":       {Kind: "bool", Group: "Request", Label: "Use a proxy", Flag: "--useproxy"},
-	"proxyurl":       {Kind: "string", Group: "Request", Label: "Proxy URL", Flag: "--proxyurl", Placeholder: "http://127.0.0.1:8080"},
+	"useproxy":           {Kind: "bool", Group: "Request", Label: "Use a proxy", Flag: "--useproxy"},
+	"proxyurl":           {Kind: "string", Group: "Request", Label: "Proxy URL", Flag: "--proxyurl", Placeholder: "http://127.0.0.1:8080"},
 
 	// Wordlists
 	"headerwordlist":    {Kind: "path", Group: "Wordlists", Label: "Header wordlist", Flag: "--headerwordlist", Placeholder: "WCVS's own 2917 headers. The framework also appends the custom headers this target was seen using"},
@@ -99,9 +99,9 @@ var wcvsOptions = map[string]VectorOptionMeta{
 	"recdomains":  {Kind: "string", Group: "Crawling", Label: "Additional domains", Flag: "--recdomains"},
 
 	// Pacing
-	"threads":  {Kind: "int", Group: "Pacing", Label: "Threads", Flag: "--threads", Placeholder: "20"},
-	"reqrate":  {Kind: "float", Group: "Pacing", Label: "Requests per second", Flag: "--reqrate", Placeholder: "unlimited"},
-	"timeout":  {Kind: "int", Group: "Pacing", Label: "Timeout", Flag: "--timeout", Placeholder: "15 seconds"},
+	"threads": {Kind: "int", Group: "Pacing", Label: "Threads", Flag: "--threads", Placeholder: "20"},
+	"reqrate": {Kind: "float", Group: "Pacing", Label: "Requests per second", Flag: "--reqrate", Placeholder: "unlimited"},
+	"timeout": {Kind: "int", Group: "Pacing", Label: "Timeout", Flag: "--timeout", Placeholder: "15 seconds"},
 
 	// Output
 	"verbosity":  {Kind: "enum", Group: "Output", Label: "Verbosity", Flag: "--verbosity", Choices: []string{"0", "1", "2"}, Placeholder: "1"},

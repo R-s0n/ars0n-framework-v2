@@ -65,6 +65,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await refreshSessionState();
   await refreshAuthState();
   await checkFrameworkConnection();
+  await loadScopeRules();
 
   setInterval(async () => {
     await refreshSessionState();
@@ -90,7 +91,10 @@ function initializeEventListeners() {
   document.getElementById('targetSelect').addEventListener('change', () => {
     lastScopeSignature = null;
     updateUI();
+    // Rules belong to a target too, so they are reloaded for the same reason the host list is.
+    void loadScopeRules();
   });
+  wireScopeRules();
   document.getElementById('addHostBtn').addEventListener('click', () => {
     const input = document.getElementById('addHostInput');
     void addHost(input.value).then(() => {
@@ -355,6 +359,242 @@ function renderScope() {
   }
 
   renderOutOfScope();
+}
+
+/* ------------------------------------------------------------------ scope rules */
+
+// The popup never parses a rule itself.
+//
+// popup.js is loaded as a plain script, not a module, so it could not import the parser without
+// breaking popup.test.mjs, which runs this file through vm. But the better reason is that every
+// sentence shown here comes from /scope-rules/preview, which is the SAME evaluator that will
+// enforce the rule. A locally computed sentence could differ from the enforced boundary, and a
+// preview that disagrees with enforcement is worse than no preview.
+
+let scopeRules = [];
+let scopeRulesActive = false;
+let previewTimer = null;
+let lastPreviewText = '';
+
+function currentScopeTargetId() {
+  const select = document.getElementById('targetSelect');
+  return (sessionState.active && sessionState.scopeTargetId)
+    ? sessionState.scopeTargetId
+    : (select ? select.value : '');
+}
+
+async function loadScopeRules() {
+  const targetId = currentScopeTargetId();
+  const list = document.getElementById('scopeRuleList');
+  if (!list) return;
+
+  if (!targetId) {
+    scopeRules = [];
+    scopeRulesActive = false;
+    renderScopeRules();
+    return;
+  }
+  try {
+    const res = await fetch(`${frameworkUrl}/api/scope-rules/${targetId}`);
+    if (!res.ok) throw new Error(`framework returned ${res.status}`);
+    const body = await res.json();
+    scopeRules = body.rules || [];
+    scopeRulesActive = !!body.rules_active;
+  } catch (error) {
+    scopeRules = [];
+    scopeRulesActive = false;
+  }
+  renderScopeRules();
+}
+
+function renderScopeRules() {
+  const list = document.getElementById('scopeRuleList');
+  if (!list) return;
+  list.textContent = '';
+
+  const banner = document.getElementById('scopeRulesActive');
+  if (banner) banner.classList.toggle('d-none', !scopeRulesActive);
+
+  // A rule the framework accepted but the worker could not parse means the two evaluators disagree,
+  // and the worker has fallen back to the host list. That must be visible here: recording by a
+  // different boundary than the scanners enforce is not a console-only fact.
+  const divergence = document.getElementById('scopeRulesDivergence');
+  if (divergence) {
+    const message = sessionState.scopeRulesError || '';
+    divergence.textContent = message;
+    divergence.classList.toggle('d-none', !message);
+  }
+
+  if (!scopeRules.length) {
+    const empty = document.createElement('div');
+    empty.className = 'text-muted';
+    empty.style.fontSize = '11px';
+    empty.textContent = 'No rules. The host list above is the boundary.';
+    list.appendChild(empty);
+    return;
+  }
+
+  scopeRules.forEach((rule) => {
+    const row = document.createElement('div');
+    row.className = 'd-flex align-items-start gap-2 mb-1';
+
+    const dot = document.createElement('span');
+    dot.className = `badge bg-${rule.effect === 'deny' ? 'danger' : 'secondary'} flex-shrink-0`;
+    dot.style.fontSize = '9px';
+    dot.textContent = rule.effect === 'deny' ? 'DENY' : 'ALLOW';
+
+    const text = document.createElement('div');
+    text.className = 'flex-grow-1';
+    text.style.fontSize = '11px';
+    // The SENTENCE is the primary text, not the pattern. A chip reading "example.com" silently
+    // means "and every subdomain", which is exactly what gets misread.
+    text.textContent = rule.sentence;
+    if (!rule.enabled) {
+      text.textContent += '  (off)';
+      text.classList.add('text-muted');
+    }
+
+    const code = document.createElement('div');
+    code.className = 'text-muted';
+    code.style.fontSize = '10px';
+    code.textContent = rule.canonical;
+    text.appendChild(code);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn btn-link btn-sm text-danger p-0 flex-shrink-0';
+    remove.style.fontSize = '11px';
+    remove.textContent = '✕';
+    remove.title = 'Remove this rule';
+    remove.addEventListener('click', () => void removeScopeRule(rule.id));
+
+    row.appendChild(dot);
+    row.appendChild(text);
+    row.appendChild(remove);
+    list.appendChild(row);
+  });
+}
+
+async function previewScopeRule(typed) {
+  const out = document.getElementById('scopeRulePreview');
+  if (!out) return;
+  if (!typed.trim()) {
+    out.textContent = '';
+    out.className = 'small mt-1';
+    return;
+  }
+  try {
+    const res = await fetch(`${frameworkUrl}/api/scope-rules/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope_target_id: currentScopeTargetId(), typed }),
+    });
+    const body = await res.json();
+    if (!body.ok) {
+      out.className = 'small mt-1 text-danger';
+      out.textContent = body.error || 'not a valid rule';
+      return;
+    }
+    const bits = [body.rule.sentence];
+    const added = (body.newly_allowed || []).length;
+    const denied = (body.newly_denied || []).length;
+    if (added) bits.push(`+${added} host${added === 1 ? '' : 's'} already seen`);
+    if (denied) bits.push(`−${denied} currently in scope`);
+    out.className = body.rule.blast === 'wide' ? 'small mt-1 text-warning' : 'small mt-1 text-muted';
+    out.textContent = bits.join('  ·  ') + (body.warning ? '  ·  ' + body.warning : '');
+  } catch (error) {
+    out.className = 'small mt-1 text-muted';
+    out.textContent = '';
+  }
+}
+
+async function addScopeRule() {
+  const input = document.getElementById('scopeRuleInput');
+  const out = document.getElementById('scopeRulePreview');
+  const typed = (input.value || '').trim();
+  const targetId = currentScopeTargetId();
+  if (!typed) return;
+  if (!targetId) {
+    out.className = 'small mt-1 text-danger';
+    out.textContent = 'Select a target first.';
+    return;
+  }
+
+  const send = (confirmWide) => fetch(`${frameworkUrl}/api/scope-rules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope_target_id: targetId, typed, confirm_wide: confirmWide || '' }),
+  });
+
+  try {
+    let res = await send('');
+    if (res.status === 428) {
+      // A rule that can admit hosts nobody has seen is stored only on a second, deliberate act.
+      // The confirmation is the rule's own canonical text, so an operator cannot confirm a
+      // different rule from the one they are looking at.
+      const message = await res.text();
+      const canonical = (message.match(/confirm_wide exactly as "([^"]+)"/) || [])[1];
+      if (!canonical || !window.confirm(
+        `${message}\n\nAdd it anyway?`)) {
+        out.className = 'small mt-1 text-warning';
+        out.textContent = 'Not added. Bound it with "within <domain>" to avoid the warning.';
+        return;
+      }
+      res = await send(canonical);
+    }
+    if (!res.ok) {
+      out.className = 'small mt-1 text-danger';
+      out.textContent = (await res.text()) || `framework returned ${res.status}`;
+      return;
+    }
+    input.value = '';
+    out.textContent = '';
+    await loadScopeRules();
+    // The worker holds its own parsed copy, so it has to be told the boundary moved.
+    await sendToWorker({ action: 'refreshScopeRules' });
+  } catch (error) {
+    out.className = 'small mt-1 text-danger';
+    out.textContent = error.message;
+  }
+}
+
+async function removeScopeRule(ruleId) {
+  try {
+    await fetch(`${frameworkUrl}/api/scope-rules/${ruleId}`, { method: 'DELETE' });
+    await loadScopeRules();
+    await sendToWorker({ action: 'refreshScopeRules' });
+  } catch (error) {
+    /* the list reloads on the next poll regardless */
+  }
+}
+
+function wireScopeRules() {
+  const input = document.getElementById('scopeRuleInput');
+  const add = document.getElementById('scopeRuleAdd');
+  const help = document.getElementById('scopeRulesHelpToggle');
+  if (!input || !add) return;
+
+  add.addEventListener('click', () => void addScopeRule());
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void addScopeRule();
+    }
+  });
+  // Debounced so a preview request is not sent per keystroke.
+  input.addEventListener('input', () => {
+    const typed = input.value;
+    if (typed === lastPreviewText) return;
+    lastPreviewText = typed;
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => void previewScopeRule(typed), 300);
+  });
+  if (help) {
+    help.addEventListener('click', (event) => {
+      event.preventDefault();
+      document.getElementById('scopeRulesHelp').classList.toggle('d-none');
+    });
+  }
 }
 
 function createOutOfScopeRow(host) {

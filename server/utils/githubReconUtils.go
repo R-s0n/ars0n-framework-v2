@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 
@@ -146,13 +145,28 @@ func ExecuteGitHubReconScan(scanID, companyName string) {
 
 	log.Printf("[GITHUB-RECON] [INFO] Successfully retrieved GitHub API key")
 
-	// Transform company name to domain-like format (lowercase, no spaces, no special characters)
-	domainName := strings.ToLower(companyName)
-	domainName = strings.ReplaceAll(domainName, " ", "")
-	// Remove special characters using regex - keep only alphanumeric characters
-	reg := regexp.MustCompile(`[^a-zA-Z0-9]`)
-	domainName = reg.ReplaceAllString(domainName, "")
-	log.Printf("[GITHUB-RECON] [INFO] Transformed company name '%s' to domain format '%s'", companyName, domainName)
+	// The per-target Company settings, from the ONE store the Settings screen and the MCP company tool
+	// both write. Absent is the normal case and produces the exact argv this runner has always built,
+	// including the alphanumeric-strip seed and the 120-second context deadline.
+	//
+	// FOUR OF THIS TOOL'S OPTIONS CANNOT BE HONOURED HERE AT ALL - they are values inside the vendored
+	// python script, not flags on it - and companyUnwireableNotes puts that on the scan row rather than
+	// letting a saved setting quietly do nothing.
+	ctx := context.Background()
+	scopeTargetID := companyScopeTargetForScan(ctx, "github_recon_scans", scanID, "github_recon")
+	tool, settings, notes := companyRunnerSettings(scopeTargetID, "github_recon")
+	plan := githubReconPlanFor(companyName, companyFirstConsolidatedRootDomain(ctx, scopeTargetID), settings)
+	notes = append(notes, plan.Notes...)
+	notes = append(notes, companyUnwireableNotes(githubReconUnwireable, settings)...)
+	if plan.Configured {
+		log.Printf("[GITHUB-RECON] [INFO] Running with stored Company settings for scope target %s: %s",
+			scopeTargetID, companySettingsSummary(settings))
+	}
+	companyLogNotes("GITHUB-RECON", notes)
+
+	domainName := plan.Seed
+	log.Printf("[GITHUB-RECON] [INFO] Transformed company name '%s' to search seed '%s' (mode %s)",
+		companyName, domainName, plan.SeedMode)
 
 	// First, check if the GitHub recon container is running
 	checkCmd := exec.Command("docker", "ps", "--filter", "name=ars0n-framework-v2-github-recon-1", "--format", "{{.Status}}")
@@ -182,7 +196,7 @@ func ExecuteGitHubReconScan(scanID, companyName string) {
 	}
 
 	// Debug: Check if the Python script exists
-	pythonCheckCmd := exec.Command("docker", "exec", "ars0n-framework-v2-github-recon-1", "ls", "-la", "/app/github-search/github-endpoints.py")
+	pythonCheckCmd := exec.Command("docker", "exec", "ars0n-framework-v2-github-recon-1", "ls", "-la", plan.ScriptPath)
 	pythonCheckOutput, pythonCheckErr := pythonCheckCmd.Output()
 	if pythonCheckErr != nil {
 		log.Printf("[GITHUB-RECON] [DEBUG] Python script check failed: %v", pythonCheckErr)
@@ -191,7 +205,7 @@ func ExecuteGitHubReconScan(scanID, companyName string) {
 	}
 
 	// Debug: Check the script help to see available parameters
-	helpCmd := exec.Command("docker", "exec", "ars0n-framework-v2-github-recon-1", "python3", "/app/github-search/github-endpoints.py", "-h")
+	helpCmd := exec.Command("docker", "exec", "ars0n-framework-v2-github-recon-1", "python3", plan.ScriptPath, "-h")
 	helpOutput, helpErr := helpCmd.Output()
 	if helpErr != nil {
 		log.Printf("[GITHUB-RECON] [DEBUG] Failed to get help output: %v", helpErr)
@@ -199,21 +213,27 @@ func ExecuteGitHubReconScan(scanID, companyName string) {
 		log.Printf("[GITHUB-RECON] [DEBUG] Script help output:\n%s", string(helpOutput))
 	}
 
-	// Construct the command with unbuffered Python output
-	cmd := exec.Command("docker", "exec", "ars0n-framework-v2-github-recon-1", "python3", "-u", "/app/github-search/github-endpoints.py", "-d", domainName, "-t", apiKey)
-	log.Printf("[GITHUB-RECON] [DEBUG] Executing command: %s", cmd.String())
+	// Construct the command with unbuffered Python output.
+	//
+	// python3 -u is LOAD BEARING and framework-owned: without it Python block-buffers stdout when it is
+	// a pipe, and a scan killed by the deadline below would lose everything written so far. This
+	// project has already lost data to stdout buffering once.
+	argv, composeNotes := githubReconCommandArgs(plan, apiKey, tool, settings)
+	notes = append(notes, composeNotes...)
+	companyLogNotes("GITHUB-RECON", composeNotes)
 
-	// Set up separate stdout and stderr pipes
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
 
-	// Add timeout context
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	// The wall-clock deadline. 120 seconds unless a target says otherwise, and it is the ONLY deadline
+	// the framework imposes on this tool. Worth knowing when raising it: killing the local `docker
+	// exec` does NOT kill python inside the container, so a timed-out scan leaves the script running,
+	// still fetching files and still spending the rate limit of a token the framework thinks is idle.
+	scanCtx, cancel := context.WithTimeout(context.Background(), plan.ScanTimeout)
 	defer cancel()
-	cmd = exec.CommandContext(ctx, "docker", "exec", "ars0n-framework-v2-github-recon-1", "python3", "-u", "/app/github-search/github-endpoints.py", "-d", domainName, "-t", apiKey)
+	cmd := exec.CommandContext(scanCtx, argv[0], argv[1:]...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	log.Printf("[GITHUB-RECON] [DEBUG] Executing command: %s", cmd.String())
 
 	err = cmd.Run()
 	stdoutStr := stdout.String()
@@ -222,86 +242,43 @@ func ExecuteGitHubReconScan(scanID, companyName string) {
 	log.Printf("[GITHUB-RECON] [DEBUG] Command stdout: %s", stdoutStr)
 	log.Printf("[GITHUB-RECON] [DEBUG] Command stderr: %s", stderrStr)
 
+	// WHAT GETS WRITTEN INTO THE command COLUMN, AND ONE DELIBERATE DEVIATION FROM WHAT IT USED TO BE.
+	//
+	// The token is passed as an argv element, so cmd.String() contains it verbatim - which means the
+	// error path has been writing a GitHub Personal Access Token into the database in PLAINTEXT on
+	// every failed scan. That is recorded on the registry entry as a defect and it is fixed here rather
+	// than left, because this change is what invites operators to go and read that column. The command
+	// LINE that is executed is unchanged, token and all; only the stored copy is redacted.
+	storedCommand := githubReconRedactToken(cmd.String(), apiKey)
+	if preamble := companySettingsPreamble(tool, scopeTargetID, settings, notes); preamble != "" {
+		storedCommand += "\n" + preamble
+	}
+
 	if err != nil {
 		log.Printf("[GITHUB-RECON] [ERROR] Failed to execute GitHub Recon scan: %v", err)
-		log.Printf("[GITHUB-RECON] [ERROR] Command that failed: %s", cmd.String())
-		UpdateGitHubReconScanStatus(scanID, "error", "", "", stderrStr, cmd.String(), time.Since(startTime).String())
+		log.Printf("[GITHUB-RECON] [ERROR] Command that failed: %s", storedCommand)
+		UpdateGitHubReconScanStatus(scanID, "error", "", "", stderrStr, storedCommand, time.Since(startTime).String())
 		return
 	}
 
 	log.Printf("[GITHUB-RECON] [INFO] GitHub Recon scan completed successfully, processing output...")
 
-	// Process the output to extract and validate domains
-	domainMap := make(map[string]bool) // Use map for deduplication
-
-	// Regex pattern for validating domain names
-	domainRegex := regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$`)
-
-	// Additional regex to extract domains from URLs or other text
-	urlDomainRegex := regexp.MustCompile(`(?:https?://)?(?:www\.)?([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,})`)
-
-	// Common file extensions to exclude
-	fileExtensions := []string{
-		".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".ico", ".webp", // Images
-		".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", // Documents
-		".js", ".css", ".html", ".htm", ".xml", ".json", ".yaml", ".yml", // Web files
-		".zip", ".rar", ".tar", ".gz", ".7z", // Archives
-		".mp4", ".avi", ".mov", ".mp3", ".wav", // Media
-		".txt", ".log", ".md", ".readme", // Text files
-		".php", ".asp", ".jsp", ".py", ".rb", ".go", ".java", // Code files
-	}
-
-	// Helper function to check if a string has a file extension
-	isFileExtension := func(s string) bool {
-		s = strings.ToLower(s)
-		for _, ext := range fileExtensions {
-			if strings.HasSuffix(s, ext) {
-				return true
-			}
-		}
-		return false
-	}
-
+	// Process the output to extract and validate domains.
+	//
+	// The extraction itself moved into githubReconExtractDomains so that the file-extension list, the
+	// exclusion list and the registrable-domain reduction are configurable and, more usefully, so that
+	// the whole filter is a PURE function with tests. Its default path is this runner's original code
+	// unchanged, with one stated deviation: the returned list is SORTED, where the original ranged a
+	// map and produced a different order on every run for the same input.
 	lines := strings.Split(stdoutStr, "\n")
 	log.Printf("[GITHUB-RECON] [DEBUG] Processing %d lines of output", len(lines))
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
+	extracted, extractNotes := githubReconExtractDomains(plan, stdoutStr)
+	notes = append(notes, extractNotes...)
+	companyLogNotes("GITHUB-RECON", extractNotes)
 
-		// Skip if it looks like a file with extension
-		if isFileExtension(line) {
-			log.Printf("[GITHUB-RECON] [DEBUG] Skipping file: %s", line)
-			continue
-		}
-
-		// Try to validate the line as a direct domain
-		if domainRegex.MatchString(line) {
-			// Convert to lowercase for consistency
-			domain := strings.ToLower(line)
-			domainMap[domain] = true
-			log.Printf("[GITHUB-RECON] [DEBUG] Found valid domain: %s", domain)
-		} else {
-			// Try to extract domain from URL or other text
-			matches := urlDomainRegex.FindAllStringSubmatch(line, -1)
-			for _, match := range matches {
-				if len(match) > 1 {
-					domain := strings.ToLower(match[1])
-					// Double-check the extracted domain isn't a file
-					if !isFileExtension(domain) && domainRegex.MatchString(domain) {
-						domainMap[domain] = true
-						log.Printf("[GITHUB-RECON] [DEBUG] Extracted domain from line: %s -> %s", line, domain)
-					}
-				}
-			}
-		}
-	}
-
-	// Convert map to slice of domain objects
-	domains := make([]map[string]interface{}, 0, len(domainMap))
-	for domain := range domainMap {
+	domains := make([]map[string]interface{}, 0, len(extracted))
+	for _, domain := range extracted {
 		domains = append(domains, map[string]interface{}{
 			"domain": domain,
 			"source": "github_recon",
@@ -310,13 +287,27 @@ func ExecuteGitHubReconScan(scanID, companyName string) {
 
 	log.Printf("[GITHUB-RECON] [DEBUG] Processed %d lines, found %d unique valid domains", len(lines), len(domains))
 
+	// THE ANTI-SILENT-NOTHING CONTROL, off by default. MEASURED: running the installed script with a
+	// syntactically valid but INVALID token produced exit code 0, zero bytes on stdout AND zero bytes
+	// on stderr, so the runner sees err == nil, extracts nothing and stores 'success'. A revoked,
+	// expired or wrongly-scoped PAT is indistinguishable from a company with no GitHub footprint, and
+	// an exhausted rate limit takes the identical path.
+	if plan.FailOnZeroDomains && len(domains) == 0 {
+		errorMsg := fmt.Sprintf("GitHub Recon extracted zero domains from %d bytes of stdout. "+
+			"failOnZeroDomains is on, so it is recorded as an error rather than as a clean result. Note "+
+			"that an INVALID or rate-limited GitHub token exits 0 with EMPTY stdout and stderr, which is "+
+			"exactly this shape; a MISSING key fails loudly instead.", len(stdoutStr))
+		UpdateGitHubReconScanStatus(scanID, "error", "", stdoutStr, errorMsg, storedCommand, time.Since(startTime).String())
+		return
+	}
+
 	// Create result object
 	result := map[string]interface{}{
 		"domains": domains,
 		"meta": map[string]interface{}{
 			"total":         len(domains),
 			"raw_lines":     len(lines),
-			"domains_found": len(domainMap),
+			"domains_found": len(extracted),
 		},
 	}
 
@@ -328,8 +319,17 @@ func ExecuteGitHubReconScan(scanID, companyName string) {
 		return
 	}
 
-	// Update scan status with success
-	UpdateGitHubReconScanStatus(scanID, "success", string(resultJSON), string(stdoutStr), "", "", time.Since(startTime).String())
+	// Update scan status with success.
+	//
+	// The success path has always stored an EMPTY command column, so it stays empty for a target that
+	// configured nothing. When settings were applied it carries the redacted command line and the
+	// preamble, because otherwise nothing anywhere records that this scan searched for a different
+	// seed, ran a different script, or had four of its options silently beyond the runner's reach.
+	successCommand := ""
+	if plan.Configured || len(notes) > 0 {
+		successCommand = storedCommand
+	}
+	UpdateGitHubReconScanStatus(scanID, "success", string(resultJSON), string(stdoutStr), "", successCommand, time.Since(startTime).String())
 	log.Printf("[GITHUB-RECON] [INFO] Successfully completed GitHub Recon scan for company %s (scan ID: %s)", companyName, scanID)
 }
 

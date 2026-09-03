@@ -513,3 +513,46 @@ func TestGhauriAlwaysFlushesItsSession(t *testing.T) {
 			"flag that makes the scan real")
 	}
 }
+
+// sqlmap keeps the same kind of session, in --output-dir/<host>/session.sqlite, and consults it
+// before sending anything. It is the third tool in this codebase with this defect: commix was fixed
+// (cmdiTools.go), ghauri was fixed (above), sqlmap was not.
+//
+// Measured on the 2026-08-23 run against 10.0.0.18: /tmp/sqlmap-out inside the container held four
+// host directories, some days old. Four traces were pure cache replays, six of the seven target
+// findings were verdicts restored from a scan TWENTY HOURS earlier, and one stored GET ?q= injection
+// was replayed as three findings across the query, cookie and header vectors that never ran.
+//
+// The worst of it is the positive control: the oracle canary "fired" in 871ms without sending a test
+// request, because it too was a replay. It runs through this same composer, so a canary that passes
+// from cache would pass identically with sqlmap broken or the oracle switched off, which makes the
+// one mechanism that proves the tool ran prove nothing.
+func TestSqlmapAlwaysFlushesItsSession(t *testing.T) {
+	v := VectorInput{
+		Method: "GET", Scheme: "http", Domain: "10.0.0.18", Path: "/rest/products/search",
+		InsertionPoint: "query", Parameters: []string{"q"},
+		ObservedValues: map[string]string{"q": "apple"},
+	}
+	args, _ := ComposeSqlmap(v, map[string]any{}, "/tmp/r.json")
+	if !argsContain(args, "--flush-session") {
+		t.Fatal("without --flush-session sqlmap restores a stored verdict from its --output-dir and " +
+			"reports it without sending a request, so a re-scan replays yesterday's answer and the " +
+			"oracle canary passes from cache while proving nothing")
+	}
+
+	// The flag has to survive a populated settings map, which is what "framework owned, appended last"
+	// buys: a stored level or technique must not be able to displace it.
+	args, _ = ComposeSqlmap(v, map[string]any{
+		"level": 3, "risk": 2, "technique": "BEUST", "threads": 5,
+	}, "/tmp/r.json")
+	if !argsContain(args, "--flush-session") {
+		t.Error("--flush-session was lost once settings were stored, which is exactly the run that " +
+			"replays a cached verdict")
+	}
+
+	tool, _ := VectorToolByKey("sqlmap")
+	if _, owned := tool.OwnedFlags["--flush-session"]; !owned {
+		t.Error("--flush-session must be framework owned, or a stored setting can switch off the one " +
+			"flag that makes the scan real")
+	}
+}

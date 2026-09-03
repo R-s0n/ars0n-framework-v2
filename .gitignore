@@ -1,7 +1,10 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
-client/node_modules
+# Unanchored and applied at any depth, because `client/node_modules` only ever covered the client:
+# docker/mcp-server/node_modules was a second install of 3,766 files that nothing was ignoring, and
+# every future package under docker/ would have had the same problem one directory at a time.
+node_modules/
 /.pnp
 .pnp.js
 
@@ -9,7 +12,31 @@ client/node_modules
 /coverage
 
 # production
+# `/build` is anchored to the repository root, so it never matched the directory that actually
+# exists: client/build. Thirteen files were tracked there as a result. Every one of them is a copy
+# of something in client/public, and the image rebuilds the directory from source (client/Dockerfile
+# runs `npm run build`), so nothing here is worth versioning.
 /build
+client/build/
+
+# Runtime state, not source.
+#
+# wordlists/ffuf is the FFUF upload directory (ffufUtils.go:163). Whatever an operator uploads for
+# one engagement lands here under a UUID prefix, which is per-machine data that means nothing in
+# anyone else's checkout. The directory is created on demand by os.MkdirAll, so ignoring it whole
+# cannot break a fresh clone. The wordlists that SHIP with the framework live one level up in
+# wordlists/ and stay tracked: ffuf-wordlist-5000.txt, ffuf-headers.txt, param-names.txt and the
+# rest are referenced by name from the Go code and the app breaks without them.
+wordlists/ffuf/
+wordlists/sniper_test.txt
+
+# Scratch files from live testing. These are captured request bodies, probe configs and one-off
+# helper scripts written while working a target; they are meaningful for an afternoon and confusing
+# forever after.
+/run*.json
+/repro.txt
+/probe_post.py
+/server/run_live.json
 
 # misc
 .DS_Store
