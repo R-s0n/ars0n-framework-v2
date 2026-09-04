@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Modal, Button, Table, Badge, Spinner, Alert, Form, InputGroup, Tabs, Tab, Accordion } from 'react-bootstrap';
+import { ArchiveHostSummary } from './ArchiveHostSummary';
 
 export const KatanaURLResultsModal = ({ 
   show, 
@@ -17,10 +18,10 @@ export const KatanaURLResultsModal = ({
   const [activeTab, setActiveTab] = useState('direct');
 
   useEffect(() => {
-    if (show && mostRecentKatanaURLScan && mostRecentKatanaURLScan.scan_id) {
+    if (show && activeTarget) {
       parseResults();
     }
-  }, [show, mostRecentKatanaURLScan]);
+  }, [show, activeTarget]);
 
   const parseResults = async () => {
     setLoading(true);
@@ -28,7 +29,7 @@ export const KatanaURLResultsModal = ({
 
     try {
       const response = await fetch(
-        `/api/discovered-endpoints/${mostRecentKatanaURLScan.scan_id}?scan_type=katana`
+        `/api/tool-endpoints/${activeTarget.id}/katana`
       );
       
       if (!response.ok) {
@@ -342,6 +343,7 @@ export const KatanaURLResultsModal = ({
         </Modal.Title>
       </Modal.Header>
       <Modal.Body>
+        <ArchiveHostSummary scan={mostRecentKatanaURLScan} />
         {mostRecentKatanaURLScan && (
           <div className="mb-3">
             <div className="d-flex justify-content-between align-items-center">

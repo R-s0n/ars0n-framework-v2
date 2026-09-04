@@ -17,10 +17,10 @@ export const WaybackURLsResultsModal = ({
   const [activeTab, setActiveTab] = useState('direct');
 
   useEffect(() => {
-    if (show && mostRecentWaybackURLsScan && mostRecentWaybackURLsScan.scan_id) {
+    if (show && activeTarget) {
       parseResults();
     }
-  }, [show, mostRecentWaybackURLsScan]);
+  }, [show, activeTarget]);
 
   const parseResults = async () => {
     setLoading(true);
@@ -28,7 +28,7 @@ export const WaybackURLsResultsModal = ({
 
     try {
       const response = await fetch(
-        `/api/discovered-endpoints/${mostRecentWaybackURLsScan.scan_id}?scan_type=waybackurls`
+        `/api/tool-endpoints/${activeTarget.id}/waybackurls`
       );
       
       if (!response.ok) {

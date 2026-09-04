@@ -23,7 +23,18 @@ import (
 // exactly the behaviour they had before.
 
 type KatanaURLConfig struct {
-	BaseURL           string `json:"baseUrl"`
+	BaseURL string `json:"baseUrl"`
+
+	// Which hosts to crawl. Same meaning as the archive tools: "default" is the direct host plus
+	// every in-scope adjacent host, resolved at run time. Unlike the archive tools these send real
+	// requests, so ScanScope is consulted again per host at launch and credentials are resolved per
+	// host rather than shared.
+	HostMode      string   `json:"hostMode"`
+	SelectedHosts []string `json:"selectedHosts"`
+	// Bound on EACH host's crawl. Was a hardcoded 20 minutes; a run over six hosts may take six
+	// times this because hosts are crawled one at a time.
+	TimeoutMinutes int `json:"timeoutMinutes"`
+
 	RateLimit         int    `json:"rateLimit"`
 	Concurrency       int    `json:"concurrency"`
 	Parallelism       int    `json:"parallelism"`
@@ -52,7 +63,13 @@ type KatanaURLConfig struct {
 }
 
 type GoSpiderURLConfig struct {
-	BaseURL            string    `json:"baseUrl"`
+	BaseURL string `json:"baseUrl"`
+
+	// See KatanaURLConfig for what these mean and why the crawlers re-check scope per host.
+	HostMode       string   `json:"hostMode"`
+	SelectedHosts  []string `json:"selectedHosts"`
+	TimeoutMinutes int      `json:"timeoutMinutes"`
+
 	Concurrent         int       `json:"concurrent"`
 	Threads            int       `json:"threads"`
 	Depth              int       `json:"depth"`
@@ -108,6 +125,7 @@ type NameVal struct {
 
 func DefaultKatanaURLConfig() KatanaURLConfig {
 	return KatanaURLConfig{
+		HostMode: ArchiveHostModeDefault, TimeoutMinutes: 20,
 		RateLimit: 0, Concurrency: 10, Parallelism: 15, Depth: 5, Timeout: 10, Retry: 1,
 		CrawlDurationS: 0, MaxResponseSize: 4194304,
 		JSCrawl: true, JSLuice: false, KnownFiles: "all", FieldScope: "rdn",
@@ -117,6 +135,7 @@ func DefaultKatanaURLConfig() KatanaURLConfig {
 
 func DefaultGoSpiderURLConfig() GoSpiderURLConfig {
 	return GoSpiderURLConfig{
+		HostMode: ArchiveHostModeDefault, TimeoutMinutes: 20,
 		Concurrent: 10, Threads: 2, Depth: 5, DelayS: 0, RandomDelayS: 0, Timeout: 10,
 		Sitemap: true, Robots: true, OtherSource: true, JS: true, NoRedirect: true,
 		UseFFUFAuth: true,
@@ -162,12 +181,26 @@ func loadCrawlerConfig(table, scopeTargetID string, out interface{}) {
 func LoadKatanaURLConfig(scopeTargetID string) KatanaURLConfig {
 	cfg := DefaultKatanaURLConfig()
 	loadCrawlerConfig("katana_url_configs", scopeTargetID, &cfg)
+	if cfg.HostMode != ArchiveHostModeCustom {
+		cfg.HostMode = ArchiveHostModeDefault
+	}
+	cfg.SelectedHosts = normaliseHostList(cfg.SelectedHosts)
+	if cfg.TimeoutMinutes <= 0 {
+		cfg.TimeoutMinutes = 20
+	}
 	return cfg
 }
 
 func LoadGoSpiderURLConfig(scopeTargetID string) GoSpiderURLConfig {
 	cfg := DefaultGoSpiderURLConfig()
 	loadCrawlerConfig("gospider_url_configs", scopeTargetID, &cfg)
+	if cfg.HostMode != ArchiveHostModeCustom {
+		cfg.HostMode = ArchiveHostModeDefault
+	}
+	cfg.SelectedHosts = normaliseHostList(cfg.SelectedHosts)
+	if cfg.TimeoutMinutes <= 0 {
+		cfg.TimeoutMinutes = 20
+	}
 	return cfg
 }
 

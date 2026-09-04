@@ -19,7 +19,7 @@ func TestArchiveFloorIsAppliedPerHostNotPerRun(t *testing.T) {
 	// clear a run-level floor while every individual query had failed.
 	var total time.Duration
 	for i := 0; i < 12; i++ {
-		target := ArchiveTarget{Host: "host" + string(rune('a'+i)) + ".example.com", URL: "https://x"}
+		target := ScanHostTarget{Host: "host" + string(rune('a'+i)) + ".example.com", URL: "https://x"}
 		run := archiveHostRun{Elapsed: 350 * time.Millisecond}
 		total += run.Elapsed
 
@@ -42,7 +42,7 @@ func TestArchiveHostOutcomeClassifies(t *testing.T) {
 	slowEnough := archiveQueryFloor + time.Second
 
 	t.Run("a real result succeeds", func(t *testing.T) {
-		res, urls := archiveHostOutcome("gau", ArchiveTarget{Host: "a.example.com"},
+		res, urls := archiveHostOutcome("gau", ScanHostTarget{Host: "a.example.com"},
 			archiveHostRun{Stdout: "https://a.example.com/one\nhttps://a.example.com/two\n", Elapsed: slowEnough})
 		if res.Status != "success" || res.URLs != 2 || len(urls) != 2 {
 			t.Fatalf("got status=%q urls=%d (%v)", res.Status, res.URLs, urls)
@@ -52,7 +52,7 @@ func TestArchiveHostOutcomeClassifies(t *testing.T) {
 	t.Run("an empty archive after a real wait is not a failure", func(t *testing.T) {
 		// An archive legitimately holds nothing for a host. That is why the archive tools are not
 		// marked SilenceIsFailure, and it must stay true per host.
-		res, _ := archiveHostOutcome("gau", ArchiveTarget{Host: "a.example.com"},
+		res, _ := archiveHostOutcome("gau", ScanHostTarget{Host: "a.example.com"},
 			archiveHostRun{Elapsed: slowEnough})
 		if res.Status != "success" {
 			t.Fatalf("an empty-but-genuine archive answer was recorded as %q: %s", res.Status, res.Error)
@@ -61,7 +61,7 @@ func TestArchiveHostOutcomeClassifies(t *testing.T) {
 
 	t.Run("a refused host is skipped, not failed", func(t *testing.T) {
 		res, urls := archiveHostOutcome("gau",
-			ArchiveTarget{Host: "10.0.0.18", Skip: "IP literal"}, archiveHostRun{})
+			ScanHostTarget{Host: "10.0.0.18", Skip: "IP literal"}, archiveHostRun{})
 		if res.Status != "skipped" {
 			t.Fatalf("a refused host was recorded as %q, which would count against the run", res.Status)
 		}
@@ -132,7 +132,7 @@ func TestArchiveHostKeyAcceptsWhatCallersActuallySend(t *testing.T) {
 }
 
 func TestSummariseNamesFailuresRatherThanHidingThem(t *testing.T) {
-	summary := summariseArchiveRun([]ArchiveTargetResult{
+	summary := summariseHostRun([]HostRunResult{
 		{Host: "a", Status: "success"},
 		{Host: "b", Status: "error"},
 		{Host: "c", Status: "skipped"},
@@ -145,7 +145,7 @@ func TestSummariseNamesFailuresRatherThanHidingThem(t *testing.T) {
 }
 
 func TestSelectedArchiveTargetsFiltersToTheSelection(t *testing.T) {
-	got := SelectedArchiveTargets([]ArchiveTarget{
+	got := SelectedScanHosts([]ScanHostTarget{
 		{Host: "a", Selected: true}, {Host: "b"}, {Host: "c", Selected: true},
 	})
 	if len(got) != 2 || got[0].Host != "a" || got[1].Host != "c" {

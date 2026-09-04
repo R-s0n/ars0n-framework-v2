@@ -16,10 +16,10 @@ export const LinkFinderURLResultsModal = ({
   const [activeTab, setActiveTab] = useState('direct');
 
   useEffect(() => {
-    if (show && mostRecentLinkFinderURLScan && mostRecentLinkFinderURLScan.scan_id) {
+    if (show && activeTarget) {
       parseResults();
     }
-  }, [show, mostRecentLinkFinderURLScan]);
+  }, [show, activeTarget]);
 
   const parseResults = async () => {
     setLoading(true);
@@ -27,7 +27,7 @@ export const LinkFinderURLResultsModal = ({
 
     try {
       const response = await fetch(
-        `/api/discovered-endpoints/${mostRecentLinkFinderURLScan.scan_id}?scan_type=linkfinder`
+        `/api/tool-endpoints/${activeTarget.id}/linkfinder`
       );
       
       if (!response.ok) {

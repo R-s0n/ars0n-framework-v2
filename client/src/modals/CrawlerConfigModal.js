@@ -106,6 +106,9 @@ export const CrawlerConfigModal = ({ show, handleClose, activeTarget, tool, onSa
   const title = { katana: 'Katana', gospider: 'GoSpider', linkfinder: 'LinkFinder',
                   waybackurls: 'Waybackurls', gau: 'GAU' }[tool] || tool;
   const isArchiveTool = tool === 'waybackurls' || tool === 'gau';
+  // The crawlers get the host picker too, but keep everything else: they DO touch the target,
+  // so the probe banner, the saved-session switch and the base URL override all still apply.
+  const hasHostPicker = isArchiveTool || tool === 'katana' || tool === 'gospider';
 
   return (
     <Modal data-bs-theme="dark" show={show} onHide={handleClose} size="lg" scrollable>
@@ -174,7 +177,7 @@ export const CrawlerConfigModal = ({ show, handleClose, activeTarget, tool, onSa
             {tool === 'katana' && <KatanaFields config={config} set={set} />}
             {tool === 'gospider' && <GoSpiderFields config={config} set={set} />}
             {tool === 'linkfinder' && <LinkFinderFields config={config} set={set} />}
-            {isArchiveTool && (
+            {hasHostPicker && (
               <ArchiveHostPicker activeTarget={activeTarget} tool={tool} config={config} set={set} />
             )}
             {tool === 'waybackurls' && <WaybackurlsFields config={config} set={set} />}
@@ -222,6 +225,11 @@ export const CrawlerConfigModal = ({ show, handleClose, activeTarget, tool, onSa
 const KatanaFields = ({ config, set }) => (
   <>
     <h6 className="text-danger">Pacing</h6>
+    <Row className="g-3 mb-2">
+      <NumField label="Timeout per host (minutes)" value={config.timeoutMinutes} min={1} max={240}
+        onChange={(v) => set('timeoutMinutes', v)}
+        help="Applies to each host separately. Hosts are crawled one at a time, so a six-host run can take six times this." />
+    </Row>
     <Row className="g-3">
       <NumField label="Rate limit (req/s)" value={config.rateLimit} min={0} max={500}
         onChange={(v) => set('rateLimit', v)} help={RATE_HELP.katana} />
@@ -264,6 +272,11 @@ const KatanaFields = ({ config, set }) => (
 
 const GoSpiderFields = ({ config, set }) => (
   <>
+    <Row className="g-3 mb-2">
+      <NumField label="Timeout per host (minutes)" value={config.timeoutMinutes} min={1} max={240}
+        onChange={(v) => set('timeoutMinutes', v)}
+        help="Applies to each host separately. Hosts are crawled one at a time." />
+    </Row>
     <h6 className="text-danger">Pacing</h6>
     <Row className="g-3">
       <NumField label="Concurrent" value={config.concurrent} min={1} max={100}
@@ -362,6 +375,7 @@ const LinkFinderFields = ({ config, set }) => (
 // is a decision about what this engagement covers, and widening it for one tool because that tool
 // happens to be passive is how a boundary stops meaning anything.
 const ArchiveHostPicker = ({ activeTarget, tool, config, set }) => {
+  const live = tool === 'katana' || tool === 'gospider';
   const [targets, setTargets] = useState([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
@@ -373,7 +387,7 @@ const ArchiveHostPicker = ({ activeTarget, tool, config, set }) => {
       setLoading(true);
       setErr('');
       try {
-        const res = await fetch(`/api/archive-hosts/${tool}/${activeTarget.id}`);
+        const res = await fetch(`/api/scan-hosts/${tool}/${activeTarget.id}`);
         if (!res.ok) throw new Error('Could not load the host list');
         const data = await res.json();
         if (!cancelled) setTargets(data.targets || []);
@@ -437,6 +451,8 @@ const ArchiveHostPicker = ({ activeTarget, tool, config, set }) => {
         {custom
           ? 'Frozen to this list. A host discovered by a later crawl will not be added on its own.'
           : 'Resolved when the scan runs, so a host a later crawl discovers is included automatically.'}
+        {live && ' Hosts are crawled one at a time, and each one is re-checked against the scope '
+          + 'and given only the credentials scoped to it.'}
       </Form.Text>
 
       {targets.length > 0 && (

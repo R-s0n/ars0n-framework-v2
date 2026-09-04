@@ -1017,7 +1017,11 @@ func RunKatanaURLScan(w http.ResponseWriter, r *http.Request) {
 // buildKatanaCommand turns the stored config into a command line. Kept separate from the launcher
 // so the mapping from setting to flag is one readable block: a rate the probe measured has to end
 // up as `-rl` or it did nothing, and that is easy to lose inside a scan function.
-func buildKatanaCommand(crawlURL string, cfg KatanaURLConfig, scopeTargetID string) []string {
+// auth is resolved by the CALLER for the host being crawled. It used to be looked up in here
+// from the scope target alone, which was safe only while a crawl had one seed: with several
+// hosts that hands the target's session to every one of them, including hosts on a different
+// registrable domain that ScopedAuthContext.For would have refused.
+func buildKatanaCommand(crawlURL string, cfg KatanaURLConfig, auth crawlAuth) []string {
 	cmd := []string{
 		"docker", "exec",
 		"ars0n-framework-v2-katana-1",
@@ -1085,12 +1089,9 @@ func buildKatanaCommand(crawlURL string, cfg KatanaURLConfig, scopeTargetID stri
 	}
 
 	headers := append([]NameVal{}, cfg.Headers...)
-	if cfg.UseFFUFAuth {
-		authHeaders, cookies := ffufAuthMaterial(scopeTargetID)
-		headers = append(headers, authHeaders...)
-		if strings.TrimSpace(cookies) != "" {
-			headers = append(headers, NameVal{Name: "Cookie", Value: cookies})
-		}
+	headers = append(headers, auth.Headers...)
+	if strings.TrimSpace(auth.Cookie) != "" {
+		headers = append(headers, NameVal{Name: "Cookie", Value: auth.Cookie})
 	}
 	for _, h := range headers {
 		if strings.TrimSpace(h.Name) == "" {
@@ -1103,120 +1104,29 @@ func buildKatanaCommand(crawlURL string, cfg KatanaURLConfig, scopeTargetID stri
 }
 
 func ExecuteAndParseKatanaURLScan(scanID, targetURL, scopeTargetID string) {
-	log.Printf("[INFO] Starting Katana URL scan for %s (scan ID: %s)", targetURL, scanID)
-	startTime := time.Now()
-
-	targetDomain := extractDomain(targetURL)
-	if targetDomain == "" {
-		log.Printf("[ERROR] Failed to extract domain from target URL: %s", targetURL)
-		UpdateKatanaURLScanStatus(scanID, "error", "", "Failed to extract domain from target URL", "", time.Since(startTime).String())
-		return
-	}
-	log.Printf("[INFO] Target domain for filtering: %s", targetDomain)
+	log.Printf("[INFO] Starting Katana scan for %s (scan ID: %s)", targetURL, scanID)
 
 	cfg := LoadKatanaURLConfig(scopeTargetID)
-	crawlURL := targetURL
-	if strings.TrimSpace(cfg.BaseURL) != "" {
-		// Set by the probe when the configured URL redirects elsewhere: crawling the pre-redirect
-		// host means every result belongs to a site the operator is not testing.
-		crawlURL = cfg.BaseURL
-	}
-
-	dockerCmd := buildKatanaCommand(crawlURL, cfg, scopeTargetID)
-
-	// Bound the crawl so a hung target cannot leave the scan stuck forever.
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, dockerCmd[0], dockerCmd[1:]...)
-	log.Printf("[INFO] Executing command: %s", strings.Join(dockerCmd, " "))
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	execTime := time.Since(startTime).String()
-
-	// Before any branching, so the output is on record whichever way this run ends. Katana was
-	// misdiagnosed as broken off the back of a run with no stored output; the run had been fine and
-	// the target had been asleep.
-	storeDiscoveryScanOutput("katana_url_scans", scanID, stdout.String(), stderr.String())
-
+	targets, err := ResolveScanHosts(scopeTargetID, cfg.HostMode, cfg.SelectedHosts)
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			log.Printf("[ERROR] Katana URL scan timed out after 20m for %s", targetURL)
-			UpdateKatanaURLScanStatus(scanID, "error", "", "Katana scan timed out after 20 minutes", strings.Join(dockerCmd, " "), execTime)
-			return
-		}
-		log.Printf("[ERROR] Katana URL scan failed for %s: %v", targetURL, err)
-		log.Printf("[ERROR] stderr output: %s", stderr.String())
-		UpdateKatanaURLScanStatus(scanID, "error", "", stderr.String(), strings.Join(dockerCmd, " "), execTime)
+		UpdateKatanaURLScanStatus(scanID, "error", "", err.Error(), "", "0s")
 		return
 	}
-
-	rawResult := stdout.String()
-	lines := strings.Split(rawResult, "\n")
-	log.Printf("[DEBUG] Found %d total URLs", len(lines))
-
-	var cleanURLs []string
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		cleanURLs = append(cleanURLs, line)
-	}
-
-	if reason := discoveryScanFailure(discoveryRun{
-		Tool:             "katana",
-		Stdout:           rawResult,
-		Stderr:           stderr.String(),
-		URLsFound:        len(cleanURLs),
-		Elapsed:          time.Since(startTime),
-		SilenceIsFailure: true,
-	}); reason != "" {
-		log.Printf("[ERROR] %s", reason)
-		UpdateKatanaURLScanStatus(scanID, "error", "", reason, strings.Join(dockerCmd, " "), time.Since(startTime).String())
+	selected := SelectedScanHosts(targets)
+	if len(selected) == 0 {
+		UpdateKatanaURLScanStatus(scanID, "error", "",
+			"No hosts are selected for this scan. Open Config and choose at least one host.", "", "0s")
 		return
 	}
+	log.Printf("[INFO] Katana crawling %d host(s) one at a time", len(selected))
 
-	log.Printf("[INFO] Processing %d URLs (no filtering applied)", len(cleanURLs))
-
-	endpoints, err := processURLsWithParameters(cleanURLs, targetDomain, scanID, "katana", scopeTargetID)
-	if err != nil {
-		log.Printf("[ERROR] Failed to process URLs with parameters: %v", err)
-		UpdateKatanaURLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to process URLs: %v", err), strings.Join(dockerCmd, " "), time.Since(startTime).String())
-		return
-	}
-
-	err = storeDiscoveredEndpoints(endpoints)
-	if err != nil {
-		log.Printf("[ERROR] Failed to store discovered endpoints: %v", err)
-		UpdateKatanaURLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to store endpoints: %v", err), strings.Join(dockerCmd, " "), time.Since(startTime).String())
-		return
-	}
-
-	directCount := 0
-	adjacentCount := 0
-	for _, ep := range endpoints {
-		if ep.IsDirect {
-			directCount++
-		} else {
-			adjacentCount++
-		}
-	}
-
-	resultSummary := fmt.Sprintf("Found %d direct endpoints and %d adjacent endpoints with parameters", directCount, adjacentCount)
-
-	execTime = time.Since(startTime).String()
-	log.Printf("[INFO] Katana URL scan completed in %s for %s", execTime, targetURL)
-
-	UpdateKatanaURLScanStatus(scanID, "success", resultSummary, "", strings.Join(dockerCmd, " "), execTime)
+	executeCrawlerScan("katana", "katana_url_scans", scanID, targetURL, scopeTargetID,
+		selected, time.Duration(cfg.TimeoutMinutes)*time.Minute, cfg.UseFFUFAuth, cfg.BaseURL,
+		func(seedURL string, t ScanHostTarget, auth crawlAuth) []string {
+			return buildKatanaCommand(seedURL, cfg, auth)
+		},
+		UpdateKatanaURLScanStatus)
 }
-
 func UpdateKatanaURLScanStatus(scanID, status, result, errorMsg, command, execTime string) {
 	query := `UPDATE katana_url_scans SET status = $1, result = $2, error = $3, command = $4, execution_time = $5 WHERE scan_id = $6`
 	_, err := dbPool.Exec(context.Background(), query, status, result, errorMsg, command, execTime, scanID)
@@ -1269,7 +1179,7 @@ func GetKatanaURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	scopeTargetID := vars["id"]
 
-	query := `SELECT scan_id, url, status, result, error, command, execution_time, created_at, status_code
+	query := `SELECT scan_id, url, status, result, error, command, execution_time, created_at, status_code, target_results
 	          FROM katana_url_scans WHERE scope_target_id = $1 ORDER BY created_at DESC`
 
 	rows, err := dbPool.Query(context.Background(), query, scopeTargetID)
@@ -1292,10 +1202,13 @@ func GetKatanaURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			ExecutionTime *string   `json:"execution_time"`
 			CreatedAt     time.Time `json:"created_at"`
 			StatusCode    *string   `json:"status_code"`
+			// Per-host outcomes, now that one run covers several hosts.
+			TargetResults *string `json:"target_results"`
 		}
 
 		err := rows.Scan(&scan.ScanID, &scan.URL, &scan.Status, &scan.Result,
-			&scan.Error, &scan.Command, &scan.ExecutionTime, &scan.CreatedAt, &scan.StatusCode)
+			&scan.Error, &scan.Command, &scan.ExecutionTime, &scan.CreatedAt, &scan.StatusCode,
+			&scan.TargetResults)
 		if err != nil {
 			log.Printf("[ERROR] Failed to scan row: %v", err)
 			continue
@@ -1311,6 +1224,7 @@ func GetKatanaURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			"execution_time": scan.ExecutionTime,
 			"created_at":     scan.CreatedAt,
 			"status_code":    scan.StatusCode,
+			"target_results": scan.TargetResults,
 		})
 	}
 
@@ -1926,12 +1840,12 @@ func ExecuteAndParseWaybackURLsScan(scanID, targetURL, scopeTargetID string) {
 	log.Printf("[INFO] Starting WaybackURLs scan for %s (scan ID: %s)", targetURL, scanID)
 
 	cfg := LoadWaybackURLsURLConfig(scopeTargetID)
-	targets, err := ResolveArchiveTargets(scopeTargetID, cfg.HostMode, cfg.SelectedHosts)
+	targets, err := ResolveScanHosts(scopeTargetID, cfg.HostMode, cfg.SelectedHosts)
 	if err != nil {
 		UpdateWaybackURLsScanStatus(scanID, "error", "", err.Error(), "", "0s")
 		return
 	}
-	selected := SelectedArchiveTargets(targets)
+	selected := SelectedScanHosts(targets)
 	if len(selected) == 0 {
 		// Refused rather than run as a green zero. A custom selection that matches nothing is an
 		// operator mistake, and a scan reporting "0 endpoints" for it is indistinguishable from an
@@ -2093,12 +2007,12 @@ func ExecuteAndParseGAUURLScan(scanID, targetURL, scopeTargetID string) {
 	log.Printf("[INFO] Starting GAU scan for %s (scan ID: %s)", targetURL, scanID)
 
 	cfg := LoadGAUURLConfig(scopeTargetID)
-	targets, err := ResolveArchiveTargets(scopeTargetID, cfg.HostMode, cfg.SelectedHosts)
+	targets, err := ResolveScanHosts(scopeTargetID, cfg.HostMode, cfg.SelectedHosts)
 	if err != nil {
 		UpdateGAUURLScanStatus(scanID, "error", "", err.Error(), "", "0s")
 		return
 	}
-	selected := SelectedArchiveTargets(targets)
+	selected := SelectedScanHosts(targets)
 	if len(selected) == 0 {
 		UpdateGAUURLScanStatus(scanID, "error", "",
 			"No hosts are selected for this scan. Open Configure and choose at least one host.", "", "0s")
@@ -2545,7 +2459,8 @@ func RunGoSpiderURLScan(w http.ResponseWriter, r *http.Request) {
 // GoSpider has no rate-limit flag. Its offered rate is concurrency divided by delay, so a measured
 // req/s is expressed here as `-k`, and the config modal does that arithmetic where the operator can
 // see it rather than hiding it in a translation table.
-func buildGoSpiderCommand(crawlURL string, cfg GoSpiderURLConfig, scopeTargetID string) []string {
+// See buildKatanaCommand: auth belongs to one host and is resolved by the caller.
+func buildGoSpiderCommand(crawlURL string, cfg GoSpiderURLConfig, auth crawlAuth) []string {
 	cmd := []string{
 		"docker", "exec",
 		"ars0n-framework-v2-gospider-1",
@@ -2615,12 +2530,9 @@ func buildGoSpiderCommand(crawlURL string, cfg GoSpiderURLConfig, scopeTargetID 
 
 	cookie := cfg.Cookie
 	headers := append([]NameVal{}, cfg.Headers...)
-	if cfg.UseFFUFAuth {
-		authHeaders, cookies := ffufAuthMaterial(scopeTargetID)
-		headers = append(headers, authHeaders...)
-		if strings.TrimSpace(cookie) == "" {
-			cookie = cookies
-		}
+	headers = append(headers, auth.Headers...)
+	if strings.TrimSpace(cookie) == "" {
+		cookie = auth.Cookie
 	}
 	if strings.TrimSpace(cookie) != "" {
 		add("--cookie", cookie)
@@ -2636,122 +2548,38 @@ func buildGoSpiderCommand(crawlURL string, cfg GoSpiderURLConfig, scopeTargetID 
 }
 
 func ExecuteAndParseGoSpiderURLScan(scanID, targetURL, scopeTargetID string) {
-	log.Printf("[GOSPIDER-URL] Starting GoSpider URL scan for %s (scan ID: %s)", targetURL, scanID)
-	startTime := time.Now()
-
-	targetDomain := extractDomain(targetURL)
-	if targetDomain == "" {
-		log.Printf("[GOSPIDER-URL] Failed to extract domain from target URL: %s", targetURL)
-		UpdateGoSpiderURLScanStatus(scanID, "error", "", "Failed to extract domain from target URL", "", time.Since(startTime).String())
-		return
-	}
-	log.Printf("[GOSPIDER-URL] Target domain for filtering: %s", targetDomain)
+	log.Printf("[GOSPIDER-URL] Starting GoSpider scan for %s (scan ID: %s)", targetURL, scanID)
 
 	cfg := LoadGoSpiderURLConfig(scopeTargetID)
-	crawlURL := targetURL
-	if strings.TrimSpace(cfg.BaseURL) != "" {
-		crawlURL = cfg.BaseURL
-	}
-	dockerCmd := buildGoSpiderCommand(crawlURL, cfg, scopeTargetID)
-
-	// Bound the crawl so a hung target cannot leave the scan stuck forever.
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, dockerCmd[0], dockerCmd[1:]...)
-	log.Printf("[GOSPIDER-URL] Executing command: %s", strings.Join(dockerCmd, " "))
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	execTime := time.Since(startTime).String()
-
-	// Before any branching, so the output is on record whichever way this run ends. GoSpider was
-	// misdiagnosed as broken off the back of a "0 endpoints in 4m12s" row with no stored output; the
-	// run had been fine and the target had been asleep.
-	storeDiscoveryScanOutput("gospider_url_scans", scanID, stdout.String(), stderr.String())
-
+	targets, err := ResolveScanHosts(scopeTargetID, cfg.HostMode, cfg.SelectedHosts)
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			log.Printf("[GOSPIDER-URL] GoSpider URL scan timed out after 20m for %s", targetURL)
-			UpdateGoSpiderURLScanStatus(scanID, "error", "", "GoSpider scan timed out after 20 minutes", strings.Join(dockerCmd, " "), execTime)
-			return
-		}
-		log.Printf("[GOSPIDER-URL] GoSpider URL scan failed for %s: %v", targetURL, err)
-		log.Printf("[GOSPIDER-URL] stderr output: %s", stderr.String())
-		UpdateGoSpiderURLScanStatus(scanID, "error", "", stderr.String(), strings.Join(dockerCmd, " "), execTime)
+		UpdateGoSpiderURLScanStatus(scanID, "error", "", err.Error(), "", "0s")
 		return
 	}
+	selected := SelectedScanHosts(targets)
+	if len(selected) == 0 {
+		UpdateGoSpiderURLScanStatus(scanID, "error", "",
+			"No hosts are selected for this scan. Open Config and choose at least one host.", "", "0s")
+		return
+	}
+	log.Printf("[GOSPIDER-URL] Crawling %d host(s) one at a time", len(selected))
 
-	rawResult := stdout.String()
-	lines := strings.Split(rawResult, "\n")
-	log.Printf("[GOSPIDER-URL] Found %d total lines", len(lines))
-
-	var cleanURLs []string
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var result map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &result); err == nil {
-			if output, ok := result["output"].(string); ok && output != "" {
-				cleanURLs = append(cleanURLs, output)
+	executeCrawlerScan("gospider", "gospider_url_scans", scanID, targetURL, scopeTargetID,
+		selected, time.Duration(cfg.TimeoutMinutes)*time.Minute, cfg.UseFFUFAuth, cfg.BaseURL,
+		func(seedURL string, t ScanHostTarget, auth crawlAuth) []string {
+			hostCfg := cfg
+			if !t.IsDirect {
+				// --whitelist and --whitelist-domain were written against the scope target's own
+				// host. Carrying them to an adjacent host would confine that crawl to a domain it
+				// is not on, which reads as "the adjacent host had nothing" rather than "the crawl
+				// was pointed at the wrong boundary".
+				hostCfg.Whitelist = ""
+				hostCfg.WhitelistDomain = ""
 			}
-		}
-	}
-
-	if reason := discoveryScanFailure(discoveryRun{
-		Tool:             "gospider",
-		Stdout:           rawResult,
-		Stderr:           stderr.String(),
-		URLsFound:        len(cleanURLs),
-		Elapsed:          time.Since(startTime),
-		SilenceIsFailure: true,
-	}); reason != "" {
-		log.Printf("[GOSPIDER-URL] %s", reason)
-		UpdateGoSpiderURLScanStatus(scanID, "error", "", reason, strings.Join(dockerCmd, " "), time.Since(startTime).String())
-		return
-	}
-
-	log.Printf("[GOSPIDER-URL] Processing %d URLs (no filtering applied)", len(cleanURLs))
-
-	endpoints, err := processURLsWithParameters(cleanURLs, targetDomain, scanID, "gospider", scopeTargetID)
-	if err != nil {
-		log.Printf("[GOSPIDER-URL] Failed to process URLs with parameters: %v", err)
-		UpdateGoSpiderURLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to process URLs: %v", err), strings.Join(dockerCmd, " "), time.Since(startTime).String())
-		return
-	}
-
-	err = storeDiscoveredEndpoints(endpoints)
-	if err != nil {
-		log.Printf("[GOSPIDER-URL] Failed to store discovered endpoints: %v", err)
-		UpdateGoSpiderURLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to store endpoints: %v", err), strings.Join(dockerCmd, " "), time.Since(startTime).String())
-		return
-	}
-
-	directCount := 0
-	adjacentCount := 0
-	for _, ep := range endpoints {
-		if ep.IsDirect {
-			directCount++
-		} else {
-			adjacentCount++
-		}
-	}
-
-	resultSummary := fmt.Sprintf("Found %d direct endpoints and %d adjacent endpoints with parameters", directCount, adjacentCount)
-
-	execTime = time.Since(startTime).String()
-	log.Printf("[GOSPIDER-URL] GoSpider URL scan completed in %s for %s", execTime, targetURL)
-
-	UpdateGoSpiderURLScanStatus(scanID, "success", resultSummary, "", strings.Join(dockerCmd, " "), execTime)
+			return buildGoSpiderCommand(seedURL, hostCfg, auth)
+		},
+		UpdateGoSpiderURLScanStatus)
 }
-
 func UpdateGoSpiderURLScanStatus(scanID, status, result, errorMsg, command, execTime string) {
 	query := `UPDATE gospider_url_scans SET status = $1, result = $2, error = $3, command = $4, execution_time = $5 WHERE scan_id = $6`
 	_, err := dbPool.Exec(context.Background(), query, status, result, errorMsg, command, execTime, scanID)
@@ -2795,7 +2623,7 @@ func GetGoSpiderURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	scopeTargetID := vars["id"]
 
-	query := `SELECT scan_id, url, status, result, error, command, execution_time, created_at 
+	query := `SELECT scan_id, url, status, result, error, command, execution_time, created_at, target_results
 	          FROM gospider_url_scans WHERE scope_target_id = $1 ORDER BY created_at DESC`
 
 	rows, err := dbPool.Query(context.Background(), query, scopeTargetID)
@@ -2817,10 +2645,12 @@ func GetGoSpiderURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			Command       *string   `json:"command"`
 			ExecutionTime *string   `json:"execution_time"`
 			CreatedAt     time.Time `json:"created_at"`
+			// Per-host outcomes, now that one run covers several hosts.
+			TargetResults *string `json:"target_results"`
 		}
 
 		err := rows.Scan(&scan.ScanID, &scan.URL, &scan.Status, &scan.Result,
-			&scan.Error, &scan.Command, &scan.ExecutionTime, &scan.CreatedAt)
+			&scan.Error, &scan.Command, &scan.ExecutionTime, &scan.CreatedAt, &scan.TargetResults)
 		if err != nil {
 			log.Printf("[GOSPIDER-URL] Failed to scan row: %v", err)
 			continue
@@ -2835,6 +2665,7 @@ func GetGoSpiderURLScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 			"command":        scan.Command,
 			"execution_time": scan.ExecutionTime,
 			"created_at":     scan.CreatedAt,
+			"target_results": scan.TargetResults,
 		})
 	}
 

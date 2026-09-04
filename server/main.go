@@ -35,6 +35,10 @@ func main() {
 		log.Fatal("Environment variable DATABASE_URL is not set")
 	}
 
+	// The auto-scan orchestrator lives in utils, which cannot import main, so the one step whose
+	// handlers are in main is registered through a hook before anything can start a session.
+	registerAutoScanHooks()
+
 	var err error
 	for i := 0; i < 10; i++ {
 		dbPool, err = pgxpool.New(context.Background(), connStr)
@@ -55,6 +59,10 @@ func main() {
 	defer dbPool.Close()
 
 	createTables()
+
+	// Pick up any auto scan the previous process was running. Must come after createTables, whose
+	// sweep clears the scan rows belonging to whichever step was mid-flight.
+	utils.ResumeInterruptedAutoScans()
 
 	// Finish the endpoint_key migration for anyone upgrading. Adding the column was not enough:
 	// ON CONFLICT cannot match a NULL key, so the first Consolidate after the upgrade inserted a
@@ -428,6 +436,10 @@ func main() {
 	r.HandleFunc("/scopetarget/{id}/scans/gospider-url", utils.GetGoSpiderURLScansForScopeTarget).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/discovered-endpoints/{scan_id}", utils.GetDiscoveredEndpoints).Methods("GET", "OPTIONS")
+	// Cumulative per-tool endpoints, which is the quantity Consolidate ingests. The card metric
+	// and the Results modal both read these so they cannot disagree with each other.
+	r.HandleFunc("/tool-endpoint-counts/{scope_target_id}", utils.GetToolEndpointCounts).Methods("GET", "OPTIONS")
+	r.HandleFunc("/tool-endpoints/{scope_target_id}/{tool}", utils.GetToolEndpoints).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/ffuf-url/run", utils.RunFFUFURLScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ffuf-url/status/{scan_id}", utils.GetFFUFURLScanStatus).Methods("GET", "OPTIONS")
@@ -472,8 +484,11 @@ func main() {
 	r.HandleFunc("/waybackurls-url-config/{scope_target_id}", utils.GetWaybackURLsURLConfig).Methods("GET", "OPTIONS")
 	r.HandleFunc("/gau-url-config/{scope_target_id}", utils.SaveGAUURLConfig).Methods("POST", "OPTIONS")
 	r.HandleFunc("/gau-url-config/{scope_target_id}", utils.GetGAUURLConfig).Methods("GET", "OPTIONS")
-	// Backs the host picker both Configure modals show.
-	r.HandleFunc("/archive-hosts/{tool}/{scope_target_id}", utils.GetArchiveHostCandidates).Methods("GET", "OPTIONS")
+	// Backs the host picker in every Configure modal that has one: the two archive tools and the
+	// two live crawlers. The /archive-hosts spelling is kept so an older client mid-deploy does
+	// not 404 against a route that only changed name.
+	r.HandleFunc("/scan-hosts/{tool}/{scope_target_id}", utils.GetScanHostCandidates).Methods("GET", "OPTIONS")
+	r.HandleFunc("/archive-hosts/{tool}/{scope_target_id}", utils.GetScanHostCandidates).Methods("GET", "OPTIONS")
 	// How much JavaScript LinkFinder will read versus how much exists, for the JS Files metric.
 	r.HandleFunc("/linkfinder-js-files/{scope_target_id}", utils.GetLinkFinderJSFiles).Methods("GET", "OPTIONS")
 	r.HandleFunc("/linkfinder-url-config/{scope_target_id}", utils.SaveLinkFinderURLConfig).Methods("POST", "OPTIONS")
@@ -1399,16 +1414,73 @@ func startAutoScanSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	var sessionID string
+	if strings.TrimSpace(req.ScopeTargetID) == "" {
+		http.Error(w, "scope_target_id is required", http.StatusBadRequest)
+		return
+	}
+	// config_snapshot is JSONB NOT NULL, so a caller that omits it gets a 500 from the database
+	// rather than an answer. The MCP start_auto_scan tool does exactly that today.
+	if req.ConfigSnapshot == nil {
+		req.ConfigSnapshot = map[string]interface{}{}
+	}
+
+	// Refuse a second live session rather than racing one, the same way RunFuzzFlow does. The
+	// database index is the real guard; this check exists to return an explanation instead of a
+	// constraint violation.
+	var liveSessionID string
 	err := dbPool.QueryRow(context.Background(), `
-		INSERT INTO auto_scan_sessions (scope_target_id, config_snapshot, status, started_at)
-		VALUES ($1, $2, 'running', NOW())
+		SELECT id::text FROM auto_scan_sessions
+		WHERE scope_target_id = $1 AND status IN ('pending','running')
+		LIMIT 1`, req.ScopeTargetID).Scan(&liveSessionID)
+	if err == nil && liveSessionID != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":      "auto_scan_already_running",
+			"message":    "An auto scan is already running on this target. Cancel it before starting another.",
+			"session_id": liveSessionID,
+		})
+		return
+	}
+
+	// Clear the control flags as the run begins.
+	//
+	// is_cancelled is otherwise cleared ONLY as a side effect of the blanket false,false write the
+	// browser sends on every step transition. Nothing else in the repository clears it: Resume
+	// clears is_paused alone. So a target that was cancelled keeps the flag, and any orchestrator
+	// that checks it before each step would stop immediately on every future run, with no way out
+	// from the UI. Clearing it here makes the start of a run mean the same thing whoever asks for it.
+	if _, err := dbPool.Exec(context.Background(), `
+		UPDATE auto_scan_state SET is_paused = false, is_cancelled = false, updated_at = NOW()
+		WHERE scope_target_id = $1`, req.ScopeTargetID); err != nil {
+		log.Printf("[AUTO-SCAN] Could not clear control flags for %s: %v", req.ScopeTargetID, err)
+	}
+
+	var sessionID string
+	err = dbPool.QueryRow(context.Background(), `
+		INSERT INTO auto_scan_sessions (scope_target_id, config_snapshot, status, started_at, steps_run)
+		VALUES ($1, $2, 'running', NOW(), '[]'::jsonb)
 		RETURNING id
 	`, req.ScopeTargetID, req.ConfigSnapshot).Scan(&sessionID)
 	if err != nil {
+		// The partial unique index is the authority, so a loser in a genuine race lands here.
+		if strings.Contains(err.Error(), "auto_scan_sessions_one_live_per_target") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "auto_scan_already_running",
+				"message": "An auto scan is already running on this target.",
+			})
+			return
+		}
+		log.Printf("[AUTO-SCAN] Failed to create session for %s: %v", req.ScopeTargetID, err)
 		http.Error(w, "Failed to create session", http.StatusInternalServerError)
 		return
 	}
+	// The scan now runs here rather than in the browser. This is the whole point of the change: the
+	// tab can close, the page can refresh, and the sequence carries on.
+	utils.StartAutoScanOrchestrator(sessionID, req.ScopeTargetID)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"session_id": sessionID})
 }
@@ -1502,6 +1574,14 @@ func cancelAutoScanSession(w http.ResponseWriter, r *http.Request) {
 	status := "cancelled"
 	if r.URL.Query().Get("completed") == "true" {
 		status = "completed"
+	}
+
+	// Stop the goroutine as well as recording the status. Without this the sequencer would carry on
+	// to the next step: the browser's cancel worked only because cancelling also killed the loop.
+	// The tool already running is deliberately left to finish and store its results, which is what
+	// cancel has always meant here.
+	if utils.CancelAutoScanOrchestrator(sessionID) {
+		log.Printf("Signalled the running orchestrator for session %s", sessionID)
 	}
 
 	log.Printf("Setting session %s status to %s", sessionID, status)

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Modal, Button, Table, Badge, Spinner, Alert, Form, InputGroup, Tabs, Tab, Accordion } from 'react-bootstrap';
+import { ArchiveHostSummary } from './ArchiveHostSummary';
 
 export const GoSpiderURLResultsModal = ({ 
   show, 
@@ -17,10 +18,10 @@ export const GoSpiderURLResultsModal = ({
   const [activeTab, setActiveTab] = useState('direct');
 
   useEffect(() => {
-    if (show && mostRecentGoSpiderURLScan && mostRecentGoSpiderURLScan.scan_id) {
+    if (show && activeTarget) {
       parseResults();
     }
-  }, [show, mostRecentGoSpiderURLScan]);
+  }, [show, activeTarget]);
 
   const parseResults = async () => {
     setLoading(true);
@@ -28,7 +29,7 @@ export const GoSpiderURLResultsModal = ({
 
     try {
       const response = await fetch(
-        `/api/discovered-endpoints/${mostRecentGoSpiderURLScan.scan_id}?scan_type=gospider`
+        `/api/tool-endpoints/${activeTarget.id}/gospider`
       );
       
       if (!response.ok) {
@@ -342,6 +343,7 @@ export const GoSpiderURLResultsModal = ({
         </Modal.Title>
       </Modal.Header>
       <Modal.Body>
+        <ArchiveHostSummary scan={mostRecentGoSpiderURLScan} />
         {mostRecentGoSpiderURLScan && (
           <div className="mb-3">
             <div className="d-flex justify-content-between align-items-center">

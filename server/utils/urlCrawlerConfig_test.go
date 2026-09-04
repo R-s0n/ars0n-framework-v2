@@ -19,7 +19,7 @@ func TestKatanaRateLimitReachesTheCommandLine(t *testing.T) {
 	cfg.UseFFUFAuth = false
 	cfg.RateLimit = 5
 
-	got := joined(buildKatanaCommand("https://example.test/", cfg, "target-id"))
+	got := joined(buildKatanaCommand("https://example.test/", cfg, crawlAuth{}))
 	if !strings.Contains(got, "-rl 5") {
 		t.Fatalf("a measured rate must appear as -rl, got: %s", got)
 	}
@@ -31,7 +31,7 @@ func TestKatanaOmitsRateLimitWhenUnset(t *testing.T) {
 	cfg.UseFFUFAuth = false
 	cfg.RateLimit = 0
 
-	if got := joined(buildKatanaCommand("https://example.test/", cfg, "t")); strings.Contains(got, "-rl") {
+	if got := joined(buildKatanaCommand("https://example.test/", cfg, crawlAuth{})); strings.Contains(got, "-rl") {
 		t.Fatalf("an unset rate must not emit -rl at all, got: %s", got)
 	}
 }
@@ -41,7 +41,7 @@ func TestKatanaDefaultsMatchThePreviousHardcodedFlags(t *testing.T) {
 	cfg := DefaultKatanaURLConfig()
 	cfg.UseFFUFAuth = false
 
-	got := joined(buildKatanaCommand("https://example.test/", cfg, "t"))
+	got := joined(buildKatanaCommand("https://example.test/", cfg, crawlAuth{}))
 	for _, want := range []string{"-d 5", "-jc", "-kf all", "-silent", "-nc", "-p 15"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("default command lost %q, got: %s", want, got)
@@ -55,7 +55,7 @@ func TestKatanaTogglesAreOmittedWhenOff(t *testing.T) {
 	cfg.JSCrawl = false
 	cfg.Headless = false
 
-	got := joined(buildKatanaCommand("https://example.test/", cfg, "t"))
+	got := joined(buildKatanaCommand("https://example.test/", cfg, crawlAuth{}))
 	if strings.Contains(got, "-jc") {
 		t.Errorf("disabling JS crawling must drop -jc, got: %s", got)
 	}
@@ -69,7 +69,7 @@ func TestGoSpiderDelayReachesTheCommandLine(t *testing.T) {
 	cfg.UseFFUFAuth = false
 	cfg.DelayS = 3
 
-	got := joined(buildGoSpiderCommand("https://example.test/", cfg, "t"))
+	got := joined(buildGoSpiderCommand("https://example.test/", cfg, crawlAuth{}))
 	if !strings.Contains(got, "-k 3") {
 		t.Fatalf("gospider expresses rate as a delay, so -k must be present, got: %s", got)
 	}
@@ -79,7 +79,7 @@ func TestGoSpiderDefaultsMatchThePreviousHardcodedFlags(t *testing.T) {
 	cfg := DefaultGoSpiderURLConfig()
 	cfg.UseFFUFAuth = false
 
-	got := joined(buildGoSpiderCommand("https://example.test/", cfg, "t"))
+	got := joined(buildGoSpiderCommand("https://example.test/", cfg, crawlAuth{}))
 	for _, want := range []string{"-d 5", "-c 10", "-t 2", "--sitemap", "--robots", "-a",
 		"--no-redirect", "--json"} {
 		if !strings.Contains(got, want) {

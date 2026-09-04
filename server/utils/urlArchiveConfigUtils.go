@@ -211,8 +211,8 @@ func archiveHostKey(raw string) string {
 
 // ---------------------------------------------------------------- host resolution
 
-// ArchiveTarget is one host an archive run will be asked about, as the picker and the run both see it.
-type ArchiveTarget struct {
+// ScanHostTarget is one host an archive run will be asked about, as the picker and the run both see it.
+type ScanHostTarget struct {
 	Host     string `json:"host"`
 	URL      string `json:"url"`
 	IsDirect bool   `json:"is_direct"`
@@ -226,7 +226,7 @@ type ArchiveTarget struct {
 	Skip string `json:"skip,omitempty"`
 }
 
-// ResolveArchiveTargets returns every host this target's archive tools could be asked about, with
+// ResolveScanHosts returns every host this target's archive tools could be asked about, with
 // the ones the config selects flagged.
 //
 // Candidates are the scope target's own host plus the adjacent hosts the manual crawl observed and
@@ -237,7 +237,7 @@ type ArchiveTarget struct {
 //
 // The direct host is always present and always first, even when no crawl has ever run, so a target
 // with no recording still scans the thing it is named after.
-func ResolveArchiveTargets(scopeTargetID, hostMode string, selected []string) ([]ArchiveTarget, error) {
+func ResolveScanHosts(scopeTargetID, hostMode string, selected []string) ([]ScanHostTarget, error) {
 	primary := strings.ToLower(scopeTargetHost(scopeTargetID))
 
 	hosts, err := loadCrawlHosts(scopeTargetID)
@@ -247,7 +247,7 @@ func ResolveArchiveTargets(scopeTargetID, hostMode string, selected []string) ([
 		hosts = nil
 	}
 
-	var out []ArchiveTarget
+	var out []ScanHostTarget
 	seen := map[string]bool{}
 	add := func(host, scheme string, isDirect bool, requests int) {
 		host = archiveHostKey(host)
@@ -258,7 +258,7 @@ func ResolveArchiveTargets(scopeTargetID, hostMode string, selected []string) ([
 		if scheme == "" {
 			scheme = "https"
 		}
-		out = append(out, ArchiveTarget{
+		out = append(out, ScanHostTarget{
 			Host:     host,
 			URL:      scheme + "://" + host,
 			IsDirect: isDirect,
@@ -312,9 +312,9 @@ func ResolveArchiveTargets(scopeTargetID, hostMode string, selected []string) ([
 	return out, nil
 }
 
-// SelectedArchiveTargets narrows a resolved list to what the run will actually query.
-func SelectedArchiveTargets(all []ArchiveTarget) []ArchiveTarget {
-	var out []ArchiveTarget
+// SelectedScanHosts narrows a resolved list to what the run will actually query.
+func SelectedScanHosts(all []ScanHostTarget) []ScanHostTarget {
+	var out []ScanHostTarget
 	for _, t := range all {
 		if t.Selected {
 			out = append(out, t)
@@ -325,8 +325,8 @@ func SelectedArchiveTargets(all []ArchiveTarget) []ArchiveTarget {
 
 // ---------------------------------------------------------------- handlers
 
-// GetArchiveHostCandidates backs the host picker in the Configure modal, for both tools.
-func GetArchiveHostCandidates(w http.ResponseWriter, r *http.Request) {
+// GetScanHostCandidates backs the host picker in the Configure modal, for both tools.
+func GetScanHostCandidates(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	scopeTargetID := mux.Vars(r)["scope_target_id"]
 	tool := strings.ToLower(mux.Vars(r)["tool"])
@@ -340,12 +340,19 @@ func GetArchiveHostCandidates(w http.ResponseWriter, r *http.Request) {
 	case "gau":
 		cfg := LoadGAUURLConfig(scopeTargetID)
 		mode, selected = cfg.HostMode, cfg.SelectedHosts
+	case "katana":
+		cfg := LoadKatanaURLConfig(scopeTargetID)
+		mode, selected = cfg.HostMode, cfg.SelectedHosts
+	case "gospider":
+		cfg := LoadGoSpiderURLConfig(scopeTargetID)
+		mode, selected = cfg.HostMode, cfg.SelectedHosts
 	default:
-		writeJSONError(w, http.StatusBadRequest, "unknown_tool", "tool must be waybackurls or gau")
+		writeJSONError(w, http.StatusBadRequest, "unknown_tool",
+			"tool must be waybackurls, gau, katana or gospider")
 		return
 	}
 
-	targets, err := ResolveArchiveTargets(scopeTargetID, mode, selected)
+	targets, err := ResolveScanHosts(scopeTargetID, mode, selected)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "no_hosts", err.Error())
 		return
@@ -363,7 +370,7 @@ func GetArchiveHostCandidates(w http.ResponseWriter, r *http.Request) {
 		"targets":        targets,
 		"total":          len(targets),
 		"adjacent_count": adjacent,
-		"selected_count": len(SelectedArchiveTargets(targets)),
+		"selected_count": len(SelectedScanHosts(targets)),
 	})
 }
 
@@ -389,13 +396,13 @@ func SaveGAUURLConfig(w http.ResponseWriter, r *http.Request) {
 
 // ---------------------------------------------------------------- run bookkeeping
 
-// ArchiveTargetResult records what one host's query did, so a run over twelve hosts can be read
+// HostRunResult records what one host's query did, so a run over twelve hosts can be read
 // afterwards rather than collapsing into a single number.
 //
 // Partial failure is the normal case here, not the exception: an archive holding nothing for one
 // adjacent host says nothing about the other eleven, and a 429 on one query is not a reason to
 // throw away the ten that worked.
-type ArchiveTargetResult struct {
+type HostRunResult struct {
 	Host     string `json:"host"`
 	IsDirect bool   `json:"is_direct"`
 	Status   string `json:"status"` // success | error | skipped
@@ -403,13 +410,19 @@ type ArchiveTargetResult struct {
 	Command  string `json:"command,omitempty"`
 	Error    string `json:"error,omitempty"`
 	Elapsed  string `json:"elapsed,omitempty"`
+
+	// Whether this host was crawled with credentials, and if not, why. Only the live crawlers set
+	// these: an archive query has nothing to authenticate to. Without the reason an operator cannot
+	// tell an application with nothing on it from a login wall nobody got past.
+	Authenticated bool   `json:"authenticated,omitempty"`
+	AuthNote      string `json:"auth_note,omitempty"`
 }
 
-// summariseArchiveRun turns per-host outcomes into the one line the tool card shows.
+// summariseHostRun turns per-host outcomes into the one line the tool card shows.
 //
 // It names failures explicitly. The alternative, reporting only the endpoint count, is how a run
 // where nine of twelve hosts were refused reads as a success.
-func summariseArchiveRun(results []ArchiveTargetResult, direct, adjacent int) string {
+func summariseHostRun(results []HostRunResult, direct, adjacent int) string {
 	ok, failed, skipped := 0, 0, 0
 	for _, r := range results {
 		switch r.Status {
@@ -432,8 +445,8 @@ func summariseArchiveRun(results []ArchiveTargetResult, direct, adjacent int) st
 	return summary
 }
 
-// storeArchiveTargetResults writes the per-host breakdown onto the scan row.
-func storeArchiveTargetResults(table, scanID string, results []ArchiveTargetResult) {
+// storeHostRunResults writes the per-host breakdown onto the scan row.
+func storeHostRunResults(table, scanID string, results []HostRunResult) {
 	payload, err := json.Marshal(results)
 	if err != nil {
 		return

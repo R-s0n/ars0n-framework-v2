@@ -378,7 +378,7 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('get_archive_hosts', 'List the hosts the Waybackurls and GAU scans can be asked about for a URL target: the direct host plus every in-scope adjacent host the manual crawl observed. Shows which are currently selected. Pair with manage_tool_config{tool:"waybackurls"|"gau"} to change the selection.', getArchiveHostsSchema.shape, async (params) => {
+  server.tool('get_scan_hosts', 'List the hosts a multi-host URL-workflow scan can cover: the direct host plus every in-scope adjacent host the manual crawl observed. Applies to waybackurls, gau, katana and gospider, and shows which are currently selected. Pair with manage_tool_config to change the selection. The two crawlers additionally re-check scope per host at launch and send each host only the credentials scoped to it.', getArchiveHostsSchema.shape, async (params) => {
     const result = await getArchiveHosts(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });

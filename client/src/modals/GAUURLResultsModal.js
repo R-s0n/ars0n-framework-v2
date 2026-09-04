@@ -17,10 +17,10 @@ export const GAUURLResultsModal = ({
   const [activeTab, setActiveTab] = useState('direct');
 
   useEffect(() => {
-    if (show && mostRecentGAUURLScan && mostRecentGAUURLScan.scan_id) {
+    if (show && activeTarget) {
       parseResults();
     }
-  }, [show, mostRecentGAUURLScan]);
+  }, [show, activeTarget]);
 
   const parseResults = async () => {
     setLoading(true);
@@ -28,7 +28,7 @@ export const GAUURLResultsModal = ({
 
     try {
       const response = await fetch(
-        `/api/discovered-endpoints/${mostRecentGAUURLScan.scan_id}?scan_type=gau`
+        `/api/tool-endpoints/${activeTarget.id}/gau`
       );
       
       if (!response.ok) {

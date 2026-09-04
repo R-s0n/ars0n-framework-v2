@@ -15,6 +15,15 @@ export const monitorActiveScan = async (
     const scanStatus = await response.json();
     console.log('[ARJUN] Scan status:', scanStatus.status);
 
+    // Pushed on every poll so the card can show progress while the scan runs. The status payload
+    // carries scan_id, processed_endpoints, total_endpoints and parameters_found, which is
+    // everything the card and the results modal read. Without this the card held whatever object it
+    // had before the run, so total_endpoints was missing and the Scan button could only say
+    // "Scanning..." for the whole run while x8, which does push, showed a real count. x8 already
+    // had this; Arjun was simply never given it.
+    setMostRecentArjunScan(scanStatus);
+    setMostRecentArjunScanStatus(scanStatus.status);
+
     if (scanStatus.status === 'running' || scanStatus.status === 'pending') {
       setTimeout(
         () =>
@@ -28,7 +37,12 @@ export const monitorActiveScan = async (
           ),
         2000
       );
-    } else if (scanStatus.status === 'success' || scanStatus.status === 'error') {
+    } else {
+      // Anything that is not running or pending is terminal, and that includes 'partial', which the
+      // backend returns when one pass of a scan failed while others succeeded. Listing the terminal
+      // statuses instead left a partial scan matching no branch at all: polling stopped, the spinner
+      // never cleared and the Scan button stayed disabled until a page reload. Same fix x8 already
+      // carries.
       setIsArjunScanning(false);
       await monitorArjunScanStatus(
         activeTarget,

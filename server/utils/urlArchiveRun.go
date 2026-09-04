@@ -25,7 +25,7 @@ import (
 
 // archiveHostRun is one host's query, independent of which tool ran it.
 type archiveHostRun struct {
-	Target   ArchiveTarget
+	Target   ScanHostTarget
 	Command  []string
 	Stdout   string
 	Stderr   string
@@ -42,10 +42,10 @@ type archiveHostRun struct {
 // the archive, and summing twelve 300ms failures produces 3.6s, which would clear a run-level floor
 // while every single query in it had failed.
 func runArchiveHosts(
-	targets []ArchiveTarget,
+	targets []ScanHostTarget,
 	perHostTimeout time.Duration,
 	build func(plan archiveQuery) []string,
-	onHost func(t ArchiveTarget, run archiveHostRun),
+	onHost func(t ScanHostTarget, run archiveHostRun),
 ) {
 	for _, target := range targets {
 		// planArchiveQuery runs per host, not once for the run. It is what refuses an IP literal and
@@ -86,8 +86,8 @@ func runArchiveHosts(
 
 // archiveHostOutcome converts one host's process result into a recorded outcome plus the URLs it
 // yielded, applying the per-host floor that catches a tool which failed fast and quietly.
-func archiveHostOutcome(tool string, t ArchiveTarget, run archiveHostRun) (ArchiveTargetResult, []string) {
-	res := ArchiveTargetResult{
+func archiveHostOutcome(tool string, t ScanHostTarget, run archiveHostRun) (HostRunResult, []string) {
+	res := HostRunResult{
 		Host:     t.Host,
 		IsDirect: t.IsDirect,
 		Command:  strings.Join(run.Command, " "),
@@ -194,7 +194,7 @@ func buildArchiveFetchCommand(plan archiveQuery, cfg WaybackURLsURLConfig) []str
 // host's endpoints as direct and destroy the distinction the results modal is built on.
 func executeArchiveScan(
 	tool, table, scanID, targetURL, scopeTargetID string,
-	targets []ArchiveTarget,
+	targets []ScanHostTarget,
 	perHostTimeout time.Duration,
 	build func(plan archiveQuery) []string,
 	update func(scanID, status, result, errorMsg, command, execTime string),
@@ -208,14 +208,14 @@ func executeArchiveScan(
 	}
 
 	var (
-		results     []ArchiveTargetResult
+		results     []HostRunResult
 		allURLs     []string
 		allStdout   strings.Builder
 		allStderr   strings.Builder
 		allCommands []string
 	)
 
-	runArchiveHosts(targets, perHostTimeout, build, func(t ArchiveTarget, run archiveHostRun) {
+	runArchiveHosts(targets, perHostTimeout, build, func(t ScanHostTarget, run archiveHostRun) {
 		res, urls := archiveHostOutcome(tool, t, run)
 		results = append(results, res)
 		allURLs = append(allURLs, urls...)
@@ -231,7 +231,7 @@ func executeArchiveScan(
 	})
 
 	storeDiscoveryScanOutput(table, scanID, allStdout.String(), allStderr.String())
-	storeArchiveTargetResults(table, scanID, results)
+	storeHostRunResults(table, scanID, results)
 
 	command := strings.Join(allCommands, " ; ")
 	execTime := time.Since(startTime).String()
@@ -270,12 +270,12 @@ func executeArchiveScan(
 	}
 
 	log.Printf("[INFO] %s scan completed in %s across %d hosts for %s", tool, execTime, len(results), targetURL)
-	update(scanID, "success", summariseArchiveRun(results, direct, adjacent), "", command, execTime)
+	update(scanID, "success", summariseHostRun(results, direct, adjacent), "", command, execTime)
 }
 
 // firstArchiveError reports why a run with no successful host failed, preferring a real error over
 // a skip so the operator sees the thing that broke rather than the thing that was declined.
-func firstArchiveError(results []ArchiveTargetResult) string {
+func firstArchiveError(results []HostRunResult) string {
 	if len(results) == 0 {
 		return "No hosts were selected for this scan. Open Configure and choose at least one."
 	}

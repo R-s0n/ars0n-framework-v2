@@ -154,7 +154,12 @@ func ExecuteAndParseShuffleDNSWithWordlist(scanID, wordlist string) {
 	log.Printf("[INFO] Using ShuffleDNS rate limit: %d", rateLimit)
 
 	// Create temporary directory for wordlist and resolvers
-	tempDir := "/tmp/shuffledns-temp"
+	// Per scan, not a fixed name. /tmp is a single named volume mounted into the api container
+	// AND every tool container (docker-compose.yml), so a fixed path is shared storage: two runs
+	// of this tool overwrite each other and each one's deferred RemoveAll deletes the other's
+	// working files. The auto-scan single-flight guard does not cover this, because the manual
+	// per-tool buttons reach the same code.
+	tempDir := "/tmp/shuffledns-" + scanID
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		log.Printf("[ERROR] Failed to create temp directory: %v", err)
 		UpdateShuffleDNSScanStatus(scanID, "error", "", fmt.Sprintf("Failed to create temp directory: %v", err), "", time.Since(startTime).String())
@@ -235,7 +240,12 @@ func ExecuteAndParseShuffleDNSScan(scanID, domain string) {
 	log.Printf("[INFO] Using ShuffleDNS rate limit: %d", rateLimit)
 
 	// Create temporary directory for wordlist and resolvers
-	tempDir := "/tmp/shuffledns-temp"
+	// Per scan, not a fixed name. /tmp is a single named volume mounted into the api container
+	// AND every tool container (docker-compose.yml), so a fixed path is shared storage: two runs
+	// of this tool overwrite each other and each one's deferred RemoveAll deletes the other's
+	// working files. The auto-scan single-flight guard does not cover this, because the manual
+	// per-tool buttons reach the same code.
+	tempDir := "/tmp/shuffledns-" + scanID
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		log.Printf("[ERROR] Failed to create temp directory: %v", err)
 		UpdateShuffleDNSScanStatus(scanID, "error", "", fmt.Sprintf("Failed to create temp directory: %v", err), "", time.Since(startTime).String())
@@ -538,7 +548,12 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 	log.Printf("[DEBUG] Processing %d URLs from httpx results", len(urls))
 
 	// Create temporary directory for wordlist
-	tempDir := "/tmp/cewl-temp"
+	// Per scan, not a fixed name. /tmp is a single named volume mounted into the api container
+	// AND every tool container (docker-compose.yml), so a fixed path is shared storage: two runs
+	// of this tool overwrite each other and each one's deferred RemoveAll deletes the other's
+	// working files. The auto-scan single-flight guard does not cover this, because the manual
+	// per-tool buttons reach the same code.
+	tempDir := "/tmp/cewl-" + scanID
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		log.Printf("[ERROR] Failed to create temp directory: %v", err)
 		UpdateCeWLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to create temp directory: %v", err), "", time.Since(startTime).String())
@@ -560,17 +575,20 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 	if raw, ok := cewlSettings["excludePaths"]; ok {
 		if paths, valid := listSetting(raw); valid && len(paths) > 0 {
 			excludeFile := filepath.Join(tempDir, "cewl-exclude.txt")
+			// Same reasoning as the wordlist: the cewl container's /tmp is shared, so a fixed name
+			// lets one scan's exclusion list silently govern another's crawl.
+			containerExclude := "/tmp/cewl-exclude-" + scanID + ".txt"
 			if err := os.WriteFile(excludeFile, []byte(strings.Join(paths, "\n")+"\n"), 0644); err != nil {
 				configNotes = append(configNotes, "excludePaths was NOT applied: the exclusion file could not be "+
 					"written on the host ("+err.Error()+"), so the crawl ran without it.")
 			} else {
 				copyExclude := exec.Command("docker", "cp", excludeFile,
-					"ars0n-framework-v2-cewl-1:/tmp/cewl-exclude.txt")
+					"ars0n-framework-v2-cewl-1:"+containerExclude)
 				if err := copyExclude.Run(); err != nil {
 					configNotes = append(configNotes, "excludePaths was NOT applied: the exclusion file could not "+
 						"be copied into the CeWL container ("+err.Error()+"), so the crawl ran without it.")
 				} else {
-					excludeArgs = []string{"--exclude", "/tmp/cewl-exclude.txt"}
+					excludeArgs = []string{"--exclude", containerExclude}
 					log.Printf("[DEBUG] CeWL exclusion list written with %d paths", len(paths))
 				}
 			}
@@ -712,11 +730,16 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 		log.Printf("[DEBUG] Wordlist file size: %d bytes", len(content))
 	}
 
+	// Named for the scan that will consume it. The previous fixed /tmp/wordlist.txt meant a second
+	// CeWL run replaced the wordlist a first run's brute force was still reading, so shuffledns
+	// silently resolved someone else's words and reported them as this target's subdomains.
+	containerWordlist := "/tmp/wordlist-" + scanID + ".txt"
+
 	// Copy wordlist to container
 	copyCmd := exec.Command(
 		"docker", "cp",
 		wordlistFile,
-		"ars0n-framework-v2-shuffledns-1:/tmp/wordlist.txt")
+		"ars0n-framework-v2-shuffledns-1:"+containerWordlist)
 	if err := copyCmd.Run(); err != nil {
 		log.Printf("[ERROR] Failed to copy wordlist to container: %v", err)
 		UpdateCeWLScanStatus(scanID, "error", "", fmt.Sprintf("Failed to copy wordlist to container: %v", err), "", time.Since(startTime).String())
@@ -729,7 +752,7 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 	checkCmd := exec.Command(
 		"docker", "exec",
 		"ars0n-framework-v2-shuffledns-1",
-		"cat", "/tmp/wordlist.txt",
+		"cat", containerWordlist,
 	)
 	var checkOutput bytes.Buffer
 	checkCmd.Stdout = &checkOutput
@@ -808,7 +831,7 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 		"ars0n-framework-v2-shuffledns-1",
 		"shuffledns",
 		"-d", domain,
-		"-w", "/tmp/wordlist.txt",
+		"-w", containerWordlist,
 		"-r", "/app/wordlists/resolvers.txt",
 		"-silent",
 		"-massdns", "/usr/local/bin/massdns",

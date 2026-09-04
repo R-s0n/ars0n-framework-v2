@@ -97,12 +97,7 @@ import monitorNucleiScreenshotScanStatus from './utils/monitorNucleiScreenshotSc
 import initiateMetaDataScan, { initiateCompanyMetaDataScan, cancelMetaDataScan } from './utils/initiateMetaDataScan';
 import monitorMetaDataScanStatus, { monitorCompanyMetaDataScanStatus } from './utils/monitorMetaDataScanStatus';
 import fetchHttpxScans from './utils/fetchHttpxScans';
-import {
-  AUTO_SCAN_STEPS,
-  resumeAutoScan as resumeAutoScanUtil,
-  startAutoScan as startAutoScanUtil
-} from './utils/wildcardAutoScan';
-import getAutoScanSteps from './utils/autoScanSteps';
+import { AUTO_SCAN_STEPS } from './utils/autoScanConstants';
 import fetchAmassIntelScans from './utils/fetchAmassIntelScans';
 import monitorAmassIntelScanStatus from './utils/monitorAmassIntelScanStatus';
 import initiateAmassIntelScan from './utils/initiateAmassIntelScan';
@@ -316,6 +311,11 @@ const HelpMeLearn = ({ section }) => (
   </Suspense>
 );
 
+// Kept for the scan-history views, which are genuinely about one run. The tool CARDS no longer use
+// it: see toolEndpointCounts. Parsing a per-run number and labelling it "Endpoints" is what made a
+// Katana card read 1 straight after a run that found 775, because the run after it was a one-host
+// probe and the card only ever showed the latest.
+//
 // Every URL-discovery tool writes the same summary sentence, so the count is parsed in one place
 // rather than five copies of the same regex.
 function countURLToolEndpoints(scan) {
@@ -384,7 +384,7 @@ const URLToolCard = ({ tool }) => (
               </div>
             </Button>
             <Button variant="outline-danger" className="flex-fill" onClick={tool.onResults}
-                    disabled={!tool.status || tool.status !== 'success'}>
+                    disabled={!(tool.resultCount > 0) && (!tool.status || tool.status !== 'success')}>
               Results
             </Button>
           </div>
@@ -536,6 +536,54 @@ function App() {
   const [autoScanCurrentStep, setAutoScanCurrentStep] = useState(AUTO_SCAN_STEPS.IDLE);
   const [autoScanTargetId, setAutoScanTargetId] = useState(null);
   const [autoScanSessionId, setAutoScanSessionId] = useState(null);
+
+  // Auto-scan progress comes from the server, not from an in-page loop.
+  //
+  // This is what makes a refresh a non-event: on mount, and every few seconds after, the current
+  // step is read from auto_scan_state. A scan started in another tab, or before this page was
+  // reloaded, is adopted here rather than being invisible. Modelled on the fuzz-run poller for the
+  // same reason it was written that way -- the endpoint-scan poller only ever starts from a click,
+  // so its running flag is lost on refresh, which is exactly the bug being fixed.
+  useEffect(() => {
+    if (!activeTarget || activeTarget.type !== 'Wildcard') return undefined;
+    let cancelled = false;
+
+    const read = async () => {
+      try {
+        const res = await fetch(`/api/api/auto-scan-state/${activeTarget.id}`);
+        if (!res.ok || cancelled) return;
+        const state = await res.json();
+        const step = state.current_step || AUTO_SCAN_STEPS.IDLE;
+        setAutoScanCurrentStep(step);
+        setAutoScanTargetId(activeTarget.id);
+        // Running is derived, never remembered. A step that is neither idle nor completed means the
+        // server is mid-sequence, whoever started it and whatever this tab has been through.
+        const live = step !== AUTO_SCAN_STEPS.IDLE
+          && step !== AUTO_SCAN_STEPS.COMPLETED
+          && String(step).toLowerCase() !== 'idle'
+          && String(step).toLowerCase() !== 'completed';
+        setIsAutoScanning(live && !state.is_paused);
+
+        // Pause and cancel are server facts too, not just things this tab did. Deriving them here
+        // is what makes the controls correct after a refresh: previously both were React booleans,
+        // so a reloaded page showed a paused scan as running and offered Pause on a scan that was
+        // already stopping.
+        setIsAutoScanPaused(!!state.is_paused);
+        setIsAutoScanPausing(false);
+        // "Cancelling" is the window between the flag being set and the sequence noticing: the
+        // request is in, the current tool is still finishing. Once the run reaches a terminal step
+        // there is nothing left to cancel.
+        setIsAutoScanCancelling(!!state.is_cancelled && live);
+      } catch (err) {
+        // A failed poll is not a finished scan. Leaving the last known state alone is the honest
+        // reading; clearing it would make a network blip look like the run had ended.
+      }
+    };
+
+    read();
+    const timer = setInterval(read, 3000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [activeTarget]);
   const [showAutoScanHistoryModal, setShowAutoScanHistoryModal] = useState(false);
   const [autoScanSessions, setAutoScanSessions] = useState([]);
   // Add these state variables near the other auto scan related states
@@ -892,8 +940,13 @@ function App() {
   // host mode resolves at RUN time, so this is read from the server rather than derived from the
   // saved config: a config that says "default" does not itself know the number.
   const [archiveHostCounts, setArchiveHostCounts] = useState({
-    waybackurls: null, gau: null,
+    waybackurls: null, gau: null, katana: null, gospider: null,
   });
+  // Every discovery tool's cumulative distinct endpoint count, which is the same quantity
+  // Consolidate ingests. Per-tool totals and the consolidated total now reconcile: the difference
+  // between them is the overlap between tools plus the manual crawl, which is what consolidating is.
+  const [toolEndpointCounts, setToolEndpointCounts] = useState({});
+
   // How much JavaScript LinkFinder will actually read, against how much has been discovered. The
   // two differ by default: the cap is 50 and truncation is silent, so without this the card cannot
   // distinguish a target with 50 bundles from one with 900.
@@ -1780,89 +1833,9 @@ function App() {
   }, []);
 
   const resumeAutoScan = async (fromStep) => {
-    resumeAutoScanUtil(
-      fromStep,
-      activeTarget,
-      () => getAutoScanSteps(
-          activeTarget,
-        setAutoScanCurrentStep,
-        // Scanning states
-        setIsScanning,
-        setIsSublist3rScanning,
-        setIsAssetfinderScanning,
-          setIsGauScanning,
-          setIsCTLScanning,
-          setIsSubfinderScanning,
-        setIsConsolidating,
-          setIsHttpxScanning,
-        setIsShuffleDNSScanning,
-        setIsCeWLScanning,
-        setIsGoSpiderScanning,
-        setIsSubdomainizerScanning,
-          setIsNucleiScreenshotScanning,
-          setIsMetaDataScanning,
-        // Scans state updaters
-        setAmassScans,
-        setSublist3rScans,
-        setAssetfinderScans,
-        setGauScans,
-        setCTLScans,
-        setSubfinderScans,
-        setHttpxScans,
-        setShuffleDNSScans,
-        setCeWLScans,
-        setGoSpiderScans,
-        setSubdomainizerScans,
-        setNucleiScreenshotScans,
-          setMetaDataScans,
-        setSubdomains,
-        setShuffleDNSCustomScans,
-        // Most recent scan updaters
-        setMostRecentAmassScan,
-        setMostRecentSublist3rScan,
-        setMostRecentAssetfinderScan,
-        setMostRecentGauScan,
-        setMostRecentCTLScan,
-        setMostRecentSubfinderScan,
-        setMostRecentHttpxScan,
-        setMostRecentShuffleDNSScan,
-        setMostRecentCeWLScan,
-        setMostRecentGoSpiderScan,
-        setMostRecentSubdomainizerScan,
-        setMostRecentNucleiScreenshotScan,
-        setMostRecentMetaDataScan,
-        setMostRecentShuffleDNSCustomScan,
-        // Status updaters
-        setMostRecentAmassScanStatus,
-        setMostRecentSublist3rScanStatus,
-        setMostRecentAssetfinderScanStatus,
-        setMostRecentGauScanStatus,
-        setMostRecentCTLScanStatus,
-        setMostRecentSubfinderScanStatus,
-        setMostRecentHttpxScanStatus,
-        setMostRecentShuffleDNSScanStatus,
-        setMostRecentCeWLScanStatus,
-        setMostRecentGoSpiderScanStatus,
-        setMostRecentSubdomainizerScanStatus,
-        setMostRecentNucleiScreenshotScanStatus,
-          setMostRecentMetaDataScanStatus,
-        setMostRecentShuffleDNSCustomScanStatus,
-        handleConsolidate,
-        undefined,
-        undefined,
-        setIsWildcardNucleiScanning,
-        setWildcardNucleiScans,
-        setMostRecentWildcardNucleiScan,
-        setMostRecentWildcardNucleiScanStatus,
-        httpxScanConfig,
-        setActiveWildcardNucleiScan
-      ),
-      consolidatedSubdomains,
-      mostRecentHttpxScan,
-      autoScanSessionId,
-      setIsAutoScanning,
-      setAutoScanCurrentStep
-    );
+        // Resume is gone with the loop: the server never stopped, so there is nothing to restart.
+        // This path could not fire on a hard refresh anyway -- its effect has [] deps and reads an
+        // activeTarget that is still null at mount.
   };
 
   // Open Modal Handlers
@@ -2448,85 +2421,9 @@ function App() {
 
       setIsAutoScanning(true);
 
-      startAutoScanUtil(
-        currentTarget,
-        setIsAutoScanning,
-        setAutoScanCurrentStep,
-        setAutoScanTargetId,
-        () => getAutoScanSteps(
-          currentTarget,
-          setAutoScanCurrentStep,
-          setIsScanning,
-          setIsSublist3rScanning,
-          setIsAssetfinderScanning,
-          setIsGauScanning,
-          setIsCTLScanning,
-          setIsSubfinderScanning,
-          setIsConsolidating,
-          setIsHttpxScanning,
-          setIsShuffleDNSScanning,
-          setIsCeWLScanning,
-          setIsGoSpiderScanning,
-          setIsSubdomainizerScanning,
-          setIsNucleiScreenshotScanning,
-          setIsMetaDataScanning,
-          setAmassScans,
-          setSublist3rScans,
-          setAssetfinderScans,
-          setGauScans,
-          setCTLScans,
-          setSubfinderScans,
-          setHttpxScans,
-          setShuffleDNSScans,
-          setCeWLScans,
-          setGoSpiderScans,
-          setSubdomainizerScans,
-          setNucleiScreenshotScans,
-          setMetaDataScans,
-          setSubdomains,
-          setShuffleDNSCustomScans,
-          setMostRecentAmassScan,
-          setMostRecentSublist3rScan,
-          setMostRecentAssetfinderScan,
-          setMostRecentGauScan,
-          setMostRecentCTLScan,
-          setMostRecentSubfinderScan,
-          setMostRecentHttpxScan,
-          setMostRecentShuffleDNSScan,
-          setMostRecentCeWLScan,
-          setMostRecentGoSpiderScan,
-          setMostRecentSubdomainizerScan,
-          setMostRecentNucleiScreenshotScan,
-          setMostRecentMetaDataScan,
-          setMostRecentShuffleDNSCustomScan,
-          setMostRecentAmassScanStatus,
-          setMostRecentSublist3rScanStatus,
-          setMostRecentAssetfinderScanStatus,
-          setMostRecentGauScanStatus,
-          setMostRecentCTLScanStatus,
-          setMostRecentSubfinderScanStatus,
-          setMostRecentHttpxScanStatus,
-          setMostRecentShuffleDNSScanStatus,
-          setMostRecentCeWLScanStatus,
-          setMostRecentGoSpiderScanStatus,
-          setMostRecentSubdomainizerScanStatus,
-          setMostRecentNucleiScreenshotScanStatus,
-          setMostRecentMetaDataScanStatus,
-          setMostRecentShuffleDNSCustomScanStatus,
-          handleConsolidate,
-          config,
-          sessionData.session_id,
-          setIsWildcardNucleiScanning,
-          setWildcardNucleiScans,
-          setMostRecentWildcardNucleiScan,
-          setMostRecentWildcardNucleiScanStatus,
-          currentHttpxConfig,
-          setActiveWildcardNucleiScan
-        ),
-        consolidatedSubdomains,
-        mostRecentHttpxScan,
-        sessionData.session_id
-      );
+      // The server sequences the run now; the browser only watches. The in-page loop that used to live here
+      // is why a refresh killed the scan. autoScanStatePoll below picks the run up from server state,
+      // including a run this tab never started.
     } catch (error) {
       console.error('[AutoScan] Error fetching config or starting scan:', error);
     }
@@ -2560,10 +2457,15 @@ function App() {
                 await fetch(`/api/api/auto-scan-state/${targetId}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
+                  // is_cancelled, NOT is_paused:false. This write means "abandon this target, it
+                  // blew its budget" -- but the sequencer now runs server-side and reads the same
+                  // row, and to it a cleared pause means "the operator pressed Resume". Saying it
+                  // that way would restart the very step the cap exists to prevent. A cancel is the
+                  // only signal that means stop, and the orchestrator honours it while paused.
                   body: JSON.stringify({
                     current_step: 'completed',
                     is_paused: false,
-                    is_cancelled: false
+                    is_cancelled: true
                   })
                 });
               } catch (err) {
@@ -2985,10 +2887,15 @@ function App() {
                 await fetch(`/api/api/auto-scan-state/${targetId}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
+                  // is_cancelled, NOT is_paused:false. This write means "abandon this target, it
+                  // blew its budget" -- but the sequencer now runs server-side and reads the same
+                  // row, and to it a cleared pause means "the operator pressed Resume". Saying it
+                  // that way would restart the very step the cap exists to prevent. A cancel is the
+                  // only signal that means stop, and the orchestrator honours it while paused.
                   body: JSON.stringify({
                     current_step: 'completed',
                     is_paused: false,
-                    is_cancelled: false
+                    is_cancelled: true
                   })
                 });
               } catch (err) {
@@ -5625,14 +5532,45 @@ function App() {
   // The counts map only carries the verdicts that actually occurred, so `counts.unverified ?? '-'`
   // rendered a dash on a run where nothing was unverified, which reads as "not measured" when it
   // is in fact the best possible outcome.
-  const verdictCount = useCallback((key) => (
-    endpointValidation && endpointValidation.status !== 'not_run'
-      ? (endpointValidationCounts[key] ?? 0)
-      : '-'
-  ), [endpointValidation, endpointValidationCounts]);
+  //
+  // A run IN PROGRESS is the third case and it was being reported as the second. The API sends
+  // counts: {} until the run finishes, so every verdict rendered 0 next to a four-figure endpoint
+  // count: "1090 Endpoints, 0 Valid, 0 Unverified, 0 Ruled Out", which reads as a finished run that
+  // found nothing rather than one that has classified fifty of them so far. Only a finished run has
+  // measured anything, so only a finished run gets to show a number.
+  const verdictCount = useCallback((key) => {
+    const status = endpointValidation?.status;
+    if (!status || status === 'not_run' || status === 'pending' || status === 'running') return '-';
+    // A run can also END without producing a summary. An interrupted one is the live case: its rows
+    // are in the results table but counts was never written, so every verdict would render 0 beside
+    // a four-figure endpoint count and read as "checked, found nothing". An empty map means nothing
+    // reportable exists, whatever the status says.
+    //
+    // Inside a POPULATED map a missing key still means zero, which is the distinction the original
+    // version of this function was written to preserve: a run where nothing came back unverified
+    // measured zero unverified, and that is a result rather than an absence.
+    if (!endpointValidationCounts || Object.keys(endpointValidationCounts).length === 0) return '-';
+    return endpointValidationCounts[key] ?? 0;
+  }, [endpointValidation, endpointValidationCounts]);
 
   // The label on the Investigate button while it runs. One button covering two phases has to say
   // which one is moving, or a run that spends twenty minutes in phase 1 looks hung.
+  // Progress for the two hidden-parameter tools, shown on their Scan buttons while they run.
+  //
+  // Both counters advance a WHOLE GROUP at a time, not per endpoint: arjunUtils.go:265 and
+  // x8Utils.go:220 both do `processed += len(g.Targets)` after the group's process exits. So the
+  // number sits at 0 for a long first pass and then jumps. That is why this falls back to words
+  // rather than rendering "0/64", which reads as stuck -- the same reason the Investigate label
+  // below says "Validating..." until it has a real count. The spinner beside it carries liveness;
+  // the number carries progress only once there is progress to report.
+  const paramScanProgressLabel = useCallback((scan) => {
+    const total = scan?.total_endpoints;
+    const done = scan?.processed_endpoints;
+    if (!total) return 'Scanning...';
+    if (!done) return `Scanning 0/${total}`;
+    return `Scanned ${done}/${total}`;
+  }, []);
+
   const endpointScanProgressLabel = useMemo(() => {
     if (!isEndpointScanRunning) return '';
     const phase = endpointScanRun?.phase;
@@ -6173,13 +6111,13 @@ function App() {
   const fetchArchiveHostCounts = async (targetId) => {
     const id = targetId || (activeTarget && activeTarget.id);
     if (!id) {
-      setArchiveHostCounts({ waybackurls: null, gau: null });
+      setArchiveHostCounts({ waybackurls: null, gau: null, katana: null, gospider: null });
       return;
     }
     const next = {};
-    await Promise.all(['waybackurls', 'gau'].map(async (tool) => {
+    await Promise.all(['waybackurls', 'gau', 'katana', 'gospider'].map(async (tool) => {
       try {
-        const res = await fetch(`/api/archive-hosts/${tool}/${id}`);
+        const res = await fetch(`/api/scan-hosts/${tool}/${id}`);
         if (!res.ok) { next[tool] = null; return; }
         const data = await res.json();
         next[tool] = { selected: data.selected_count ?? 0, total: data.total ?? 0 };
@@ -6195,6 +6133,13 @@ function App() {
       setLinkFinderJS(res.ok ? await res.json() : null);
     } catch (error) {
       setLinkFinderJS(null);
+    }
+
+    try {
+      const res = await fetch(`/api/tool-endpoint-counts/${id}`);
+      setToolEndpointCounts(res.ok ? await res.json() : {});
+    } catch (error) {
+      setToolEndpointCounts({});
     }
   };
 
@@ -9520,7 +9465,7 @@ function App() {
                       secondaryCount: (archiveHostCounts.waybackurls
                         ? `${archiveHostCounts.waybackurls.selected} / ${archiveHostCounts.waybackurls.total}`
                         : '-'),
-                      resultCount: countURLToolEndpoints(mostRecentWaybackURLsScan),
+                      resultCount: toolEndpointCounts['waybackurls']?.total ?? 0,
                       resultLabel: 'Endpoints'
                     },
                     {
@@ -9540,7 +9485,7 @@ function App() {
                       secondaryCount: (linkFinderJS
                         ? `${linkFinderJS.scanned} / ${linkFinderJS.available}`
                         : '-'),
-                      resultCount: countURLToolEndpoints(mostRecentLinkFinderURLScan),
+                      resultCount: toolEndpointCounts['linkfinder']?.total ?? 0,
                       resultLabel: 'Endpoints'
                     },
                     {
@@ -9557,7 +9502,7 @@ function App() {
                       secondaryCount: (archiveHostCounts.gau
                         ? `${archiveHostCounts.gau.selected} / ${archiveHostCounts.gau.total}`
                         : '-'),
-                      resultCount: countURLToolEndpoints(mostRecentGAUURLScan),
+                      resultCount: toolEndpointCounts['gau']?.total ?? 0,
                       resultLabel: 'Endpoints'
                     }
                   ].map((tool) => (
@@ -9579,7 +9524,11 @@ function App() {
                       onScan: startKatanaURLScan,
                       onResults: handleOpenKatanaURLResultsModal,
                       onConfig: () => setCrawlerConfigTool('katana'),
-                      resultCount: countURLToolEndpoints(mostRecentKatanaURLScan),
+                      secondaryLabel: 'Scan Targets',
+                      secondaryCount: (archiveHostCounts.katana
+                        ? `${archiveHostCounts.katana.selected} / ${archiveHostCounts.katana.total}`
+                        : '-'),
+                      resultCount: toolEndpointCounts['katana']?.total ?? 0,
                       resultLabel: 'Endpoints'
                     },
                     {
@@ -9592,7 +9541,11 @@ function App() {
                       onScan: startGoSpiderURLScan,
                       onResults: handleOpenGoSpiderURLResultsModal,
                       onConfig: () => setCrawlerConfigTool('gospider'),
-                      resultCount: countURLToolEndpoints(mostRecentGoSpiderURLScan),
+                      secondaryLabel: 'Scan Targets',
+                      secondaryCount: (archiveHostCounts.gospider
+                        ? `${archiveHostCounts.gospider.selected} / ${archiveHostCounts.gospider.total}`
+                        : '-'),
+                      resultCount: toolEndpointCounts['gospider']?.total ?? 0,
                       resultLabel: 'Endpoints'
                     }
                   ].map((tool) => (
@@ -9627,36 +9580,24 @@ function App() {
                             <Col>
                               <div className="text-danger fw-bold fs-4">{consolidatedEndpointCount}</div>
                               <div className="text-muted small card-metric-label">Endpoints</div>
-                              <div className="text-muted" style={{ fontSize: '0.68rem' }}>
-                                unique url + verb
-                              </div>
                             </Col>
                             <Col>
                               <div className="text-danger fw-bold fs-4">
                                 {verdictCount('valid')}
                               </div>
                               <div className="text-muted small card-metric-label">Valid</div>
-                              <div className="text-muted" style={{ fontSize: '0.68rem' }}>
-                                distinct real pages
-                              </div>
                             </Col>
                             <Col>
                               <div className="text-secondary fw-bold fs-4">
                                 {verdictCount('unverified')}
                               </div>
                               <div className="text-muted small card-metric-label">Unverified</div>
-                              <div className="text-muted" style={{ fontSize: '0.68rem' }}>
-                                still tested
-                              </div>
                             </Col>
                             <Col>
                               <div className="text-secondary fw-bold fs-4">
                                 {verdictCount('ruled_out')}
                               </div>
                               <div className="text-muted small card-metric-label">Ruled Out</div>
-                              <div className="text-muted" style={{ fontSize: '0.68rem' }}>
-                                catch-all or gone
-                              </div>
                             </Col>
                           </Row>
                         </div>
@@ -9771,7 +9712,8 @@ function App() {
                             >
                               <div className="btn-content">
                                 {isArjunScanning ? (
-                                  <Spinner animation="border" size="sm" />
+                                  <><Spinner animation="border" size="sm" className="me-2" />
+                                    {paramScanProgressLabel(mostRecentArjunScan)}</>
                                 ) : (
                                   'Scan'
                                 )}
@@ -9812,17 +9754,19 @@ function App() {
                                   up to four injection places and takes as long as it takes, so it is
                                   the difference between "working" and "hung" from the operator's
                                   side. */}
+                              {/* Targets Enabled means the same thing whether or not a scan is
+                                  running: how many endpoints this tool is configured to cover. It
+                                  used to be replaced mid-scan by a progress count, so the one
+                                  number that answers "what will this scan do" disappeared exactly
+                                  when it was being done, and a metric changing its own label is
+                                  read as the number changing meaning. Progress now lives on the
+                                  Scan button instead, where the spinner already says "running". */}
                               <div className="text-danger fw-bold fs-4">
-                                {isX8Scanning && mostRecentX8Scan?.total_endpoints
-                                  ? `${mostRecentX8Scan.processed_endpoints || 0}/${mostRecentX8Scan.total_endpoints}`
-                                  : paramTargetCounts.x8
-                                    ? `${paramTargetCounts.x8.enabled}/${paramTargetCounts.x8.total}`
-                                    : '-'}
+                                {paramTargetCounts.x8
+                                  ? `${paramTargetCounts.x8.enabled}/${paramTargetCounts.x8.total}`
+                                  : '-'}
                               </div>
-                              <div className="text-muted small card-metric-label">
-                                {isX8Scanning && mostRecentX8Scan?.total_endpoints
-                                  ? 'Endpoints Scanned' : 'Targets Enabled'}
-                              </div>
+                              <div className="text-muted small card-metric-label">Targets Enabled</div>
                             </Col>
                             <Col>
                               <div className="text-danger fw-bold fs-4">
@@ -9836,9 +9780,7 @@ function App() {
                               Some passes failed
                             </div>
                           )}
-                          {!isX8Scanning && mostRecentX8ScanStatus === 'error' && (
-                            <div className="text-danger small text-center mt-2">Scan failed</div>
-                          )}
+
                         </div>
                         <div className="card-actions">
                           <div className="d-flex justify-content-center gap-2">
@@ -9858,7 +9800,8 @@ function App() {
                             >
                               <div className="btn-content">
                                 {isX8Scanning ? (
-                                  <Spinner animation="border" size="sm" />
+                                  <><Spinner animation="border" size="sm" className="me-2" />
+                                    {paramScanProgressLabel(mostRecentX8Scan)}</>
                                 ) : (
                                   'Scan'
                                 )}

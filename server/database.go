@@ -36,6 +36,19 @@ func createTables() {
 			final_live_web_servers INTEGER
 		);`,
 
+		// One live auto-scan per target, enforced by the DATABASE rather than by application code.
+		//
+		// Until now the browser tab was the concurrency control: one tab, one loop. Nothing on the
+		// server prevented a second run, because nothing on the server ran anything. Once a goroutine
+		// does the sequencing, a second Start -- another tab, another browser, or the MCP tool --
+		// would spawn a second full pipeline over the SAME shared tool containers, which write to
+		// fixed paths on a shared /tmp volume and delete those paths on the way out. A partial index
+		// so that a race between two POSTs is lost at the database, where it cannot be lost by
+		// mistake, rather than in a check-then-insert window in Go.
+		`CREATE UNIQUE INDEX IF NOT EXISTS auto_scan_sessions_one_live_per_target
+			ON auto_scan_sessions (scope_target_id)
+			WHERE status IN ('pending', 'running');`,
+
 		`CREATE TABLE IF NOT EXISTS user_settings (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			amass_rate_limit INTEGER DEFAULT 10,
@@ -1273,6 +1286,8 @@ func createTables() {
 		// twelve hosts collapses into one number and a partial failure is unreadable.
 		`ALTER TABLE waybackurls_scans ADD COLUMN IF NOT EXISTS target_results JSONB;`,
 		`ALTER TABLE gau_url_scans ADD COLUMN IF NOT EXISTS target_results JSONB;`,
+		`ALTER TABLE katana_url_scans ADD COLUMN IF NOT EXISTS target_results JSONB;`,
+		`ALTER TABLE gospider_url_scans ADD COLUMN IF NOT EXISTS target_results JSONB;`,
 		`CREATE TABLE IF NOT EXISTS linkfinder_url_configs (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			scope_target_id UUID NOT NULL UNIQUE REFERENCES scope_targets(id) ON DELETE CASCADE,
@@ -3096,6 +3111,14 @@ func createTables() {
 		}
 	}
 
+	// Auto-scan sessions left behind by a restart are RESUMED rather than closed, by
+	// ResumeInterruptedAutoScans (utils/autoScanResume.go) which main calls once the schema is ready.
+	//
+	// Nothing is done to them here on purpose. Marking them interrupted at this point would race the
+	// resume pass and close the very sessions it is about to pick up. The flags are left alone too:
+	// a run the operator had PAUSED must still be paused after a restart, and the blanket clear that
+	// used to live here would have silently resumed it.
+
 	deletePendingScansQuery := `
 		DELETE FROM amass_scans WHERE status = 'pending';
 		DELETE FROM amass_intel_scans WHERE status = 'pending';
@@ -3189,11 +3212,27 @@ func createTables() {
 		UPDATE vector_scan_vectors SET status = 'skipped',
 			reason = 'UNTESTED: the scan was interrupted by a server restart before this vector was '
 				|| 'sent.'
-		WHERE status NOT IN ('skipped','findings','error','clean');`
+		WHERE status NOT IN ('skipped','findings','error','clean');
+		-- The two endpoint scans were missing from this sweep and it cost the Investigate button.
+		--
+		-- Measured 2026-09-03: a validation run stalled at 80 of 1090 endpoints, the api restarted
+		-- twenty minutes later, and the row stayed 'running' with nothing behind it. Because
+		-- RequestIssuingScansRunning counts a running validation as live traffic at the target,
+		-- Investigate then refused every subsequent attempt with "Cannot run while these scans are
+		-- sending traffic at the target: Validate" and there was no way to clear it from the UI.
+		-- The same shape as the x8/Arjun case two blocks up, on the one pair of tables that block
+		-- the button they belong to.
+		UPDATE endpoint_validation_scans SET status = 'error',
+			error = 'Validation was interrupted by a server restart. The endpoints it had not reached '
+				|| 'were never checked, so their verdicts are unknown rather than clean. Re-run it.'
+		WHERE status IN ('pending','running');
+		UPDATE endpoint_investigation_scans SET status = 'error',
+			error = 'Investigation was interrupted by a server restart and did not finish. Re-run it.'
+		WHERE status IN ('pending','running');`
 	if _, err := dbPool.Exec(context.Background(), resolveStuckURLScansQuery); err != nil {
-		log.Printf("[WARN] Failed to resolve stuck FFUF/WAF-probe/x8/Arjun/fuzz/vector scans on startup: %v", err)
+		log.Printf("[WARN] Failed to resolve stuck FFUF/WAF-probe/x8/Arjun/fuzz/vector/endpoint scans on startup: %v", err)
 	} else {
-		log.Println("[INFO] Resolved any stuck FFUF/WAF-probe/x8/Arjun/fuzz/vector scans left running after a restart")
+		log.Println("[INFO] Resolved any stuck FFUF/WAF-probe/x8/Arjun/fuzz/vector/endpoint scans left running after a restart")
 	}
 
 	log.Println("[INFO] Database schema created successfully")

@@ -183,7 +183,23 @@ const NUCLEI_FIELDS = {
   'advanced_config.leave_default_ports': 'Keep :80 and :443 in the URL (-ldp).',
 };
 
+// The two live crawlers share the archive tools' host selection, minus includeSubdomains (which is
+// an archive-query concept). Unlike the archive tools these SEND requests, so each host is
+// re-checked against the scope at launch and is given only the credentials scoped to it.
+const CRAWLER_HOST_FIELDS = {
+  hostMode: '"default" crawls the direct host plus every in-scope adjacent host, resolved fresh at ' +
+    'run time. "custom" crawls exactly selectedHosts. A string rather than an empty array because ' +
+    '"nothing chosen yet" and "the operator chose none" must not look identical.',
+  selectedHosts: 'Hosts to crawl, used only when hostMode is "custom". Array of authorities. Read ' +
+    'the candidates from get_scan_hosts. Selecting none makes the scan refuse rather than report ' +
+    'zero endpoints. Every host is re-checked against the scope at launch regardless of what is ' +
+    'listed here, and is given only the credentials scoped to it.',
+  timeoutMinutes: 'Bound on EACH host crawl, not the run. Hosts are crawled one at a time, so a ' +
+    'six-host run can take six times this.',
+};
+
 const KATANA_FIELDS = {
+  ...CRAWLER_HOST_FIELDS,
   baseUrl: 'scheme://host[:port] to crawl. Empty uses the scope target. The probe sets this when the configured URL redirects somewhere else.',
   rateLimit: 'Requests per second (-rl), 0 for katana\'s own default of 150/s. Shared with the probe.',
   concurrency: 'Concurrent fetchers (-c). Shared with the probe.',
@@ -210,6 +226,7 @@ const KATANA_FIELDS = {
 };
 
 const GOSPIDER_FIELDS = {
+  ...CRAWLER_HOST_FIELDS,
   baseUrl: 'scheme://host[:port] to crawl. Empty uses the scope target.',
   concurrent: 'Concurrent requests per matching domain (-c). Shared with the probe.',
   threads: 'Sites crawled in parallel (-t).',
@@ -815,13 +832,13 @@ function str(v) {
 // reason to widen the engagement boundary.
 const getArchiveHostsSchema = z.object({
   target_id: z.string().uuid().describe('The URL scope target UUID.'),
-  tool: z.enum(['waybackurls', 'gau']).describe(
+  tool: z.enum(['waybackurls', 'gau', 'katana', 'gospider']).describe(
     'Which saved selection to reflect in the `selected` flags. The candidate list itself is ' +
     'the same for both.'),
 });
 
 async function getArchiveHosts(params) {
-  const res = await apiGet(`/archive-hosts/${params.tool}/${params.target_id}`);
+  const res = await apiGet(`/scan-hosts/${params.tool}/${params.target_id}`);
   if (res.error) return res;
   return {
     tool: res.tool,
