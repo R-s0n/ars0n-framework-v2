@@ -16,7 +16,7 @@ Ars0n Framework v2
 </p>
 
 <p align="center">
-    <em>🚨 Pre-Alpha Release Out now!!  Beta Launch @ DEFCON 33 Bug Bounty Hunting Village!!! 🚨</em>
+    <em>🚨 Beta 0.1.0 Out Now!! 🚨</em>
 </p>
 
 <p align="center">My full bug bounty hunting methodology built into a single framework!  Automate the most common bug bounty hunting workflows and <em>Earn While You Learn</em>!</p>
@@ -100,9 +100,9 @@ My hope is that this modular framework will act as a canvas to help share what I
 
 ## Download And Install
 
-This framework consists of 20+ Docker containers along w/ a Docker Compose Manifest to automate the process of deploying these containers.
+This framework consists of 50+ Docker containers along w/ a Docker Compose Manifest to automate the process of deploying these containers.
 
-1. Download the Zip File for the <a href="https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.7/ars0n-framework-v2-beta-0.0.7.zip">latest release</a>
+1. Download the Zip File for the <a href="https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.0/ars0n-framework-v2-beta-0.1.0.zip">latest release</a>
 2. Unzip the files
 3. Navigate to the directory with the `docker-compose.yml` file
 4. Run `docker-compose up --build`
@@ -114,12 +114,12 @@ This framework consists of 20+ Docker containers along w/ a Docker Compose Manif
 
 **Step 1:** Download the framework
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.7/ars0n-framework-v2-beta-0.0.7.zip" -OutFile "ars0n-framework-v2-beta-0.0.7.zip"
+Invoke-WebRequest -Uri "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.0/ars0n-framework-v2-beta-0.1.0.zip" -OutFile "ars0n-framework-v2-beta-0.1.0.zip"
 ```
 
 **Step 2:** Extract the zip file
 ```powershell
-Expand-Archive -Path "ars0n-framework-v2-beta-0.0.7.zip" -DestinationPath "."
+Expand-Archive -Path "ars0n-framework-v2-beta-0.1.0.zip" -DestinationPath "."
 ```
 
 **Step 3:** Navigate to the framework directory
@@ -138,12 +138,12 @@ docker-compose up --build
 
 **Step 1:** Download the framework
 ```bash
-curl -L -o ars0n-framework-v2-beta-0.0.7.zip "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.7/ars0n-framework-v2-beta-0.0.7.zip"
+curl -L -o ars0n-framework-v2-beta-0.1.0.zip "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.0/ars0n-framework-v2-beta-0.1.0.zip"
 ```
 
 **Step 2:** Extract the zip file
 ```bash
-unzip ars0n-framework-v2-beta-0.0.7.zip
+unzip ars0n-framework-v2-beta-0.1.0.zip
 ```
 
 **Step 3:** Navigate to the framework directory
@@ -162,12 +162,12 @@ docker-compose up --build
 
 **Step 1:** Download the framework
 ```bash
-wget "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.0.7/ars0n-framework-v2-beta-0.0.7.zip"
+wget "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.0/ars0n-framework-v2-beta-0.1.0.zip"
 ```
 
 **Step 2:** Extract the zip file
 ```bash
-unzip ars0n-framework-v2-beta-0.0.7.zip
+unzip ars0n-framework-v2-beta-0.1.0.zip
 ```
 
 **Step 3:** Navigate to the framework directory
@@ -427,21 +427,28 @@ The framework ships with a **Model Context Protocol (MCP) server** that exposes 
 
 ### What it exposes
 
-The server registers **55 tools** across six categories:
+The server registers **135 tools** across eleven categories:
 
-- **Scope management** — list/add/activate/delete scope targets, update ROI scores
-- **Scan execution** — run any individual tool (amass, subfinder, httpx, nuclei, katana, ffuf, arjun, etc.) and check status
-- **Workflows** — run the full Company / Wildcard / URL workflows or individual phases
-- **Recon data queries** — subdomains, company domains, network ranges, live servers, target URLs, endpoints, parameters, DNS records, technologies, Nuclei findings, attack surface
-- **Bug bounty analysis** — subdomain-takeover candidates, exposed panels, API endpoints, sensitive files, interesting responses, cross-target search, scan diffing
-- **Settings** — read all settings and modify rate limits, custom HTTP (user-agent/header), Burp Suite config, recon API keys, and AI provider API keys (`get_settings`, `update_settings`, `set_api_key`/`delete_api_key`, `set_ai_api_key`/`delete_ai_api_key`). The MCP Server section itself is read-only via MCP.
+- **Scope and targets** (9): list, add, activate and delete scope targets, update ROI scores, manage scope rules, read scope overview and per-target statistics
+- **Scan execution and workflows** (11): run any individual tool (amass, subfinder, httpx, nuclei, katana, ffuf, arjun, etc.), check or cancel a running scan, read raw tool output, run the full Company / Wildcard / URL workflows or individual phases, drive auto-scan sessions
+- **Recon data queries** (21): subdomains, company domains, network ranges, live servers, target URLs, endpoints, parameters, DNS records, discovered IPs, technologies, cloud assets, Nuclei findings and the consolidated attack surface
+- **Bug bounty analysis** (13): subdomain-takeover candidates, exposed panels, API endpoints, sensitive files, interesting responses, unique hosts, queries by CIDR or tech stack, cross-target search and scan diffing
+- **Endpoints and attack surface** (12): consolidate discovered endpoints, run endpoint validation and investigation scans, read their results, manage attack vectors, capture and manage a manual crawl, manage client identifiers
+- **Vulnerability scanning** (14): the per-vector scanners behind the URL workflow, covering XSS, SQL injection, command injection and SSTI, LFI, web cache, request smuggling, SSRF and open redirect, GraphQL, sensitive data leaks, access bypass, exposed git, fuzzing and hidden-parameter enumeration
+- **Authentication and authorization** (19): document and replay register/login/MFA/reset flows step by step, manage auth recordings and session tokens, check token validity, and manage identity patterns plus role, policy and discretionary access models
+- **Target behaviour probe** (9): configure, dry run and execute the WAF and rate-limit probe, list its targets and read run status and results
+- **Threat model and notes** (3): create, read, update and delete STRIDE threat model entries and their notes
+- **Methodology and guidance** (4): the built-in methodology, "what should I do next" guidance, the attack vector model and per-tool guidance
+- **Settings and configuration** (20): read all settings and modify rate limits, custom HTTP (user-agent/header), Burp Suite config, recon API keys and AI provider API keys (`get_settings`, `update_settings`, `set_api_key`/`delete_api_key`, `set_ai_api_key`/`delete_ai_api_key`), plus tool configs, wordlists, database bundles, HackerOne scope import, screenshots and scan exports. The MCP Server section itself is read-only via MCP.
+
+The count is not hardcoded: `/health` reports the number of tools actually registered at startup, so it cannot drift from the code.
 
 ### Connecting
 
 The MCP server **starts automatically** with `docker-compose up` and listens on **port 3001** using the SSE transport:
 
 - SSE endpoint: `http://localhost:3001/sse`
-- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.0.0","tools":50}`
+- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.0.0","tools":135}`
 
 Verify it's up:
 ```bash
@@ -890,7 +897,7 @@ A: Yes, the framework can be used for legitimate security testing. However, alwa
 A: You need Docker and Docker Compose installed with at least 8GB of RAM and several GB of free disk space. The framework runs on Windows, macOS, and Linux. See the installation section for detailed requirements.
 
 **Q: Why does the initial setup take so long?**  
-A: The first run downloads and builds 20+ Docker containers for all the integrated tools. This can take 30-60 minutes depending on your internet connection. Subsequent startups are much faster since the containers are already built.
+A: The first run downloads and builds 50+ Docker containers for all the integrated tools. This can take 30-60 minutes depending on your internet connection. Subsequent startups are much faster since the containers are already built.
 
 **Q: Do I need API keys to use the framework?**  
 A: Many tools work without API keys, but you'll get significantly better results with API keys for services like SecurityTrails, Censys, Shodan, and others. The framework includes free/limited functionality for most tools, with enhanced capabilities when API keys are provided.
