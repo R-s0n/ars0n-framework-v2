@@ -19,7 +19,7 @@ const POINT_LABEL = {
   query: 'query', body: 'body', header: 'header', cookie: 'cookie', path: 'path',
 };
 
-function VectorToolConfigModal({ show, handleClose, activeTarget, tool, category }) {
+function VectorToolConfigModal({ show, handleClose, activeTarget, tool, category, onSaved}) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -134,9 +134,35 @@ function VectorToolConfigModal({ show, handleClose, activeTarget, tool, category
         return;
       }
       // The blinding warning wins over the generic one. It is the only message here that says the
-      // scan will now report clean for vectors it never sent.
-      setNotice(data.blinded_warning || data.warning || 'Saved.');
-      await load();
+      // scan will now report clean for vectors it never sent, so it is worth holding the modal open
+      // for; everything else closes, because a form that stays put after a successful save reads as
+      // a form that did not save.
+      const consequential = data.blinded_warning || data.warning;
+      if (consequential) {
+        setNotice(consequential);
+        if (onSaved) onSaved(consequential, 'warning');
+        await load();
+        return;
+      }
+
+      let message = 'Settings saved.';
+      // Only speak about the webhook when THIS save actually carried a webhook value. A whole-form
+      // save always round-trips the stored pair, so keying the message on the server's
+      // webhook_configured alone made every REcollapse save announce "Webhook saved" even when the
+      // operator had only changed a mutation setting on a different tab.
+      const touchedWebhook = Object.keys(payload).some((key) => meta[key]?.group === 'Webhook');
+      if (touchedWebhook && data.webhook_configured === true) {
+        message = 'Webhook saved. Both URLs are set, so REcollapse can run.';
+      } else if (data.webhook_configured === false) {
+        message = 'Saved, but the webhook needs BOTH URLs before a callback can prove anything.';
+      }
+      // CLOSE FIRST, then notify. The app's toast container sits at z-index 1000 and a Bootstrap
+      // modal backdrop renders above that, so a toast raised while this modal is still open is
+      // hidden behind it and the operator sees no confirmation at all, which is the exact complaint
+      // this change exists to fix.
+      if (handleClose) handleClose();
+      if (onSaved) onSaved(message, data.webhook_configured === false ? 'warning' : 'success');
+      return;
     } catch (err) {
       setError('Could not save these settings: ' + err.message);
     } finally {
@@ -221,6 +247,14 @@ function VectorToolConfigModal({ show, handleClose, activeTarget, tool, category
         {m.choices && m.kind === 'csv' && (
           <div className="text-white-50 mt-1" style={{ fontSize: '0.7rem' }}>
             Comma separated. Options: {m.choices.join(', ')}
+          </div>
+        )}
+        {/* The longer explanation, for a setting whose consequences do not fit in a placeholder.
+            Added with the webhook pair, which moved off its own modal onto this one and would
+            otherwise have lost the text saying why a localhost callback URL is refused. */}
+        {m.help && (
+          <div className="text-white-50 mt-1" style={{ fontSize: '0.72rem', lineHeight: 1.45 }}>
+            {m.help}
           </div>
         )}
       </div>
@@ -348,7 +382,22 @@ function VectorToolConfigModal({ show, handleClose, activeTarget, tool, category
         )}
       </Modal.Body>
       <Modal.Footer>
-        <Button variant="outline-secondary" onClick={() => setValues({})} disabled={saving}>
+        {/* Clear all empties the FORM, and a save then writes that emptiness. On REcollapse that
+            would take the webhook with it, which is a value the operator typed once and cannot get
+            back from here, so the webhook keys are preserved unless the operator clears them by
+            hand on their own tab. Every other setting has a placeholder describing its default;
+            the webhook has no default, only an absence that switches the tool off. */}
+        <Button
+          variant="outline-secondary"
+          onClick={() => setValues((prev) => {
+            const kept = {};
+            Object.keys(prev).forEach((key) => {
+              if (meta[key]?.group === 'Webhook') kept[key] = prev[key];
+            });
+            return kept;
+          })}
+          disabled={saving}
+        >
           Clear all
         </Button>
         <Button variant="outline-secondary" onClick={handleClose} disabled={saving}>Close</Button>

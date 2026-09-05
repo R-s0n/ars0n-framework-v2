@@ -45,16 +45,25 @@ func TestSectionToolsRefuseWithoutAWebhook(t *testing.T) {
 		Method: "GET", Scheme: "https", Domain: "x.example.com", Path: "/r",
 		InsertionPoint: "query", Parameters: []string{"url"}, Section: map[string]any{},
 	}
-	for name, compose := range map[string]VectorComposer{
-		"recollapse": ComposeREcollapse, "nuclei-dast": ComposeNucleiDast,
-	} {
-		args, warnings := compose(v, map[string]any{}, "/tmp/rep")
-		if args != nil {
-			t.Errorf("%s must refuse to run with no webhook configured", name)
-		}
-		if len(warnings) == 0 || !strings.Contains(strings.ToLower(warnings[0]), "webhook") {
-			t.Errorf("%s must say the webhook is missing, got %v", name, warnings)
-		}
+	// REcollapse still refuses: it builds its payloads out of the webhook, so without one there is
+	// nothing to send.
+	args, warnings := ComposeREcollapse(v, map[string]any{}, "/tmp/rep")
+	if args != nil {
+		t.Error("recollapse must refuse to run with no webhook configured")
+	}
+	if len(warnings) == 0 || !strings.Contains(strings.ToLower(warnings[0]), "webhook") {
+		t.Errorf("recollapse must say the webhook is missing, got %v", warnings)
+	}
+
+	// NUCLEI MUST NOT. It runs stock upstream templates and never sees the webhook, and gating it on
+	// one meant a target with no webhook got nothing from this section at all, including the
+	// response-based checks that prove themselves and never call anybody.
+	nucleiArgs, _ := ComposeNucleiDast(v, map[string]any{}, "/tmp/rep")
+	if nucleiArgs == nil {
+		t.Fatal("nuclei must run without a webhook: it does not use one")
+	}
+	if !argsContain(nucleiArgs, "-dast") {
+		t.Errorf("nuclei must still be composed in DAST mode: %v", nucleiArgs)
 	}
 
 	// The eligibility report says so too, rather than showing a count nobody can act on.
@@ -64,8 +73,12 @@ func TestSectionToolsRefuseWithoutAWebhook(t *testing.T) {
 	if report.Eligible != 0 {
 		t.Error("with no webhook configured nothing in this section is eligible")
 	}
-	if !strings.Contains(report.Vectors[0].Reason, "Configure Webhook") {
-		t.Errorf("the reason must point at the button that fixes it: %q", report.Vectors[0].Reason)
+	// The reason has to point at where the field now IS. There is no section-wide button any more.
+	if !strings.Contains(report.Vectors[0].Reason, "Webhook tab") {
+		t.Errorf("the reason must point at the tab that fixes it: %q", report.Vectors[0].Reason)
+	}
+	if strings.Contains(report.Vectors[0].Reason, "Configure Webhook") {
+		t.Errorf("the reason still names a button that no longer exists: %q", report.Vectors[0].Reason)
 	}
 
 	configured := BuildVectorEligibility(tool, rows, map[string]any{}, nil, webhookSection())
@@ -90,95 +103,6 @@ func TestNucleiIsAlwaysDrivenFromARawRequest(t *testing.T) {
 		if argsContain(args, "-u") {
 			t.Errorf("%s vector was passed as a URL, which fuzzes only the query string", point)
 		}
-	}
-}
-
-// -lfa is required or the template cannot read its payload file: nuclei answers "access to helper
-// file denied", the template fails to compile, and the run reports no templates rather than no
-// findings.
-func TestNucleiAllowsLocalFileAccessAndUsesOurTemplate(t *testing.T) {
-	v := VectorInput{
-		Method: "GET", Scheme: "https", Domain: "x.example.com", Path: "/f",
-		InsertionPoint: "query", Parameters: []string{"url"}, Section: webhookSection(),
-	}
-	args, _ := ComposeNucleiDast(v, map[string]any{}, "/tmp/rep")
-	if !argsContain(args, "-lfa") {
-		t.Fatal("without -lfa the payload file is refused and the scan loads no templates at all")
-	}
-	if !argsContainPair(args, "-t", "/tmp/rep.tpl/") {
-		t.Errorf("the per-vector template directory must be used: %v", args)
-	}
-	if !argsContain(args, "-dast") {
-		t.Error("without -dast the fuzzing template is not loaded")
-	}
-	for _, want := range []string{"-jsonl", "-o", "/tmp/rep", "-no-color"} {
-		if !argsContain(args, want) {
-			t.Errorf("framework flag %s missing: %v", want, args)
-		}
-	}
-}
-
-// The template must declare the parts nuclei will actually honour, and must not claim the one it
-// will not.
-func TestTemplateDeclaresTheFuzzablePartsOnly(t *testing.T) {
-	if !strings.Contains(NucleiPayloadTemplate, "parts: [query, body, header, cookie]") {
-		t.Error("the template must declare the four parts nuclei was measured to fuzz")
-	}
-	if strings.Contains(NucleiPayloadTemplate, "cookie, path]") {
-		t.Error("nuclei does not fuzz a path segment; declaring it would promise coverage it has not got")
-	}
-	if !strings.Contains(NucleiPayloadTemplate, "payload: payloads.txt") {
-		t.Error("the template must read the generated payload list")
-	}
-	// The matchers that make a response-visible SSRF provable without any callback.
-	//
-	// "Location: http" is deliberately NOT in this list any more. It was, and as a lone word matcher
-	// it fired on every absolute redirect the application makes of its own accord: 42 high severity
-	// findings out of 53 vectors, each with an empty parameter, URL and payload. The redirect matcher
-	// is now pinned to the operator's webhook host and is asserted by
-	// TestOpenRedirectMatcherRequiresOurOwnHost against the RENDERED template, because the constant
-	// on its own still carries the placeholder.
-	for _, want := range []string{"root:", "ami-id", "SSH-", "location: http"} {
-		if !strings.Contains(NucleiPayloadTemplate, want) {
-			t.Errorf("the template lost the matcher for %q", want)
-		}
-	}
-	if !strings.Contains(NucleiPayloadTemplate, nucleiWebhookHostPlaceholder) {
-		t.Error("the redirect matcher must carry the host placeholder, or it goes back to matching " +
-			"every redirect the application makes on its own")
-	}
-}
-
-// Every payload a vector sends carries a marker unique to that vector, which is what turns "the
-// webhook was called" into "this parameter called".
-func TestPayloadListIsTokenisedPerVector(t *testing.T) {
-	v := VectorInput{
-		Method: "GET", Scheme: "https", Domain: "shop.example.com", Path: "/f",
-		InsertionPoint: "query", Parameters: []string{"url"}, Section: webhookSection(),
-		Token: "rs0nAAAABBBB",
-	}
-	mutations := "https://webhook.example/" + vectorTokenPlaceholder + "\n" +
-		"%00https://webhook.example/" + vectorTokenPlaceholder + "\n"
-	list := BuildVectorPayloadList(v, mutations)
-
-	if strings.Contains(list, vectorTokenPlaceholder) {
-		t.Error("the placeholder survived, so every vector would send the same marker")
-	}
-	if !strings.Contains(list, "rs0nAAAABBBB") {
-		t.Error("this vector's token is not in its payload list")
-	}
-	if !strings.Contains(list, "%00https://webhook.example/") {
-		t.Error("REcollapse's mutations were dropped")
-	}
-	if !strings.Contains(list, "file:///etc/passwd") {
-		t.Error("the framework's response-visible payloads were dropped, and those are the ones that " +
-			"need no callback at all")
-	}
-	if !strings.Contains(list, "169.254.169.254") {
-		t.Error("the cloud metadata payload was dropped")
-	}
-	if !strings.Contains(list, "shop.example.com") {
-		t.Error("the forms that abuse the target's own hostname were dropped")
 	}
 }
 
@@ -350,62 +274,6 @@ func TestSSRFmapParserIgnoresProgressChatter(t *testing.T) {
 	}
 	if !strings.Contains(findings[0].Evidence, "8000") {
 		t.Errorf("the open port was not captured: %q", findings[0].Evidence)
-	}
-}
-
-// The open-redirect matcher used to be the single word "Location: http", which tests that the
-// response redirects SOMEWHERE, not that the payload chose where. Every ordinary absolute redirect
-// matched it: a 53 vector run against ginandjuice.shop produced 42 high severity findings with an
-// empty parameter, an empty URL and an empty payload, one per vector that happened to redirect.
-// That is worse than finding nothing, because a real open redirect would be indistinguishable from
-// the other 41.
-func TestOpenRedirectMatcherRequiresOurOwnHost(t *testing.T) {
-	v := VectorInput{
-		Method: "GET", Scheme: "https", Domain: "ginandjuice.shop", Path: "/blog",
-		InsertionPoint: "query", Parameters: []string{"back"}, Token: "tok123",
-		Section: map[string]any{
-			"listeningWebhookURL": "https://webhook.site/66aa3ab4-5ce0-41c8-94e2-82f5b8986118",
-			"resultsWebhookURL":   "https://webhook.site/token/66aa3ab4/requests",
-		},
-	}
-	rendered := NucleiPayloadTemplateFor(v)
-
-	if !strings.Contains(rendered, "webhook.site") {
-		t.Error("the matcher does not name the host we control, so it cannot tell an attacker " +
-			"controlled redirect from the application's own")
-	}
-	if !strings.Contains(rendered, "condition: and") {
-		t.Error("without condition: and the two words are ORed and 'location: http' alone matches " +
-			"every redirect again")
-	}
-	if strings.Contains(rendered, nucleiWebhookHostPlaceholder) {
-		t.Error("the placeholder survived into the template nuclei will run")
-	}
-	// The host, not the whole URL: a Location header carrying a mutated path still proves the point,
-	// and requiring the full URL would miss every bypass form REcollapse generates.
-	if strings.Contains(rendered, "https://webhook.site/66aa3ab4") {
-		t.Error("the matcher pins the full URL rather than the host, so any mutation of the path " +
-			"stops it matching")
-	}
-}
-
-// With no webhook the matcher is REMOVED rather than left matching everything. The tool is gated on
-// the webhook being configured so this should be unreachable, but "unreachable" and "produces 42
-// false highs if reached" is a bad pairing.
-func TestWithNoWebhookTheOpenRedirectMatcherIsDroppedNotLeftWildcarded(t *testing.T) {
-	rendered := NucleiPayloadTemplateFor(VectorInput{Token: "tok123"})
-	if strings.Contains(rendered, "name: open-redirect") {
-		t.Error("the open-redirect matcher survived with no host to pin it to")
-	}
-	if strings.Contains(rendered, nucleiWebhookHostPlaceholder) {
-		t.Error("an unsubstituted placeholder was left in the template")
-	}
-	// The response-based matchers need no webhook and must survive, or a target that hands back
-	// /etc/passwd stops being detected.
-	for _, keep := range []string{"local-file-read", "cloud-metadata", "internal-service"} {
-		if !strings.Contains(rendered, keep) {
-			t.Errorf("the %s matcher needs no callback and must not be dropped", keep)
-		}
 	}
 }
 

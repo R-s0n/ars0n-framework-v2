@@ -216,7 +216,6 @@ import VectorToolResultsModal from './modals/VectorToolResultsModal';
 import WildcardToolConfigModal from './modals/WildcardToolConfigModal';
 import CompanyToolConfigModal from './modals/CompanyToolConfigModal';
 import IPPortScanConfigModal from './modals/IPPortScanConfigModal';
-import SectionWebhookModal from './modals/SectionWebhookModal';
 import ManualCrawlResultsModal from './modals/ManualCrawlResultsModal';
 import AuthFlowModal from './modals/AuthFlowModal';
 import RecordAuthFlowsModal from './modals/RecordAuthFlowsModal';
@@ -243,7 +242,6 @@ const WelcomeModal = lazy(() => import('./modals/WelcomeModal.js'));
 // in the wrong section would call /xss/ for a SQL scanner and get a 404 rather than a wrong answer.
 // Sections whose tools share a setting that belongs to the section rather than to any one of them.
 // The label is what the button says.
-const SECTION_SETTINGS_BUTTON = { 'redirect-ssrf': 'Configure Webhook' };
 
 // How a threat model entry's test status is shown. A threat is grey until somebody has actually run
 // it, green when the attack worked, red when it was run and did not. The point of the colour is that
@@ -5838,7 +5836,6 @@ function App() {
   const [vectorTool, setVectorTool] = useState(null);
   const [showVectorConfigModal, setShowVectorConfigModal] = useState(false);
   const [showVectorResultsModal, setShowVectorResultsModal] = useState(false);
-  const [webhookSection, setWebhookSection] = useState(null);
 
   const loadAttackVectorCounts = useCallback(async () => {
     if (!activeTarget) return;
@@ -10055,18 +10052,11 @@ function App() {
                     data rather than by copying a hundred lines of markup. */}
                 {ATTACK_TOOL_SECTIONS.map((section) => (
                   <div key={section.key}>
+                    {/* No per-section settings button any more. The only one there was configured
+                        the SSRF webhook, and that webhook belongs to REcollapse alone now, so it is
+                        a tab on that tool's own Config modal where the operator is already looking. */}
                     <div className="d-flex align-items-center justify-content-between mt-4 mb-3">
                       <h4 className="text-secondary fs-5 mb-0">{section.title}</h4>
-                      {SECTION_SETTINGS_BUTTON[section.key] && (
-                        <Button
-                          variant="outline-danger"
-                          size="sm"
-                          disabled={!activeTarget}
-                          onClick={() => setWebhookSection(section)}
-                        >
-                          {SECTION_SETTINGS_BUTTON[section.key]}
-                        </Button>
-                      )}
                     </div>
                     {/* Keyed off the same section key the cards come from, so adding a section to
                         attackTools.js and adding its lessons is all it takes. An unknown key
@@ -11148,6 +11138,16 @@ function App() {
         activeTarget={activeTarget}
         tool={vectorTool}
         category={vectorTool ? VECTOR_TOOL_CATEGORY.get(vectorTool.key) : undefined}
+        // A save used to leave the modal open with a line of grey text under the tabs, which on the
+        // Webhook tab meant an operator could type a callback URL, press Save and have no idea
+        // whether it took. The toast is the app's existing one, so this reads like every other save.
+        onSaved={(message, variant) => {
+          setToastTitle(variant === 'warning' ? 'Check this' : 'Saved');
+          setToastVariant(variant || 'success');
+          setToastMessage(message);
+          setShowToast(true);
+          setTimeout(() => setShowToast(false), variant === 'warning' ? 7000 : 4000);
+        }}
       />
 
       <WildcardToolConfigModal
@@ -11186,22 +11186,6 @@ function App() {
         // touches, so the modal links to the screen that does it rather than growing a tick box the
         // runner would not read.
         onTrimNetworkRanges={handleTrimNetworkRanges}
-      />
-
-      <SectionWebhookModal
-        show={webhookSection !== null}
-        handleClose={() => {
-          const closing = webhookSection;
-          setWebhookSection(null);
-          // Reloaded on close because configuring the webhook is what makes this section's tools
-          // eligible, and the cards have to stop saying zero the moment it is filled in.
-          if (closing) {
-            (closing.tools || []).forEach((tool) => loadVectorToolStatus(tool.key));
-          }
-        }}
-        activeTarget={activeTarget}
-        category={webhookSection?.key}
-        title={webhookSection?.title}
       />
 
       <VectorToolResultsModal

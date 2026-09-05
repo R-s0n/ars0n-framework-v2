@@ -5,6 +5,8 @@
 // shipped with unwired cards: the key here said 'redirect' and the section said 'redirect-ssrf'.
 //
 // Every entry MUST match a section key in attackTools.js AND a category the server registers.
-export const WIRED_CATEGORIES = ['xss', 'sqli', 'cmdi', 'redirect-ssrf', 'lfi', 'cache', 'smuggling', 'access-bypass', 'graphql', 'sensitive-leak', 'exposed-git', 'misc'];
+// Membership, not order: nothing reads this by index. Kept in the same order as the sections in
+// attackTools.js anyway, so the two files can be diffed against each other by eye.
+export const WIRED_CATEGORIES = ['xss', 'sqli', 'cmdi', 'lfi', 'redirect-ssrf', 'cache', 'smuggling', 'access-bypass', 'graphql', 'sensitive-leak', 'exposed-git', 'misc'];
 
 export default WIRED_CATEGORIES;

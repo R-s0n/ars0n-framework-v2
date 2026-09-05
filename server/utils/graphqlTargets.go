@@ -79,13 +79,41 @@ func endpointListPeers(toolKey string) []string {
 // through the MCP server, which sends plain strings.
 func graphqlEndpointsFor(ctx context.Context, scopeTargetID, toolKey string) []string {
 	settings := loadVectorSettings(ctx, scopeTargetID, toolKey)
-	return splitEndpointList(stringifySetting(settings[graphqlEndpointsSetting]))
+
+	// settingValues, NOT stringifySetting. The list arrives in two shapes: the config modal posts one
+	// string with a URL per line, and the API and MCP post a JSON array. stringifySetting flattens an
+	// array by joining it with "; ", because its other callers are building Cookie headers, and the
+	// splitter below never treated ";" as a separator. So a list set through MCP came back as
+	//
+	//	https://host/admin;  https://host/admin/login;  https://host/admin/users
+	//
+	// and the first two were scanned WITH THE SEMICOLON ATTACHED: a different URL from the one the
+	// operator chose, silently, with the tool reporting a clean result for a path nobody asked about.
+	// Measured on ginandjuice.shop, where two of three bypass targets were scanned as /admin; and
+	// /admin/login;.
+	var raw []string
+	for _, item := range settingValues(settings[graphqlEndpointsSetting]) {
+		raw = append(raw, splitEndpointList(item)...)
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, url := range raw {
+		if seen[url] {
+			continue
+		}
+		seen[url] = true
+		out = append(out, url)
+	}
+	return out
 }
 
 // splitEndpointList turns whatever the operator typed into a clean list of URLs.
 func splitEndpointList(raw string) []string {
 	fields := strings.FieldsFunc(raw, func(r rune) bool {
-		return r == '\n' || r == '\r' || r == ',' || r == ' ' || r == '\t'
+		// ";" is in here as well as the whitespace and comma separators, so a list that has already
+		// been flattened by stringifySetting somewhere upstream still splits correctly rather than
+		// leaving the separator glued to the end of every URL but the last.
+		return r == '\n' || r == '\r' || r == ',' || r == ' ' || r == '\t' || r == ';'
 	})
 	seen := map[string]bool{}
 	var out []string

@@ -155,8 +155,9 @@ func BuildVectorEligibility(tool VectorTool, vectors []vectorRow, settings map[s
 			verdict.Reason = perVectorWhy
 		case tool.RequiresSectionSetting != "" &&
 			strings.TrimSpace(stringifySetting(sectionSettings[tool.RequiresSectionSetting])) == "":
-			verdict.Reason = "This section's webhook is not configured yet. " + tool.Name + " builds " +
-				"its payloads out of it, so there is nothing to send until Configure Webhook is filled in."
+			verdict.Reason = "The webhook is not configured yet. " + tool.Name + " builds its payloads " +
+				"out of it, so there is nothing to send until it is filled in. Set it on the Webhook " +
+				"tab of " + tool.Name + "'s Config."
 		case tool.RequiresFinding != "" && !alreadyFound[v.ID]:
 			verdict.Reason = "Nothing has been found on this vector yet. " + tool.Name + " works on a " +
 				"parameter that has already been shown to be vulnerable, so run the detector first " +

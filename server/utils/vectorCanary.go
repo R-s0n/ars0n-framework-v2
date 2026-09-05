@@ -119,6 +119,22 @@ var vectorCanaries = map[string]CanarySpec{
 			"with no validation. Either the templates did not run or the matcher is not doing what it " +
 			"appears to: this is the same section where a matcher once produced 53 fabricated findings.",
 	},
+	// REcollapse is a DETECTOR now, so it needs a control like any other. It had none while it was a
+	// payload generator, which was defensible then and is not any more: it is the tool that actually
+	// sends this section's requests, so its silence is the silence that matters.
+	//
+	// The same oracle endpoint nuclei uses, and it exercises the whole chain rather than the binary:
+	// recollapse must emit mutations carrying the token, the framework must build a request with the
+	// payload in the right parameter, send it, decline to follow the 30x, and recognise that the
+	// Location it came back with names the webhook host. A miss anywhere in that sequence is a miss
+	// here.
+	"recollapse": {
+		Path: "/redirect", Param: "next", Method: "GET", InsertionPoint: "query",
+		Why: "the framework's own SSRF probe found no redirect on an endpoint that sends the caller " +
+			"anywhere it is told with no validation. That is the whole send-and-match path failing, not " +
+			"just recollapse: check that the Listening Webhook URL is a real absolute URL, since the " +
+			"open redirect match is what compares the Location header against its host.",
+	},
 	"lfimap": {
 		Path: "/lfi", Param: "file", Method: "GET", InsertionPoint: "query",
 		Why: "LFImap found no inclusion on a parameter that returns a passwd-shaped document for a " +

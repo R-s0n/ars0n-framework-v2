@@ -2,69 +2,78 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"strings"
 )
 
-// Keeping REcollapse's output where the scanner can reach it.
+// Turning REcollapse's output into a scan.
 //
-// REcollapse prints mutations and stops; it has no network code and never sends one. So its "scan"
-// does not produce findings, it produces AMMUNITION, and the honest way to report that is a count of
-// what it built rather than a list of vulnerabilities it did not find.
+// REcollapse prints mutations and stops; it has no network code and never sends one. Until this
+// section was reshaped its "scan" therefore produced no findings at all, only AMMUNITION: the list
+// went onto a shared volume and nuclei fired it from a template this project maintained.
 //
-// The list goes on the shared volume because the two tools live in different containers: REcollapse
-// prints in its own, the API writes the file, and nuclei reads it from its own.
+// Now the framework sends the list itself, in redirectProbe.go, so this function is the seam between
+// the two: read what REcollapse printed, hand it to the prober, return what came back. The shared
+// volume, the cross-container write and the per-target payload file are all gone with it, and so is
+// the failure they carried, where a scan that ran before REcollapse had ever run sent only the
+// framework's own forms and said so in a warning nobody reads.
 
-// storeREcollapseMutations writes the payload list and reports what was built.
-func storeREcollapseMutations(ctx context.Context, tool VectorTool, v VectorInput,
-	stdout string) ([]VectorFinding, []string) {
+// runREcollapseProbe parses the mutation list and sends it at one vector.
+//
+// The findings returned are the IN-BAND ones only: a redirect to the webhook host, or a response
+// carrying a local file, a cloud metadata document or an internal service banner. The out-of-band
+// half is collected once at the end of the scan by collectWebhookFindings, because a callback can
+// arrive seconds after the response that triggered it.
+func runREcollapseProbe(ctx context.Context, v VectorInput, settings map[string]any,
+	stdout string) ([]VectorFinding, []string, error) {
 
-	var warnings []string
-	var lines []string
+	var mutations []string
+	seen := map[string]bool{}
 	for _, line := range strings.Split(stripANSI(stdout), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			lines = append(lines, line)
+		line = strings.TrimSpace(line)
+		// REcollapse prints one mutation per line and nothing else, but a line that lost its token is
+		// a payload that cannot be attributed to anything, and sending it would produce a callback
+		// nobody can match to a parameter.
+		if line == "" || seen[line] || !strings.Contains(line, vectorTokenPlaceholder) {
+			continue
 		}
-	}
-	if len(lines) == 0 {
-		return nil, []string{"REcollapse produced no mutations, so there is nothing for the scan to " +
-			"send. Check the webhook URL."}
+		seen[line] = true
+		mutations = append(mutations, line)
 	}
 
-	// The framework's own structural forms are counted here too, because they are part of what the
-	// scanner will send and an operator reading "2083 payloads" should be reading the real number.
-	webhook := strings.TrimRight(strings.TrimSpace(stringifySetting(v.Section["listeningWebhookURL"])), "/")
-	extra := FrameworkSSRFPayloads(webhook+"/"+vectorTokenPlaceholder, v.Domain)
-
-	body := strings.Join(lines, "\n") + "\n"
-	if err := writeContainerFile(ctx, tool.Container, redirectMutationsPath(v.ScopeTargetID), body); err != nil {
-		return nil, []string{"Could not store the payload list: " + err.Error()}
+	// AN ERROR, not a warning. REcollapse printing nothing usable means the payload generator did not
+	// run, and a vector whose generator did not run has not been tested. The previous version returned
+	// a warning here and the runner filed the vector clean, which is exactly the fail-open this
+	// framework keeps rediscovering: the operator reads "no SSRF" from a scan that sent nothing.
+	//
+	// The framework's own structural forms are NOT a consolation prize. They are built from the
+	// webhook inside ProbeSSRFVector, which is never reached from here.
+	if len(mutations) == 0 {
+		return nil, nil, fmt.Errorf("UNTESTED: REcollapse produced no mutations carrying the token " +
+			"placeholder, so nothing was sent and this vector's result is unknown rather than clean. " +
+			"Check the Listening Webhook URL on the Webhook tab, and check the REcollapse trace for a " +
+			"rejected argument")
 	}
 
-	// Written into the SCANNER's container as well. Both mount the shared volume, but writing it
-	// through the container that will read it is what makes a mount misconfiguration surface here
-	// rather than as an empty scan later.
-	if scanner, ok := VectorToolByKey("nuclei-dast"); ok && scanner.Container != tool.Container {
-		if err := writeContainerFile(ctx, scanner.Container,
-			redirectMutationsPath(v.ScopeTargetID), body); err != nil {
-			warnings = append(warnings, "Stored the payload list, but could not write it into the "+
-				"scanner's container: "+err.Error())
+	result := ProbeSSRFVector(ctx, v, mutations, settings)
+	warnings := result.Warnings
+
+	if result.Untested != "" {
+		// Findings already proved are kept: they happened, whatever stopped the run afterwards.
+		return result.Findings, warnings, fmt.Errorf("UNTESTED: %s", result.Untested)
+	}
+
+	// Reported even when nothing was found, because "0 findings" and "0 findings from 3,411 requests"
+	// are different claims and only the second one is evidence.
+	if result.Sent > 0 && len(result.Findings) == 0 {
+		summary := "Sent " + itoa(result.Sent) + " payloads and nothing answered in band."
+		if result.Failed > 0 {
+			summary += " " + itoa(result.Failed) + " of them failed at the transport layer, which is " +
+				"ordinary for payloads aimed at unroutable addresses but is worth reading if the number " +
+				"is most of them."
 		}
+		summary += " Any blind callback is decided at the end of the scan, when the results URL is read."
+		warnings = append(warnings, summary)
 	}
-
-	return []VectorFinding{{
-		VectorID: v.VectorID,
-		Tool:     "recollapse",
-		Kind:     "payload-list",
-		Severity: "info",
-		Confidence: "not a vulnerability: this is the payload list the scan will send. REcollapse " +
-			"generates mutations and sends nothing itself",
-		InsertionPoint: v.InsertionPoint,
-		Param:          markableParam(v),
-		Method:         v.Method,
-		URL:            v.TargetURL(),
-		Evidence: itoa(len(lines)) + " mutations of the webhook URL, plus " + itoa(len(extra)) +
-			" structural bypass forms from the framework. Each one carries a marker unique to the " +
-			"vector it is sent at, so a callback names the parameter that produced it.",
-		DetectionMethod: "payload generation",
-	}}, warnings
+	return result.Findings, warnings, nil
 }

@@ -32,6 +32,11 @@ type VectorOptionMeta struct {
 	// Placeholder says what the TOOL does when the option is not set, so an empty field reads as a
 	// decision rather than as a gap.
 	Placeholder string `json:"placeholder,omitempty"`
+	// Help is a longer explanation shown under the control, for a setting whose consequences do not
+	// fit in a placeholder. Added for the webhook pair, which moved out of its own modal onto
+	// REcollapse's Config and would otherwise have lost the text that told an operator why a
+	// localhost URL is refused and why a private inbox needs an auth header.
+	Help string `json:"help,omitempty"`
 	// Repeatable options are passed once per value rather than comma joined. dalfox's -H and sqlmap's
 	// --tamper differ here, and comma joining a header produces one header whose value has a comma.
 	Repeatable bool `json:"repeatable,omitempty"`

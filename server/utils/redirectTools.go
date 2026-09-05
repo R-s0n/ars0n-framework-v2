@@ -2,32 +2,36 @@ package utils
 
 import "time"
 
-// Open redirect and server-side request forgery.
+// Server-side request forgery, which is also where the open redirect checks live.
 //
-// THIS SECTION IS SHAPED DIFFERENTLY FROM THE OTHERS, because two of its three tools do not detect
-// anything and never claimed to:
+// Open redirect is kept here rather than given its own section because it is the same question asked
+// of the same parameters: does this input decide where a request goes. The difference is only who
+// makes the onward request, the browser or the server, and a parameter that does one is worth testing
+// for the other.
 //
-//   - REcollapse has no network code at all. Grepping its source for requests, urlopen or socket
-//     returns nothing. It reads a string and prints mutations of it. It is a payload generator.
-//   - SSRFmap has no detection or verification step anywhere in its core. It requires a raw request
-//     and a parameter name, and then runs EXPLOITATION modules (readfiles, redis, mysql, postgres,
-//     smbhash, fastcgi, tomcat, portscan, networkscan) against a parameter it assumes is vulnerable.
+// THE SECTION IS A CHAIN, and each tool does one job it is actually capable of:
 //
-// So the detector is nuclei, driven in its DAST fuzzing mode. It was chosen because it satisfies the
-// three constraints that matter here: no API key (it runs unauthenticated, there is no credentials
-// file), no callback server the operator has to stand up, and nothing for this project to maintain,
-// since ProjectDiscovery curate the templates and `nuclei -update-templates` picks them up.
+//  1. REcollapse is the framework's OWN SSRF scanner. REcollapse itself has no network code at all
+//     (grepping its source for requests, urlopen or socket returns nothing); it reads a string and
+//     prints mutations of it. So it generates the payloads from the operator's webhook URL and the
+//     FRAMEWORK sends them, in redirectProbe.go, one payload at a time at every probeable parameter
+//     of every vector. Each payload carries a canary token unique to that parameter, which is what
+//     lets a callback name the input that produced it instead of naming the host.
+//  2. Nuclei DAST runs STOCK UPSTREAM TEMPLATES with default settings and knows nothing about the
+//     webhook. This is a deliberate reversal: it used to run a template this project wrote, which
+//     meant maintaining a scanner inside somebody else's fuzzing engine, and the two defects that
+//     produced are recorded in redirectProbe.go. Upstream's templates are curated by
+//     ProjectDiscovery, updated by `nuclei -update-templates`, and each reports under its own id and
+//     its own severity, so a finding says which class of bug was proved.
+//  3. SSRFmap weaponises whatever the two above confirmed. It has no detection step anywhere in its
+//     core: it takes a raw request and a parameter name and runs EXPLOITATION modules (readfiles,
+//     redis, mysql, postgres, smbhash, fastcgi, tomcat, portscan, networkscan) against a parameter
+//     it assumes is already vulnerable. It is gated on a finding for exactly that reason.
 //
-// The part that makes it work without any external infrastructure is response-ssrf.yaml. Alongside
-// its interactsh payloads it carries file:///etc/passwd, 169.254.169.254, 100.100.100.200,
-// metadata.tencentyun.com, 127.0.0.1:22, 127.0.0.1:3306 and dict://127.0.0.1:6379, matched by
-// response regexes for the SSH banner, the Redis and MySQL errors, root:x:0:0 and the cloud metadata
-// document shapes. Measured against a lab that fetches a user-supplied URL: it reported the SSRF
-// through file:////./etc/./passwd, severity high, at every aggression level.
-//
-// The out-of-band half is real but currently unreliable: interactsh registers and receives
-// interactions, and this nuclei build then fails to decrypt them ("Could not unmarshal interaction
-// data: invalid control character"). Blind detection is therefore opt-in rather than assumed.
+// So the webhook belongs to REcollapse alone now, and lives on its own Webhook tab rather than on a
+// section-wide button. Nuclei is not gated on it, which matters: before this change a target with no
+// webhook configured got NOTHING from this section, including the response-based checks that need no
+// callback at all.
 
 // ---------------------------------------------------------------------------------------------
 // nuclei, in DAST mode
@@ -56,9 +60,16 @@ var nucleiDastOwned = map[string]string{
 
 var nucleiDastOptions = map[string]VectorOptionMeta{
 	// Templates
+	//
+	// These are HONOURED now. They used to be offered here and then dropped by the composer, which
+	// put both keys in its skip set and hardcoded -t at a template this project wrote, so an operator
+	// choosing a template set changed nothing at all.
 	"templates": {Kind: "csv", Group: "Templates", Label: "Template sets", Flag: "-t",
-		Choices:     []string{"ssrf", "redirect"},
-		Placeholder: "both. ssrf is response-ssrf and blind-ssrf, redirect is open-redirect and open-redirect-bypass"},
+		Choices: []string{"ssrf", "redirect", "rfi", "xxe", "xinclude", "crlf"},
+		Placeholder: "ssrf,redirect,rfi,xxe,xinclude. ssrf is response-ssrf and blind-ssrf; redirect is " +
+			"open-redirect and open-redirect-bypass; rfi, xxe and xinclude are all server-side fetches of " +
+			"a URL the request supplied, which is this section's question asked a different way. crlf is " +
+			"off by default: header injection is redirect-adjacent rather than an SSRF"},
 	"severity":         {Kind: "csv", Group: "Templates", Label: "Only these severities", Flag: "-severity", Choices: []string{"info", "low", "medium", "high", "critical"}},
 	"excludeTemplates": {Kind: "string", Group: "Templates", Label: "Exclude templates", Flag: "-et", Repeatable: true},
 	"extraTemplates":   {Kind: "path", Group: "Templates", Label: "Additional template path", Flag: "-t", Repeatable: true, Placeholder: "a directory inside the container"},
@@ -94,7 +105,10 @@ var nucleiDastOptions = map[string]VectorOptionMeta{
 // REcollapse
 // ---------------------------------------------------------------------------------------------
 
-var recollapseGroups = []string{"Mutation", "Encoding", "Replay"}
+// The Webhook group is why the section no longer has a Configure Webhook button. REcollapse is the
+// only tool that uses the webhook now, so the fields belong on its own Config modal, and the modal
+// renders a tab per group without needing to know what is in them.
+var recollapseGroups = []string{"Webhook", "Mutation", "Encoding", "Replay"}
 
 var recollapseOwned = map[string]string{
 	"-f":          "The input comes from the finding this run is based on, not from a file.",
@@ -107,6 +121,25 @@ var recollapseOwned = map[string]string{
 }
 
 var recollapseOptions = map[string]VectorOptionMeta{
+	// Webhook. NOT REcollapse flags: these are the out-of-band pair, stored in the section store and
+	// surfaced here so they appear as a tab on this tool's Config modal. See webhookSettingKeys in
+	// vectorAPI.go for the read and write path, which is also where the validation runs.
+	"listeningWebhookURL": {Kind: "string", Group: "Webhook", Label: "Listening Webhook URL", Flag: "",
+		Placeholder: "https://webhook.site/8f3c...",
+		Help: "The URL the payloads point at. A server-side request forgery is proved by the target " +
+			"making a request to somewhere you control, so this has to be reachable from the internet " +
+			"rather than from your own machine. A localhost address is refused on save."},
+	"resultsWebhookURL": {Kind: "string", Group: "Webhook", Label: "Webhook Results URL", Flag: "",
+		Placeholder: "https://webhook.site/token/8f3c.../requests",
+		Help: "The URL the framework READS afterwards to find out which payloads called back. Anything " +
+			"that returns the received requests as text or JSON works, because the check is whether a " +
+			"run's canary token appears in what it returns."},
+	"resultsAuthHeader": {Kind: "string", Group: "Webhook", Label: "Results auth header", Flag: "",
+		Placeholder: "Api-Key: abc123",
+		Help: "Sent when reading the results URL, for a private inbox. Optional, but webhook.site " +
+			"answers an unauthenticated read with a 302 to its login page, and a login page contains no " +
+			"tokens, which reads exactly like no callback arrived."},
+
 	// Mutation
 	"modes": {Kind: "csv", Group: "Mutation", Label: "Variation modes", Flag: "-m",
 		Choices:     []string{"1", "2", "3", "4", "5", "6", "7"},
@@ -122,9 +155,18 @@ var recollapseOptions = map[string]VectorOptionMeta{
 		Placeholder: "1 URL-encoded. 2 unicode, 3 raw, 4 double URL-encoded"},
 
 	// Replay. Not REcollapse's own options: REcollapse only prints mutations, so these govern what the
-	// framework does with them.
-	"replayLimit": {Kind: "int", Group: "Replay", Label: "Maximum mutations to send", Flag: "", Placeholder: "500. REcollapse can emit tens of thousands, and sending all of them at one parameter is a denial of service rather than a test"},
-	"canaryHost":  {Kind: "string", Group: "Replay", Label: "Canary host", Flag: "", Placeholder: "rs0n.example. The host a bypass has to redirect to for the framework to count it"},
+	// framework does with them in redirectProbe.go.
+	"replayLimit": {Kind: "int", Group: "Replay", Label: "Maximum mutations to send", Flag: "",
+		Placeholder: "250",
+		Help: "Caps the REcollapse MUTATIONS sent at one parameter. The framework's own structural " +
+			"bypass forms are always sent on top and are not counted against this, because there are only " +
+			"a couple of dozen and they are the ones that get past an allowlist. Read the cost as " +
+			"payloads x probeable parameters x vectors: raising this to 5000 on a corpus of 60 vectors " +
+			"is a quarter of a million requests."},
+	"probeDelayMs": {Kind: "int", Group: "Replay", Label: "Delay between payloads", Flag: "",
+		Placeholder: "100 milliseconds",
+		Help: "Every payload is one small request, so an unpaced loop is the fastest way to look like a " +
+			"denial of service to a target that agreed to be scanned. Set 0 only against your own lab."},
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -172,37 +214,47 @@ func init() {
 			// Four of the five. Measured by driving nuclei from a RAW REQUEST rather than a URL: given a
 			// URL it fuzzes the query string alone, given the request it also fuzzes the body, the
 			// headers and the cookies. Path is not fuzzed either way, even when the template declares it.
-			InsertionPoints:        []string{"query", "body", "header", "cookie"},
-			RequiresSectionSetting: "listeningWebhookURL",
-			UsesReportFile:         true,
-			Compose:                ComposeNucleiDast,
-			Parse:                  parseNucleiDastReport,
-			SkipReason:             nucleiDastSkipReason,
-			Timeout:                25 * time.Minute,
-			Limitation: "Fires the payload list at the query string, body, headers and cookies of every " +
-				"eligible vector, then reads the webhook to see which ones called out. Payloads that " +
-				"answer in the response, like a cloud metadata document or /etc/passwd, are matched " +
-				"directly and need no callback. A path segment is not fuzzed: nuclei ignores that part " +
-				"even when the template declares it.",
+			InsertionPoints: []string{"query", "body", "header", "cookie"},
+			// NOT gated on the webhook any more. It runs stock upstream templates and never sees the
+			// callback URL, and gating it was actively harmful: a target with no webhook configured got
+			// nothing at all from this section, including response-ssrf and open-redirect, which prove
+			// themselves from the response and need no callback in the first place.
+			UsesReportFile: true,
+			Compose:        ComposeNucleiDast,
+			Parse:          parseNucleiDastReport,
+			SkipReason:     nucleiDastSkipReason,
+			Timeout:        25 * time.Minute,
+			Limitation: "Runs ProjectDiscovery's own DAST templates with their own payloads and their own " +
+				"severities: response-ssrf and blind-ssrf, open-redirect and open-redirect-bypass, plus " +
+				"generic-rfi, generic-xxe and xinclude-injection, which are all a server fetching a URL " +
+				"the request supplied. It reaches the query string, body, headers and cookies of every " +
+				"eligible vector. A path segment is not fuzzed: nuclei ignores that part even when the " +
+				"template declares it. blind-ssrf uses interactsh rather than your webhook, so re-check " +
+				"what it reports; this nuclei build has been seen failing to decrypt interaction data.",
 		},
 		VectorTool{
 			Key: "recollapse", Name: "REcollapse", Category: "redirect-ssrf",
 			Binary: "recollapse", Container: "ars0n-framework-v2-recollapse-1",
 			Groups: recollapseGroups, Options: recollapseOptions, OwnedFlags: recollapseOwned,
-			// Every insertion point, because the payload list it builds is used against all of them.
-			// It sends nothing itself, so nothing here is a claim about reachability.
+			// All five. REcollapse itself still sends nothing, but the framework now sends its output
+			// (redirectProbe.go), and the prober reaches every insertion point including a path segment,
+			// which is the proxy-style endpoint where a path IS a URL.
 			InsertionPoints:        VectorInsertionPoints,
 			RequiresSectionSetting: "listeningWebhookURL",
-			// One list per target, not one per vector: the payloads are a property of the webhook, and
-			// generating the same 3361 mutations once per vector would be seventy identical runs.
-			DedupeKey: func(VectorInput) string { return "one-list-per-target" },
-			ScanUnit:  "payload list",
-			Compose:   ComposeREcollapse,
-			Parse:     parseREcollapseOutput,
-			Timeout:   15 * time.Minute,
-			Limitation: "REcollapse generates mutations of your webhook URL and sends nothing itself: it " +
-				"has no network code at all. One list is built per target and the scan beside it fires " +
-				"that list at every eligible vector. Configure the webhook first.",
+			// NO DedupeKey any more. It used to build one list per target because nothing here sent
+			// anything; now the send is the scan, so it has to run per vector like every other detector.
+			// Generation is local and costs the target nothing, so regenerating per vector is cheap.
+			Compose: ComposeREcollapse,
+			Parse:   parseREcollapseOutput,
+			Timeout: 45 * time.Minute,
+			Limitation: "The framework's own SSRF scan. REcollapse mutates your webhook URL into a payload " +
+				"list (it has no network code of its own), and the framework sends every payload at every " +
+				"probeable parameter of this vector, each carrying a canary unique to that parameter. A " +
+				"redirect to your webhook host or a response carrying /etc/passwd, a cloud metadata " +
+				"document or an internal service banner is recorded immediately; everything else is " +
+				"decided at the end of the scan by reading the results URL for the canaries that arrived. " +
+				"A parameter that is a session cookie, a CSRF token or a load balancer value is NOT " +
+				"probed, because overwriting one ends the scan instead of testing it.",
 		},
 		VectorTool{
 			Key: "ssrfmap", Name: "SSRFmap", Category: "redirect-ssrf",
@@ -214,16 +266,20 @@ func init() {
 			Parse:           parseSSRFmapOutput,
 			Timeout:         20 * time.Minute,
 			Limitation: "SSRFmap exploits an SSRF that has already been found; it has no detection step " +
-				"of its own and assumes the parameter it is given is vulnerable. It becomes eligible " +
-				"once the detector has found something on a vector, and it defaults to portscan, " +
-				"because its other modules read files and talk to internal databases on someone else's " +
-				"network.",
+				"of its own and assumes the parameter it is given is vulnerable. It becomes eligible on " +
+				"a vector once EITHER detector has found something there, the framework's own probe or " +
+				"Nuclei DAST, and it defaults to portscan, because its other modules read files and talk " +
+				"to internal databases on someone else's network.",
 		},
 	)
 	VectorCategories = append(VectorCategories, struct {
 		Key  string `json:"key"`
 		Name string `json:"name"`
-	}{"redirect-ssrf", "Open Redirect & Server-Side Request Forgery"})
+		// The KEY stays "redirect-ssrf" while the NAME changes. The key is the route prefix in main.go and
+		// the category column on vector_scans, vector_findings and vector_section_settings, so renaming it
+		// would orphan every stored row and 404 every saved link for a change nobody asked for. Only the
+		// display name is the section's name.
+	}{"redirect-ssrf", "Server-Side Request Forgery"})
 }
 
 func nucleiDastSkipReason(insertionPoint string) string {

@@ -170,6 +170,12 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 		targetHeaderWords, targetParamWords, len(order))
 
 	completed, found := 0, 0
+	// The vectors this run actually SENT, which is not the same as the vectors it was eligible to
+	// send. A cancelled or session-lost scan breaks out of this loop with most of `order` untouched,
+	// and the out-of-band collector below must not attribute a callback to a vector nothing was ever
+	// sent at. Siblings of a deduped vector are added too, since the payloads carrying their token
+	// went out under the representative.
+	sentVectors := map[string]bool{}
 	for _, vector := range order {
 		// CANCELLATION, checked between vectors. A cancelled scan is explicitly NOT clean: everything
 		// it did not reach is recorded UNTESTED, for the same reason the session check below does it.
@@ -247,6 +253,13 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 			}
 		}
 		completed++
+		// siblings is this vector's dedupe group, computed above, and it already contains the vector
+		// itself. Payloads carrying a sibling's token went out under the representative, so all of them
+		// count as sent.
+		sentVectors[vector.ID] = true
+		for _, sibling := range siblings {
+			sentVectors[sibling] = true
+		}
 
 		status, reason := "clean", strings.Join(warnings, " ")
 		if err != nil {
@@ -280,8 +293,27 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 	// The out-of-band half. A callback is asynchronous by definition, so this happens after every
 	// vector has been sent rather than per vector, and it waits before reading: a target that queues
 	// its outbound request has not made it yet when the response comes back.
-	if tool.Key == "nuclei-dast" && sectionWebhookConfigured(sectionSettings) {
-		found += collectWebhookFindings(ctx, scanID, tool, vectors, eligible, sectionSettings)
+	// REcollapse, not nuclei: the framework's own probe is what sends payloads carrying a canary, and
+	// nuclei runs stock upstream templates that never see the webhook. Reading the results URL after
+	// a nuclei run would attribute somebody else's callbacks to it.
+	// HALF A WEBHOOK IS THE DANGEROUS CASE. Eligibility keys on the listening URL alone, so a target
+	// with only that half runs the whole scan, sends every payload, and then never reads an inbox it
+	// has no address for. That is thousands of requests whose entire purpose was the callback, filed
+	// as a clean result. Said out loud rather than skipped quietly.
+	if tool.Key == "recollapse" && !sectionWebhookConfigured(sectionSettings) &&
+		strings.TrimSpace(stringifySetting(sectionSettings["listeningWebhookURL"])) != "" {
+		detail := "UNTESTED (out of band): payloads were sent carrying a canary, but no Webhook " +
+			"Results URL is configured, so nothing read the inbox and no callback could be seen. Only " +
+			"the in-band findings above mean anything. Set both URLs on REcollapse's Webhook tab."
+		if _, dbErr := dbPool.Exec(ctx, `
+			UPDATE vector_scans SET error = COALESCE(NULLIF(error, ''), $2) WHERE id = $1`,
+			scanID, detail); dbErr != nil {
+			log.Printf("[VECTOR] recording missing results URL: %v", dbErr)
+		}
+	}
+
+	if tool.Key == "recollapse" && sectionWebhookConfigured(sectionSettings) {
+		found += collectWebhookFindings(ctx, scanID, tool, vectors, sentVectors, sectionSettings)
 		if _, err := dbPool.Exec(ctx, `UPDATE vector_scans SET finding_count = $2 WHERE id = $1`,
 			scanID, found); err != nil {
 			log.Printf("[VECTOR] updating finding count: %v", err)
@@ -342,6 +374,16 @@ func runCanaryControl(ctx context.Context, scanID, scopeTargetID string, tool Ve
 
 	spec, defined := vectorCanaryFor(tool.Key)
 	if !defined {
+		return CanaryOutcome{Ran: false}
+	}
+
+	// A tool missing the section setting it declares cannot compose a command line at all, so its
+	// composer refuses the control exactly as it refuses every real vector: nil args, run skipped,
+	// zero findings, and a "positive control FAILED" verdict blaming the scanner for an empty
+	// webhook field. A control that fails for its own reasons is worse than no control, because it
+	// trains the operator to ignore the one that matters.
+	if tool.RequiresSectionSetting != "" &&
+		strings.TrimSpace(stringifySetting(sectionSettings[tool.RequiresSectionSetting])) == "" {
 		return CanaryOutcome{Ran: false}
 	}
 
@@ -456,16 +498,49 @@ func recordVectorTrace(ctx context.Context, scanID string, vector vectorRow, too
 // hand the fetched content back; everything else is invisible until the callback arrives, and the
 // token is what says WHICH vector made it.
 func collectWebhookFindings(ctx context.Context, scanID string, tool VectorTool,
-	vectors []vectorRow, eligible map[string]bool, sectionSettings map[string]any) int {
+	vectors []vectorRow, sent map[string]bool, sectionSettings map[string]any) int {
 
+	// Keyed per PARAMETER, not per vector. The prober narrows each vector's token once per probeable
+	// parameter, so a cookie vector carrying five names produces five distinct canaries and a callback
+	// says which of the five called out. Keying on the vector alone would put the finding on the
+	// vector and leave the operator to guess among its parameters.
+	type callbackOwner struct {
+		vectorID string
+		param    string
+	}
 	tokens := map[string]string{}
+	owners := map[string]callbackOwner{}
 	byID := map[string]vectorRow{}
+
 	for _, vector := range vectors {
-		if !eligible[vector.ID] {
+		// SENT, not merely eligible. A scan that was cancelled at vector 30 of 67, or that lost its
+		// session, never put the last 37 vectors' canaries on the wire, so a hit matching one of them
+		// would have to have come from somewhere else: a previous scan of the same target, or another
+		// operator's inbox. Filing it here would invent a finding for a vector this run never touched.
+		if !sent[vector.ID] {
 			continue
 		}
-		tokens[vectorToken(scanID, vector.ID)] = vector.ID
 		byID[vector.ID] = vector
+		base := vectorToken(scanID, vector.ID)
+
+		// The SAME function the prober used, walked in the SAME order, so index N here is index N
+		// there. Rebuilding this list any other way is how the collector comes to look for canaries
+		// the prober never sent.
+		params, _ := ssrfProbeParams(vector.toInput())
+		if len(params) == 0 {
+			// Refused by the prober, so nothing was ever sent carrying this vector's token. Registering
+			// it anyway would let an unrelated hit be attributed to a vector that was never scanned.
+			continue
+		}
+		for index, param := range params {
+			// Must match how ProbeSSRFVector built it, EXACTLY: same function, same slice, same order,
+			// so index N here is the parameter index N there. A collector looking for a token the
+			// prober never sent finds nothing and reports no callback, which is this section's worst
+			// failure, a silent clean.
+			token := paramToken(base, index)
+			tokens[token] = vector.ID
+			owners[token] = callbackOwner{vectorID: vector.ID, param: param}
+		}
 	}
 	if len(tokens) == 0 {
 		return 0
@@ -479,7 +554,20 @@ func collectWebhookFindings(ctx context.Context, scanID string, tool VectorTool,
 
 	hits, err := CheckWebhookResults(ctx, sectionSettings, tokens)
 	if err != nil {
+		// NOT a silent zero. An unreadable inbox is indistinguishable from an empty one only if
+		// nobody says so, and CheckWebhookResults already produces the precise reason: webhook.site
+		// answers an unauthenticated read with a 302 to its login page, and a login page contains no
+		// tokens. Swallowing that turns "we could not look" into "nothing called out", which is the
+		// whole out-of-band half of this section reporting clean without having checked.
 		log.Printf("[VECTOR] reading the webhook results: %v", err)
+		detail := "UNTESTED (out of band): the webhook results URL could not be read, so it is NOT " +
+			"known whether any payload called back. The in-band findings above stand; the blind half " +
+			"of this scan produced no answer either way. " + err.Error()
+		if _, dbErr := dbPool.Exec(ctx, `
+			UPDATE vector_scans SET error = COALESCE(NULLIF(error, ''), $2) WHERE id = $1`,
+			scanID, detail); dbErr != nil {
+			log.Printf("[VECTOR] recording webhook read failure: %v", dbErr)
+		}
 		return 0
 	}
 
@@ -489,21 +577,32 @@ func collectWebhookFindings(ctx context.Context, scanID string, tool VectorTool,
 		if !ok {
 			continue
 		}
+		owner := owners[hit.Token]
+
+		named := owner.param
+		where := "the " + vector.InsertionPoint + " parameter " + named
+		if named == "" {
+			// A path vector names no parameter: the payload was the segment itself.
+			named = strings.Join(vector.Parameters, ",")
+			where = "the path segment"
+		}
+
 		stored += storeVectorFindings(ctx, scanID, vector, []VectorFinding{{
 			VectorID: vector.ID,
 			Tool:     tool.Key,
 			Kind:     "blind-ssrf",
 			Severity: "high",
 			Confidence: "confirmed out of band: the target made a request to the configured webhook " +
-				"carrying this vector's token, so the callback belongs to this parameter rather than " +
-				"to the host in general",
+				"carrying a canary that was sent in exactly one place, so the callback belongs to " +
+				where + " rather than to the host in general",
 			InsertionPoint: vector.InsertionPoint,
-			Param:          strings.Join(vector.Parameters, ","),
+			Param:          named,
 			Payload:        hit.Token,
 			Method:         vector.Method,
 			URL:            vector.EvidenceURL,
 			Evidence: "The webhook results URL reported an interaction containing " + hit.Token +
-				", which was sent only in the payloads aimed at this vector.",
+				", and that canary was sent only in the payloads aimed at " + where + " of " +
+				vector.EvidenceURL + ".",
 			DetectionMethod: "out-of-band callback",
 		}})
 	}
@@ -572,8 +671,10 @@ func runVectorOnce(ctx context.Context, scanID, scopeTargetID string, tool Vecto
 
 	// nuclei is always driven from a RAW REQUEST rather than a URL. Measured: given a URL it fuzzes
 	// the query string alone even when the template declares every part; given the request it also
-	// fuzzes the body, the headers and the cookies. Its own payload list and template are written
-	// beside it, with this vector's token substituted so a callback can be attributed.
+	// fuzzes the body, the headers and the cookies.
+	//
+	// Nothing else is written beside it any more. It used to be handed a payload file and a template
+	// this project wrote; it runs stock upstream templates now, which carry their own payloads.
 	if tool.Key == "nuclei-dast" {
 		record, err := NucleiBodyRecord(input)
 		if err == nil {
@@ -581,28 +682,6 @@ func runVectorOnce(ctx context.Context, scanID, scopeTargetID string, tool Vecto
 		}
 		if err != nil {
 			return nil, warnings, fmt.Errorf("writing the request record: %w", err)
-		}
-
-		mutations, readErr := readContainerFile(ctx, tool.Container,
-			redirectMutationsPath(scopeTargetID))
-		if readErr != nil || strings.TrimSpace(mutations) == "" {
-			mutations = ""
-			warnings = append(warnings, "REcollapse has not produced a payload list for this target "+
-				"yet, so this run used only the framework's own bypass forms. Run REcollapse first "+
-				"for the full set.")
-		}
-
-		if err := exec.CommandContext(ctx, "docker", "exec", tool.Container,
-			"mkdir", "-p", reportPath+".tpl").Run(); err != nil {
-			return nil, warnings, fmt.Errorf("creating the template directory: %w", err)
-		}
-		if err := writeContainerFile(ctx, tool.Container, reportPath+".tpl/payloads.txt",
-			BuildVectorPayloadList(input, mutations)); err != nil {
-			return nil, warnings, fmt.Errorf("writing the payload list: %w", err)
-		}
-		if err := writeContainerFile(ctx, tool.Container, reportPath+".tpl/template.yaml",
-			NucleiPayloadTemplateFor(input)); err != nil {
-			return nil, warnings, fmt.Errorf("writing the template: %w", err)
 		}
 	}
 
@@ -700,13 +779,37 @@ func runVectorOnce(ctx context.Context, scanID, scopeTargetID string, tool Vecto
 				"CacheBoom ends: it does not exit on its own. Anything it printed before then was kept.")
 		}
 
-		// REcollapse produces the payload list the scanner then fires. It is stored on the shared
-		// volume rather than turned into findings, because a mutation nobody has sent yet is not a
-		// finding; it is ammunition.
+		// REcollapse generates the payloads and the FRAMEWORK sends them. The docker exec above only
+		// printed mutations; the requests are made here, in Go, because the framework has to know which
+		// payload it put in which parameter for a callback to name anything.
+		//
+		// This is the one tool whose scan is not the exec. Its exec costs the target nothing at all.
 		if tool.Key == "recollapse" {
-			stored, storeWarnings := storeREcollapseMutations(ctx, tool, input, string(output))
-			warnings = append(warnings, storeWarnings...)
-			all = append(all, stored...)
+			// Its OWN deadline. runCtx was cancelled the moment the exec returned, and the ctx in scope
+			// here is context.Background (see runVectorScan), so without this the send loop would have
+			// no time limit at all and tool.Timeout would silently mean nothing for the one tool whose
+			// work is not the exec.
+			probeCtx, probeCancel := context.WithTimeout(ctx, limit)
+			probed, probeWarnings, probeErr := runREcollapseProbe(probeCtx, input, settings, string(output))
+			probeCancel()
+			warnings = append(warnings, probeWarnings...)
+			all = append(all, probed...)
+
+			// A probe that could not run is an ERROR, so the vector is recorded UNTESTED rather than
+			// clean. This branch bypasses every guard the ordinary path applies after it -- the
+			// refused-its-command-line check, the produced-nothing check, tool.Incomplete -- so if the
+			// failure is not turned into an error here it is turned into a clean result by omission.
+			// Findings already proved are returned alongside it: they happened.
+			if probeErr != nil {
+				return all, warnings, probeErr
+			}
+
+			// The exec itself failing means recollapse never printed a usable list, which the probe
+			// already reports; this catches the case where it printed something parseable AND failed.
+			if err != nil && len(probed) == 0 {
+				return all, warnings, fmt.Errorf("UNTESTED: recollapse exited badly (%v) and nothing "+
+					"was proved, so this vector was not tested: %s", err, tailOf(string(output)))
+			}
 			continue
 		}
 
@@ -774,6 +877,16 @@ func runVectorOnce(ctx context.Context, scanID, scopeTargetID string, tool Vecto
 			parsed[i].IsGraphQLTarget = vector.IsGraphQLTarget
 		}
 		all = append(all, parsed...)
+	}
+
+	// Stamped AGAIN over everything on the way out, because the loop above only reaches findings that
+	// came back from tool.Parse. REcollapse's findings are built in its own branch and never touch
+	// Parse, so before this they carried three zero values and only landed in the right column by
+	// luck. Cheap, idempotent, and it covers the next tool that reports without a parser.
+	for i := range all {
+		all[i].IsBypassTarget = vector.IsBypassTarget
+		all[i].IsLeakTarget = vector.IsLeakTarget
+		all[i].IsGraphQLTarget = vector.IsGraphQLTarget
 	}
 	return all, warnings, nil
 }

@@ -81,30 +81,6 @@ export const ATTACK_TOOL_SECTIONS = [  {
     ],
   },
   {
-    key: 'redirect-ssrf',
-    title: 'Open Redirect & Server-Side Request Forgery',
-    tools: [
-      {
-        key: 'recollapse',
-        name: 'REcollapse',
-        url: 'https://github.com/0xacb/recollapse',
-        description: 'Builds the payload list. Mutates your webhook URL to defeat the regexes guarding redirect and SSRF validation, and adds the framework’s own bypass forms. Configure the webhook first.',
-      },
-      {
-        key: 'nuclei-dast',
-        name: 'Nuclei DAST',
-        url: 'https://github.com/projectdiscovery/fuzzing-templates',
-        description: 'Fires the payload list at every eligible attack vector, then checks the webhook to see which ones actually called out. Also matches responses that come back directly, for the SSRF that needs no callback at all.',
-      },
-      {
-        key: 'ssrfmap',
-        name: 'SSRFmap',
-        url: 'https://github.com/swisskyrepo/SSRFmap',
-        description: 'Pivots a confirmed SSRF into internal port scanning, file read or worse, through 20+ modules. Becomes available once the scan above has found something.',
-      },
-    ],
-  },
-  {
     key: 'lfi',
     title: 'Local File Inclusion (LFI)',
     tools: [
@@ -119,6 +95,32 @@ export const ATTACK_TOOL_SECTIONS = [  {
         name: 'LFIHunt',
         url: 'https://github.com/Chocapikk/LFIHunt',
         description: 'Runs five file-inclusion checks over a URL list: PHP filter chains, php://input, data://, /proc/self/environ and traversal. Its menu is interactive, but it ships a batch scanner and that is what runs here.',
+      },
+    ],
+  },
+  {
+    // The KEY stays redirect-ssrf: it is the API route prefix and the category column on every
+    // stored scan and finding. Only the name changed.
+    key: 'redirect-ssrf',
+    title: 'Server-Side Request Forgery',
+    tools: [
+      {
+        key: 'recollapse',
+        name: 'REcollapse',
+        url: 'https://github.com/0xacb/recollapse',
+        description: 'The framework’s own SSRF scan. Mutates your webhook URL into a payload list, then sends every payload at every probeable parameter with a canary that says which one called back. Set the webhook on its Config.',
+      },
+      {
+        key: 'nuclei-dast',
+        name: 'Nuclei DAST',
+        url: 'https://github.com/projectdiscovery/fuzzing-templates',
+        description: 'ProjectDiscovery’s own fuzzing templates at their default settings: SSRF, open redirect, remote file inclusion, XXE and XInclude. Needs no webhook and knows nothing about yours.',
+      },
+      {
+        key: 'ssrfmap',
+        name: 'SSRFmap',
+        url: 'https://github.com/swisskyrepo/SSRFmap',
+        description: 'Pivots a confirmed SSRF into internal port scanning, file read or worse, through 20+ modules. Becomes available on a vector once either scan above has found something there.',
       },
     ],
   },

@@ -116,50 +116,19 @@ func redirectKindFor(templateID string) (kind, confidence string) {
 	return templateID, "reported by nuclei"
 }
 
-// parseREcollapseOutput reads the mutations REcollapse printed.
+// parseREcollapseOutput is DELIBERATELY UNREACHABLE, and exists only to satisfy the runner.
 //
-// It produces no findings of its own, because it sends nothing: it is a list of candidate payloads.
-// The runner replays them and records what actually bypassed, which is where the findings come from.
+// REcollapse is the one tool whose scan is not its exec. The runner special-cases it and calls
+// runREcollapseProbe on the exec's stdout, then `continue`s, so tool.Parse is never reached for it.
+// The field cannot simply be left nil: runVectorOnce refuses a tool with no Compose or no Parse as
+// "has no runner wired up", which would disable the section entirely.
+//
+// It used to contain a full finding shape keyed on a jsonl report with mutation, location, status,
+// param, url, request and response fields. Nothing has ever written that file, so it was dead in two
+// separate ways at once, and dead code shaped like a working parser is how a reader concludes the
+// tool reports through a path it does not use. Returning nil says what is true.
 func parseREcollapseOutput(stdout, report string, row vectorRow) []VectorFinding {
-	// The replay findings arrive through the report file the runner writes, in the same jsonl shape
-	// the rest of this file reads. Anything on stdout is the raw mutation list.
-	var findings []VectorFinding
-	for _, line := range strings.Split(report, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || !strings.HasPrefix(line, "{") {
-			continue
-		}
-		var doc struct {
-			Mutation string `json:"mutation"`
-			Location string `json:"location"`
-			Status   int    `json:"status"`
-			Param    string `json:"param"`
-			URL      string `json:"url"`
-			Request  string `json:"request"`
-			Response string `json:"response"`
-		}
-		if json.Unmarshal([]byte(line), &doc) != nil || doc.Mutation == "" {
-			continue
-		}
-		findings = append(findings, VectorFinding{
-			VectorID:       row.ID,
-			Tool:           "recollapse",
-			Kind:           "validation-bypass",
-			Severity:       "medium",
-			Confidence:     "confirmed: the mutated value was accepted and the redirect landed on the canary host",
-			InsertionPoint: row.InsertionPoint,
-			Param:          doc.Param,
-			Payload:        doc.Mutation,
-			Method:         row.Method,
-			URL:            doc.URL,
-			Evidence: "The value " + doc.Mutation + " got past validation and produced a " +
-				itoa(doc.Status) + " to " + doc.Location + ".",
-			DetectionMethod: "recollapse mutation replay",
-			RawRequest:      doc.Request,
-			RawResponse:     doc.Response,
-		})
-	}
-	return findings
+	return nil
 }
 
 // parseSSRFmapOutput reads SSRFmap's stdout.

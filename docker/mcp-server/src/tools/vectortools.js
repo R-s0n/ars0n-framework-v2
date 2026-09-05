@@ -74,9 +74,13 @@ const buildSchema = (tools, extraActions = []) => z.object({
     'section_settings: the settings that belong to the SECTION rather than to any one tool, which ' +
     'is where the out-of-band webhook pair lives. A tool that requires one reports every vector as ' +
     'skipped until it is set, so check here first when eligibility is 0 of everything. ' +
-    'save_section_settings: MERGE into that section store. Nuclei DAST and REcollapse need BOTH ' +
-    'listeningWebhookURL (where the target calls out to) and resultsWebhookURL (the API the runner ' +
-    'reads the hits back from); one without the other counts as unconfigured. ' +
+    'save_section_settings: MERGE into that section store. In manage_redirect this is the SSRF ' +
+    'webhook, and REcollapse is the only tool that needs it: it needs BOTH listeningWebhookURL ' +
+    '(where the target calls out to) and resultsWebhookURL (what the runner reads the hits back ' +
+    'from), and one without the other counts as unconfigured. Nuclei DAST is NOT gated on it and ' +
+    'runs stock upstream templates that never see it. The same three keys are also readable and ' +
+    'writable through settings and save_settings with tool "recollapse", which is where the UI puts ' +
+    'them; both routes reach the same store, so use whichever is convenient. ' +
     'run: scan every eligible attack vector with one tool, one vector at a time. ' +
     'status: how a run is going, including which vector of how many. ' +
     'results: the findings AND the vectors that were never sent, with the reason for each. ' +
@@ -192,9 +196,14 @@ async function manageVectorTools(category, tools, params) {
     }
 
     // Section settings belong to the SECTION, not to a tool, so they take no tool argument. They
-    // were unreachable from here until now: nuclei-dast and REcollapse both declare
+    // were unreachable from here until this existed: REcollapse declares
     // RequiresSectionSetting: "listeningWebhookURL", so with no way to set it every vector was
     // reported skipped and eligibility read 0 of 53 with nothing an agent could do about it.
+    //
+    // Still the canonical store after the SSRF section was reshaped. The webhook now also appears as
+    // three options on REcollapse's own settings, because it belongs to that one tool and the UI puts
+    // it on that tool's Config; the server proxies those keys to and from HERE, so the two views can
+    // never disagree.
     case 'section_settings':
       return apiGet(`/${category}/${targetId}/section-settings`);
 

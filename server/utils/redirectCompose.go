@@ -7,47 +7,42 @@ import (
 	"strings"
 )
 
-// Building the command lines for the open redirect and SSRF section.
+// Building the command lines for the server-side request forgery section.
 //
-// The section runs as a chain, and each card is one link:
+// The chain, and which link each card is:
 //
-//	REcollapse   mutates the operator's webhook URL into a payload list
-//	Nuclei DAST  fires that list at every eligible vector, then asks the webhook who called
-//	SSRFmap      pivots whatever the scan confirmed
+//	REcollapse   mutates the webhook URL into a payload list, which the FRAMEWORK then sends
+//	             (redirectProbe.go) at every probeable parameter, each payload carrying a canary
+//	Nuclei DAST  runs stock upstream DAST templates, knows nothing about the webhook
+//	SSRFmap      weaponises whatever either of them confirmed
 //
-// The webhook is the section's, not a tool's, because the first two both need the same pair and
-// entering it twice is how two copies come to disagree.
-
-// redirectMutationsPath is where REcollapse's output is kept for the scanner to pick up.
-//
-// On the SHARED volume, because the two run in different containers: REcollapse prints to stdout in
-// its own, the API writes the list here, and nuclei reads it from its own. Per target rather than
-// per scan, since the list is a property of the webhook rather than of one run.
-func redirectMutationsPath(scopeTargetID string) string {
-	return "/tmp/redirect-mutations-" + strings.ReplaceAll(scopeTargetID, "-", "") + ".txt"
-}
+// The webhook belongs to REcollapse alone, which is why it is a tab on that tool's Config modal
+// rather than a section-wide button. Nuclei used to be gated on it too, and that gate meant a target
+// with no webhook got nothing from this section at all, including the checks that prove themselves
+// from the response and never call anybody.
 
 // ComposeREcollapse builds the recollapse argv.
 //
-// The input is the webhook URL with a TOKEN PLACEHOLDER in its path. REcollapse runs once per scan
-// and the scanner runs once per vector, so the per-vector marker cannot be baked in here; the
-// placeholder is substituted when the payload list is written for a given vector, which is what lets
-// a callback name the parameter that produced it.
+// The seed is the webhook URL with a TOKEN PLACEHOLDER in its path. The placeholder is substituted
+// at SEND time, per parameter, in redirectProbe.go: REcollapse generates one list and the prober
+// aims it, so a callback names the input that produced it rather than the vector it belonged to.
 func ComposeREcollapse(v VectorInput, settings map[string]any, reportPath string) ([]string, []string) {
 	tool, _ := VectorToolByKey("recollapse")
 	var warnings []string
 
 	webhook := strings.TrimSpace(stringifySetting(v.Section["listeningWebhookURL"]))
 	if webhook == "" {
-		return nil, []string{"No listening webhook URL is configured for this section, so there is " +
-			"nothing to build payloads out of. Use Configure Webhook."}
+		return nil, []string{"No listening webhook URL is configured, so there is nothing to build " +
+			"payloads out of. Set it on the Webhook tab of this tool's Config."}
 	}
 
 	seed := strings.TrimRight(webhook, "/") + "/" + vectorTokenPlaceholder
 
 	args := []string{}
-	args = append(args, composeVectorSettings(tool, settings, "",
-		map[string]bool{"replayLimit": true, "canaryHost": true}, &warnings)...)
+	// replayLimit, probeDelayMs and the three webhook keys all carry no flag, so composeVectorSettings
+	// drops them on its own; they are framework settings that govern the send rather than recollapse
+	// arguments. Nothing needs to be named here.
+	args = append(args, composeVectorSettings(tool, settings, "", nil, &warnings)...)
 	args = append(args, seed)
 	_ = reportPath
 	return args, warnings
@@ -60,119 +55,79 @@ func ComposeREcollapse(v VectorInput, settings map[string]any, reportPath string
 // by a raw request it fuzzes query, body, header AND cookie, which is 60 of the 71 vectors on the
 // reference target rather than 39. Path is not fuzzed either way.
 //
-// -lfa is required because the payload list is a file, and nuclei refuses to read a helper file
-// outside its template directory without it: "access to helper file denied", after which the
-// template fails to compile and the run reports no templates rather than no findings.
+// No -lfa any more: that flag existed only so nuclei would read the payload file belonging to the
+// custom template this section used to ship. Upstream templates carry their own payloads.
 func ComposeNucleiDast(v VectorInput, settings map[string]any, reportPath string) ([]string, []string) {
 	tool, _ := VectorToolByKey("nuclei-dast")
 	var warnings []string
 
-	if strings.TrimSpace(stringifySetting(v.Section["listeningWebhookURL"])) == "" {
-		return nil, []string{"No listening webhook URL is configured, so the payloads would point at " +
-			"nothing and a silent result would mean nothing. Use Configure Webhook."}
-	}
-
 	args := []string{
 		"-dast",
-		"-lfa", // the payload list is a file outside the default template directory
 		"-im", "jsonl",
 		"-l", reportPath + ".in.jsonl",
-		"-t", reportPath + ".tpl/",
 	}
 
+	// One -t per selected set. These are UPSTREAM templates now, so there is no helper file to read
+	// and -lfa is gone with the custom template that needed it.
+	for _, path := range nucleiTemplatePaths(settings, &warnings) {
+		args = append(args, "-t", path)
+	}
+
+	// templates is consumed above rather than skipped-and-forgotten; extraTemplates is emitted by
+	// composeVectorSettings itself, since it is a plain repeatable -t.
 	args = append(args, composeVectorSettings(tool, settings, "",
-		map[string]bool{"templates": true, "extraTemplates": true}, &warnings)...)
+		map[string]bool{"templates": true}, &warnings)...)
 
 	// Framework owned, appended last so a stored setting cannot displace them.
 	args = append(args, "-jsonl", "-o", reportPath, "-no-color")
 	return args, warnings
 }
 
-// NucleiPayloadTemplate is the fuzzing template the scanner runs.
+// nucleiTemplateSets maps a set name to the upstream path holding it.
 //
-// Ours rather than upstream's, and that is a deliberate trade. The upstream DAST templates carry
-// their own payloads and cannot be pointed at a webhook, so using them would mean the operator's
-// callback URL was never sent. This one is thirty lines, it declares every part nuclei will honour,
-// and its matchers cover the SSRF that answers in the response, so a target that returns
-// /etc/passwd is caught without any callback at all.
-const NucleiPayloadTemplate = `id: framework-redirect-ssrf
-info:
-  name: Framework open redirect and SSRF sweep
-  author: ars0n-framework
-  severity: high
-  description: |
-    Fires the payload list built by REcollapse from the operator's webhook, plus the framework's own
-    structural bypass forms, at every fuzzable part of the request. Callbacks are confirmed against
-    the webhook afterwards; the matchers below catch the cases that answer in the response instead.
-  tags: ssrf,redirect,dast
-http:
-  - pre-condition:
-      - type: dsl
-        dsl:
-          - "true"
-    payloads:
-      payload: payloads.txt
-    fuzzing:
-      - parts: [query, body, header, cookie]
-        mode: single
-        fuzz:
-          - "{{payload}}"
-    stop-at-first-match: false
-    matchers-condition: or
-    matchers:
-      - type: regex
-        part: body
-        name: local-file-read
-        regex:
-          - 'root:.*?:[0-9]*:[0-9]*:'
-          - 'for 16-bit app support'
-      - type: regex
-        part: body
-        name: cloud-metadata
-        regex:
-          - 'ami-id[\s\S]+placement/'
-          - 'instance-id[\s\S]+local-hostname'
-          - 'computeMetadata[\s\S]+project-id'
-      - type: regex
-        part: body
-        name: internal-service
-        regex:
-          - 'SSH-(\d.\d)-OpenSSH'
-          - '(DENIED Redis|NOAUTH Authentication|redis_version)'
-      - type: word
-        part: header
-        name: open-redirect
-        condition: and
-        words:
-          - "location: http"
-          - "__WEBHOOK_HOST__"
-        case-insensitive: true
-`
+// xinclude is a FILE rather than a directory on purpose: xinclude-injection.yaml lives in
+// dast/vulnerabilities/injection/ beside csv-injection, unix-command-injection and
+// windows-command-injection, none of which belong in this section. Pointing -t at that directory
+// would quietly turn the SSRF scan into a command injection scan.
+var nucleiTemplateSets = map[string]string{
+	"ssrf":     "/root/nuclei-templates/dast/vulnerabilities/ssrf/",
+	"redirect": "/root/nuclei-templates/dast/vulnerabilities/redirect/",
+	"rfi":      "/root/nuclei-templates/dast/vulnerabilities/rfi/",
+	"xxe":      "/root/nuclei-templates/dast/vulnerabilities/xxe/",
+	"xinclude": "/root/nuclei-templates/dast/vulnerabilities/injection/xinclude-injection.yaml",
+	"crlf":     "/root/nuclei-templates/dast/vulnerabilities/crlf/",
+}
 
-// nucleiWebhookHostPlaceholder is substituted per vector by NucleiPayloadTemplateFor.
-const nucleiWebhookHostPlaceholder = "__WEBHOOK_HOST__"
+// nucleiDefaultTemplateSets is everything that is a server-side fetch of a supplied URL, plus the
+// redirect pair this section keeps. crlf is deliberately absent: header injection is redirect
+// adjacent rather than an SSRF, and it is one checkbox away for an operator who wants it.
+var nucleiDefaultTemplateSets = []string{"ssrf", "redirect", "rfi", "xxe", "xinclude"}
 
-// NucleiPayloadTemplateFor renders the template for ONE vector, pinning the open-redirect matcher to
-// the operator's own webhook host.
-//
-// The matcher used to be the single word "Location: http", which tests that the response redirects
-// somewhere, not that the PAYLOAD decided where. Every ordinary absolute redirect matched it, so a
-// 53 vector run produced 42 high severity findings with an empty parameter, an empty URL and an
-// empty payload: one per vector that happened to redirect at all. That is worse than finding
-// nothing, because a real open redirect would have been indistinguishable from the other 41.
-//
-// Requiring the host we control means a match says the target sent the user somewhere we chose,
-// which is what the finding claims.
-//
-// With no webhook configured the matcher is REMOVED rather than left matching everything. This tool
-// is gated on the webhook being set so that should be unreachable, but "unreachable" and "produces
-// 42 false highs if reached" is a bad pairing.
-func NucleiPayloadTemplateFor(v VectorInput) string {
-	host := webhookHost(stringifySetting(v.Section["listeningWebhookURL"]))
-	if host == "" {
-		return removeOpenRedirectMatcher(NucleiPayloadTemplate)
+func nucleiTemplatePaths(settings map[string]any, warnings *[]string) []string {
+	chosen := settingValues(settings["templates"])
+	if len(chosen) == 0 {
+		chosen = nucleiDefaultTemplateSets
 	}
-	return strings.ReplaceAll(NucleiPayloadTemplate, nucleiWebhookHostPlaceholder, host)
+	var paths []string
+	for _, name := range chosen {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if path, ok := nucleiTemplateSets[name]; ok {
+			paths = append(paths, path)
+			continue
+		}
+		// Reported rather than dropped. A template set that silently vanishes is how an operator comes
+		// to believe a class of bug was tested for.
+		*warnings = append(*warnings, "Ignored unknown template set "+name+
+			". The sets are ssrf, redirect, rfi, xxe, xinclude and crlf.")
+	}
+	if len(paths) == 0 {
+		*warnings = append(*warnings, "No template set resolved, so the defaults were used instead of "+
+			"running nuclei with no templates at all, which reports success having tested nothing.")
+		for _, name := range nucleiDefaultTemplateSets {
+			paths = append(paths, nucleiTemplateSets[name])
+		}
+	}
+	return paths
 }
 
 // webhookHost reduces a webhook URL to the host that will appear in a Location header.
@@ -186,51 +141,6 @@ func webhookHost(raw string) string {
 		return ""
 	}
 	return strings.ToLower(parsed.Hostname())
-}
-
-func removeOpenRedirectMatcher(template string) string {
-	idx := strings.Index(template, "        name: open-redirect")
-	if idx < 0 {
-		return template
-	}
-	// Trim back to the start of that matcher's list item, so the YAML stays valid.
-	idx = strings.LastIndex(template[:idx], "      - type: word")
-	if idx < 0 {
-		return template
-	}
-	return template[:idx]
-}
-
-// BuildVectorPayloadList renders the payload file for ONE vector.
-//
-// The token is substituted here, which is the whole attribution mechanism: every payload this vector
-// sends carries a marker unique to it, so a hit on the webhook names the vector rather than the
-// target in general.
-func BuildVectorPayloadList(v VectorInput, mutations string) string {
-	webhook := strings.TrimSpace(stringifySetting(v.Section["listeningWebhookURL"]))
-	tokenised := strings.ReplaceAll(mutations, vectorTokenPlaceholder, v.Token)
-
-	seen := map[string]bool{}
-	var out []string
-	add := func(line string) {
-		line = strings.TrimSpace(line)
-		if line == "" || seen[line] {
-			return
-		}
-		seen[line] = true
-		out = append(out, line)
-	}
-
-	for _, line := range strings.Split(tokenised, "\n") {
-		add(line)
-	}
-	// The framework's own structural forms, on top of whatever REcollapse produced. REcollapse
-	// mutates bytes; these are shapes, and they are the ones that get past an allowlist.
-	tokenWebhook := strings.TrimRight(webhook, "/") + "/" + v.Token
-	for _, payload := range FrameworkSSRFPayloads(tokenWebhook, v.Domain) {
-		add(payload)
-	}
-	return strings.Join(out, "\n") + "\n"
 }
 
 // ComposeSSRFmap builds the SSRFmap argv.
