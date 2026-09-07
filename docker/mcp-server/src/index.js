@@ -54,6 +54,9 @@ const { manageAttackVectorsSchema, manageAttackVectors } = require('./tools/atta
 const { findSubdomainTakeoverSchema, findSubdomainTakeover, findExposedPanelsSchema, findExposedPanels, findApiEndpointsSchema, findApiEndpoints, findInterestingResponsesSchema, findInterestingResponses, findSensitiveFilesSchema, findSensitiveFiles, compareScansSchema, compareScans, getScopeStatsSchema, getScopeStats, findUniqueHostsSchema, findUniqueHosts, queryByCidrSchema, queryByCidr, queryByTechStackSchema, queryByTechStack, searchGlobalSchema, searchGlobal } = require('./tools/bugbounty');
 const { getSettingsSchema, getSettings, updateSettingsSchema, updateSettings, setApiKeySchema, setApiKey, deleteApiKeySchema, deleteApiKey, setAiApiKeySchema, setAiApiKey, deleteAiApiKeySchema, deleteAiApiKey } = require('./tools/settings');
 const { listAuthFlowsSchema, listAuthFlows, createAuthFlowSchema, createAuthFlow, updateAuthFlowSchema, updateAuthFlow, deleteAuthFlowSchema, deleteAuthFlow, getAuthFlowStepsSchema, getAuthFlowSteps, addAuthFlowStepSchema, addAuthFlowStep, updateAuthFlowStepSchema, updateAuthFlowStep, deleteAuthFlowStepSchema, deleteAuthFlowStep, replayAuthFlowStepSchema, replayAuthFlowStep, replayAuthFlowSchema, replayAuthFlow } = require('./tools/authflows');
+const { replayRequestSchema, replayRequest, manageRequestVersionsSchema, manageRequestVersions, manageDetectedFlowsSchema, manageDetectedFlows } = require('./tools/requestflows');
+const { manageFlowDetectionSchema, manageFlowDetection, manageFlowConfigSchema, manageFlowConfig, getFlowMetricsSchema, getFlowMetrics } = require('./tools/flowdetection');
+const { manageFlowBuilderSchema, manageFlowBuilder } = require('./tools/flowbuilder');
 
 const pkg = require('../package.json');
 
@@ -819,6 +822,47 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
 
   server.tool('replay_auth_flow', 'Run an entire auth flow end-to-end in order using one shared cookie jar (session carries across steps), re-recording every step\'s response.', replayAuthFlowSchema.shape, async (params) => {
     const result = await replayAuthFlow(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // ============================================================
+  // REQUEST FLOW REPLAY — the repeater, detected flows, active detection, and the builder.
+  // Same rule as manage_wildcard_tools: everything the Request Flow Replay screens can do is
+  // reachable here, and nothing here does something those screens cannot. The feature added 42
+  // HTTP routes; these seven tools are the whole of it.
+  // ============================================================
+  server.tool('replay_request', `The repeater. Search the manual-crawl capture corpus with the full query language, pull one capture out as raw HTTP bytes, edit them and SEND THEM TO THE LIVE TARGET. send puts a real request on somebody's production host. Start with query_syntax if you are about to write a search: the q parameter is a grammar, not a substring, and a bare phrase usually returns nothing.`, replayRequestSchema.shape, async (params) => {
+    const result = await replayRequest(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_request_versions', `Version history for a replayed request. Nothing is ever overwritten: the capture's unmodified bytes are the ORIGINAL and every edit is a new row that remembers what it was edited from, so there is always a way back to what the target actually said. The ORIGINAL refuses update and delete; it can still be sent.`, manageRequestVersionsSchema.shape, async (params) => {
+    const result = await manageRequestVersions(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_detected_flows', `The flows reconstructed from the capture corpus: a form POST and the page its 302 produced, an OAuth dance across three hosts. List them, read one as a graph, and re-run the whole thing at the live target. run is a DRY RUN unless you pass dry_run:false, and the dry run is the right first call every time.`, manageDetectedFlowsSchema.shape, async (params) => {
+    const result = await manageDetectedFlows(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_flow_detection', `Plan and run active flow detection against a target, and manage the endpoints it must never touch. dry_run sends nothing and returns the exact request list, so do that first. run puts real requests on a live bug bounty programme.`, manageFlowDetectionSchema.shape, async (params) => {
+    const result = await manageFlowDetection(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_flow_config', `Which endpoints detection may reach, and the per-target programme requirements (mandatory header, User-Agent, rate cap, timeout, redirect depth) with per-field provenance saying whether each value was set here, inherited from the global settings, or is a built-in default.`, manageFlowConfigSchema.shape, async (params) => {
+    const result = await manageFlowConfig(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_flow_metrics', `The four numbers above the Request Flow Replay buttons: sendable endpoints of everything discovered, detected flows, built flows, saved repeater versions. A number that could not be read is reported as unavailable, never as zero.`, getFlowMetricsSchema.shape, async (params) => {
+    const result = await getFlowMetrics(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_flow_builder', `Build, edit and run multi-step request flows: the ordered list of raw HTTP requests, with values carried from one step into the next and conditions that branch on what the target answers. This is the shape almost every access-control and business-logic test actually takes, and it is the only way to test a sequence rather than a request. Seed one from a flow the detector already found (seed_from_detected_flow), change the step you care about, preview, then replay. Seeded POST/PUT/PATCH/DELETE steps arrive TURNED OFF because they carry the recorded body. Call action:"grammar" before writing any condition or retry loop: it returns the field/operator/action grammar, the save-time rules, worked examples, and every loop-protection cap with its default and ceiling.`, manageFlowBuilderSchema.shape, async (params) => {
+    const result = await manageFlowBuilder(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 

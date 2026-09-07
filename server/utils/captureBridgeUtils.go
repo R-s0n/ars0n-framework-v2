@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -70,12 +71,24 @@ func BuildRawHTTPRequest(method, rawURL string, headers map[string]interface{}, 
 	fmt.Fprintf(&sb, "%s %s HTTP/1.1\r\n", strings.ToUpper(method), pathQuery)
 	fmt.Fprintf(&sb, "Host: %s\r\n", host)
 
-	for name, value := range headers {
+	// Sorted, because ranging a Go map is randomised per iteration and this function is the source
+	// of the bytes a human then edits. Unsorted, twelve identical loads of one capture produced
+	// twelve different orderings: the repeater could not diff two loads of the same request, and an
+	// auth-flow step rebuilt from the same capture changed shape for no reason. The original
+	// on-the-wire order is already lost by the time headers reach us as a JSON object, so a stable
+	// order is the only honest option and is worth more than a fictional one.
+	names := make([]string, 0, len(headers))
+	for name := range headers {
 		lower := strings.ToLower(name)
 		if skipRebuildHeaders[lower] || strings.HasPrefix(lower, ":") {
 			continue
 		}
-		text := stringifyHeaderValue(value)
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		text := stringifyHeaderValue(headers[name])
 		if text == "" {
 			continue
 		}

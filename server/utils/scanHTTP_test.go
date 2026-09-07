@@ -2,20 +2,52 @@ package utils
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// The safety property this whole file exists to hold: nothing in the endpoint workflow can send a
-// request that changes state on the target.
-//
-// This was not hypothetical. investigateEndpoint passed the verb recorded during the manual crawl
-// into http.NewRequest with the captured credentials attached, so pressing Investigate on a target
-// whose crawl captured `DELETE /api/keys/7` sent a real, authenticated DELETE.
+// The verb the caller asked for is the verb that reaches the target. The operator chooses; a
+// scanner that silently downgrades a POST to a GET reports on an endpoint it never tested.
 
-func TestOnlySafeVerbsCanBeSent(t *testing.T) {
+func TestEveryHTTPVerbIsSent(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method)
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	want := []string{"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
+
+	c := NewScanClient(nil, 0, "", nil)
+	for _, method := range want {
+		resp := c.Do(context.Background(), ScanRequest{URL: srv.URL, Method: method, ReadBody: true})
+		if resp.Err != nil {
+			t.Errorf("%s must be sendable, got %v", method, resp.Err)
+		}
+		if resp.Method != method {
+			t.Errorf("the response must report the verb that was sent, got %q for %s", resp.Method, method)
+		}
+	}
+
+	if len(seen) != len(want) {
+		t.Fatalf("expected %d requests, server saw %v", len(want), seen)
+	}
+	for i, method := range want {
+		if seen[i] != method {
+			t.Errorf("request %d arrived as %s, want %s", i, seen[i], method)
+		}
+	}
+}
+
+// A verb the transport does not know is still refused, and never reaches the network. This is a
+// typo check, not a policy: "GTE" would otherwise become a run's worth of 405s recorded as if the
+// endpoints had been tested.
+func TestUnknownVerbsAreRefusedBeforeTheNetwork(t *testing.T) {
 	var seen []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.Method)
@@ -24,35 +56,91 @@ func TestOnlySafeVerbsCanBeSent(t *testing.T) {
 	defer srv.Close()
 
 	c := NewScanClient(nil, 0, "", nil)
-
-	for _, method := range []string{"POST", "PUT", "PATCH", "DELETE", "TRACE", "CONNECT", "PROPFIND"} {
-		resp := c.Do(context.Background(), ScanRequest{URL: srv.URL + "/x", Method: method})
-		if resp.Err != ErrMethodNotAllowed {
-			t.Errorf("%s must be refused outright, got err=%v status=%d", method, resp.Err, resp.Status)
+	for _, method := range []string{"GTE", "PSOT", "TRACE", "CONNECT", "PROPFIND"} {
+		if resp := c.Do(context.Background(), ScanRequest{URL: srv.URL + "/x", Method: method}); resp.Err != ErrMethodNotAllowed {
+			t.Errorf("%s must be refused, got err=%v status=%d", method, resp.Err, resp.Status)
 		}
 	}
-
 	if len(seen) != 0 {
 		t.Fatalf("a refused verb must never reach the network, but the server saw: %v", seen)
 	}
 }
 
-func TestSafeVerbsAreSent(t *testing.T) {
-	var seen []string
+// A request body is sent verbatim, with Content-Length set from the bytes actually written.
+func TestRequestBodyIsSentWithCorrectContentLength(t *testing.T) {
+	type arrival struct {
+		method        string
+		body          string
+		contentLength int64
+		header        string
+		contentType   string
+	}
+	var got []arrival
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen = append(seen, r.Method)
+		raw, _ := io.ReadAll(r.Body)
+		got = append(got, arrival{
+			method: r.Method, body: string(raw), contentLength: r.ContentLength,
+			header: r.Header.Get("Content-Length"), contentType: r.Header.Get("Content-Type"),
+		})
 		w.Write([]byte("ok"))
 	}))
 	defer srv.Close()
 
+	body := `{"order_id":42,"note":"a real identifier"}`
 	c := NewScanClient(nil, 0, "", nil)
-	for _, method := range []string{"GET", "HEAD", "OPTIONS"} {
-		if resp := c.Do(context.Background(), ScanRequest{URL: srv.URL, Method: method, ReadBody: true}); resp.Err != nil {
-			t.Errorf("%s should be permitted, got %v", method, resp.Err)
+
+	for _, method := range []string{"POST", "PUT", "PATCH", "DELETE"} {
+		resp := c.Do(context.Background(), ScanRequest{
+			URL: srv.URL, Method: method, Body: body,
+			Headers: map[string]string{"Content-Type": "application/json"},
+		})
+		if resp.Err != nil {
+			t.Fatalf("%s with a body must be sendable, got %v", method, resp.Err)
 		}
 	}
-	if len(seen) != 3 {
-		t.Fatalf("expected 3 requests, server saw %v", seen)
+
+	if len(got) != 4 {
+		t.Fatalf("expected 4 requests, got %d", len(got))
+	}
+	for _, a := range got {
+		if a.body != body {
+			t.Errorf("%s: body arrived as %q, want %q", a.method, a.body, body)
+		}
+		if a.contentLength != int64(len(body)) {
+			t.Errorf("%s: ContentLength %d, want %d", a.method, a.contentLength, len(body))
+		}
+		if a.header != strconv.Itoa(len(body)) {
+			t.Errorf("%s: Content-Length header %q, want %d", a.method, a.header, len(body))
+		}
+		if a.contentType != "application/json" {
+			t.Errorf("%s: Content-Type %q must survive from Headers", a.method, a.contentType)
+		}
+	}
+}
+
+// A stale Content-Length in Headers must never contradict the bytes on the wire. Go writes
+// req.ContentLength and ignores the header map for this field; this asserts that stays true, because
+// a mismatch is a request smuggling primitive rather than a cosmetic bug.
+func TestContentLengthHeaderCannotContradictTheBody(t *testing.T) {
+	var length int64
+	var raw string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		raw, length = string(b), r.ContentLength
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	body := "a=1&b=2"
+	resp := NewScanClient(nil, 0, "", nil).Do(context.Background(), ScanRequest{
+		URL: srv.URL, Method: "POST", Body: body,
+		Headers: map[string]string{"Content-Length": "9999"},
+	})
+	if resp.Err != nil {
+		t.Fatalf("unexpected error: %v", resp.Err)
+	}
+	if raw != body || length != int64(len(body)) {
+		t.Fatalf("body %q len %d, want %q len %d", raw, length, body, len(body))
 	}
 }
 
@@ -85,21 +173,25 @@ func TestRedirectsAreNeverFollowed(t *testing.T) {
 	}
 }
 
-func TestNoRequestEverCarriesABody(t *testing.T) {
-	// There is no field on ScanRequest to put one in, and this asserts the wire agrees.
-	var lengths []string
+// An empty Body means no body and no Content-Length, so a plain GET stays a plain GET. Sending
+// `Content-Length: 0` on every request would change what the target sees on every read-only probe
+// the framework makes, and some WAFs treat a bodied GET differently.
+func TestNoBodyMeansNoBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		lengths = append(lengths, r.Header.Get("Content-Length"))
 		if r.ContentLength > 0 {
-			t.Errorf("a request arrived with a %d byte body", r.ContentLength)
+			t.Errorf("%s arrived with a %d byte body", r.Method, r.ContentLength)
+		}
+		if h := r.Header.Get("Content-Length"); h != "" {
+			t.Errorf("%s arrived with Content-Length: %q, want none", r.Method, h)
 		}
 		w.Write([]byte("ok"))
 	}))
 	defer srv.Close()
 
 	c := NewScanClient(nil, 0, "", nil)
-	c.Do(context.Background(), ScanRequest{URL: srv.URL, Method: "GET", ReadBody: true})
-	c.Do(context.Background(), ScanRequest{URL: srv.URL, Method: "OPTIONS"})
+	for _, method := range []string{"GET", "OPTIONS", "HEAD", "DELETE"} {
+		c.Do(context.Background(), ScanRequest{URL: srv.URL, Method: method, ReadBody: true})
+	}
 }
 
 func TestBodyIsCappedAndFlagged(t *testing.T) {

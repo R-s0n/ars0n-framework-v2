@@ -427,13 +427,14 @@ The framework ships with a **Model Context Protocol (MCP) server** that exposes 
 
 ### What it exposes
 
-The server registers **135 tools** across eleven categories:
+The server registers **142 tools** across twelve categories:
 
 - **Scope and targets** (9): list, add, activate and delete scope targets, update ROI scores, manage scope rules, read scope overview and per-target statistics
 - **Scan execution and workflows** (11): run any individual tool (amass, subfinder, httpx, nuclei, katana, ffuf, arjun, etc.), check or cancel a running scan, read raw tool output, run the full Company / Wildcard / URL workflows or individual phases, drive auto-scan sessions
 - **Recon data queries** (21): subdomains, company domains, network ranges, live servers, target URLs, endpoints, parameters, DNS records, discovered IPs, technologies, cloud assets, Nuclei findings and the consolidated attack surface
 - **Bug bounty analysis** (13): subdomain-takeover candidates, exposed panels, API endpoints, sensitive files, interesting responses, unique hosts, queries by CIDR or tech stack, cross-target search and scan diffing
 - **Endpoints and attack surface** (12): consolidate discovered endpoints, run endpoint validation and investigation scans, read their results, manage attack vectors, capture and manage a manual crawl, manage client identifiers
+- **Request flow replay** (7): the repeater — search the capture corpus, edit raw HTTP bytes and send them at the live target, with a full version history that never overwrites the original; the flows reconstructed from captured traffic, read as a graph and re-run end to end; active flow detection with a dry run that sends nothing; the per-target engagement config (mandatory header, rate cap, timeout) and which endpoints detection may reach; and the builder for multi-step flows with values carried between steps and conditions that branch on the response
 - **Vulnerability scanning** (14): the per-vector scanners behind the URL workflow, covering XSS, SQL injection, command injection and SSTI, LFI, web cache, request smuggling, SSRF and open redirect, GraphQL, sensitive data leaks, access bypass, exposed git, fuzzing and hidden-parameter enumeration
 - **Authentication and authorization** (19): document and replay register/login/MFA/reset flows step by step, manage auth recordings and session tokens, check token validity, and manage identity patterns plus role, policy and discretionary access models
 - **Target behaviour probe** (9): configure, dry run and execute the WAF and rate-limit probe, list its targets and read run status and results
@@ -448,7 +449,7 @@ The count is not hardcoded: `/health` reports the number of tools actually regis
 The MCP server **starts automatically** with `docker-compose up` and listens on **port 3001** using the SSE transport:
 
 - SSE endpoint: `http://localhost:3001/sse`
-- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.0.0","tools":135}`
+- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.0.0","tools":142}`
 
 Verify it's up:
 ```bash

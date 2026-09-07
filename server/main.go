@@ -60,6 +60,15 @@ func main() {
 
 	createTables()
 
+	// The Request Flow Builder ships its DDL as an exported var next to its handlers rather than in
+	// createTables. Applied here, at boot, rather than lazily from the handlers: every builder route
+	// touches request_flows or request_flow_steps, so without this the whole feature is a set of
+	// registered routes that 500. Idempotent (CREATE TABLE IF NOT EXISTS), and non-fatal, because a
+	// DDL failure should cost one feature rather than the whole API.
+	if err := utils.EnsureRequestFlowBuilderSchema(context.Background()); err != nil {
+		log.Printf("[REQUEST-FLOW-BUILDER] Schema could not be applied, builder routes will fail: %v", err)
+	}
+
 	// Pick up any auto scan the previous process was running. Must come after createTables, whose
 	// sweep clears the scan rows belonging to whichever step was mid-flight.
 	utils.ResumeInterruptedAutoScans()
@@ -636,6 +645,114 @@ func main() {
 	// The endpoints the Routing & WAF Probe may be pointed at: crawl-observed, HTTP 200 only,
 	// adjacent hosts included, explicitly-excluded hosts dropped.
 	r.HandleFunc("/manual-crawl/probe-candidates/{scope_target_id}", utils.GetProbeCandidateEndpoints).Methods("GET", "OPTIONS")
+
+	// Replay Request: the repeater over recorded traffic. Reads manual_crawl_captures, so it lives
+	// next to the routes that fill that table.
+	//
+	// /replay-request/capture/... and /replay-request/send are registered first out of the same
+	// habit as everything above: a literal segment before a {variable} one, because gorilla/mux
+	// matches in declaration order.
+	r.HandleFunc("/replay-request/capture/{id}/raw", utils.GetReplayRequestCaptureRaw).Methods("GET", "OPTIONS")
+	// The flow graph shares the capture corpus and the search language with the repeater above.
+	// /flow/{flow_id} goes here, with the other literal-prefixed routes, because it is the same
+	// shape as /{scope_target_id}/flows and gorilla matches in declaration order: registered after
+	// it, a request for /replay-request/flow/flows would be handed to the list handler with
+	// scope_target_id="flow".
+	//
+	// Running a detected flow. A detected flow is derived from manual_crawl_captures on the fly and
+	// has no step rows, so it runs LINEARLY in captured order and its runs live in an in-process
+	// registry rather than a table. /run and /run/{run_id}/... are longer paths than /flow/{flow_id}
+	// so gorilla cannot confuse them, but they are declared before it anyway to keep the
+	// literal-before-variable habit this whole block is built on.
+	r.HandleFunc("/replay-request/flow/{flow_id}/run/{run_id}/cancel", utils.CancelDetectedFlowRun).Methods("POST", "OPTIONS")
+	r.HandleFunc("/replay-request/flow/{flow_id}/run/{run_id}", utils.GetDetectedFlowRun).Methods("GET", "OPTIONS")
+	r.HandleFunc("/replay-request/flow/{flow_id}/run", utils.RunDetectedFlow).Methods("POST", "OPTIONS")
+	r.HandleFunc("/replay-request/flow/{flow_id}", utils.GetReplayRequestFlow).Methods("GET", "OPTIONS")
+	r.HandleFunc("/replay-request/send", utils.SendReplayRequest).Methods("POST", "OPTIONS")
+	// Version history for edited requests. /versions/{id} is the literal-prefixed pair of
+	// /{scope_target_id}/versions below and goes first for the reason given above: the two are the
+	// same shape with the literal in opposite positions, so declaration order is what separates them.
+	r.HandleFunc("/replay-request/versions/{id}/send", utils.SendReplayRequestVersion).Methods("POST", "OPTIONS")
+	r.HandleFunc("/replay-request/versions/{id}", utils.UpdateReplayRequestVersion).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/replay-request/versions/{id}", utils.DeleteReplayRequestVersion).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/replay-request/{scope_target_id}/captures", utils.GetReplayRequestCaptures).Methods("GET", "OPTIONS")
+	r.HandleFunc("/replay-request/{scope_target_id}/flows", utils.GetReplayRequestFlows).Methods("GET", "OPTIONS")
+	r.HandleFunc("/replay-request/{scope_target_id}/versions", utils.ListReplayRequestVersions).Methods("GET", "OPTIONS")
+	r.HandleFunc("/replay-request/{scope_target_id}/versions", utils.CreateReplayRequestVersion).Methods("POST", "OPTIONS")
+
+	// Active flow detection: the scanner that SENDS requests to find routing the operator never
+	// clicked, and the exclusion list without which it must not exist.
+	//
+	// /flow-detection/exclusions/{id} is registered FIRST, before the {scope_target_id} routes, for
+	// the same reason /replay-request/flow/{flow_id} is above: gorilla matches in declaration order
+	// and /flow-detection/exclusions/{id} is the same shape as /flow-detection/{scope_target_id}/...
+	// with the literal in the other position.
+	//
+	// dry-run and run are separate endpoints on purpose. The dry run sends nothing and reports every
+	// endpoint it would skip WITH the rule and reason that excluded it; sending is a second,
+	// deliberate action against a different URL, so there is no config value that turns a preview
+	// into live traffic by accident.
+	r.HandleFunc("/flow-detection/exclusions/{id}", utils.DeleteFlowDetectionExclusion).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/flow-detection/{scope_target_id}/exclusions", utils.GetFlowDetectionExclusions).Methods("GET", "OPTIONS")
+	r.HandleFunc("/flow-detection/{scope_target_id}/exclusions", utils.CreateFlowDetectionExclusion).Methods("POST", "OPTIONS")
+	r.HandleFunc("/flow-detection/{scope_target_id}/dry-run", utils.DryRunFlowDetection).Methods("POST", "OPTIONS")
+	r.HandleFunc("/flow-detection/{scope_target_id}/run", utils.StartFlowDetection).Methods("POST", "OPTIONS")
+	r.HandleFunc("/flow-detection/{scope_target_id}/status", utils.GetFlowDetectionStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/flow-detection/{scope_target_id}/cancel", utils.CancelFlowDetection).Methods("POST", "OPTIONS")
+
+	// Flow configuration: what active detection is ALLOWED to touch, and what every request it sends
+	// must carry. Read by the planner before it builds a plan, so a decision made here is a decision
+	// about traffic, not a display preference.
+	//
+	// The endpoint selection is per scope target and stored as DESELECTIONS, so an endpoint the crawl
+	// has not discovered yet is selected by default rather than silently omitted.
+	//
+	// The engagement config is the fix for one global custom header across every programme. Each
+	// column is nullable and NULL means inherit from user_settings, which is what lets the UI say
+	// where a value came from instead of showing a number with no provenance.
+	//
+	// No registration-order hazard in this block, unlike the /flow-detection/exclusions/{id} case
+	// above: gorilla matches on segment count as well as position, so .../endpoints/summary cannot be
+	// swallowed by .../endpoints and .../engagement/{field} cannot be swallowed by .../engagement.
+	// The literal segments are ordered before their {param} siblings anyway, so the rule holds if a
+	// route with a different shape is ever added here.
+	r.HandleFunc("/flow-config/{scope_target_id}/endpoints/summary", utils.GetFlowEndpointSummary).Methods("GET", "OPTIONS")
+	r.HandleFunc("/flow-config/{scope_target_id}/endpoints/selection", utils.SetFlowEndpointSelectionHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/flow-config/{scope_target_id}/endpoints", utils.GetFlowEndpoints).Methods("GET", "OPTIONS")
+	r.HandleFunc("/flow-config/{scope_target_id}/engagement", utils.GetEngagementConfig).Methods("GET", "OPTIONS")
+	r.HandleFunc("/flow-config/{scope_target_id}/engagement", utils.PutEngagementConfig).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/flow-config/{scope_target_id}/engagement/{field}", utils.DeleteEngagementConfigField).Methods("DELETE", "OPTIONS")
+
+	// The four numbers above the Request Flow Replay card's buttons. Read-only, four concurrent
+	// counts, sends nothing. Unregistered until now, which the client rendered as four permanent
+	// n/a: the handler and its tests existed, the route did not, and the "unavailable is not zero"
+	// design meant the card degraded silently instead of showing wrong numbers.
+	r.HandleFunc("/flow-metrics/{scope_target_id}", utils.GetFlowCardMetrics).Methods("GET", "OPTIONS")
+
+	// Request Flow Builder: flows assembled by hand out of captures, detected flows, or nothing at
+	// all. Built on the auth-flow machinery above, so a step is an ordered raw request with variable
+	// extraction and substitution and a flow replays through one shared cookie jar.
+	//
+	// The /flow/... and /steps/... routes are registered BEFORE /{scope_target_id}/..., the same
+	// ordering rule the replay-request block documents: /request-flow-builder/flow/{flow_id} and
+	// /request-flow-builder/{scope_target_id}/flows are the same shape with the literal in different
+	// positions, so registered the other way round a GET of /request-flow-builder/flow/flows would be
+	// handed to ListRequestFlows with scope_target_id="flow".
+	r.HandleFunc("/request-flow-builder/flow/{flow_id}/steps/order", utils.ReorderRequestFlowSteps).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/flow/{flow_id}/steps", utils.AddRequestFlowStep).Methods("POST", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/flow/{flow_id}/preview", utils.PreviewRequestFlow).Methods("GET", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/flow/{flow_id}/replay", utils.ReplayRequestFlow).Methods("POST", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/flow/{flow_id}", utils.GetRequestFlow).Methods("GET", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/flow/{flow_id}", utils.UpdateRequestFlow).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/flow/{flow_id}", utils.DeleteRequestFlow).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/steps/{step_id}/move", utils.MoveRequestFlowStep).Methods("POST", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/steps/{step_id}/replay", utils.ReplayRequestFlowStep).Methods("POST", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/steps/{step_id}", utils.UpdateRequestFlowStep).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/steps/{step_id}", utils.DeleteRequestFlowStep).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/{scope_target_id}/flows", utils.ListRequestFlows).Methods("GET", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/{scope_target_id}/flows", utils.CreateRequestFlow).Methods("POST", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/{scope_target_id}/from-flow", utils.CreateRequestFlowFromDetectedFlow).Methods("POST", "OPTIONS")
+	r.HandleFunc("/request-flow-builder/{scope_target_id}/from-captures", utils.CreateRequestFlowFromCaptures).Methods("POST", "OPTIONS")
 
 	// Scope rules: the pattern-capable boundary. Preview is separate from create on purpose, so a
 	// rule can be rendered as a sentence and checked against already-recorded hosts before it is

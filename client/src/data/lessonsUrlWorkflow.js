@@ -1,7 +1,8 @@
 // Lessons for the URL workflow sections that had no Help Me Learn content: Authentication,
-// Authorization, Consolidate Attack Vectors, the twelve attack-tool sections, and Threat Model
-// Results. Same shape as data/lessons.js (title, overview, sections[], practicalTips[],
-// furtherReading[]) and merged into that export, so every consumer sees one flat lessons object.
+// Authorization, HTTP Request Flows, Consolidate Attack Vectors, the twelve attack-tool sections,
+// and Threat Model Results. Same shape as data/lessons.js (title, overview, sections[],
+// practicalTips[], furtherReading[]) and merged into that export, so every consumer sees one flat
+// lessons object.
 //
 // The tool sections are written from what these tools actually did against a live target during
 // this project rather than from their README files. Where a tool has a failure mode that reads as
@@ -9,6 +10,370 @@
 // about it will read "0 findings" as "no vulnerability".
 
 export const urlWorkflowLessons = {
+  // ---------------------------------------------------------------------------------------------
+  // HTTP Request Flows
+  //
+  // Written from what the five buttons on the Request Flow Replay card actually do, including the
+  // numbers the server enforces (the loop caps, the rate ceiling, the verb filter), because a lesson
+  // that describes a cap the code does not have is worse than no lesson.
+  // ---------------------------------------------------------------------------------------------
+  urlRequestFlowsMethodology: {
+    title: "Request Flows: Why a Single Request Is the Wrong Unit",
+    overview: "One click in a browser is almost never one request. This section groups the requests that belong together, so you can see a mechanism before you try to test any part of it, and so the steps that only work in sequence can be replayed in sequence.",
+    sections: [
+      {
+        title: "One Click, Half a Dozen Requests",
+        icon: "fa-diagram-project",
+        content: [
+          "Submit a login form and the browser does not send one request. It sends the POST, receives a 302, follows it with a GET of the page it lands on, and then runs whatever that page's JavaScript asks for: a session check, a profile fetch, a feature-flag call, three analytics beacons. Six or seven requests, one user action, and only two of them are interesting.",
+          "Bigger mechanisms are worse. An OAuth handshake is typically four redirects across three hosts, tied together by a state parameter minted on the first and validated on the last. A password reset is a POST, an email, a GET carrying a token in the query string, and a second POST that consumes it. A checkout is a quote, a payment intent, a confirmation, and a webhook you never see at all.",
+          "Test any one of those requests on its own and you are usually testing nothing. Replaying the OAuth callback without the request that minted the state gets you an error page. Replaying the second half of a reset without the first gets you an expired token. The sequence is the thing under test, so the sequence has to be the unit you work with."
+        ],
+        keyPoints: [
+          "A form submit is a POST, a redirect, a page load, and the requests that page fires",
+          "An OAuth handshake is several redirects across several hosts, tied together by one parameter",
+          "Requests that only make sense in order cannot be judged one at a time",
+          "The interesting request is usually the second or third in the group, not the first"
+        ]
+      },
+      {
+        title: "You Cannot Choose What You Cannot See Grouped",
+        icon: "fa-sitemap",
+        content: [
+          "The capture corpus from a manual crawl is a flat list, in time order, of everything the browser did. On a real target that is thousands of rows, roughly ninety per cent of them scripts, stylesheets, fonts, images, and analytics pings. Scrolling that to work out which POST went with which redirect is not analysis, it is archaeology.",
+          "Flow reconstruction reads the same rows a second time and draws them as a graph: the navigation that started it, the redirects it followed, and the requests the page issued afterwards, with an edge for each relationship and the reason that edge was drawn. Nothing is sent to the target to build this. It is a second reading of what the crawl already stored.",
+          "The noise is hidden rather than deleted. The graph shows the request types that carry application behaviour and puts the rest behind a count and a toggle, because a diagram that omits things silently is worse than no diagram. When the header says 398 of 2,723 shown, you know exactly how much you are not looking at, and one click shows the rest."
+        ],
+        keyPoints: [
+          "The raw capture list is time-ordered and mostly subresources",
+          "A flow is drawn from stored captures; building one sends nothing",
+          "Every edge carries the reason it was drawn, so you can weigh it yourself",
+          "Hidden requests are counted and one toggle away, never dropped"
+        ]
+      }
+    ],
+    practicalTips: [
+      "Crawl the feature end to end first; a flow can only ever contain what was captured",
+      "Start with the flows that contain a redirect chain, since that is where state gets carried and dropped",
+      "Read the edge reasons before trusting a grouping, especially on script-initiated requests",
+      "Turn the hidden requests on once per flow to check nothing interesting was filtered away",
+      "A flow with a single node is usually a page you loaded directly rather than a mechanism",
+      "Note which request in the flow carries the decision; that is the one you will be editing later"
+    ],
+    furtherReading: [
+      {
+        title: "MDN - HTTP redirections",
+        url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Redirections",
+        description: "What the browser does with a 302, and why the chain matters"
+      },
+      {
+        title: "PortSwigger - OAuth 2.0 authentication vulnerabilities",
+        url: "https://portswigger.net/web-security/oauth",
+        description: "A worked example of a mechanism that is only testable as a sequence"
+      }
+    ]
+  },
+
+  urlRequestFlowsDetection: {
+    title: "Passive and Active Flow Detection",
+    overview: "There are two ways to end up with a flow. Passive reconstructs what the browser already did, from captures you already have. Active sends requests to discovered endpoints to find routing nobody ever clicked. They find different things, and a flow found by both is a different fact from a flow found by either.",
+    sections: [
+      {
+        title: "Passive: A Second Reading of the Crawl",
+        icon: "fa-eye",
+        content: [
+          "Passive detection sends nothing at all. It groups the captures already stored for this target into flows: a navigation, the redirects it followed, and the requests the page issued afterwards. Everything it shows you is something a browser genuinely did while you were driving it, in the order it happened.",
+          "That is its strength and its ceiling. The flows are real, they are authenticated if your crawl was, and the bodies are the bodies the application actually received. But a feature you never used produces no flow, exactly as a form you never submitted produces no attack vector. Passive coverage measures your crawling, not the application.",
+          "So the first thing to do with the flow list is compare it against what you know the application does. A target with a password reset, an invite flow, and a checkout, showing three flows in the list, is not telling you the application is small. It is telling you where to go and crawl next."
+        ],
+        keyPoints: [
+          "Passive detection is a read of stored captures and puts no traffic on the target",
+          "The flows are real requests with real bodies, authenticated if your crawl was",
+          "A feature you never exercised produces no flow",
+          "Judge the flow list against the features you know exist, not against itself"
+        ]
+      },
+      {
+        title: "Active: Asking About Routes Nobody Walked",
+        icon: "fa-satellite-dish",
+        content: [
+          "Active detection sends real requests to the endpoints already discovered on this target, with the verbs you choose, and reads what comes back: what redirects where, what a POST does to a route you only ever saw as a GET, which endpoints answer at all. It finds routing that exists but that nothing in your crawl ever triggered.",
+          "A flow can carry both labels. When active detection reaches a flow that passive reconstruction already found, it is marked as found by both, and that agreement is information: the route is real and reachable without a browser session driving it. A flow marked active only is the more interesting kind, because nobody browsed it, which often means nobody hardened it either.",
+          "Because it sends traffic, it is fenced. A host marked out of scope is never contacted, on the original endpoint and again on every redirect destination, and no setting on the run overrides that. Exclusions you wrote with a reason are enforced the same way. The verb filter runs against the verb each endpoint was observed with, so a GET-only run never invents a GET for something only ever seen as a POST. And the dry run is there to tell you what would go out, in what order, how many requests, and what is being skipped and why, before anything is sent."
+        ],
+        keyPoints: [
+          "Active detection is the only part of this card that puts traffic on the target",
+          "Passive only, active only, and both are three different statements about a flow",
+          "Out of scope is enforced on the endpoint and on every redirect destination",
+          "The verb selection is yours; the scope boundary is not"
+        ]
+      }
+    ],
+    practicalTips: [
+      "Crawl first, then read the passive flows; active detection is worth more once the corpus is real",
+      "Read the endpoint number on the card before running: it is what a run would send to, not what is ticked",
+      "Start with GET only and a low rate, then widen once you have seen what comes back",
+      "Treat active-only flows as your priority list, since nobody browsed them",
+      "Ask for the dry run and read the skip reasons; that is where the surprises are",
+      "Re-open the flow list after each crawl, since it is rebuilt from captures every time you look"
+    ],
+    furtherReading: [
+      {
+        title: "OWASP WSTG - Test HTTP Methods",
+        url: "https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/06-Test_HTTP_Methods",
+        description: "Why sending a verb an endpoint was never observed with is worth doing"
+      },
+      {
+        title: "OWASP WSTG - Information Gathering",
+        url: "https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/01-Information_Gathering/",
+        description: "Mapping the surface before attacking any part of it"
+      }
+    ]
+  },
+
+  urlRequestFlowsRepeater: {
+    title: "Replay Requests: What a Repeater Is For",
+    overview: "A repeater takes one request the target already answered, lets you change any byte of it, and sends it again so you can compare the two responses. It is the most used tool in web testing and the whole idea fits in one sentence: change one thing, resend, see what moved.",
+    sections: [
+      {
+        title: "Change One Thing, Send It Again, Compare",
+        icon: "fa-rotate-right",
+        content: [
+          "If you have never used one: a repeater is not a scanner and it knows nothing about vulnerabilities. It is a text editor for an HTTP request with a send button next to it. On the left is the corpus of requests the crawl recorded, filtered by a small query language. Pick one and its exact bytes appear in the editor: request line, headers, blank line, body. Change something, press replay, and the raw response comes back beside it, status line and headers included.",
+          "The discipline is to change one thing at a time. Change the user identifier in the path and nothing else, and the difference between the two responses was caused by the identifier. Change the identifier and a header together and you have learned something you cannot defend in a report. This is why the repeater outranks any scanner for real work: it produces evidence with a single stateable cause.",
+          "Byte exactness is the other half of it. Nothing here reformats the request, re-orders headers, pretty-prints the body, or trims whitespace, because a tool that tidies your payload changes what the target receives. The one thing normalised is the line terminator, and only because a browser text box forces it; the editor puts the carriage returns back to match the style the request was loaded with, and there is a control to change that deliberately rather than by accident."
+        ],
+        keyPoints: [
+          "A repeater is an editor for one request plus a send button, and nothing more",
+          "Change one thing per send, or the comparison proves nothing",
+          "The response is shown raw, because sometimes the exact bytes are the finding",
+          "Nothing is reformatted behind your back: what is in the editor is what goes out"
+        ]
+      },
+      {
+        title: "Versions: Keeping Several Variants of One Request",
+        icon: "fa-clone",
+        content: [
+          "In most repeaters an edit destroys the previous text, so testing four variants of one request means four tabs or a scratch file. Here every edit is written down as a version. The request the target originally answered is kept as the immutable original, and each save records the version it was edited from, so the column beside the editor is a small history you can click back through.",
+          "That changes how you work. You can hold the clean baseline, the one with the identifier swapped, the one with the header removed, and the one carrying the payload, all against the same request, and come back to any of them tomorrow. When you write the finding, the version that demonstrated it is still there byte for byte instead of being reconstructed from memory.",
+          "Versions are created when the bytes actually differ, and at the moments where an edit would otherwise be lost: when you press replay, when you click another version or another request, after a few seconds of not typing, and when the modal closes. Not per keystroke, and not when the bytes are unchanged. Closing is safe rather than destructive, which is why there is no prompt on the way out."
+        ],
+        keyPoints: [
+          "The observed request is never overwritten by an edit",
+          "Each version records which version it was edited from",
+          "Edits are saved on replay, on switching away, after an idle pause, and on close",
+          "Identical bytes create no version, so the column stays readable"
+        ]
+      }
+    ],
+    practicalTips: [
+      "Send the request unmodified first; a baseline you did not capture is a comparison you cannot make",
+      "Change one field per version, so the version itself records what you changed",
+      "Watch the response size and time as well as the status; a 200 that is forty bytes shorter is a signal",
+      "Use the query on the sitemap to find the request rather than scrolling a few thousand rows",
+      "Keep the version that proves the bug: it is most of your reproduction steps already written",
+      "If a response looks impossible, re-read your request bytes before blaming the target"
+    ],
+    furtherReading: [
+      {
+        title: "MDN - HTTP messages",
+        url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Messages",
+        description: "What the bytes in the editor actually are, line by line"
+      },
+      {
+        title: "PortSwigger - Burp Repeater",
+        url: "https://portswigger.net/burp/documentation/desktop/tools/repeater",
+        description: "The same tool in another product, documented at length"
+      }
+    ]
+  },
+
+  urlRequestFlowsReplaying: {
+    title: "Replaying a Whole Flow, and Editing One Request Inside It",
+    overview: "The repeater replays one request. This replays the sequence, in the order it was captured, and sends your edited version of any step in place of the original. That combination is what makes a multi-step mechanism testable at all.",
+    sections: [
+      {
+        title: "Why the Sequence Has to Run",
+        icon: "fa-list-ol",
+        content: [
+          "Most of what you want to test is step three of four. Step three needs a session step one established, a CSRF token step two handed out, and an identifier the application minted somewhere along the way. Replayed alone it fails, and it fails in a way that looks like the application refusing you rather than like a missing prerequisite. People abandon real findings at exactly this point.",
+          "Running the whole flow removes the ambiguity. Steps one and two run as captured and do their job, step three arrives with everything it expects, and now the response to step three means something. This is also the shape almost every access-control test takes: establish an identity, obtain a reference, then use the reference in a way the rules say should be refused.",
+          "A detected flow runs linearly, in the order the requests were captured. There are no conditions and no branching in one, because a detected flow is a reading of history and history did not branch. When you need it to make decisions, the same flow copies into the Request Flow Builder as editable steps."
+        ],
+        keyPoints: [
+          "Step three usually cannot be tested without steps one and two",
+          "A failed lone replay is often a missing prerequisite, not a refusal",
+          "Detected flows replay linearly, in capture order, with no branching",
+          "Copy the flow into the builder when it needs to react to what comes back"
+        ]
+      },
+      {
+        title: "Your Edit Is What Gets Sent",
+        icon: "fa-pen-to-square",
+        content: [
+          "Any node in the graph opens as raw bytes, and saving creates a version exactly as the repeater does. Nothing is overwritten: the observed request stays as the original, and the picker walks back through everything you saved. That is what makes editing inside a flow safe enough to be useful, because you are never one keystroke away from losing what the target originally received.",
+          "When the flow runs, the version each step will send is chosen explicitly, named on the node, counted in the header, listed in the dry run, and sent as an explicit pairing rather than left to a default at the far end. Quietly sending the original bytes after somebody spent ten minutes editing them is the worst outcome available here, so the run tells you what it is carrying and expects you to have read it.",
+          "The run opens on a dry run, for the same reason Detect Flows does. The first click asks what would be sent, in what order, how many requests, and which steps are skipped and why. Sending is a second, deliberately different click. Change the configuration and the plan is invalidated, because a dry run of a different configuration is not evidence about this one. Results then land on the graph itself as each node's badge, with one toggle back to the captured statuses, because what happened during the crawl and what happened during your run are two different facts and must never be read as one."
+        ],
+        keyPoints: [
+          "Editing a step inside a flow creates a version; the original is kept",
+          "The run states which version every step will send, before it sends anything",
+          "The first click is a dry run; sending is a separate, differently labelled click",
+          "Run results replace the captured badges on the graph and toggle back"
+        ]
+      }
+    ],
+    practicalTips: [
+      "Replay the flow unmodified once and confirm it still works before you change anything",
+      "Read the dry run's skipped list; a step skipped for a good reason changes what the run proves",
+      "Edit only the step you are testing and leave the rest as captured, so the cause is unambiguous",
+      "A flow captured an hour ago may already be stale, since tokens and identifiers expire",
+      "When a run fails at step one, fix the session before you look at anything else",
+      "Note which step a proving version belongs to; a version out of its sequence is not a repro"
+    ],
+    furtherReading: [
+      {
+        title: "OWASP WSTG - Testing for Bypassing Authorization Schema",
+        url: "https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/02-Testing_for_Bypassing_Authorization_Schema",
+        description: "The tests that need a sequence rather than a single request"
+      },
+      {
+        title: "OWASP WSTG - Business Logic Testing",
+        url: "https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/10-Business_Logic_Testing/",
+        description: "Where the order of the requests is itself the vulnerability"
+      }
+    ]
+  },
+
+  urlRequestFlowsBuilder: {
+    title: "The Request Flow Builder: Flows That Make Decisions",
+    overview: "The builder is where you assemble a flow by hand: these requests, in this order, with the token step two captured carried into step three, and rules that decide what happens next based on what came back.",
+    sections: [
+      {
+        title: "Assembling a Flow, and Carrying Values Between Steps",
+        icon: "fa-screwdriver-wrench",
+        content: [
+          "There are two ways to start: empty, or by copying a detected flow in as editable steps. The second is the one that actually gets used, because retyping a login by hand when the crawl already recorded it is work for nothing.",
+          "The point of a built flow is the wiring. A step can capture a value out of its response, from the body, a header, or a cookie, and a later step references it with a placeholder. That is how a CSRF token minted in step one reaches the POST in step two, and how an identifier the application invented in step two reaches the request in step four. Without it a hand-built flow is just four requests that happen to be next to each other.",
+          "A placeholder whose value never arrives is the classic silent failure: step two's capture does not fire, step three sends the literal placeholder text, and the target answers with something plausible. So an unresolved reference is reported on the step, naming the step that was supposed to produce the value, while you are still typing, and the send is refused rather than made. Steps seeded from captures that change state arrive disarmed for a related reason: a captured body carries a real identifier, and replaying one can mean the application texts or emails a real person."
+        ],
+        keyPoints: [
+          "Seed from a detected flow rather than retyping a login",
+          "A step captures a value; a later step references it by placeholder",
+          "An unresolved placeholder is named before the run, not discovered after it",
+          "Seeded state-changing steps start disarmed until a human arms them"
+        ]
+      },
+      {
+        title: "Conditionals: When the Response Decides What Happens Next",
+        icon: "fa-code-branch",
+        content: [
+          "A straight line stops being enough as soon as the target can answer in more than one way. A login returning 200 with a session goes one way; the same login returning 302 to a device-verification page has to go another. A condition on a step is a rule of the form: look at the response, and if this is true, do that.",
+          "The vocabulary is deliberately small, because a dropdown cannot produce a syntax error at two in the morning. A field (the status, one named header, the body, the body size, the response time), an operator, and an action: continue, go to a named step, retry this step, stop the run, or fail the run. Rules are tried top to bottom and the first match wins, so ordering is meaning. A rule for status at least 400 placed above a rule for status exactly 403 means the second can never fire, and the builder says so rather than letting you discover it mid-run.",
+          "The last row is the catch-all: what to do when none of the rules above matched. It can only ever be last, and that is enforced rather than suggested, because a catch-all in the middle makes every rule beneath it dead. There is also no test for a header being absent, because an absent header matches nothing at all, not even is-not. Test for the header being present, and put what you wanted for the missing case in the catch-all."
+        ],
+        keyPoints: [
+          "A condition is a field, an operator, and an action, chosen from small lists",
+          "Rules are tried top to bottom and the first match wins, so ordering is meaning",
+          "The catch-all is always last, and the builder keeps it there",
+          "There is no absent test: check for present, and handle the rest in the catch-all"
+        ]
+      },
+      {
+        title: "Loop Caps, and Why They Are Not Settings",
+        icon: "fa-shield-halved",
+        content: [
+          "A goto that points backwards closes a loop. That is legitimate, because a bounded retry is a real thing to build, and it is also exactly how you accidentally send a live programme thousands of requests in a minute. A loop against a live target is a denial of service, and denial of service is out of scope on every programme this framework is pointed at.",
+          "So the flow's graph is walked while you are authoring it, and a cycle is named the moment the goto that closes it is picked. The caps that would stop a runaway are printed next to the run button rather than discovered by hitting one: a budget of executed steps, a per-step execution cap, a retry cap, and a wall-clock limit. The budget counts executions and not steps, so a four-step flow that goes round five times has executed twenty.",
+          "None of them is a checkbox, and there is no control anywhere that turns one off. When a run stops it says why: which cap fired, or that a condition stopped it, or that the flow simply finished. A run that ends with no stated reason is how an operator concludes the target is broken when the fault was in their own flow."
+        ],
+        keyPoints: [
+          "A backwards goto is allowed; an unbounded one is not survivable on a live target",
+          "Cycles are named while you author them, not discovered while they run",
+          "The caps sit next to the run button and cannot be disabled",
+          "Every run states why it stopped, and names the cap when a cap fired"
+        ]
+      }
+    ],
+    practicalTips: [
+      "Seed from a detected flow and delete what you do not need, rather than building from nothing",
+      "Wire the value capture and replay the flow once before you add a single condition",
+      "Order rules from most specific to most general, because the first match wins",
+      "Give every branching step a catch-all, so an unexpected response has somewhere to go",
+      "Bound your retries deliberately instead of relying on the caps to stop you",
+      "Read the run trace: it says which condition matched on each execution"
+    ],
+    furtherReading: [
+      {
+        title: "RE2 syntax",
+        url: "https://github.com/google/re2/wiki/Syntax",
+        description: "The regular expression dialect the matches operator accepts"
+      },
+      {
+        title: "PortSwigger - Race conditions",
+        url: "https://portswigger.net/web-security/race-conditions",
+        description: "A bug class where the order and timing of a sequence is the vulnerability"
+      }
+    ]
+  },
+
+  urlRequestFlowsEngagement: {
+    title: "Configure: Engagement Rules Belong to the Programme",
+    overview: "Before anything on this card sends a request, this is where you say what it may touch and what every request has to carry. The custom header and the rate limit are per target because programmes differ, and getting them wrong is a rules violation rather than a matter of taste.",
+    sections: [
+      {
+        title: "The Header Is Not a Preference",
+        icon: "fa-id-badge",
+        content: [
+          "Programmes tell you how to identify your traffic, and they do not all say the same thing. One requires a header naming the programme and your handle on every single request, because their security operations centre reads unlabelled probing as an attack and will block you or escalate it. Another wants a tag appended to a real browser User-Agent instead, and caps you at forty-five requests a minute. A third asks for neither.",
+          "One global header and one global rate limit, shared by every target, makes switching programmes something you have to remember to do, and forgetting means sending unlabelled traffic to a programme whose brief says the label is mandatory. That is not a mistake you get to explain afterwards. So every field on this screen belongs to this target, and falls back to the global setting only when this target has not overridden it. Which of those two is happening is printed next to the field, on every field, always.",
+          "There is a preview of exactly what a request will carry, and it says plainly when no programme header is set. A half-configured header is a blocked save rather than a warning, because a value with no name is not a header at all, and a name that is not a legal token does not produce a header either; it produces a malformed request that some servers answer with a 400."
+        ],
+        keyPoints: [
+          "Identification requirements differ per programme and are mandatory where stated",
+          "The header, the User-Agent and the rate limit are per target, not global",
+          "Every field says whether it is this target's value or the global fallback",
+          "A name with no value, or an illegal header name, is refused rather than sent"
+        ]
+      },
+      {
+        title: "Scoping, and the Difference Between a Deselection and an Exclusion",
+        icon: "fa-lock",
+        content: [
+          "The endpoint list here is scoping. Everything is selected by default, because the corpus is the corpus, and unticking an endpoint says not this one, not today. It is a checkbox and it behaves like one; tick it back on whenever you want.",
+          "An exclusion is a completely different statement. It is a safety rule with a written reason, made in Detect Flows, enforced by the server on the endpoint and again on every redirect destination. An endpoint is on that list because requesting it texts a one-time code to a real customer, or cancels a real order. So excluded rows have no checkbox at all: there is a padlock, the rule that matched, and the reason somebody wrote. Removing one is done where it was written, deliberately, with a confirmation, so that nobody skimming this screen can text a stranger with a stray click.",
+          "Three things are true whatever you configure here: a host outside this target's scope is never contacted, the rate limit applies, and conditional flows are capped. They are listed on the screen as fixed edges rather than as cautions, so you know where the boundaries are instead of hunting for a setting that does not exist."
+        ],
+        keyPoints: [
+          "A deselection is scoping and reversible; an exclusion is a safety rule with a reason",
+          "Excluded rows have no checkbox at all, deliberately",
+          "Exclusions are enforced on redirect destinations as well as on the endpoint itself",
+          "Scope, the rate limit, and the execution caps hold whatever else is configured"
+        ]
+      }
+    ],
+    practicalTips: [
+      "Read the programme brief and set this screen before you run anything, not after the first run",
+      "Set the header the moment you add the target, while the brief is still in front of you",
+      "Use the preview to confirm what a request will actually carry rather than assuming",
+      "Cap the rate at whatever the brief says, not at whatever the target survives",
+      "Write an exclusion, with the reason, for anything that emails, texts, charges or cancels",
+      "Re-check this screen after switching programmes: a header naming the wrong one is worse than none"
+    ],
+    furtherReading: [
+      {
+        title: "RFC 9110 - Field Names",
+        url: "https://www.rfc-editor.org/rfc/rfc9110#name-field-names",
+        description: "What is and is not a legal header name"
+      },
+      {
+        title: "MDN - User-Agent",
+        url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/User-Agent",
+        description: "The header most programmes ask you to tag your traffic with"
+      }
+    ]
+  },
+
   // ---------------------------------------------------------------------------------------------
   // Authentication
   // ---------------------------------------------------------------------------------------------

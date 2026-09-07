@@ -220,6 +220,65 @@ const HelpMeLearn = ({ section }) => {
         }
       ]
     },
+    urlHttpRequestFlows: {
+      title: "Help Me Learn!",
+      items: [
+        {
+          question: "What is a request flow, and why is a single request the wrong unit for most testing?",
+          lessonKey: "urlRequestFlowsMethodology",
+          answers: [
+            "One click is almost never one request. Submitting a form is a POST, a 302, a GET of the page it lands on, and then whatever that page's JavaScript fires: a session check, a profile fetch, three analytics beacons. An OAuth handshake is typically four redirects across three hosts, tied together by a state parameter minted on the first and validated on the last.",
+            "Replay any one of those on its own and you are usually testing nothing. The OAuth callback without the request that minted the state gives you an error page; the second half of a password reset without the first gives you an expired token. The sequence is the thing under test, so the sequence has to be the unit you work with.",
+            "The capture list from a crawl is flat, time-ordered, and roughly ninety per cent scripts, images and analytics pings, which makes working out by eye which POST went with which redirect an exercise in archaeology. Flow reconstruction reads those same stored rows a second time and draws them as a graph, sending nothing, with the reason on every edge and a count of what the noise filter is hiding."
+          ]
+        },
+        {
+          question: "What is the difference between passive and active flow detection, and what does a flow marked \"both\" mean?",
+          lessonKey: "urlRequestFlowsDetection",
+          answers: [
+            "Passive detection sends nothing. It groups captures you already have into flows, so everything it shows is something a browser genuinely did while you were driving it. That makes the flows real and authenticated, and it also means passive coverage measures your crawling rather than the application: a feature you never used produces no flow, the same way a form you never submitted produces no attack vector.",
+            "Active detection sends real requests to the endpoints already discovered on this target, with the verbs you choose, to find routing nothing in your crawl ever triggered. It is the only part of this card that puts traffic on the target, so it is fenced: an out-of-scope host is never contacted, on the endpoint or on any redirect destination, and the verb filter runs against the verb each endpoint was observed with rather than inventing new ones.",
+            "A flow found by both carries both labels, and the agreement is information: the route is real and reachable without a browser session driving it. A flow marked active only is the more interesting kind, because nobody browsed it, which frequently means nobody hardened it either."
+          ]
+        },
+        {
+          question: "I have never used a repeater. What is Replay Requests for, and what do request versions give me?",
+          lessonKey: "urlRequestFlowsRepeater",
+          answers: [
+            "A repeater is not a scanner and knows nothing about vulnerabilities. It is a text editor for one HTTP request with a send button next to it: pick a recorded request, its exact bytes appear, change something, press replay, and the raw response comes back beside it. The discipline is to change one thing at a time, because that is what produces evidence with a single stateable cause.",
+            "Byte exactness is the other half. Nothing reformats the request, re-orders headers, pretty-prints the body or trims whitespace, since a tool that tidies your payload changes what the target receives.",
+            "In most repeaters an edit destroys the previous text. Here the original the target answered is kept immutably and every edit is saved as a version that records what it was edited from, so you can hold the clean baseline, the one with the identifier swapped, and the one carrying the payload all at once, and come back to any of them tomorrow. Versions are written when the bytes differ and at the moments an edit would otherwise be lost: on replay, on switching away, after an idle pause, and on close."
+          ]
+        },
+        {
+          question: "Why replay a whole flow, and why does editing one request inside it matter?",
+          lessonKey: "urlRequestFlowsReplaying",
+          answers: [
+            "Most of what you want to test is step three of four, and step three needs the session step one established, the CSRF token step two handed out, and an identifier minted along the way. Replayed alone it fails in a way that looks like the application refusing you rather than like a missing prerequisite, which is where real findings get abandoned. Running the sequence removes the ambiguity, and it is the shape almost every access-control test takes: establish an identity, obtain a reference, use the reference somewhere the rules say it should be refused.",
+            "Any node in the flow opens as raw bytes and saving creates a version, exactly as the repeater does, so the observed request is never overwritten. When the flow runs, the version each step will send is named on the node, counted in the header, listed in the dry run and sent explicitly, because quietly sending the original after somebody spent ten minutes editing it is the worst outcome available.",
+            "The run opens on a dry run: the first click asks what would be sent, in what order, how many requests, and what is being skipped and why, and sending is a second deliberate click. Results then land on the graph as each node's badge, with one toggle back to the captured statuses, since what happened during the crawl and what happened during your run are two different facts."
+          ]
+        },
+        {
+          question: "What does the Request Flow Builder add, and how do conditionals work?",
+          lessonKey: "urlRequestFlowsBuilder",
+          answers: [
+            "The builder is where you assemble a flow by hand, usually by copying a detected flow in as editable steps rather than starting empty. The wiring is the point: a step captures a value from its response body, a header or a cookie, and a later step references it with a placeholder, which is how a CSRF token from step one reaches the POST in step two. A placeholder whose value never arrives is named on the step while you type and the send is refused, rather than the literal placeholder text going to the target.",
+            "A condition is a rule of the form: look at the response, and if this is true, do that. You pick a field (status, one named header, the body, the body size, the response time), an operator, and an action: continue, go to a named step, retry, stop, or fail. Rules are tried top to bottom and the first match wins, so ordering is meaning: a rule for status at least 400 above a rule for status exactly 403 means the second can never fire. The catch-all is what to do when nothing matched, and it can only ever be last, because a catch-all in the middle makes every rule beneath it dead.",
+            "A goto that points backwards is a loop, which is allowed because a bounded retry is a real thing to build and dangerous because a loop against a live programme is a denial of service. So cycles are named while you author them, and the caps that would stop a runaway are printed next to the run button: an executed-step budget, a per-step cap, a retry cap, and a wall-clock limit. None of them is a checkbox, and every run says why it stopped."
+          ]
+        },
+        {
+          question: "Why are the mandatory header and the rate limit set per target instead of once in Settings?",
+          lessonKey: "urlRequestFlowsEngagement",
+          answers: [
+            "Because programmes differ and their requirements are rules, not preferences. One requires a header naming the programme and your handle on every single request, or their security operations centre reads the traffic as an attack. Another wants a tag appended to a real browser User-Agent and caps you at forty-five requests a minute. A third asks for neither.",
+            "With one global header and one global rate limit, switching programmes becomes something you have to remember to do, and forgetting means sending unlabelled traffic to a programme whose brief says the label is mandatory. So every field here belongs to this target and falls back to the global setting only when this target has not overridden it, with which of those two is happening printed next to the field. A half-configured header is a blocked save, since a value with no name is not a header and an illegal name produces a malformed request rather than a labelled one.",
+            "The same screen holds the endpoint selection, and it draws one distinction carefully. Unticking an endpoint is scoping: a checkbox, reversible, meaning not this one today. An exclusion is a safety rule with a written reason, enforced on the endpoint and on every redirect destination, and excluded rows have no checkbox at all, because an endpoint is usually on that list for a reason like texting a one-time code to a real customer."
+          ]
+        }
+      ]
+    },
     urlAuthentication: {
       title: "Help Me Learn!",
       items: [

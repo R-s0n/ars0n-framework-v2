@@ -208,6 +208,11 @@ import { FFUFConfigModal } from './modals/FFUFConfigModal';
 import FFUFSettingsModal from './modals/FFUFSettingsModal';
 import AddAttackVectorModal from './modals/AddAttackVectorModal';
 import AttackVectorsModal from './modals/AttackVectorsModal';
+import FlowConfigureModal from './modals/FlowConfigureModal';
+import DetectFlowsModal from './modals/DetectFlowsModal';
+import RequestFlowBuilderModal from './modals/RequestFlowBuilderModal';
+import ReplayRequestsModal from './modals/ReplayRequestsModal';
+import RequestFlowsModal from './modals/RequestFlowsModal';
 import AttackToolCard from './components/AttackToolCard';
 import { ATTACK_TOOL_SECTIONS } from './data/attackTools';
 import { WIRED_CATEGORIES } from './data/wiredCategories';
@@ -391,6 +396,48 @@ const URLToolCard = ({ tool }) => (
     </Card>
   </Col>
 );
+
+// One number in the Request Flow Replay card's metrics row.
+//
+// It exists because of the one thing a card cannot do by hand: TELL A ZERO FROM A FAILED COUNT. Both
+// render as a single grey glyph and the operator reads the first one, so "no flows detected" and
+// "the flow count could not be read" become the same statement on screen. The server never sends a
+// value it could not compute - a failed metric arrives with no value at all - and this renders that
+// absence as `n/a` in warning colour with the reason in the tooltip, which is a different thing to
+// look at than a grey 0.
+//
+// Everything else is the shape the Consolidate Attack Vectors card uses: fw-bold fs-4 over a
+// text-muted small card-metric-label, greyed to text-secondary at zero because a zero here is the
+// reason a button below will do nothing.
+const FlowCardMetric = ({ metric, label, sub, sub2, title }) => {
+  const value = metric && metric.available ? metric.value : null;
+  const missing = value === null || value === undefined;
+  const tip = missing
+    ? (metric && metric.error
+      ? `This number could not be read: ${metric.error}`
+      : 'This number has not been read yet.')
+    : [title, metric.note].filter(Boolean).join(' ') || undefined;
+  return (
+    <Col title={tip}>
+      <div className={`fw-bold fs-4 ${missing ? 'text-warning' : (value > 0 ? 'text-danger' : 'text-secondary')}`}>
+        {missing ? 'n/a' : value.toLocaleString()}
+      </div>
+      <div className="text-muted small card-metric-label">{label}</div>
+      {/* The second line carries the denominator or the split. Same treatment the WAF probe card's
+          "will break scans" note uses, so it cannot change the card's height enough to move the
+          buttons out of line with the cards beside it. */}
+      {!missing && sub && (
+        <div className="text-muted" style={{ fontSize: '0.68rem' }}>{sub}</div>
+      )}
+      {/* Third line, and only when there IS a difference to explain. Present on every card it would
+          be noise; present when the headline is a fortieth of the total it is the answer to the
+          question the operator is about to ask. */}
+      {!missing && sub2 && (
+        <div className="text-muted" style={{ fontSize: '0.62rem' }}>{sub2}</div>
+      )}
+    </Col>
+  );
+};
 
 function App() {
   const [showScanHistoryModal, setShowScanHistoryModal] = useState(false);
@@ -5829,6 +5876,54 @@ function App() {
   const [isConsolidatingAttackVectors, setIsConsolidatingAttackVectors] = useState(false);
   const [showAddAttackVectorModal, setShowAddAttackVectorModal] = useState(false);
   const [showAttackVectorsModal, setShowAttackVectorsModal] = useState(false);
+  // Starting Point, not Consolidate: the repeater used to be a button on the attack vectors card and
+  // its flag was declared here with the rest of them. It is its own row at the top of the workflow
+  // now, because replaying a captured request is where a URL target's testing starts.
+  //
+  // Five flags rather than one plus a tab index. These were tabs in a single modal and are now
+  // separate modals, which is what lets the flow view hand a request to the repeater: a tab cannot
+  // open another tab and leave the first one's state alone.
+  const [showFlowConfigureModal, setShowFlowConfigureModal] = useState(false);
+  const [showDetectFlowsModal, setShowDetectFlowsModal] = useState(false);
+  const [showRequestFlowBuilderModal, setShowRequestFlowBuilderModal] = useState(false);
+  const [showReplayRequestsModal, setShowReplayRequestsModal] = useState(false);
+  const [showRequestFlowsModal, setShowRequestFlowsModal] = useState(false);
+  // Same reasoning as repeaterCaptureId below, for the flows -> builder handover: null means the
+  // builder was opened from its own button and should start on its own list.
+  const [builderInitialFlowId, setBuilderInitialFlowId] = useState(null);
+  // The handover itself. Held here, above both modals, because it is the one piece of state neither
+  // of them can own: the flow view is closing at the moment it is set and the repeater is not mounted
+  // yet. Null means the repeater was opened straight from its own button and should start empty.
+  const [repeaterCaptureId, setRepeaterCaptureId] = useState(null);
+
+  // The four numbers above those five buttons. Null until the first read lands, which the card
+  // renders as n/a rather than as four zeroes: a card that says 0 before it has asked is a card that
+  // tells the operator there is nothing here on every single page load.
+  const [flowCardMetrics, setFlowCardMetrics] = useState(null);
+
+  const loadFlowCardMetrics = useCallback(async () => {
+    if (!activeTarget) { setFlowCardMetrics(null); return; }
+    try {
+      const res = await fetch(`/api/flow-metrics/${activeTarget.id}`);
+      if (!res.ok) { setFlowCardMetrics(null); return; }
+      setFlowCardMetrics(await res.json());
+    } catch {
+      // Blanked to n/a rather than left showing the last target's numbers. Four counts belonging to
+      // a target the operator has moved away from is worse than four honest gaps.
+      setFlowCardMetrics(null);
+    }
+  }, [activeTarget]);
+
+  // Read on arrival and again every time one of the five modals CLOSES, because all five change one
+  // of these numbers: Configure changes the selection, Detect Flows adds flows, the builder adds
+  // built flows, the repeater saves versions, and the flow view is where a flow gets promoted into
+  // the builder. One effect keyed on "none of them is open" does all of it - opening a modal changes
+  // the flag to true and fetches nothing, closing it changes back and refreshes.
+  const flowModalsOpen = showFlowConfigureModal || showDetectFlowsModal
+    || showRequestFlowBuilderModal || showReplayRequestsModal || showRequestFlowsModal;
+  useEffect(() => {
+    if (!flowModalsOpen) loadFlowCardMetrics();
+  }, [flowModalsOpen, loadFlowCardMetrics]);
 
   // XSS. One status object per tool, keyed by tool key, holding both the eligibility figures (which
   // exist before any scan has run, so the card can say 27/71 up front) and the latest run.
@@ -5945,6 +6040,52 @@ function App() {
 
   const handleAddAttackVectorManually = () => setShowAddAttackVectorModal(true);
   const handleOpenUniqueAttackVectorsModal = () => setShowAttackVectorsModal(true);
+  const handleOpenFlowConfigureModal = () => setShowFlowConfigureModal(true);
+  const handleOpenDetectFlowsModal = () => setShowDetectFlowsModal(true);
+  // Same rule as the repeater below: opened from its own button there is no handover, so the id left
+  // behind by the last "Edit as flow" is cleared first rather than silently reopening that flow.
+  const handleOpenRequestFlowBuilderModal = () => {
+    setBuilderInitialFlowId(null);
+    setShowRequestFlowBuilderModal(true);
+  };
+  // Opened from its own button, so there is no handover: the pending id is cleared first, otherwise
+  // the id left behind by the last flow-view handover would be loaded again by a button that says
+  // nothing about it.
+  const handleOpenReplayRequestsModal = () => {
+    setRepeaterCaptureId(null);
+    setShowReplayRequestsModal(true);
+  };
+  const handleOpenRequestFlowsModal = () => setShowRequestFlowsModal(true);
+
+  // The handover, and the reason the tabbed modal was split. RequestFlowsModal calls this with the
+  // capture id of the node the operator selected; this closes the flow view, records the id and opens
+  // the repeater. All three in ONE commit, so ReplayRequestsModal mounts with show and
+  // initialCaptureId already set and its open effect hands the id straight to the pane. Setting the
+  // id after the open would be a commit where the repeater is showing with nothing to load.
+  //
+  // String() because the id ends up in a URL. The repeater treats an unchanged prop as "already
+  // loaded", so re-arming after a repeat handover of the same request is its job, not this one's.
+  const handleOpenCaptureInRepeater = (captureId) => {
+    if (!captureId) return;
+    setShowRequestFlowsModal(false);
+    setRepeaterCaptureId(String(captureId));
+    setShowReplayRequestsModal(true);
+  };
+  // The second handover, and the bridge from a detected flow to a branching one. RequestFlowsModal
+  // creates the built flow (POST /request-flow-builder/{target}/from-flow) and calls this with the
+  // new flow's id; this closes the flow view and opens the builder ALREADY LOOKING AT IT. Without
+  // it the operator is told a flow was built somewhere and left to go and find it, which is the
+  // friction the "Edit as flow" button exists to remove.
+  //
+  // All three set in one commit, for the same reason as the repeater handover above: the builder
+  // must mount with show and initialFlowId already set, or its open effect runs once with no id and
+  // resets the selection it was handed.
+  const handleEditDetectedFlowAsFlow = (flowId) => {
+    if (!flowId) return;
+    setShowRequestFlowsModal(false);
+    setBuilderInitialFlowId(String(flowId));
+    setShowRequestFlowBuilderModal(true);
+  };
   const handleOpenAuthFlowModal = (categoryKey) => {
     setAuthFlowCategory(categoryKey);
     setShowAuthFlowModal(true);
@@ -9304,6 +9445,157 @@ function App() {
                   </Col>
                 </Row>
 
+                {/* Its own row, directly under Starting Point. It was a third card up there and one
+                    button; it is five now, and squeezing them into a third of a row would have made
+                    Detect Flows - the only one of the five that SENDS TRAFFIC TO THE TARGET - a
+                    cramped button indistinguishable from the four that only read what is already
+                    recorded or decide what a later run is allowed to do. Full width also lets the
+                    description carry that warning. */}
+                <h4 className="text-secondary mb-3 fs-5 mt-4">HTTP Request Flows</h4>
+                <HelpMeLearn section="urlHttpRequestFlows" />
+                <Row className="mb-4">
+                  <Col md={12}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
+                      <Card.Body className="d-flex flex-column">
+                        <Card.Title className="text-danger mb-3">
+                          Request Flow Replay
+                        </Card.Title>
+                        <Card.Text className="text-white small fst-italic">
+                          Every request the crawl recorded, and what you can do with it. Send one back to the target byte for byte, editing it first if you want to. Open the whole flow it belonged to: the navigation, the redirects it followed and the requests the page issued, drawn as one graph you can click through. Chain requests into a flow of your own, passing values from one response into the next. Or go and find the routing the crawl never walked, by sending for it, with whichever verbs you choose - a dry run is there when you want to see what would go out first, and nothing you have excluded or marked out of scope is ever touched.
+                        </Card.Text>
+                        {/* Metrics and buttons in one bottom-pinned block, the same shape the
+                            Consolidate Attack Vectors card uses, so the label row sits the same
+                            distance above the buttons here as it does on every other card. */}
+                        <div className="mt-auto">
+                          {/* Four numbers, one per piece of work the five buttons below do, so the
+                              card says WHERE the work is instead of making the operator open five
+                              modals to find out. Read left to right they follow the buttons:
+                              Configure governs ENDPOINTS, Detect Flows produces FLOWS, the builder
+                              holds BUILT FLOWS, the repeater holds VERSIONS.
+
+                              A count that could not be read shows n/a, not 0. See FlowCardMetric. */}
+                          <Row className="text-center align-items-start mb-3">
+                            {/* The headline is what a run would SEND to, not what is selected.
+                                Selected is the total minus your own deselections and ignores every
+                                rail, so on a target whose corpus is mostly third-party hosts it
+                                reads as the whole corpus above a button that would touch a
+                                fortieth of it. The second line carries the total, and the third
+                                says what the difference is made of. */}
+                            <FlowCardMetric
+                              metric={flowCardMetrics?.endpoints}
+                              label="Endpoints"
+                              title="What Detect Flows would send to. Configure changes the selection; scope and your exclusions do the rest."
+                              sub={flowCardMetrics?.endpoints?.parts
+                                ? `of ${(flowCardMetrics.endpoints.parts.total || 0).toLocaleString()} discovered`
+                                : null}
+                              sub2={(() => {
+                                const p = flowCardMetrics?.endpoints?.parts;
+                                if (!p) return null;
+                                const held = [
+                                  p.deselected ? `${p.deselected.toLocaleString()} deselected` : '',
+                                  p.out_of_scope ? `${p.out_of_scope.toLocaleString()} out of scope` : '',
+                                  p.excluded ? `${p.excluded.toLocaleString()} excluded` : '',
+                                ].filter(Boolean);
+                                return held.length ? held.join(', ') : null;
+                              })()}
+                            />
+                            <FlowCardMetric
+                              metric={flowCardMetrics?.flows}
+                              label="Flows"
+                              title="Reconstructed from the captures this target has recorded."
+                              // The split is the point: a flow the active scanner found is a route
+                              // nobody browsed, and one found by both is the crawl and the scanner
+                              // agreeing. Shown only once active detection has produced something,
+                              // because "120 passive" on a target that has never run it is noise.
+                              sub={flowCardMetrics?.flows?.parts
+                                && (flowCardMetrics.flows.parts.active || flowCardMetrics.flows.parts.both)
+                                ? `${flowCardMetrics.flows.parts.active || 0} active, ${flowCardMetrics.flows.parts.both || 0} both`
+                                : null}
+                            />
+                            <FlowCardMetric
+                              metric={flowCardMetrics?.built_flows}
+                              label="Built Flows"
+                              title="Assembled by hand in the Request Flow Builder."
+                              // A built flow with no steps replays nothing, so the step count is what
+                              // says whether the flow is finished.
+                              sub={flowCardMetrics?.built_flows?.parts
+                                ? `${(flowCardMetrics.built_flows.parts.steps || 0).toLocaleString()} steps`
+                                : null}
+                            />
+                            <FlowCardMetric
+                              metric={flowCardMetrics?.versions}
+                              label="Versions"
+                              title="Saved request versions in the repeater."
+                              // Opening a capture in the repeater materialises its unmodified
+                              // original, so the headline counts rows the operator never typed. The
+                              // edit count is the one that reflects work done.
+                              sub={flowCardMetrics?.versions?.parts
+                                ? `${(flowCardMetrics.versions.parts.edited || 0).toLocaleString()} edited`
+                                : null}
+                            />
+                          </Row>
+                          <Row className="g-2">
+                            {/* First, and to the left of Detect Flows, because it is the screen that
+                                decides what Detect Flows may touch and what every request it sends
+                                carries. Reading the row left to right is the order the work happens
+                                in. Nothing behind this button sends a request. */}
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenFlowConfigureModal}
+                                disabled={!activeTarget}
+                              >
+                                Configure
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenDetectFlowsModal}
+                                disabled={!activeTarget}
+                              >
+                                Detect Flows
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenRequestFlowBuilderModal}
+                                disabled={!activeTarget}
+                              >
+                                Request Flow Builder
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenReplayRequestsModal}
+                                disabled={!activeTarget}
+                              >
+                                Replay Requests
+                              </Button>
+                            </Col>
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenRequestFlowsModal}
+                                disabled={!activeTarget}
+                              >
+                                Request Flows
+                              </Button>
+                            </Col>
+                          </Row>
+                        </div>
+                      </Card.Body>
+                    </Card>
+                  </Col>
+                </Row>
+
                 <h4 className="text-secondary mb-3 fs-5 mt-4">Authentication</h4>
                 <HelpMeLearn section="urlAuthentication" />
                 <Row className="mb-4">
@@ -11125,6 +11417,46 @@ function App() {
         handleClose={() => setShowAttackVectorsModal(false)}
         activeTarget={activeTarget}
         onChanged={loadAttackVectorCounts}
+      />
+
+      {/* The five Request Flow Replay modals. One tabbed modal until now; separate modals because
+          the flow view has to be able to hand a request to the repeater, and a tab cannot open
+          another tab without taking the first one's state down with it. */}
+      <FlowConfigureModal
+        show={showFlowConfigureModal}
+        handleClose={() => setShowFlowConfigureModal(false)}
+        activeTarget={activeTarget}
+      />
+
+      <DetectFlowsModal
+        show={showDetectFlowsModal}
+        handleClose={() => setShowDetectFlowsModal(false)}
+        activeTarget={activeTarget}
+      />
+
+      <RequestFlowBuilderModal
+        show={showRequestFlowBuilderModal}
+        handleClose={() => setShowRequestFlowBuilderModal(false)}
+        activeTarget={activeTarget}
+        initialFlowId={builderInitialFlowId}
+      />
+
+      {/* initialCaptureId is the receiving end of the handover. Not cleared on close: the modal
+          clears its own pending id when it hides, so clearing it here as well would be a second
+          state change racing the first, and the next open from a button clears it anyway. */}
+      <ReplayRequestsModal
+        show={showReplayRequestsModal}
+        handleClose={() => setShowReplayRequestsModal(false)}
+        activeTarget={activeTarget}
+        initialCaptureId={repeaterCaptureId}
+      />
+
+      <RequestFlowsModal
+        show={showRequestFlowsModal}
+        handleClose={() => setShowRequestFlowsModal(false)}
+        activeTarget={activeTarget}
+        onOpenInRepeater={handleOpenCaptureInRepeater}
+        onEditAsFlow={handleEditDetectedFlowAsFlow}
       />
 
       {/* Reloaded on close because saving a setting can change how many vectors are eligible: turning

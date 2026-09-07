@@ -3099,6 +3099,176 @@ func createTables() {
 			updated_at TIMESTAMP DEFAULT NOW(),
 			PRIMARY KEY (scope_target_id, tool)
 		);`,
+
+		// ACTIVE FLOW DETECTION. Three schema changes, and the first one is the reason the other two
+		// are allowed to exist.
+		//
+		// flow_detection_exclusions is the list of endpoints the scanner must never request. Active
+		// detection sends real traffic to a live bug bounty target, and this operator's own notes on
+		// one target record six endpoints that dispatch a one-time code to a REAL CUSTOMER when hit
+		// with an identifier that resolves. Nothing is pre-seeded: a seeded list would be a guess
+		// about somebody else's application and a wrong guess is bad in both directions.
+		//
+		// `reason` is NOT NULL and the API refuses a blank one. An exclusion nobody explained is an
+		// exclusion the next operator deletes, and what they delete here is the rule that stops the
+		// framework texting somebody's customers.
+		//
+		// UNIQUE on (scope_target_id, pattern) so adding the same rule twice updates the reason
+		// rather than producing two rows that report the same skip twice in the dry run.
+		`CREATE TABLE IF NOT EXISTS flow_detection_exclusions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			pattern TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT NOW(),
+			UNIQUE (scope_target_id, pattern)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_flow_detection_exclusions_target
+		   ON flow_detection_exclusions(scope_target_id, created_at);`,
+
+		// One row per active detection run: progress, the abort ladder's verdict, and the session its
+		// captures were written under. `status` carries 'cancelling' as well as the terminal states,
+		// because that is how a cancel reaches a runner whose in-memory latch is in another process.
+		`CREATE TABLE IF NOT EXISTS flow_detection_runs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			session_id UUID REFERENCES manual_crawl_sessions(id) ON DELETE SET NULL,
+			status VARCHAR(20) NOT NULL DEFAULT 'pending',
+			config JSONB NOT NULL DEFAULT '{}'::jsonb,
+			planned_count INTEGER NOT NULL DEFAULT 0,
+			sent_count INTEGER NOT NULL DEFAULT 0,
+			error_count INTEGER NOT NULL DEFAULT 0,
+			redirect_count INTEGER NOT NULL DEFAULT 0,
+			excluded_count INTEGER NOT NULL DEFAULT 0,
+			abort_reason TEXT,
+			last_error TEXT,
+			started_at TIMESTAMP,
+			completed_at TIMESTAMP,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_flow_detection_runs_target
+		   ON flow_detection_runs(scope_target_id, created_at DESC);`,
+
+		// Where a capture came from. 'passive' is the default and the backfill value because every row
+		// that predates this column was produced by the operator's own browser.
+		//
+		// A COLUMN, NOT A SECOND TABLE. The sitemap, the repeater, the capture query language and the
+		// flow segmenter all read manual_crawl_captures today; a parallel table for active results
+		// would mean a union in every one of them, and the first one somebody forgot would silently
+		// hide half the corpus.
+		`ALTER TABLE manual_crawl_captures
+		   ADD COLUMN IF NOT EXISTS capture_source TEXT NOT NULL DEFAULT 'passive';`,
+		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_source
+		   ON manual_crawl_captures(scope_target_id, capture_source);`,
+
+		// A run left mid-flight by a restart is not running any more, whatever its row says. Marked
+		// aborted rather than deleted: it sent real requests and wrote real captures, and the operator
+		// is entitled to see that it stopped and why.
+		`UPDATE flow_detection_runs
+		    SET status = 'aborted',
+		        abort_reason = COALESCE(abort_reason, 'the framework restarted while this run was in flight'),
+		        completed_at = COALESCE(completed_at, NOW())
+		  WHERE status IN ('pending','running','cancelling');`,
+
+		// ---------------------------------------------------------------------------------------
+		// FLOW CONFIG: which endpoints active detection may touch, and the engagement rules it
+		// sends under. Both tables belong to the Configure button on the Request Flow Replay card.
+		// ---------------------------------------------------------------------------------------
+
+		// DESELECTIONS, NOT SELECTIONS. This is the load-bearing decision in the whole feature and
+		// it is worth the paragraph.
+		//
+		// Every endpoint is selected by default and this table records only the ones the operator
+		// took OUT. The obvious alternative - a table of selected endpoint keys - is wrong in a way
+		// that is invisible on screen, which is the worst way for a security control to be wrong:
+		//
+		//   The operator opens Configure on a corpus of 400 endpoints, reviews them, and saves. Two
+		//   days later they crawl again and the corpus is 900. With a selections table, the 500 new
+		//   endpoints are absent from it, so they are not selected, so detection never touches them.
+		//   Nothing on the screen says so. The operator configured once, discovered more surface,
+		//   and quietly stopped scanning all of it - and the run still reports "completed".
+		//
+		// Storing the negative keeps the default correct as the corpus grows. A newly discovered
+		// endpoint has no row here, so it is selected, so it is scanned. The only endpoints skipped
+		// are the ones somebody explicitly said to skip, which is the only claim this table should
+		// ever be able to make.
+		//
+		// The same argument is why flow_detection_exclusions is a separate table rather than a flag
+		// on this one. An exclusion is a permanent "never send here, it texts customers" rule with a
+		// mandatory reason; a deselection is "not this run's problem" with no reason required. They
+		// are refused at different points and shown differently in the dry run, and collapsing them
+		// would make the cheap one able to silently delete the expensive one.
+		//
+		// endpoint_key is FlowEndpointKey (server/utils/flowEndpointSelection.go): METHOD|host[:port]|
+		// canonical-path, with NO query string, derived through the same CanonicalizeEndpoint the
+		// endpoint list uses so it survives a re-crawl. It is deliberately coarser than
+		// consolidated_url_endpoints.endpoint_key, which includes the identity query: detection
+		// strips query strings before sending, so fifty rows of /search?q=<fifty things> are ONE
+		// request and must be one row here. Keying on the finer identity would give the operator a
+		// deselect control that removes one of fifty identical requests and changes nothing.
+		`CREATE TABLE IF NOT EXISTS flow_endpoint_deselections (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+			endpoint_key TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT NOW(),
+			UNIQUE (scope_target_id, endpoint_key)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_flow_endpoint_deselections_target
+		   ON flow_endpoint_deselections(scope_target_id);`,
+
+		// PER-TARGET ENGAGEMENT RULES, with user_settings as the fallback rather than the only value.
+		//
+		// user_settings.custom_header and user_settings.custom_user_agent are global: one value
+		// across every target. That is wrong for bug bounty work, because each programme's brief
+		// demands something different. Three real examples from this operator's own targets:
+		//
+		//   DailyPay  requires X-HackerOne-DailyPay-Research: <handle> on EVERY request, or their
+		//             SOC reads the traffic as an attack.
+		//   Assurant  requires <H1-handle> APPENDED to an ordinary browser User-Agent, and caps the
+		//             whole engagement at 45 requests per minute.
+		//   Swan, Transmit  specify neither.
+		//
+		// With one global slot, switching targets means remembering to change it, and forgetting
+		// means sending traffic to a programme without the header its brief calls mandatory. In
+		// practice every script written against these targets hardcoded the header, because there
+		// was nowhere else to put it.
+		//
+		// EVERY COLUMN IS NULLABLE AND NULL MEANS "INHERIT". That is what makes provenance
+		// answerable: ResolveEngagementConfig can say per field whether the value came from this
+		// target, from the global settings, or from the built-in default, and a config screen that
+		// cannot tell you where a value came from is one you stop trusting. It is also why the PUT
+		// is written with COALESCE on absent fields: a partial update must not wipe the columns it
+		// did not mention. Clearing an override is the separate DELETE .../engagement/{field}.
+		//
+		// user_agent_mode exists because the two shapes above are genuinely different. 'replace'
+		// means custom_user_agent IS the User-Agent; 'append' means it is a tag glued onto the end
+		// of the inherited one, which is the only way to express Assurant's rule.
+		//
+		// send_cookies DEFAULTS FALSE and the API refuses to set it true without an explicit
+		// acknowledge_state_risk in the same request. A scanner carrying the operator's session acts
+		// AS the authenticated user: it can change state, and on some of these targets it can
+		// dispatch a one-time code to a real customer. Active flow detection ignores this column
+		// outright - it has no cookie jar and never will - and it is stored for the senders that DO
+		// carry a session, so that the acknowledgement is recorded per target rather than per click.
+		`CREATE TABLE IF NOT EXISTS scope_target_engagement_config (
+			scope_target_id UUID PRIMARY KEY REFERENCES scope_targets(id) ON DELETE CASCADE,
+			custom_header_name TEXT,
+			custom_header_value TEXT,
+			custom_user_agent TEXT,
+			user_agent_mode TEXT,
+			max_rps NUMERIC,
+			max_requests_per_run INTEGER,
+			request_timeout_s INTEGER,
+			max_redirects INTEGER,
+			follow_redirects BOOLEAN,
+			send_cookies BOOLEAN NOT NULL DEFAULT FALSE,
+			programme_notes TEXT,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW(),
+			CONSTRAINT scope_target_engagement_user_agent_mode
+				CHECK (user_agent_mode IS NULL OR user_agent_mode IN ('replace','append'))
+		);`,
 	}
 
 	for _, query := range queries {

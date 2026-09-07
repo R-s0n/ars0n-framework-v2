@@ -12,42 +12,73 @@ import (
 	"time"
 )
 
-// The single door every request issued by Validate and Investigate goes through.
-//
-// This exists because of a live defect. investigateEndpoint passed the verb recorded during the
-// manual crawl straight into http.NewRequest with the captured credentials applied, so pressing
-// Investigate on a target whose crawl captured `DELETE /api/keys/7` sent a real, authenticated
-// DELETE to the target. The same shape would have applied to POST /invoices/{id}/send.
-//
-// Making that a convention ("we only send GET") is not enough, because the next person adds a call
-// site. It is enforced here: the caller never constructs an *http.Request, so the verb allowlist
-// and the no-body rule cannot be worked around without deleting this file.
+// The single door every request issued by Validate, Investigate and active flow detection goes
+// through. Scope, pacing and redirect handling are enforced here so no call site has to remember
+// them: a rule every call site has to remember is a rule that leaks.
 //
 // Redirects are never followed. A 302 to /login is the single most useful observation Validate
 // makes, and a client that follows it reports 200 and destroys the evidence.
 
-// The only verbs this framework will send at a target during validation or investigation. All
-// three are defined as safe or idempotent by RFC 9110 and none of them carry a body here.
+// scanSendableMethods is what this transport will put on the wire. The full set: the operator
+// chooses the verb, and a scanner that cannot send a POST cannot reach most of the surface worth
+// testing.
+//
+// Unknown verbs are still refused. That is not a policy, it is a typo check: "GTE" would otherwise
+// become a run's worth of 405s recorded as if the endpoints had been tested.
+var scanSendableMethods = map[string]bool{
+	http.MethodGet:     true,
+	http.MethodHead:    true,
+	http.MethodOptions: true,
+	http.MethodPost:    true,
+	http.MethodPut:     true,
+	http.MethodPatch:   true,
+	http.MethodDelete:  true,
+}
+
+// allowedScanMethods is the safe/idempotent subset, per RFC 9110.
+//
+// THIS IS NOT THE TRANSPORT'S LIMIT. The transport sends scanSendableMethods above. This map is the
+// policy that two OTHER subsystems apply to themselves, and both have a specific reason:
+//
+//	endpointInvestigationUtils.go  downgrades a recorded verb to GET and records VerbNotReplayed.
+//	                              It applies captured credentials, and it is the original defect:
+//	                              a crawl that captured `DELETE /api/keys/7` sent a real,
+//	                              authenticated DELETE. Investigate characterises a verb, it does
+//	                              not replay one.
+//	bypassControl.go              refuses to judge a candidate whose verb is not safe, because a
+//	                              POST answering 2xx means the application accepted a new request,
+//	                              not that a refused resource was reached.
+//
+// Widening this map would silently re-arm both. Detection's verb set is chosen in
+// flowDetectionActive.go and enforced by scanSendableMethods; leave this one alone.
 var allowedScanMethods = map[string]bool{
 	http.MethodGet:     true,
 	http.MethodHead:    true,
 	http.MethodOptions: true,
 }
 
-// ErrMethodNotAllowed is returned rather than silently downgrading to GET. A caller that asked for
-// DELETE has a bug, and quietly turning it into a GET hides it.
-var ErrMethodNotAllowed = fmt.Errorf("scanHTTP: only GET, HEAD and OPTIONS may be sent at a target")
+// ErrMethodNotAllowed is returned rather than silently downgrading to GET. A caller that asked for a
+// verb this transport does not know has a bug, and quietly turning it into a GET hides it.
+var ErrMethodNotAllowed = fmt.Errorf(
+	"scanHTTP: method must be one of GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE")
 
 const (
 	scanMaxBodyBytes  = 2 << 20 // 2 MB decoded; enough for any page worth analysing
 	scanBodySampleCap = 8 << 10 // what is retained on stored evidence samples
 )
 
-// ScanRequest is what a call site may ask for. There is no body field, by construction.
+// ScanRequest is what a call site may ask for.
 type ScanRequest struct {
 	URL     string
 	Method  string
 	Headers map[string]string
+	// Body is sent as-is when non-empty, with Content-Length set from its length. Empty means no
+	// body and no Content-Length header, so a plain GET stays a plain GET.
+	//
+	// Set Content-Type in Headers when the body needs one. Nothing here guesses it: a JSON body
+	// posted as application/x-www-form-urlencoded gets a 400 that looks like the endpoint rejecting
+	// the request rather than the sender mislabelling it.
+	Body string
 	// Credentials are applied by the caller's ScopedAuthContext, never guessed here.
 	Auth *ScopedAuthMaterial
 	// Timeout overrides the client default for one request, used when the probe reported a tarpit.
@@ -146,7 +177,7 @@ func (c *ScanClient) Do(ctx context.Context, req ScanRequest) ScanResponse {
 	}
 	out := ScanResponse{URL: req.URL, Method: method}
 
-	if !allowedScanMethods[method] {
+	if !scanSendableMethods[method] {
 		out.Err = ErrMethodNotAllowed
 		return out
 	}
@@ -180,11 +211,26 @@ func (c *ScanClient) Do(ctx context.Context, req ScanRequest) ScanResponse {
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Body is nil, always. There is no code path here that can carry one.
-	httpReq, err := http.NewRequestWithContext(reqCtx, method, req.URL, nil)
+	// A nil body when there is nothing to send, so a GET does not acquire a Content-Length: 0 that
+	// the recorded request never had. http.NewRequestWithContext derives ContentLength from a
+	// *strings.Reader; it is set again below so the value is explicit rather than inferred, and so a
+	// stale Content-Length in req.Headers cannot contradict the bytes actually being written.
+	var bodyReader io.Reader
+	if req.Body != "" {
+		bodyReader = strings.NewReader(req.Body)
+	}
+	httpReq, err := http.NewRequestWithContext(reqCtx, method, req.URL, bodyReader)
 	if err != nil {
 		out.Err = err
 		return out
+	}
+	if req.Body != "" {
+		httpReq.ContentLength = int64(len(req.Body))
+		// GetBody lets the transport rebuild the body if it has to retry the request.
+		body := req.Body
+		httpReq.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(body)), nil
+		}
 	}
 
 	httpReq.Header.Set("User-Agent", c.userAgent)

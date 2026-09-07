@@ -308,9 +308,40 @@ func (s *ScanScope) Refused() map[string]int {
 }
 
 // Describe renders the boundary for the operator, so "why was this skipped" has an answer on screen.
+//
+// AUTHORED RULES ARE RENDERED FIRST AND ALONE when there are any, because that is what Allows()
+// actually decides on: rules REPLACE primary/domains/extra rather than adding to them (see the
+// struct comment on the rules field, and the early return in Allows). Rendering the replaced fields
+// while the rules are the live boundary describes a boundary that is not in force.
+//
+// That is not cosmetic. Active flow detection puts this string in front of the operator as the
+// `scope_boundary` of a DRY RUN they are about to approve, next to the list of endpoints the run
+// would request. On a real target here, one authored rule (~dailypay, blast wide) admits
+// account.dailypaystaging.com, while the old rendering claimed the boundary was "*.dailypay.com,
+// app.dailypay.com". An operator reconciling that list against that boundary sees a scanner
+// apparently escaping scope and stops trusting the one control that matters, or - worse - assumes
+// the narrower string is real and approves a run wider than they believe.
 func (s *ScanScope) Describe() string {
 	if s == nil {
 		return "unrestricted"
+	}
+	if len(s.rules) > 0 {
+		// Only ENABLED rules, because DecideScope skips the rest. Listing a disabled rule here would
+		// be the same defect this branch exists to fix, one level down.
+		texts := make([]string, 0, len(s.rules))
+		for _, r := range s.rules {
+			if r.Enabled {
+				texts = append(texts, CanonicalScopeText(r))
+			}
+		}
+		if len(texts) == 0 {
+			// Rules exist but every one is switched off. Allows() still takes the rules branch and
+			// DecideScope matches nothing, so the boundary really is empty - which is worth saying
+			// out loud rather than falling through to a legacy list that is no longer consulted.
+			return "nothing (every authored scope rule is disabled)"
+		}
+		sort.Strings(texts)
+		return "authored scope rules: " + strings.Join(texts, ", ")
 	}
 	var parts []string
 	if s.primary != "" {
