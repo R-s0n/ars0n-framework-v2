@@ -255,13 +255,14 @@ export const urlWorkflowLessons = {
         content: [
           "There are two ways to start: empty, or by copying a detected flow in as editable steps. The second is the one that actually gets used, because retyping a login by hand when the crawl already recorded it is work for nothing.",
           "The point of a built flow is the wiring. A step can capture a value out of its response, from the body, a header, or a cookie, and a later step references it with a placeholder. That is how a CSRF token minted in step one reaches the POST in step two, and how an identifier the application invented in step two reaches the request in step four. Without it a hand-built flow is just four requests that happen to be next to each other.",
-          "A placeholder whose value never arrives is the classic silent failure: step two's capture does not fire, step three sends the literal placeholder text, and the target answers with something plausible. So an unresolved reference is reported on the step, naming the step that was supposed to produce the value, while you are still typing, and the send is refused rather than made. Steps seeded from captures that change state arrive disarmed for a related reason: a captured body carries a real identifier, and replaying one can mean the application texts or emails a real person."
+          "A placeholder whose value never arrives is the classic silent failure: step two's capture does not fire, step three sends the literal placeholder text, and the target answers with something plausible. So an unresolved reference is reported on the step, naming the step that was supposed to produce the value, while you are still typing, and the send is refused rather than made.",
+          "Every seeded step arrives ON, exactly as it was recorded, whatever verb it uses. A flow whose POST arrived switched off is a flow that proves nothing when it passes, so the decision is yours: read the steps, and turn off the ones you do not want sent. The switch on each step is the control, and it is honoured on every run."
         ],
         keyPoints: [
           "Seed from a detected flow rather than retyping a login",
           "A step captures a value; a later step references it by placeholder",
           "An unresolved placeholder is named before the run, not discovered after it",
-          "Seeded state-changing steps start disarmed until a human arms them"
+          "Seeded steps arrive on; the per-step switch is yours to turn off"
         ]
       },
       {

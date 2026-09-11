@@ -24,21 +24,15 @@ import { Modal, Button, Form, InputGroup, Spinner, Badge, OverlayTrigger, Toolti
 //      was supposed to produce the value. buildVariableModel is that analysis and it runs over the
 //      LIVE editor buffer, so the warning appears while the placeholder is still being typed.
 //
-//   2. A SEEDED STATE-CHANGING STEP STAYS DISARMED UNTIL A HUMAN ARMS IT. Seeding copies captured
-//      request bodies verbatim, and a captured body carries a real identifier: on some endpoints
-//      replaying one means the application texts or emails a real person. The server disarms them
-//      and says how many; this screen puts that number in front of the operator rather than in a
-//      toast, and marks every disarmed step in the list.
-//
-//   3. WHAT IS IN THE EDITOR IS WHAT GETS SAVED. Nothing here reformats, re-orders headers or trims
+//   2. WHAT IS IN THE EDITOR IS WHAT GETS SAVED. Nothing here reformats, re-orders headers or trims
 //      whitespace. The one exception is the line terminator, because a browser textarea normalises
 //      every terminator in its value to a bare LF; handleBufferChange puts the CRs back to match the
 //      style the step was loaded with. Same rule, and the same reason, as the repeater.
 //
-//   4. UNSAVED BYTES ARE NOT THROWN AWAY BY A CLICK. Selecting another step, another flow, or
+//   3. UNSAVED BYTES ARE NOT THROWN AWAY BY A CLICK. Selecting another step, another flow, or
 //      closing the modal with an edited buffer asks first.
 //
-//   5. A FLOW THAT CAN LOOP SAYS SO BEFORE IT RUNS, AND A RUN THAT LOOPED SAYS WHY IT STOPPED.
+//   4. A FLOW THAT CAN LOOP SAYS SO BEFORE IT RUNS, AND A RUN THAT LOOPED SAYS WHY IT STOPPED.
 //      Conditions turn a straight line into a decision tree, and a goto that points backwards is a
 //      loop. A loop against a live programme is a denial of service, which is out of scope on every
 //      programme this framework is pointed at. So: the graph is walked at AUTHORING time and a cycle
@@ -253,13 +247,6 @@ function parseRequestLine(raw) {
   const method = (bits[0] || '').toUpperCase();
   const target = bits[1] || '';
   return { method, target };
-}
-
-// The server's rule, by verb and not by path heuristics: guessing which GET changes state costs the
-// operator a working step, while treating every POST as harmless costs somebody a text message.
-function isStateChanging(raw) {
-  const { method } = parseRequestLine(raw);
-  return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
 }
 
 // Every distinct {{af:NAME}} in these bytes, in the order they first appear.
@@ -1172,7 +1159,7 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
   const [baseUrl, setBaseUrl] = useState('');
   const [loadedBaseUrl, setLoadedBaseUrl] = useState('');
 
-  // Action feedback. `notice` is what the server said (the disarmed-step count, the replay note);
+  // Action feedback. `notice` is what the server said (the seed summary, the replay note);
   // `actionError` is what went wrong. Both are dismissible and neither is an alert.
   const [notice, setNotice] = useState('');
   const [actionError, setActionError] = useState('');
@@ -1190,7 +1177,6 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
   const [seedFlowId, setSeedFlowId] = useState(null);
   const [seedName, setSeedName] = useState('');
   const [seedIncludeAll, setSeedIncludeAll] = useState(false);
-  const [seedArmWrites, setSeedArmWrites] = useState(false);
   const detectedSeq = useRef(0);
 
   // Capture picker.
@@ -1301,7 +1287,6 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
     const hosts = Array.from(new Set(sendable.map((row) => row.host).filter(Boolean))).sort();
     return {
       willSend: sendable.length,
-      writes: sendable.filter((row) => row.state_changing).length,
       skipped: rows.length - sendable.length,
       outOfScope: rows.filter((row) => !row.in_scope).length,
       hosts,
@@ -1435,7 +1420,6 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
     setSeedFlowId(null);
     setSeedName('');
     setSeedIncludeAll(false);
-    setSeedArmWrites(false);
     setCaptures([]);
     setCaptureQuery('');
     if (show && targetId) loadFlows();
@@ -1569,18 +1553,15 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
       flow_id: seedFlowId,
       name: seedName.trim(),
       include_all: seedIncludeAll,
-      arm_write_steps: seedArmWrites,
     }));
     setMode('build');
     setSeedFlowId(null);
     setSeedName('');
     setSeedIncludeAll(false);
-    setSeedArmWrites(false);
     setCreating(false);
     setNewFlowName('');
     setSelectedStepId(null);
-    // The server's note is the disarmed-step count and the reason for it. It is the single most
-    // important sentence this screen ever shows, so it goes on screen and stays until dismissed.
+    // Whatever the server says about the seed goes on screen and stays until dismissed.
     setNotice((data && data.note) || 'Flow copied in. Every step is editable.');
     await loadFlows(data && data.flow && data.flow.id);
   });
@@ -1643,31 +1624,24 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
       setMode('build');
       await loadFlowDetail(selectedFlowId);
       selectNewStep(data && data.step);
-      // Says so when the step arrived turned off, and why. Without it, "I added the login POST and
-      // the replay did nothing" is what the safety default looks like from the outside.
-      setNotice((data && data.note) || '');
+      setNotice('');
     });
   };
 
   const duplicateStep = (step) => {
     if (!confirmDiscard()) return;
-    // The copy of a state-changing step arrives DISARMED even when the original was armed. Duplicate
-    // is a gesture about editing, not about sending, and a click that silently doubles the number of
-    // POSTs a replay makes is not what anybody meant by it.
-    const stateChanging = isStateChanging(step.raw_request);
+    // The copy inherits the original's on/off state verbatim. That switch is the operator's, and a
+    // duplicate that quietly changed it would be this screen editing their flow behind their back.
     run('duplicate', async () => {
       const data = await apiJSON(`${BUILDER}/flow/${selectedFlowId}/steps`, jsonPost({
         name: `${step.name || 'step'} (copy)`,
         raw_request: step.raw_request,
         extractions: step.extractions || [],
-        enabled: step.enabled && !stateChanging,
+        enabled: step.enabled,
       }));
       await loadFlowDetail(selectedFlowId);
       selectNewStep(data && data.step);
-      setNotice(stateChanging
-        ? 'The copy was added at the END of the flow, turned OFF because it is a state-changing '
-          + 'request. Move it where you want it, and turn it on once you have read it.'
-        : 'The copy was added at the END of the flow. Move it where you want it.');
+      setNotice('The copy was added at the END of the flow. Move it where you want it.');
     });
   };
 
@@ -2033,7 +2007,6 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
     const inCycle = (conditionModel.cyclesByStep.get(step.id) || EMPTY_RULES).length > 0;
     const preview = previewByStep.get(step.id);
     const outOfScope = preview && !preview.in_scope;
-    const stateChanging = isStateChanging(step.raw_request);
     return (
       <div
         key={step.id}
@@ -2131,18 +2104,6 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
           )}
           {outOfScope && (
             <Badge bg="danger" style={{ fontSize: '0.56rem' }}>out of scope</Badge>
-          )}
-          {stateChanging && (
-            <Badge
-              bg={step.enabled ? 'danger' : 'dark'}
-              className={step.enabled ? '' : 'border border-secondary text-white-50'}
-              style={{ fontSize: '0.56rem' }}
-              title={step.enabled
-                ? 'Armed and state-changing. Replaying this sends the body it carries.'
-                : 'State-changing and turned off, which is how it was seeded.'}
-            >
-              {method}
-            </Badge>
           )}
           {step.source_capture_id && (
             <Badge bg="dark" className="border border-secondary text-white-50" style={{ fontSize: '0.56rem' }}>
@@ -2259,7 +2220,7 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
               variant="outline-secondary"
               disabled={!selectedStep || busy === 'duplicate'}
               onClick={() => selectedStep && duplicateStep(selectedStep)}
-              title="Copy this step to the end of the flow. A state-changing copy arrives turned off."
+              title="Copy this step to the end of the flow."
             >
               <i className="bi bi-files" />
             </Button>
@@ -3216,28 +3177,6 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
             requests. On, it also brings in the images, stylesheets and fonts, which is usually noise.
           </div>
 
-          {/* The safety default, stated rather than implied. Off means every seeded POST, PUT, PATCH
-              and DELETE arrives turned off, which is the whole reason importing a real flow is safe. */}
-          <div
-            className="border rounded p-2 mb-2"
-            style={{ borderColor: seedArmWrites ? '#dc3545' : '#495057', backgroundColor: seedArmWrites ? '#2b1215' : 'transparent' }}
-          >
-            <Form.Check
-              type="switch"
-              id="rfb-arm-writes"
-              className={seedArmWrites ? 'text-danger' : 'text-white-50'}
-              style={{ fontSize: '0.73rem' }}
-              label="Arm the state-changing steps"
-              checked={seedArmWrites}
-              onChange={(e) => setSeedArmWrites(e.target.checked)}
-            />
-            <div className={seedArmWrites ? 'text-warning mt-1' : 'text-white-50 mt-1'} style={{ fontSize: '0.66rem' }}>
-              {seedArmWrites
-                ? 'Every seeded POST, PUT, PATCH and DELETE will arrive ARMED, carrying the body that was recorded. A recorded body holds a real identifier, and on some endpoints replaying one makes the application text or email a real person. Read each step before replaying the flow.'
-                : 'Leave this off. Seeded POST, PUT, PATCH and DELETE steps arrive turned OFF because they carry the body that was recorded, and that body holds a real identifier. Turn on the ones you mean to send, one at a time, after reading them.'}
-            </div>
-          </div>
-
           <Button
             variant="danger"
             disabled={!seedFlowId || busy === 'seed'}
@@ -3270,8 +3209,7 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
         <div className="ms-3">
           <div className="text-light" style={{ fontSize: '0.85rem' }}>Add a step from a recorded request</div>
           <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
-            The request's bytes are copied to the end of the flow. A POST, PUT, PATCH or DELETE
-            arrives turned off, because it carries the body that was recorded.
+            The request's bytes are copied to the end of the flow, exactly as they were recorded.
           </div>
         </div>
       </div>
@@ -3467,11 +3405,6 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
         {/* What the button will do, spelled out next to it rather than discovered afterwards. */}
         <span className="text-white-50" style={{ fontSize: '0.72rem' }}>
           sends <strong className="text-light">{sendSummary.willSend}</strong> of {steps.length} step(s)
-          {sendSummary.writes > 0 && (
-            <span className="text-danger ms-1">
-              · {sendSummary.writes} state-changing
-            </span>
-          )}
           {sendSummary.skipped > 0 && <span className="ms-1">· {sendSummary.skipped} skipped</span>}
           {sendSummary.hosts.length > 0 && <span className="ms-1">· {sendSummary.hosts.join(', ')}</span>}
         </span>

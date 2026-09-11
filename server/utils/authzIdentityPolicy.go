@@ -157,6 +157,38 @@ const authzIdentityCategoryRank = `CASE category
 	WHEN 'signed_token' THEN 1
 	ELSE 2 END`
 
+// decodeAuthzResponseHeaders accepts both header shapes this field has to live with: the
+// map[string][]string that net/http produces, and the flat {"name": "value"} that every stored
+// manual-crawl capture holds. Accepting only the former made the obvious translation from a capture
+// fail the entire request with "Invalid request body", an error that names the body rather than the
+// one field at fault, so the caller reasonably concludes the whole payload is wrong.
+func decodeAuthzResponseHeaders(raw []byte) (map[string][]string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return map[string][]string{}, nil
+	}
+	var loose map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &loose); err != nil {
+		return nil, err
+	}
+	out := make(map[string][]string, len(loose))
+	for name, val := range loose {
+		var list []string
+		if err := json.Unmarshal(val, &list); err == nil {
+			out[name] = list
+			continue
+		}
+		var single string
+		if err := json.Unmarshal(val, &single); err == nil {
+			out[name] = []string{single}
+			continue
+		}
+		// A number, bool or nested object is kept as its literal JSON rather than dropped. A header
+		// the operator can still read is worth more than one that vanished on a type mismatch.
+		out[name] = []string{string(val)}
+	}
+	return out, nil
+}
+
 func scanAuthzIdentityPattern(row interface{ Scan(...interface{}) error }) (AuthzIdentityPattern, error) {
 	var p AuthzIdentityPattern
 	var headersJSON []byte
@@ -166,7 +198,14 @@ func scanAuthzIdentityPattern(row interface{ Scan(...interface{}) error }) (Auth
 		return p, err
 	}
 	if len(headersJSON) > 0 {
-		_ = json.Unmarshal(headersJSON, &p.ResponseHeaders)
+		// Previously the error here was discarded, so a row stored in the flat shape came back with
+		// nil headers while the database still held them: evidence present but invisible.
+		headers, err := decodeAuthzResponseHeaders(headersJSON)
+		if err != nil {
+			log.Printf("[WARN] Identity pattern %s has unparsable response_headers, returning it without them: %v", p.ID, err)
+		} else {
+			p.ResponseHeaders = headers
+		}
 	}
 	return p, nil
 }
@@ -211,15 +250,15 @@ func CreateAuthzIdentityPattern(w http.ResponseWriter, r *http.Request) {
 		Name               string              `json:"name"`
 		Category           string              `json:"category"`
 		Description        string              `json:"description"`
-		RawRequest         string              `json:"raw_request"`
-		ResponseStatus     *int                `json:"response_status"`
-		ResponseHeaders    map[string][]string `json:"response_headers"`
-		ResponseBody       string              `json:"response_body"`
-		ResponseTimeMs     *float64            `json:"response_time_ms"`
-		IdentifierLocation string              `json:"identifier_location"`
-		IdentifierName     string              `json:"identifier_name"`
-		IdentifierValue    string              `json:"identifier_value"`
-		Notes              string              `json:"notes"`
+		RawRequest         string          `json:"raw_request"`
+		ResponseStatus     *int            `json:"response_status"`
+		ResponseHeaders    json.RawMessage `json:"response_headers"`
+		ResponseBody       string          `json:"response_body"`
+		ResponseTimeMs     *float64        `json:"response_time_ms"`
+		IdentifierLocation string          `json:"identifier_location"`
+		IdentifierName     string          `json:"identifier_name"`
+		IdentifierValue    string          `json:"identifier_value"`
+		Notes              string          `json:"notes"`
 		// Replay sends the pasted request straight away so the record starts out with a real
 		// response instead of an empty one.
 		Replay bool `json:"replay"`
@@ -241,10 +280,12 @@ func CreateAuthzIdentityPattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if payload.ResponseHeaders == nil {
-		payload.ResponseHeaders = map[string][]string{}
+	headers, hErr := decodeAuthzResponseHeaders(payload.ResponseHeaders)
+	if hErr != nil {
+		http.Error(w, "Invalid response_headers: expected an object mapping header names to a string or a list of strings", http.StatusBadRequest)
+		return
 	}
-	headersJSON, _ := json.Marshal(payload.ResponseHeaders)
+	headersJSON, _ := json.Marshal(headers)
 
 	id := uuid.New().String()
 	_, err := dbPool.Exec(context.Background(),
@@ -278,15 +319,26 @@ func UpdateAuthzIdentityPattern(w http.ResponseWriter, r *http.Request) {
 
 	// Pointers throughout so the client can send only the fields it touched. That matters most for
 	// identifier_location, where the empty string is a real value and cannot mean "leave alone".
+	//
+	// The four response_* fields have to be here as well as on create. A caller that creates a
+	// minimal record and then fills in the heavy evidence with an update is doing the obvious thing
+	// when a create is too large to send in one go, and until these were accepted that update
+	// dropped the response silently and still answered {"updated": true}. The record then rendered
+	// as a populated row carrying a status and no body, which is worse than an empty section
+	// because it looks finished.
 	var payload struct {
-		Name               *string `json:"name"`
-		Category           *string `json:"category"`
-		Description        *string `json:"description"`
-		RawRequest         *string `json:"raw_request"`
-		IdentifierLocation *string `json:"identifier_location"`
-		IdentifierName     *string `json:"identifier_name"`
-		IdentifierValue    *string `json:"identifier_value"`
-		Notes              *string `json:"notes"`
+		Name               *string              `json:"name"`
+		Category           *string              `json:"category"`
+		Description        *string              `json:"description"`
+		RawRequest         *string              `json:"raw_request"`
+		ResponseStatus     *int            `json:"response_status"`
+		ResponseHeaders    json.RawMessage `json:"response_headers"`
+		ResponseBody       *string         `json:"response_body"`
+		ResponseTimeMs     *float64        `json:"response_time_ms"`
+		IdentifierLocation *string         `json:"identifier_location"`
+		IdentifierName     *string         `json:"identifier_name"`
+		IdentifierValue    *string         `json:"identifier_value"`
+		Notes              *string         `json:"notes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -304,6 +356,28 @@ func UpdateAuthzIdentityPattern(w http.ResponseWriter, r *http.Request) {
 		clean := sanitizeForPostgres(*payload.RawRequest)
 		payload.RawRequest = &clean
 	}
+	if payload.ResponseBody != nil {
+		clean := sanitizeForPostgres(*payload.ResponseBody)
+		payload.ResponseBody = &clean
+	}
+
+	// Marshal only when the caller actually sent the field, so an untouched update leaves the
+	// stored headers alone rather than overwriting them with an empty object.
+	var headersJSON *string
+	if len(payload.ResponseHeaders) > 0 && string(payload.ResponseHeaders) != "null" {
+		headers, hErr := decodeAuthzResponseHeaders(payload.ResponseHeaders)
+		if hErr != nil {
+			http.Error(w, "Invalid response_headers: expected an object mapping header names to a string or a list of strings", http.StatusBadRequest)
+			return
+		}
+		encoded, mErr := json.Marshal(headers)
+		if mErr != nil {
+			http.Error(w, "Invalid response_headers", http.StatusBadRequest)
+			return
+		}
+		s := string(encoded)
+		headersJSON = &s
+	}
 
 	result, err := dbPool.Exec(context.Background(),
 		`UPDATE authz_identity_patterns SET
@@ -311,13 +385,18 @@ func UpdateAuthzIdentityPattern(w http.ResponseWriter, r *http.Request) {
 		   category = COALESCE($2, category),
 		   description = COALESCE($3, description),
 		   raw_request = COALESCE($4, raw_request),
-		   identifier_location = COALESCE($5, identifier_location),
-		   identifier_name = COALESCE($6, identifier_name),
-		   identifier_value = COALESCE($7, identifier_value),
-		   notes = COALESCE($8, notes),
+		   response_status = COALESCE($5, response_status),
+		   response_headers = COALESCE($6::jsonb, response_headers),
+		   response_body = COALESCE($7, response_body),
+		   response_time_ms = COALESCE($8, response_time_ms),
+		   identifier_location = COALESCE($9, identifier_location),
+		   identifier_name = COALESCE($10, identifier_name),
+		   identifier_value = COALESCE($11, identifier_value),
+		   notes = COALESCE($12, notes),
 		   updated_at = NOW()
-		 WHERE id = $9`,
+		 WHERE id = $13`,
 		payload.Name, payload.Category, payload.Description, payload.RawRequest,
+		payload.ResponseStatus, headersJSON, payload.ResponseBody, payload.ResponseTimeMs,
 		payload.IdentifierLocation, payload.IdentifierName, payload.IdentifierValue,
 		payload.Notes, id)
 	if err != nil {

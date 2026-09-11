@@ -21,8 +21,10 @@ import "time"
 //     webhook. This is a deliberate reversal: it used to run a template this project wrote, which
 //     meant maintaining a scanner inside somebody else's fuzzing engine, and the two defects that
 //     produced are recorded in redirectProbe.go. Upstream's templates are curated by
-//     ProjectDiscovery, updated by `nuclei -update-templates`, and each reports under its own id and
-//     its own severity, so a finding says which class of bug was proved.
+//     ProjectDiscovery and each reports under its own id and its own severity, so a finding says
+//     which class of bug was proved. The corpus is PINNED at image build time (nuclei-templates
+//     v10.4.7) rather than fetched by `nuclei -update-templates`, so detection coverage no longer
+//     changes underneath a scan; moving it is a deliberate rebuild.
 //  3. SSRFmap weaponises whatever the two above confirmed. It has no detection step anywhere in its
 //     core: it takes a raw request and a parameter name and runs EXPLOITATION modules (readfiles,
 //     redis, mysql, postgres, smbhash, fastcgi, tomcat, portscan, networkscan) against a parameter

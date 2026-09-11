@@ -27,7 +27,11 @@ import (
 var (
 	gauBaseForTest = []string{
 		"docker", "run", "--rm",
-		"sxcurity/gau:latest",
+		// gau is pinned by digest rather than by tag because the repository publishes only "latest",
+		// so there is no version tag to name. This is the digest that tag resolves to, which means the
+		// image is the same one the runner used when this fixture said :latest, and the byte-identical
+		// guarantee below still covers every flag.
+		"sxcurity/gau@sha256:e5ad95a6fce296e671b83039d84fc0629afd320cc05ac91972ce83b4ac18b862",
 		"example.com",
 		"--providers", "wayback",
 		"--json",
@@ -39,7 +43,8 @@ var (
 	}
 	gauRetryBaseForTest = []string{
 		"docker", "run", "--rm",
-		"sxcurity/gau:latest",
+		// Must be the identical digest to gauBaseForTest: the retry varies the flags, not the binary.
+		"sxcurity/gau@sha256:e5ad95a6fce296e671b83039d84fc0629afd320cc05ac91972ce83b4ac18b862",
 		"example.com",
 		"--providers", "wayback,otx,urlscan",
 		"--subs",

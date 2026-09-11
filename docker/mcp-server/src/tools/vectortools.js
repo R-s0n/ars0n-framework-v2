@@ -285,6 +285,27 @@ const manageLeakSchema = buildSchema(LEAK_TOOLS, ['candidate_endpoints']);
 const manageGitSchema = buildSchema(GIT_TOOLS, ['candidate_endpoints', 'git_endpoints']);
 const manageMiscSchema = buildSchema(MISC_TOOLS, ['upload_candidates', 'found_jwts']);
 
+// The same twelve sections keyed by the category segment their routes live under, exported so other
+// tools can walk them without keeping a second copy. requestflows.js needs it to find a finding by
+// id: /{category}/{target}/{tool}/results is the only route that returns a finding's raw request,
+// and there is no route that resolves a finding id on its own, so a search has to know every
+// (category, tool) pair that exists. A duplicated list would drift the first time a tool is added
+// here and the finding lookup would then quietly stop finding that tool's results.
+const VECTOR_SECTIONS = {
+  xss: XSS_TOOLS,
+  sqli: SQLI_TOOLS,
+  cmdi: CMDI_TOOLS,
+  'redirect-ssrf': REDIRECT_TOOLS,
+  lfi: LFI_TOOLS,
+  cache: CACHE_TOOLS,
+  smuggling: SMUGGLING_TOOLS,
+  'access-bypass': BYPASS_TOOLS,
+  graphql: GRAPHQL_TOOLS,
+  'sensitive-leak': LEAK_TOOLS,
+  'exposed-git': GIT_TOOLS,
+  misc: MISC_TOOLS,
+};
+
 const manageXSS = (params) => manageVectorTools('xss', XSS_TOOLS, params);
 const manageSQLi = (params) => manageVectorTools('sqli', SQLI_TOOLS, params);
 const manageCache = (params) => manageVectorTools('cache', CACHE_TOOLS, params);
@@ -299,6 +320,7 @@ const manageGit = (params) => manageVectorTools('exposed-git', GIT_TOOLS, params
 const manageMisc = (params) => manageVectorTools('misc', MISC_TOOLS, params);
 
 module.exports = {
+  VECTOR_SECTIONS,
   manageXSSSchema, manageXSS,
   manageSQLiSchema, manageSQLi,
   manageCacheSchema, manageCache,

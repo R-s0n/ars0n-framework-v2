@@ -195,18 +195,25 @@ type FlowEdge struct {
 // flow reports the same numbers in the list and in the detail view. What a particular detail
 // response actually hid is the separate top-level hidden_count on that response.
 type FlowSummary struct {
-	ID            string    `json:"id"`
-	SessionID     string    `json:"session_id"`
-	TabID         *int      `json:"tab_id"`
-	RootCaptureID string    `json:"root_capture_id"`
-	Label         string    `json:"label"`
-	Host          string    `json:"host"`
-	StartedAt     time.Time `json:"started_at"`
-	EndedAt       time.Time `json:"ended_at"`
-	DurationMs    int       `json:"duration_ms"`
-	RequestCount  int       `json:"request_count"`
-	ShownCount    int       `json:"shown_count"`
-	HiddenCount   int       `json:"hidden_count"`
+	ID            string `json:"id"`
+	SessionID     string `json:"session_id"`
+	TabID         *int   `json:"tab_id"`
+	RootCaptureID string `json:"root_capture_id"`
+	// Label is DERIVED from the request that rooted the flow and is always present.
+	Label string `json:"label"`
+	// Name and Description are what the operator called this flow, from detected_flow_names, and are
+	// absent when it has not been named. A client shows Name when set and falls back to Label, so the
+	// two must never be merged: the label is the only record of which request began the flow, and
+	// clearing a name has to leave something behind to display.
+	Name         string    `json:"name,omitempty"`
+	Description  string    `json:"description,omitempty"`
+	Host         string    `json:"host"`
+	StartedAt    time.Time `json:"started_at"`
+	EndedAt      time.Time `json:"ended_at"`
+	DurationMs   int       `json:"duration_ms"`
+	RequestCount int       `json:"request_count"`
+	ShownCount   int       `json:"shown_count"`
+	HiddenCount  int       `json:"hidden_count"`
 	// Keyed "1xx".."5xx", plus "err" for a request that never got a status at all (a connection
 	// failure is a result, and folding it into 2xx would be a lie). Counts EVERY request in the
 	// flow, not just the shown ones, because "did anything in here 4xx" is the question being asked.
@@ -217,6 +224,43 @@ type FlowSummary struct {
 	// navigated and the flow was cut at an idle gap instead. Surfaced rather than hidden: a burst is
 	// a heuristic and the operator should be able to see which flows rest on one.
 	RootKind string `json:"root_kind"`
+
+	// Kind is "detected" for a flow the detector segmented out of captured traffic, and "built" for
+	// one an operator assembled in the Request Flow Builder. Both now appear in the same list,
+	// because "show me the flows on this target" is one question and answering it from two screens
+	// meant a built flow was invisible from the place an operator goes to look for flows.
+	//
+	// The two are NOT interchangeable and the discriminator is what keeps that honest. A detected
+	// flow is a record of traffic that happened, with real timings and status counts. A built flow is
+	// an editable, re-runnable artefact whose steps have never necessarily been sent at all, so its
+	// request_count is a STEP count and its timings are empty. A client that renders them
+	// identically would be claiming a built flow had been observed.
+	Kind string `json:"kind"`
+	// StepCount is set on a built flow only, and is the number of steps it holds.
+	StepCount int `json:"step_count,omitempty"`
+
+	// Verification is set on a BUILT flow only: "unverified", "stale" or "verified".
+	//
+	// A built flow is a hypothesis until it has run. Its steps are bytes somebody wrote, and nothing
+	// has confirmed the target still answers them - a route may have moved, a token shape may have
+	// changed, a condition may reference a step that no longer exists. "stale" is the state that
+	// matters most and the one a simpler design would miss: the flow HAS run, so it looks proven,
+	// but a step has been edited since and the run describes bytes that are no longer the ones that
+	// would be sent.
+	Verification string `json:"verification,omitempty"`
+	// LastRunID is the run whose trace can be drawn as this flow's map, and LastRunAt is when it ran.
+	// Both empty until the flow has run once.
+	LastRunID string    `json:"last_run_id,omitempty"`
+	LastRunAt time.Time `json:"last_run_at,omitempty"`
+	// LastRunOutcome is that run's own verdict: completed, stopped, failed or capped.
+	//
+	// SENT BECAUSE "VERIFIED" DOES NOT MEAN "PASSED", and the two are easy to read as one word.
+	// Verification answers "is the map current", nothing else. Measured on the live target: a flow
+	// whose newest run ended `failed` at step 1 - its control step got a 401 from an expired bearer
+	// token - is correctly VERIFIED, because that run is newer than every step edit and is exactly
+	// what the flow does now. A green badge with no outcome beside it would read as "this flow
+	// works" on a flow that proved nothing.
+	LastRunOutcome string `json:"last_run_outcome,omitempty"`
 }
 
 // captureFlow is one reconstructed flow before it is turned into a graph. Captures are in timeline
@@ -869,11 +913,15 @@ func DecodeFlowID(id string) (sessionID string, tabID *int, rootCaptureID string
 // ---------------------------------------------------------------------------
 
 type replayFlowsResponse struct {
-	Flows     []FlowSummary `json:"flows"`
-	Total     int           `json:"total"`
-	Limit     int           `json:"limit"`
-	Truncated bool          `json:"truncated"`
-	Query     string        `json:"query"`
+	// BuiltCount and BuiltNote exist so a client can tell how many of the rows are built flows and
+	// explain, in the operator's terms, why those rows ignore the query.
+	BuiltCount int           `json:"built_count"`
+	BuiltNote  string        `json:"built_note,omitempty"`
+	Flows      []FlowSummary `json:"flows"`
+	Total      int           `json:"total"`
+	Limit      int           `json:"limit"`
+	Truncated  bool          `json:"truncated"`
+	Query      string        `json:"query"`
 	// Present only when the query itself is the problem, matching the captures endpoint: the rest of
 	// the payload is still filled in so a client that renders the shape unconditionally survives.
 	Error         string `json:"error,omitempty"`
@@ -984,9 +1032,41 @@ func GetReplayRequestFlows(w http.ResponseWriter, r *http.Request) {
 		page = page[:limit]
 	}
 
+	// Decorated AFTER paging, so one query covers the page rather than the whole corpus. Fatal on
+	// error rather than falling back to the derived labels: a failed read and a target where nothing
+	// has been named would otherwise render identically, and the operator would conclude their names
+	// had been lost.
+	names, err := LoadDetectedFlowNames(scopeTargetID)
+	if err != nil {
+		log.Printf("[REPLAY-FLOWS] Failed to read flow names for %s: %v", scopeTargetID, err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error",
+			"The flow names could not be read: "+err.Error())
+		return
+	}
+	applyDetectedFlowNames(page, names)
+	for i := range page {
+		page[i].Kind = "detected"
+	}
+
+	// Built flows join the same list, ahead of the detected ones.
+	//
+	// One question, one list: an operator looking for "the flows on this target" should not have to
+	// know that the detector and the builder keep separate screens. They are NOT query-filtered - the
+	// query grammar matches captures and a built flow has steps that may never have been sent - so
+	// they are always present and the response says so rather than letting them appear and disappear
+	// for a reason nobody can see.
+	built, builtErr := BuiltFlowSummaries(r.Context(), scopeTargetID)
+	if builtErr != nil {
+		log.Printf("[REPLAY-FLOWS] Failed to read built flows for %s: %v", scopeTargetID, builtErr)
+	}
+	page = append(built, page...)
+
 	json.NewEncoder(w).Encode(replayFlowsResponse{
-		Flows:            page,
-		Total:            total,
+		Flows:      page,
+		BuiltCount: len(built),
+		BuiltNote: "Built flows are listed first and are NOT filtered by the query: the query matches " +
+			"captured requests, and a built flow holds steps that may never have been sent.",
+		Total:            total + len(built),
 		Limit:            limit,
 		Truncated:        total > len(page),
 		Query:            query,
@@ -1070,8 +1150,23 @@ func GetReplayRequestFlow(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		nodes, edges, hidden := renderFlowGraph(flow, deriveFlowLinks(flow), showAll)
+		summary := summarizeFlow(flow)
+
+		// The detail view is where the description is rendered, so a read failure here is fatal rather
+		// than silently falling back to the derived label: prose the operator wrote and cannot see is
+		// worse than an error saying why it is missing.
+		if labelling, nerr := lookupDetectedFlowName(summary.ID); nerr != nil {
+			log.Printf("[REPLAY-FLOWS] Failed to read the name for flow %s: %v", summary.ID, nerr)
+			writeJSONError(w, http.StatusInternalServerError, "internal_error",
+				"The flow name could not be read: "+nerr.Error())
+			return
+		} else {
+			summary.Name = labelling.Name
+			summary.Description = labelling.Description
+		}
+
 		json.NewEncoder(w).Encode(replayFlowResponse{
-			Flow:        summarizeFlow(flow),
+			Flow:        summary,
 			Nodes:       nodes,
 			Edges:       edges,
 			HiddenCount: hidden,

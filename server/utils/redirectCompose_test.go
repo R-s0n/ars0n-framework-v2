@@ -392,3 +392,61 @@ func TestARealInboxIsStillReadAndItsTokensFound(t *testing.T) {
 		t.Errorf("expected exactly the token that appears in the inbox, got %+v", hits)
 	}
 }
+
+// A deselected vector must be reported as skipped WITH THE OPERATOR'S REASON, not silently dropped
+// and not masked by a capability reason.
+//
+// The masking case is the one that matters: when a vector is both switched off AND unreachable by
+// the tool, showing the capability reason would send the operator hunting for a deselection that did
+// save. The selection is the decisive fact and states itself first.
+func TestDeselectedVectorIsSkippedWithTheOperatorReason(t *testing.T) {
+	tool, ok := VectorToolByKey("nuclei-dast")
+	if !ok {
+		t.Skip("nuclei-dast is not registered in this build")
+	}
+	rows := []vectorRow{
+		{ID: "v1", Method: "GET", Scheme: "https", Domain: "t.example", Path: "/a", InsertionPoint: "query"},
+		{ID: "v2", Method: "GET", Scheme: "https", Domain: "t.example", Path: "/b", InsertionPoint: "query"},
+	}
+
+	// Nothing deselected: both eligible, which is the pre-existing behaviour a nil map must preserve.
+	base := BuildVectorEligibilityFor(tool, rows, map[string]any{}, nil, map[string]any{}, nil)
+	if base.Eligible != 2 {
+		t.Fatalf("with no selection stored both vectors should be eligible, got %d", base.Eligible)
+	}
+
+	got := BuildVectorEligibilityFor(tool, rows, map[string]any{}, nil, map[string]any{},
+		map[string]bool{"v1": true})
+	if got.Eligible != 1 {
+		t.Errorf("deselecting one vector should leave 1 eligible, got %d", got.Eligible)
+	}
+	for _, v := range got.Vectors {
+		if v.VectorID == "v1" {
+			if v.Eligible {
+				t.Error("v1 was deselected but came back eligible")
+			}
+			if !strings.Contains(v.Reason, "Deselected") {
+				t.Errorf("v1 should say it was deselected, got %q", v.Reason)
+			}
+		}
+		if v.VectorID == "v2" && !v.Eligible {
+			t.Errorf("v2 was not deselected but is ineligible: %s", v.Reason)
+		}
+	}
+}
+
+// The old entry point must keep behaving exactly as it did, because three call sites and every
+// existing test use it and a silent change there would alter what scans send.
+func TestBuildVectorEligibilityUnchangedWithoutSelection(t *testing.T) {
+	tool, ok := VectorToolByKey("nuclei-dast")
+	if !ok {
+		t.Skip("nuclei-dast is not registered in this build")
+	}
+	rows := []vectorRow{{ID: "v1", Method: "GET", Scheme: "https", Domain: "t.example",
+		Path: "/a", InsertionPoint: "query"}}
+	old := BuildVectorEligibility(tool, rows, map[string]any{}, nil, map[string]any{})
+	new := BuildVectorEligibilityFor(tool, rows, map[string]any{}, nil, map[string]any{}, nil)
+	if old.Eligible != new.Eligible {
+		t.Errorf("the two entry points disagree: %d vs %d", old.Eligible, new.Eligible)
+	}
+}

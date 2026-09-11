@@ -397,3 +397,306 @@ body {
   font-size: 1.05rem;
   vertical-align: -0.08em;
 }
+
+/* ------------------------------------------------------------------ knowledge base
+
+   The book icon.
+
+   The rest of the top right cluster (YouTube, GitHub, coffee, import, export, tools, scans, notes,
+   settings) lives in components/ars0nFrameworkHeader.js. That file belongs to another workstream, so
+   the book is rendered in App.js beside the header instead and put back into the row from here: the
+   wrapper reserves a button's width at the right edge, and the book occupies it. The result is one
+   row of identically sized glyphs, which is what the user should see and the only thing that
+   matters. Move the button into the header component one day and all of this goes away. */
+.kb-header-wrap {
+  position: relative;
+  /* One number drives both halves of this, because guessing a reserve and guessing a button width
+     separately is how you get an icon sitting on top of the gear. The button is given this width
+     explicitly and the row is padded by the same amount plus Bootstrap's 0.75rem gutter, so the
+     gear's right edge lands exactly where the book's left edge starts. */
+  --kb-btn-w: 2.1rem;
+}
+
+/* The header's own last column, scoped to the wrapper so no other Bootstrap row is touched. */
+.kb-header-wrap > .row > [class*="col"]:last-child {
+  padding-right: calc(0.75rem + var(--kb-btn-w));
+}
+
+/* right: 0 rather than a gutter offset. The column's 0.75rem padding cancels the row's -0.75rem
+   margin, so the gear already sits flush with the container edge and the book has to as well. */
+.kb-header-btn {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  width: var(--kb-btn-w);
+  text-align: center;
+  z-index: 2;
+}
+
+/* The modal is fullscreen, so the body is the only thing that scrolls and it must not scroll as a
+   whole: the file list and the document scroll independently or the tree walks off the top of the
+   screen the moment you open a long report. */
+.kb-body {
+  overflow: hidden;
+  display: flex;
+}
+
+.kb-layout {
+  display: flex;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+}
+
+.kb-sidebar {
+  width: 340px;
+  min-width: 260px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid #343a40;
+  background-color: #1b1b1b;
+}
+
+.kb-sidebar-scroll {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.kb-group-label {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #adb5bd;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid #2e2e2e;
+  margin-bottom: 0.25rem;
+}
+
+/* A <button> rather than a <div> with an onClick, so the whole tree is reachable from the keyboard
+   without inventing roles and tabindexes. */
+.kb-file {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 0.25rem;
+  color: #dee2e6;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.85rem;
+  line-height: 1.3;
+}
+
+.kb-file:hover {
+  background-color: #2a2a2a;
+  color: #fff;
+}
+
+.kb-file-active {
+  background-color: #2f1616;
+  color: #ff6b6b;
+  box-shadow: inset 2px 0 0 #d10000;
+}
+
+.kb-file-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The size is on every row on purpose. One of these files is 607 KB and the operator deserves to
+   know that before clicking it, not after the browser stalls laying it out. */
+.kb-file-size {
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  color: #6c757d;
+}
+
+.kb-hits {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.kb-hit {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-left: 2px solid #343a40;
+  border-radius: 0 0.25rem 0.25rem 0;
+  color: #dee2e6;
+  padding: 0.35rem 0.5rem;
+}
+
+.kb-hit:hover {
+  background-color: #2a2a2a;
+  border-left-color: #d10000;
+}
+
+/* Three lines maximum. A matched line in the report corpus carries a title, a link, a program and a
+   bounty, and letting one hit run to eight lines would push every other hit off the screen. */
+.kb-hit-text {
+  font-size: 0.8rem;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.kb-hit-meta {
+  font-size: 0.7rem;
+  color: #6c757d;
+  margin-top: 0.15rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kb-hit-heading {
+  color: #ff6b6b;
+}
+
+.kb-doc {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 0 1.5rem 4rem;
+}
+
+.kb-doc-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background-color: #212529;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid #343a40;
+  margin-bottom: 1rem;
+}
+
+.kb-empty {
+  max-width: 34rem;
+  margin: 6rem auto;
+  text-align: center;
+  color: #adb5bd;
+}
+
+.kb-empty .bi {
+  font-size: 3rem;
+  color: #3d3d3d;
+  display: block;
+  margin-bottom: 1rem;
+}
+
+/* ----- the rendered markdown
+
+   Long form prose read at a screen's width is unreadable, so the measure is capped. Everything else
+   here exists because Bootstrap's dark theme leaves raw h1..h6, pre, code and blockquote looking
+   nothing like the rest of the app. */
+.kb-markdown {
+  max-width: 62rem;
+  color: #dee2e6;
+  font-size: 0.92rem;
+  line-height: 1.65;
+  word-wrap: break-word;
+}
+
+.kb-markdown h1,
+.kb-markdown h2,
+.kb-markdown h3,
+.kb-markdown h4,
+.kb-markdown h5,
+.kb-markdown h6 {
+  color: #ff6b6b;
+  margin-top: 1.75rem;
+  margin-bottom: 0.6rem;
+  line-height: 1.25;
+}
+
+.kb-markdown h1 { font-size: 1.6rem; border-bottom: 1px solid #343a40; padding-bottom: 0.4rem; }
+.kb-markdown h2 { font-size: 1.3rem; border-bottom: 1px solid #2e2e2e; padding-bottom: 0.3rem; }
+.kb-markdown h3 { font-size: 1.1rem; }
+.kb-markdown h4,
+.kb-markdown h5,
+.kb-markdown h6 { font-size: 0.95rem; color: #ffa8a8; }
+
+.kb-markdown p { margin-bottom: 0.85rem; }
+
+.kb-markdown ul,
+.kb-markdown ol {
+  margin-bottom: 0.85rem;
+  padding-left: 1.4rem;
+}
+
+.kb-markdown li { margin-bottom: 0.2rem; }
+
+.kb-markdown a { color: #6ea8fe; text-decoration: none; }
+.kb-markdown a:hover { text-decoration: underline; }
+
+.kb-markdown code {
+  background-color: #2b2b2b;
+  color: #ffc9c9;
+  padding: 0.1rem 0.3rem;
+  border-radius: 0.2rem;
+  font-size: 0.85em;
+}
+
+.kb-markdown pre {
+  background-color: #161616;
+  border: 1px solid #343a40;
+  border-radius: 0.3rem;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  margin-bottom: 0.85rem;
+}
+
+.kb-markdown pre code {
+  background: none;
+  color: #dee2e6;
+  padding: 0;
+}
+
+.kb-markdown blockquote {
+  border-left: 3px solid #d10000;
+  padding: 0.25rem 0 0.25rem 1rem;
+  margin: 0 0 0.85rem;
+  color: #adb5bd;
+}
+
+.kb-markdown blockquote p:last-child { margin-bottom: 0; }
+
+.kb-markdown hr {
+  border: 0;
+  border-top: 1px solid #343a40;
+  margin: 1.5rem 0;
+  opacity: 1;
+}
+
+.kb-markdown strong { color: #fff; }
+
+/* The block a search hit landed on. In a file of 4702 near identical lines, scrolling to the right
+   place is not enough on its own: without this the reader still has to find the line by eye. */
+.kb-hit-flash {
+  background-color: rgba(209, 0, 0, 0.22) !important;
+  box-shadow: 0 0 0 4px rgba(209, 0, 0, 0.22);
+  border-radius: 0.2rem;
+  transition: background-color 0.4s ease, box-shadow 0.4s ease;
+}
+
+@media (max-width: 900px) {
+  .kb-sidebar {
+    width: 240px;
+    min-width: 200px;
+  }
+  .kb-doc {
+    padding: 0 1rem 3rem;
+  }
+}

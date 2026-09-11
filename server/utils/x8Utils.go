@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -169,6 +170,14 @@ func ExecuteX8Scan(scanID, scopeTargetID string) {
 		scopeTargetID).Scan(&configJSON); err == nil {
 		_ = UnmarshalConfigTolerant(configJSON, &config)
 	}
+
+	// Same reasoning as the arjun runner: x8 read only its own configured headers, so it was the
+	// other half of the one blind spot in the framework's credential handling. See ParamAuthHeaders.
+	//
+	// Note for the headers place specifically: x8 --headers replaces the header NAMES it is fuzzing,
+	// not the static headers passed with -H, so an overlaid Authorization still authenticates a
+	// header-name sweep rather than being clobbered by it.
+	config.Headers = ParamAuthHeaders(scopeTargetID, config.Headers)
 
 	sel, err := SelectParamEnumTargets(ctx, scopeTargetID,
 		ParamTargetOptions{Tool: "x8", IncludeScripts: config.IncludeScripts})
@@ -733,6 +742,11 @@ func parseX8Output(ctx context.Context, outputFile, scanID, scopeTargetID string
 		if method == "" {
 			method = strings.ToUpper(g.Verb)
 		}
+
+		// Collect this endpoint's hits BEFORE storing any of them, so an implausible result set can
+		// be discarded whole. Storing as it parsed is what let one endpoint write thousands of rows
+		// before anything could notice, the last time this section met a runaway detector.
+		hits := make([]x8Hit, 0, len(r.FoundParams))
 		for _, p := range r.FoundParams {
 			name := strings.TrimSpace(p.Name)
 			// x8 can report "name=value"; keep the name.
@@ -746,14 +760,111 @@ func parseX8Output(ctx context.Context, outputFile, scanID, scopeTargetID string
 			if p.Value != nil {
 				value = *p.Value
 			}
+			hits = append(hits, x8Hit{name, value, p.ReasonKind})
+		}
+
+		if reason, noisy := x8ResultSetIsImplausible(hits); noisy {
+			// Deliberately not stored, and said out loud rather than dropped quietly. The count
+			// describes the measurement, not the endpoint: see x8ResultSetIsImplausible.
+			log.Printf("[X8] %s %s: discarding %d finding(s) - %s",
+				method, r.URL, len(hits), reason)
+			continue
+		}
+
+		for _, h := range hits {
 			if StoreParameterFinding(ctx, scanID, "x8", scopeTargetID, r.URL, method,
-				g.Label, name, x8ParamType(g.Mode, r.InjectionPlace),
-				x8Confidence(p.ReasonKind), value, p.ReasonKind) {
+				g.Label, h.name, x8ParamType(g.Mode, r.InjectionPlace),
+				x8Confidence(h.reason), h.value, h.reason) {
 				found++
 			}
 		}
 	}
 	return found, nil
+}
+
+// x8NoiseThreshold is the point past which one endpoint's result set stops being a discovery and
+// starts being a measurement of the detector.
+//
+// A genuine hidden-parameter result is a handful of names: measured on this corpus, the endpoints
+// that behaved returned 1 to 5, and every one was semantically right for its route (limit, offset,
+// page_size, timeframe, start, end, direction). An endpoint returning tens of names has told you
+// about its own error handling instead.
+const x8NoiseThreshold = 12
+
+// x8CustomSet is the vocabulary x8 tests on every run regardless of wordlist, read out of the
+// binary. Used only as a noise signal: if EVERY one of them fires on one endpoint, the endpoint is
+// answering differently to arbitrary input rather than recognising these particular names.
+var x8CustomSet = []string{"admin", "bot", "captcha", "debug", "disable", "encryption",
+	"env", "show", "sso", "test", "waf"}
+
+// x8ResultSetIsImplausible decides whether one endpoint's hits describe the target or the detector.
+//
+// WHY THIS EXISTS, measured 2026-09-08. A PATCH order-replace route returned 37 of a scan's 55 total
+// findings - 67% of everything, against 1 to 5 on every other endpoint. Two signatures gave it away
+// and both are checked here:
+//
+//   - ALL ELEVEN of x8's built-in custom names fired at once. Those are unrelated words; a route
+//     that genuinely honours admin AND captcha AND waf AND sso together does not exist. What it
+//     really means is the endpoint changes its status for any body it dislikes, so the differential
+//     fires on whatever was in the chunk.
+//   - The names formed CONTIGUOUS ALPHABETICAL RUNS (order_id, organization, origin, os, otp, out,
+//     output, overwrite, owner, p, page, pager ... try, tx, type, u, ui, uid, unlock, unsafe).
+//     Wordlists are alphabetical and x8 packs 256 names per request, so a whole chunk reading as
+//     positive lands as an alphabetical band. Real parameters do not cluster by spelling.
+//
+// This is the same lesson the removed parameth tool taught and it was never generalised: a detector
+// that fires across a wordlist has measured its own oracle, not the target. The guard belongs to the
+// section, not to any one tool.
+//
+// Erring towards keeping data: a set only has to clear the threshold to be stored untouched, and a
+// large set still survives if it shows neither signature.
+// x8Hit is one parsed finding, held before the plausibility decision is made.
+type x8Hit struct{ name, value, reason string }
+
+func x8ResultSetIsImplausible(hits []x8Hit) (string, bool) {
+	if len(hits) <= x8NoiseThreshold {
+		return "", false
+	}
+
+	names := make(map[string]bool, len(hits))
+	sorted := make([]string, 0, len(hits))
+	for _, h := range hits {
+		names[strings.ToLower(h.name)] = true
+		sorted = append(sorted, strings.ToLower(h.name))
+	}
+
+	custom := 0
+	for _, c := range x8CustomSet {
+		if names[c] {
+			custom++
+		}
+	}
+	if custom == len(x8CustomSet) {
+		return fmt.Sprintf("all %d of x8's built-in custom names fired together, which means the "+
+			"endpoint responds differently to arbitrary input rather than recognising these names",
+			custom), true
+	}
+
+	// Longest run of names sharing a first letter, after sorting. A real result set is spread across
+	// the alphabet; a chunk artifact is a band.
+	sort.Strings(sorted)
+	longest, run := 1, 1
+	for i := 1; i < len(sorted); i++ {
+		if sorted[i][0] == sorted[i-1][0] {
+			run++
+		} else {
+			run = 1
+		}
+		if run > longest {
+			longest = run
+		}
+	}
+	if longest*2 > len(hits) {
+		return fmt.Sprintf("%d of %d names share one initial letter, the signature of a whole "+
+			"wordlist chunk reading as positive rather than of discovery", longest, len(hits)), true
+	}
+
+	return "", false
 }
 
 // x8Confidence grades a finding by how x8 came to it.

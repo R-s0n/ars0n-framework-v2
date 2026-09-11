@@ -21,9 +21,16 @@ import (
 // amassHistoricArgs is the command ExecuteAndParseAmassScan built inline before the wiring existed,
 // spelled out in full rather than generated, because generating it from the same list the builder
 // uses would make the test agree with itself.
+//
+// ONE TOKEN HERE IS NOT HISTORIC AND IS MEANT NOT TO BE: the image reference. The inline command said
+// `caffix/amass` with no tag; it now says `caffix/amass:v4.2.0`, which is a deliberate change to the
+// image reference and has nothing to do with the wiring this file tests. It does not weaken the
+// nothing-changed guarantee, because the two references resolve to the same image (both tags point at
+// manifest list sha256:b11100806a4fd31990103a92d296cd5b7dd5442502e3cf51aceeeaa397305d08, both pushed
+// 2023-09-10). Everything after it is still token for token what the runner built inline.
 func amassHistoricArgs(domain string, rateLimit string) []string {
 	return []string{
-		"run", "--rm", "caffix/amass",
+		"run", "--rm", "caffix/amass:v4.2.0",
 		"enum", "-active", "-alts", "-brute", "-nocolor",
 		"-min-for-recursive", "2", "-timeout", "60",
 		"-d", domain,

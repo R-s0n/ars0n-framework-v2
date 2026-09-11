@@ -59,7 +59,20 @@ services:
 
   db:
     container_name: ars0n-framework-v2-db-1
-    image: postgres:latest
+    # PINNED TO THE MAJOR, deliberately, and this is the highest-consequence pin in the file.
+    #
+    # The postgres_data volume was initialised by PostgreSQL 18 (it contains a "18" directory).
+    # PostgreSQL ships a new major every September or October and the official :latest follows within
+    # days, so on a `docker compose pull` after that release this service would start a PG19 container
+    # against a PG18 data directory. Postgres refuses that outright, the healthcheck never passes, and
+    # both api and mcp-server gate on `condition: service_healthy` - so the whole stack stops, holding
+    # every scan result, with nothing in the repo having changed. Same shape as the bullseye
+    # expiry that broke the x8 build, with a bigger blast radius.
+    #
+    # Pinned to the MAJOR and not to a patch, so Debian and PostgreSQL security rebuilds still arrive.
+    # Moving to 19 is then a deliberate pg_dump/pg_restore rather than something a prune can trigger.
+    # Verified at the time of pinning: postgres:18 and postgres:latest are the same manifest.
+    image: postgres:18
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -322,6 +335,16 @@ services:
     depends_on:
       - api
     volumes:
+      # arjun's -w takes a path INSIDE this container and the config modal offers it as free text,
+      # so with no host directory mounted an operator-supplied list could only ever be missing.
+      # That failure is at least loud: arjun 2.2.7 given `-w /nope/x.txt` prints "The specified
+      # file for parameters doesn't exist" and exits 1 while loading the wordlist, before it even
+      # checks that a target was given, so the run dies at startup rather than silently scanning
+      # with the wrong words. Leaving -w unset stays fine either way, since arjun then falls back
+      # to its own bundled db/large.txt.
+      # Same mount and same path as the x8 and ffuf containers, so a wordlist path that works in
+      # one works in all three.
+      - ./wordlists:/app/wordlists
       - temp_data:/tmp
     entrypoint: ["sleep", "infinity"]
     restart: "no"

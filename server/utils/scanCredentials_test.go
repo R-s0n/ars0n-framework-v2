@@ -1,8 +1,12 @@
 package utils
 
 import (
+	"encoding/base64"
 	"net/http"
+	"strconv"
+	"sync"
 	"testing"
+	"time"
 )
 
 // Building a context by hand, because the real loaders read the database. What is under test is the
@@ -181,5 +185,116 @@ func TestMergeDoesNotMutateOperands(t *testing.T) {
 	}
 	if got.Cookies != "c=1" {
 		t.Errorf("merge lost the cookie: %q", got.Cookies)
+	}
+}
+
+// jwtWithExp builds an unsigned JWT carrying only an exp claim. expiredBearer never verifies a
+// signature, so a real one would add nothing to the test.
+func jwtWithExp(exp int64) string {
+	body := base64.RawURLEncoding.EncodeToString([]byte(
+		`{"exp":` + strconv.FormatInt(exp, 10) + `}`))
+	return "Bearer eyJhbGciOiJSUzI1NiJ9." + body + ".c2ln"
+}
+
+// The defect this guards: a captured or configured bearer whose exp has passed used to be sent
+// anyway, and the resulting 401s were recorded as evidence about the endpoint rather than as a dead
+// credential. Measured against a target issuing 900-second tokens.
+func TestExpiredBearerRecognisesADeadToken(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{"expired an hour ago", jwtWithExp(time.Now().Add(-time.Hour).Unix()), true},
+		{"expired just past the skew", jwtWithExp(time.Now().Add(-90 * time.Second).Unix()), true},
+		{"still live", jwtWithExp(time.Now().Add(10 * time.Minute).Unix()), false},
+
+		// Everything below must read as NOT expired. Refusing to send a credential merely because it
+		// is unfamiliar would break every non-JWT the loader handles: API keys, opaque session
+		// strings, CSRF tokens.
+		{"opaque api key", "0f8b2c1d4e", false},
+		{"not three segments", "Bearer aaa.bbb", false},
+		{"undecodable payload", "Bearer eyJhbGciOiJIUzI1NiJ9.!!!not-base64!!!.sig", false},
+		{"no exp claim", "Bearer eyJhbGciOiJIUzI1NiJ9." +
+			base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"u1"}`)) + ".sig", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := expiredBearer(tc.value); got != tc.want {
+				t.Errorf("expiredBearer(%q) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+// A token expiring within the skew window is still sent. Without the allowance, a token with four
+// seconds left would be dropped and the request would go out anonymous, which is strictly worse than
+// sending something that is about to expire.
+func TestExpiredBearerAllowsSkew(t *testing.T) {
+	if expiredBearer(jwtWithExp(time.Now().Add(-5 * time.Second).Unix())) {
+		t.Error("a token five seconds past exp should still be sent; the skew allowance is 30s")
+	}
+}
+
+// Contexts assembled by hand - every test above, and the crawler path in urlCrawlerConfigUtils.go -
+// carry no scope target, so there is nothing to re-read. refreshIfStale must leave them completely
+// alone no matter how old loadedAt looks, or For() would blank material that was set deliberately.
+func TestHandBuiltContextIsNeverRefreshed(t *testing.T) {
+	c := ctxWith(&ScopedAuthMaterial{
+		Headers: map[string]string{"Authorization": "Bearer live"},
+	}, nil, "app.target.com", "")
+	c.loadedAt = time.Now().Add(-24 * time.Hour) // far past the TTL
+
+	material, reason := c.For("app.target.com")
+	if material == nil {
+		t.Fatalf("hand-built material was dropped by the refresh path: %s", reason)
+	}
+	if material.Headers["Authorization"] != "Bearer live" {
+		t.Errorf("header lost: %+v", material.Headers)
+	}
+	if !c.HasAny() {
+		t.Error("HasAny went false on a hand-built context")
+	}
+}
+
+// For() is called from concurrent request goroutines and now takes locks and can swap the maps.
+// Run with -race: this fails loudly if the refresh path and the readers disagree about locking.
+func TestConcurrentLookupsAreSafe(t *testing.T) {
+	c := ctxWith(&ScopedAuthMaterial{
+		Headers: map[string]string{"Authorization": "Bearer live"},
+		Cookies: "s=1",
+	}, nil, "app.target.com", "")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if m, _ := c.For("app.target.com"); m == nil {
+				t.Error("lost material under concurrent lookup")
+			}
+			_ = c.HasAny()
+		}()
+	}
+	wg.Wait()
+}
+
+// The credential loaders are reached from the request-flow runner and the parameter tools now, and
+// those have unit tests that exercise the send path with no database. pgxpool panics on a nil
+// receiver rather than returning an error, so a missing guard is a crash and not a failed query.
+func TestCredentialLoadersSurviveWithNoDatabase(t *testing.T) {
+	if dbPool != nil {
+		t.Skip("this test is about the no-database case")
+	}
+	// Each of these reaches a dbPool call and must not panic.
+	if c := buildScopedAuthContext("some-target-id"); c == nil || c.HasAny() {
+		t.Errorf("expected an empty context with no database, got %+v", c)
+	}
+	if _, host, _ := ScopeTargetBase("some-target-id"); host != "" {
+		t.Errorf("expected no host with no database, got %q", host)
+	}
+	if got := ParamAuthHeaders("some-target-id", []map[string]string{{"X-A": "1"}}); len(got) != 1 {
+		t.Errorf("configured headers should survive with no database, got %v", got)
 	}
 }

@@ -6,7 +6,8 @@ import DetectFlowsModal from './DetectFlowsModal';
 // The reversal, asserted on the rendered screen rather than on the source.
 //
 // What this proves:
-//   every one of the seven verbs is a tickable checkbox, none disabled;
+//   every one of the seven quick-pick verbs is a tickable checkbox, none disabled;
+//   a verb that is not one of the seven can be typed in and is sent;
 //   there is no acknowledgement checkbox and no strikethrough "unavailable here" row;
 //   Run is pressable with no dry run behind it, and the request body carries the chosen verbs;
 //   the removed sentences are absent from the rendered text.
@@ -105,11 +106,28 @@ describe('the detect flows verb selector', () => {
       expect(box.disabled).toBe(false);
       expect(box.readOnly).toBe(false);
     });
-    // GET is the default, and only GET.
-    expect(verbBox('GET').checked).toBe(true);
-    ['HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'].forEach((v) => {
-      expect(verbBox(v).checked).toBe(false);
+    // ALL SEVEN are ticked on open, not just GET. The verb is also the selection filter, so a
+    // GET-only default silently removed every write endpoint from the corpus.
+    VERBS.forEach((v) => {
+      expect(verbBox(v).checked).toBe(true);
     });
+  });
+
+  // The set can never be emptied. An empty list reaches the server as "unspecified" and comes back as
+  // the FULL default set, so a row with nothing ticked would mean the opposite of what it shows. Six
+  // of the seven come off; the last tick holds.
+  test('the last ticked verb cannot be unticked', async () => {
+    await open();
+    for (const v of VERBS) {
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => { verbBox(v).click(); });
+    }
+    const stillTicked = VERBS.filter((v) => verbBox(v).checked);
+    expect(stillTicked).toHaveLength(1);
+
+    await act(async () => { runButton().click(); });
+    await settle();
+    expect(runPosts()[0].body.methods).toEqual(stillTicked);
   });
 
   test('there is no acknowledgement checkbox', async () => {
@@ -133,6 +151,7 @@ describe('the detect flows verb selector', () => {
   test('Run is pressable with a stale preview, and sends the verbs that were ticked', async () => {
     await open();
 
+    // All seven start ticked, so these two clicks REMOVE them. What is sent must be the five left.
     await act(async () => { verbBox('POST').click(); });
     await act(async () => { verbBox('DELETE').click(); });
 
@@ -146,19 +165,72 @@ describe('the detect flows verb selector', () => {
 
     expect(runPosts()).toHaveLength(1);
     const sent = runPosts()[0].body;
-    expect(sent.methods.sort()).toEqual(['DELETE', 'GET', 'POST']);
+    expect(sent.methods.slice().sort()).toEqual(['GET', 'HEAD', 'OPTIONS', 'PATCH', 'PUT']);
     // The dead acknowledgement field is not in the body at all.
     expect(Object.keys(sent)).not.toContain('allow_state_changing');
     // And the body toggle is expressed, defaulting to on.
     expect(sent.send_recorded_bodies).toBe(true);
   });
 
-  test('the body toggle appears only once a body-taking verb is chosen', async () => {
+  test('the body toggle is shown only while a body-taking verb is chosen', async () => {
     await open();
+    // POST, PUT, PATCH and DELETE are all ticked by default, so the toggle starts visible.
+    expect(document.querySelector('#detect-send-bodies')).toBeTruthy();
+    for (const v of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => { verbBox(v).click(); });
+    }
     expect(document.querySelector('#detect-send-bodies')).toBeNull();
     await act(async () => { verbBox('PUT').click(); });
     expect(document.querySelector('#detect-send-bodies')).toBeTruthy();
-    await act(async () => { verbBox('PUT').click(); });
-    expect(document.querySelector('#detect-send-bodies')).toBeNull();
+  });
+
+  // THE SEVEN ARE QUICK PICKS, NOT THE VOCABULARY. A curated list is a verb gate wearing a checkbox,
+  // and it means the framework cannot test the endpoint that only answers PROPFIND. The SHAPE of the
+  // token is what gets validated.
+  const customBox = () => Array.from(document.querySelectorAll('input'))
+    .find((i) => /your own verb/i.test(i.getAttribute('placeholder') || ''));
+  const addButton = () => Array.from(document.querySelectorAll('button'))
+    .find((b) => b.textContent.trim() === 'Add');
+
+  const typeVerb = async (value) => {
+    const box = customBox();
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    await act(async () => {
+      setter.call(box, value);
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => { addButton().click(); });
+  };
+
+  test('a verb outside the seven can be added and is sent', async () => {
+    await open();
+    await typeVerb('propfind');
+
+    // Uppercased and shown as a removable chip, so it is not a value that lives only in state.
+    expect(document.body.textContent).toContain('PROPFIND');
+
+    await act(async () => { runButton().click(); });
+    await settle();
+
+    expect(runPosts()).toHaveLength(1);
+    expect(runPosts()[0].body.methods.slice().sort())
+      .toEqual(['DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST', 'PROPFIND', 'PUT']);
+  });
+
+  test('a token that cannot go on a request line is refused for its shape, not its spelling', async () => {
+    await open();
+    await typeVerb('GET /etc');
+    // The refusal quotes what was typed and names the characters, never a list of approved verbs.
+    expect(document.body.textContent).toMatch(/"GET \/etc" is not a valid HTTP method token/i);
+    expect(document.body.textContent).not.toMatch(/Choose from GET/i);
+
+    // And it was not added: no chip carries it, and the run sends the untouched default set.
+    const chips = Array.from(document.querySelectorAll('button')).map((b) => b.textContent.trim());
+    expect(chips.some((c) => c.includes('/etc'))).toBe(false);
+
+    await act(async () => { runButton().click(); });
+    await settle();
+    expect(runPosts()[0].body.methods.slice().sort()).toEqual(VERBS.slice().sort());
   });
 });

@@ -2,6 +2,18 @@
   "generatedBy": "scripts/gen-attack-catalog.mjs",
   "attacks": [
     {
+      "id": "account-pre-hijacking",
+      "name": "Account Pre-Hijacking and Identifier Confusion",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "repudiation",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
       "id": "app-dos",
       "name": "Application-Layer Denial of Service",
       "categories": [
@@ -25,11 +37,35 @@
       ]
     },
     {
+      "id": "crlf-injection",
+      "name": "CRLF Injection and HTTP Response Splitting",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "repudiation",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
       "id": "csrf",
       "name": "Cross-Site Request Forgery (CSRF)",
       "categories": [
         "spoofing",
         "tampering",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "email-spoofing",
+      "name": "Email Spoofing and Mail Header Injection",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "repudiation",
+        "information_disclosure",
+        "denial_of_service",
         "elevation_of_privilege"
       ]
     },
@@ -51,6 +87,16 @@
         "tampering",
         "information_disclosure",
         "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "host-header-injection",
+      "name": "Host Header Injection & Password Reset Poisoning",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "information_disclosure",
         "elevation_of_privilege"
       ]
     },
@@ -114,6 +160,18 @@
       "categories": [
         "spoofing",
         "tampering",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "mfa-bypass",
+      "name": "Multi-Factor Authentication Bypass",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "repudiation",
+        "information_disclosure",
+        "denial_of_service",
         "elevation_of_privilege"
       ]
     },
@@ -185,6 +243,30 @@
       ]
     },
     {
+      "id": "saml-attacks",
+      "name": "SAML Assertion Forgery and XML Signature Wrapping",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "repudiation",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "session-fixation",
+      "name": "Session Fixation and Cookie Injection",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "repudiation",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
       "id": "sql-injection",
       "name": "SQL Injection",
       "categories": [
@@ -215,12 +297,46 @@
       ]
     },
     {
+      "id": "subdomain-takeover",
+      "name": "Subdomain Takeover",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
+      ]
+    },
+    {
       "id": "web-cache-poisoning",
       "name": "Web Cache Poisoning & Deception",
       "categories": [
         "tampering",
         "information_disclosure",
         "denial_of_service"
+      ]
+    },
+    {
+      "id": "webhook-signature-forgery",
+      "name": "Webhook and API Signature Forgery",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "repudiation",
+        "information_disclosure",
+        "elevation_of_privilege"
+      ]
+    },
+    {
+      "id": "websocket-hijacking",
+      "name": "Cross-Site WebSocket Hijacking (CSWSH)",
+      "categories": [
+        "spoofing",
+        "tampering",
+        "repudiation",
+        "information_disclosure",
+        "denial_of_service",
+        "elevation_of_privilege"
       ]
     },
     {

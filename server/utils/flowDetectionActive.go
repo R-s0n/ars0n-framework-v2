@@ -37,9 +37,10 @@ import (
 // THE RAILS
 // ============================================================================
 //
-// The verb is the operator's choice: GET, HEAD, OPTIONS, POST, PUT, PATCH and DELETE are all
-// sendable, and a recorded request body is sent with them. The rails below are the programme's rules
-// and this scanner's correctness, which is a different thing:
+// The verb is the operator's choice: any syntactically valid HTTP method token is sendable, from GET
+// to PROPFIND to something the application invented for itself, and a recorded request body is sent
+// with it. The rails below are the programme's rules and this scanner's correctness, which is a
+// different thing:
 //
 //	SCOPE.           ScanClient.WithScope refuses out-of-boundary hosts at the door, and a host marked
 //	                 in_scope=false is denied separately and unconditionally first. See
@@ -223,10 +224,10 @@ type FlowDetectionPlan struct {
 
 // ValidateFlowDetectionConfig normalises a requested config.
 //
-// Every verb the transport can send is legal here: GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE.
-// The operator chooses. A verb the transport does not know is refused, which is a typo check and not
-// a policy: "GTE" would otherwise become a run's worth of 405s recorded as if the endpoints had been
-// tested.
+// Every verb is legal here. There is no list: a method is checked for SHAPE, not membership, so
+// PROPFIND, LOCK, REPORT and an application's own invented verb all validate. What is refused is a
+// string that is not an HTTP method token at all, which is a typo check and not a policy: "GET /x"
+// with a space in it is a mangled config, not a verb anybody meant.
 //
 // The default is GET, because a sensible default is not a block. An operator opening the modal for
 // the first time should not immediately send POSTs to everything; nothing stops them selecting POST.
@@ -244,16 +245,16 @@ func ValidateFlowDetectionConfig(cfg FlowDetectionConfig) (FlowDetectionConfig, 
 		methods = append(methods, m)
 	}
 	if len(methods) == 0 {
-		methods = []string{http.MethodGet}
+		methods = defaultFlowDetectionMethods()
 	}
 	sort.Strings(methods)
 	out.Methods = methods
 
 	for _, m := range methods {
-		if !scanSendableMethods[m] {
+		if !IsHTTPMethodToken(m) {
 			return out, fmt.Errorf(
-				"%q is not an HTTP method this scanner can send. Choose from GET, HEAD, OPTIONS, "+
-					"POST, PUT, PATCH, DELETE", m)
+				"%q is not a valid HTTP method token. A method is one or more of the characters "+
+					"A-Z, a-z, 0-9 and !#$%%&'*+-.^_`|~, with no spaces", m)
 		}
 	}
 
@@ -295,8 +296,21 @@ func ValidateFlowDetectionConfig(cfg FlowDetectionConfig) (FlowDetectionConfig, 
 	return out, nil
 }
 
-// DefaultFlowDetectionConfig is what the UI should open with: GET, one request per second, redirects
-// followed, no query strings, recorded bodies sent.
+// defaultFlowDetectionMethods is what an unspecified verb list means: all of them, not just GET.
+//
+// The verb is also the SELECTION filter, since a run only touches endpoints already observed
+// answering that verb. A GET-only default therefore did not merely send fewer requests, it silently
+// removed every write endpoint from the corpus, and a run that never asked reads as a run that found
+// nothing. The operator narrows this when they want to; the framework does not narrow it for them.
+func defaultFlowDetectionMethods() []string {
+	return []string{
+		http.MethodGet, http.MethodHead, http.MethodOptions,
+		http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete,
+	}
+}
+
+// DefaultFlowDetectionConfig is what the UI should open with: every quick-pick verb, one request per
+// second, redirects followed, no query strings, recorded bodies sent.
 func DefaultFlowDetectionConfig() FlowDetectionConfig {
 	cfg, _ := ValidateFlowDetectionConfig(FlowDetectionConfig{})
 	return cfg
@@ -319,15 +333,21 @@ type flowDetectionCandidate struct {
 
 // flowDetectVerbTakesBody reports whether sending a body with this verb is meaningful.
 //
-// GET, HEAD and OPTIONS are excluded even when the corpus recorded a body against them. A bodied GET
-// is accepted by almost nothing and rejected inconsistently by proxies, so attaching one would change
-// the response for reasons that have nothing to do with the endpoint.
+// A DENY LIST OF THREE, not an allow list of four. GET, HEAD and OPTIONS are excluded even when the
+// corpus recorded a body against them: a bodied GET is accepted by almost nothing and rejected
+// inconsistently by proxies, so attaching one would change the response for reasons that have
+// nothing to do with the endpoint. HEAD is defined to have no body at all.
+//
+// Everything else carries its recorded body, and it has to be this way round now that any method
+// token is sendable. An allow list of POST/PUT/PATCH/DELETE would send an empty PROPFIND or an empty
+// REPORT, both of which are defined by the XML body they carry, and the run would record a 400 as
+// though the endpoint had been tested.
 func flowDetectVerbTakesBody(method string) bool {
 	switch strings.ToUpper(strings.TrimSpace(method)) {
-	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-		return true
+	case "", http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
 	}
-	return false
+	return true
 }
 
 // loadFlowDetectionBodies indexes the request bodies this target has actually recorded.
@@ -430,12 +450,64 @@ func flowDetectionContentType(bodyType, body string) string {
 	return ""
 }
 
-// loadFlowDetectionCandidates sources endpoints from the two tables that describe this target's
-// surface. Both are read, not one: consolidated_url_endpoints is the crawl and archive corpus, and
-// attack_vectors is the operator-curated list, which routinely contains hand-added rows that never
-// appeared in a crawl.
+// loadFlowDetectionCandidates sources endpoints from the three tables that describe this target's
+// surface. All three are read, not one:
+//
+//	manual_crawl_captures      what the operator's browser actually did, available the moment a
+//	                           recording stops
+//	consolidated_url_endpoints the crawl and archive corpus, available only after consolidation runs
+//	attack_vectors             the operator-curated list, which routinely contains hand-added rows
+//	                           that never appeared in any crawl
+//
+// THE CRAWL WAS THE MISSING SOURCE and its absence was invisible in the worst way. This one function
+// feeds the Configure screen, the card's endpoint metric, the detection planner and deselect-all, so
+// on a target that had been crawled but never consolidated, 3,548 recorded requests produced an
+// endpoint list of zero rows and a card reading "0 of 0 discovered". Nothing errored and nothing
+// looked broken: the corpus simply was never asked for. A screen that reports an empty corpus and a
+// screen that reports a corpus it did not read are indistinguishable to the operator, which is the
+// same class of defect as a count that counts something else.
+//
+// THE CRAWL IS READ FIRST, and that ordering carries a decision. BuildFlowEndpointList merges rows on
+// the flow key and the FIRST occurrence supplies the displayed URL, so reading the crawl first means
+// the URL on screen is one that was genuinely observed on the wire rather than one a consolidation
+// pass may have assembled from an archive. Same precedence, and the same reasoning, as
+// loadFlowDetectionBodies, where the crawl also wins.
+//
+// DISTINCT IS DONE IN SQL for the crawl, because a browsing session hits the same request hundreds of
+// times: on a live corpus here it collapses 3,548 rows to 386 before any of them leave Postgres. The
+// duplicates that remain are the same endpoint under different query strings, and those are collapsed
+// by BuildFlowEndpointList on the flow key, which strips the query and is where that decision belongs.
+// Expect the resulting endpoint count to differ slightly from the number the manual-crawl summary
+// reports: that summary groups on a TEMPLATISED path (/accounts/{uuid}/details), while a candidate
+// must keep the literal path because the literal path is what gets sent.
+//
+// NO RESOURCE-TYPE FILTER. Stylesheets, images and fonts recorded by the crawl become candidates like
+// everything else. Dropping them here would be this file quietly deciding what the operator may scan,
+// and the header comment on flowEndpointSelection.go explains at length why silently narrowing a
+// corpus is the one thing this feature must not do. They arrive selected, they are visible on the
+// Configure screen, and taking them out is one filtered deselect.
 func loadFlowDetectionCandidates(scopeTargetID string) ([]flowDetectionCandidate, error) {
 	out := []flowDetectionCandidate{}
+
+	mrows, err := dbPool.Query(context.Background(), `
+		SELECT DISTINCT COALESCE(url,''), COALESCE(NULLIF(method,''),'GET')
+		  FROM manual_crawl_captures
+		 WHERE scope_target_id = $1 AND COALESCE(url,'') <> '' AND url LIKE 'http%'`, scopeTargetID)
+	if err != nil {
+		return nil, fmt.Errorf("could not read crawled endpoints: %w", err)
+	}
+	for mrows.Next() {
+		var c flowDetectionCandidate
+		if err := mrows.Scan(&c.URL, &c.Method); err != nil {
+			continue
+		}
+		c.Source = "manual_crawl"
+		out = append(out, c)
+	}
+	mrows.Close()
+	if err := mrows.Err(); err != nil {
+		return nil, fmt.Errorf("could not read crawled endpoints: %w", err)
+	}
 
 	rows, err := dbPool.Query(context.Background(), `
 		SELECT COALESCE(url,''), COALESCE(NULLIF(method,''),'GET')
@@ -1376,8 +1448,9 @@ func flowDetectionJitter(ctx context.Context, interval, deficit time.Duration) {
 // roots a flow on it, and so redirect destinations continue that flow through the rule
 // segmentCaptureFlows already has for exactly this shape.
 //
-// post_data is the body that was ACTUALLY SENT. Storing '' while sending one would make the repeater
-// rebuild a different request from this row than the one that produced the response next to it.
+// post_data is the body that was ACTUALLY SENT. Storing an empty string while sending a body would
+// make the repeater rebuild a different request from this row than the one that produced the
+// response sitting next to it.
 func writeFlowDetectionCapture(
 	scopeTargetID, sessionID, targetHost, requestURL, method, body, contentType string,
 	resp ScanResponse, chain []FlowRedirectHop, errText string,

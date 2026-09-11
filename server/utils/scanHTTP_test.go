@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -44,10 +45,37 @@ func TestEveryHTTPVerbIsSent(t *testing.T) {
 	}
 }
 
-// A verb the transport does not know is still refused, and never reaches the network. This is a
-// typo check, not a policy: "GTE" would otherwise become a run's worth of 405s recorded as if the
-// endpoints had been tested.
-func TestUnknownVerbsAreRefusedBeforeTheNetwork(t *testing.T) {
+// There is no list of verbs. A method the transport has never heard of is sent, because RFC 9110
+// says a method is a token and says nothing about which tokens a client may use: PROPFIND, REPORT,
+// LOCK and an application's own invented verb are all reachable surface, and a scanner that curates
+// the list cannot test them.
+//
+// "GTE" goes out too, and that is correct: it is the operator's typo to make, and the 405 that comes
+// back is the honest answer to what they asked for.
+func TestUncuratedVerbsAreSent(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	want := []string{"PROPFIND", "REPORT", "LOCK", "PURGE", "M-SEARCH", "GTE"}
+	c := NewScanClient(nil, 0, "", nil)
+	for _, method := range want {
+		if resp := c.Do(context.Background(), ScanRequest{URL: srv.URL + "/x", Method: method}); resp.Err != nil {
+			t.Errorf("%s must be sendable, got %v", method, resp.Err)
+		}
+	}
+	if strings.Join(seen, ",") != strings.Join(want, ",") {
+		t.Fatalf("the server saw %v, want %v", seen, want)
+	}
+}
+
+// What is still refused is a string that is not a method at all. This is a SHAPE check, not a
+// policy: a method with a space or a control character in it is a mangled config, and Go's own
+// transport would reject it a layer lower with a worse message.
+func TestMalformedMethodTokensAreRefusedBeforeTheNetwork(t *testing.T) {
 	var seen []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.Method)
@@ -56,13 +84,79 @@ func TestUnknownVerbsAreRefusedBeforeTheNetwork(t *testing.T) {
 	defer srv.Close()
 
 	c := NewScanClient(nil, 0, "", nil)
-	for _, method := range []string{"GTE", "PSOT", "TRACE", "CONNECT", "PROPFIND"} {
-		if resp := c.Do(context.Background(), ScanRequest{URL: srv.URL + "/x", Method: method}); resp.Err != ErrMethodNotAllowed {
-			t.Errorf("%s must be refused, got err=%v status=%d", method, resp.Err, resp.Status)
+	for _, method := range []string{"GET /x", "PO\tST", "PO\nST", "GET;", "GET(1)", "\"GET\""} {
+		resp := c.Do(context.Background(), ScanRequest{URL: srv.URL + "/x", Method: method})
+		if resp.Err != ErrMethodNotAllowed {
+			t.Errorf("%q is not a method token and must be refused, got err=%v status=%d",
+				method, resp.Err, resp.Status)
 		}
 	}
 	if len(seen) != 0 {
-		t.Fatalf("a refused verb must never reach the network, but the server saw: %v", seen)
+		t.Fatalf("a refused method must never reach the network, but the server saw: %v", seen)
+	}
+}
+
+// REMOVING THE VERB LIST MUST NOT HAVE OPENED THE HOST BOUNDARY.
+//
+// The verb allowlist and the scope check sat next to each other in Do, so this is the regression
+// worth pinning: a DELETE, a POST or a verb nobody curated, aimed at a host outside the boundary,
+// must still be refused before the network, and refused for SCOPE rather than for its verb. The
+// boundary is the control that keeps the operator inside their programme; the verb never was one.
+//
+// The refusal is also RECORDED on the scope, because a boundary that refuses silently is a boundary
+// nobody can audit afterwards.
+func TestScopeStillRefusesWriteVerbsAfterTheVerbListWasRemoved(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.Host)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	scope := dfrScope("example.com")
+	c := NewScanClient(nil, 0, "", nil).WithScope(scope)
+
+	// A fabricated host that is not the test server and is not in the boundary. Nothing is sent to
+	// it: the point is that the refusal happens before any dial.
+	const offsite = "https://totally-not-in-scope.invalid/api/v1/accounts/9"
+
+	for _, method := range []string{"DELETE", "POST", "PUT", "PATCH", "PROPFIND", "PURGE", "GET"} {
+		resp := c.Do(context.Background(), ScanRequest{
+			URL: offsite, Method: method, Body: `{"a":1}`,
+		})
+		if resp.Err == nil {
+			t.Errorf("%s to an out-of-boundary host was allowed", method)
+			continue
+		}
+		if !strings.Contains(resp.Err.Error(), ErrOutOfScope.Error()) {
+			t.Errorf("%s was refused for the wrong reason: %v", method, resp.Err)
+		}
+		if resp.Status != 0 {
+			t.Errorf("%s produced status %d, so something went on the wire", method, resp.Status)
+		}
+	}
+
+	if len(seen) != 0 {
+		t.Fatalf("an out-of-scope request must never reach the network, the server saw: %v", seen)
+	}
+	if len(scope.Refused()) == 0 {
+		t.Error("the refusals were not recorded on the scope, so nothing can audit them afterwards")
+	}
+
+	// And the same client still sends an in-boundary write, so the test above is measuring the
+	// boundary rather than a client that refuses everything.
+	here, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("test server URL: %v", err)
+	}
+	inScope := NewScanClient(nil, 0, "", nil).WithScope(dfrScope(here.Hostname()))
+	if resp := inScope.Do(context.Background(), ScanRequest{
+		URL: srv.URL + "/x", Method: "DELETE",
+	}); resp.Err != nil {
+		t.Fatalf("an in-boundary DELETE must still be sent, got %v", resp.Err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("the in-boundary DELETE did not arrive, server saw: %v", seen)
 	}
 }
 

@@ -627,7 +627,7 @@ var shuffleDNSWildcardOptions = map[string]WildcardOptionMeta{
 		Flag: "-w", Provenance: "measured",
 		Choices:     []string{"/app/wordlists/all.txt"},
 		Placeholder: "The runner hardcodes /app/wordlists/all.txt, which is 420,112 lines. The operator is never offered anything else today.",
-		Why:         "THIS IS THE BRUTE FORCE. 420k names against a slow or rate-limited authoritative server is a multi-hour run; a 5k top-names list is minutes. It is the single biggest cost and coverage dial in the workflow. /app/wordlists is a BIND MOUNT of ./docker/shuffledns/wordlists (docker-compose.yml:148-149), so files dropped in on the host appear in the container immediately, which is what makes this a real setting rather than a fixed path.",
+		Why:         "THIS IS THE BRUTE FORCE. 420k names against a slow or rate-limited authoritative server is a multi-hour run; a 5k top-names list is minutes. It is the single biggest cost and coverage dial in the workflow. /app/wordlists is a BIND MOUNT of ./docker/shuffledns/wordlists (docker-compose.yml:161-162), so files dropped in on the host appear in the container immediately, which is what makes this a real setting rather than a fixed path.",
 		Danger:      "VERIFIED SILENT-NOTHING, TWICE OVER. shuffledns v1.2.1 exits 0 with empty stdout when the path does NOT EXIST, and the only evidence is a stderr line the runner then discards: `[ERR] Could not read bruteforce wordlist`. An EMPTY but existing file is worse: exit 0, empty stdout, and not one word on stderr. The runner's `if result == \"\"` branch at bruteForceUtils.go:287 writes status 'completed' with the literal string 'No results found', so a typo'd path is stored identically to a clean brute force. Choices lists what is actually present today; the picker must enumerate the directory INSIDE the container at request time rather than accept free text, and the runner must stat the file and refuse to launch if it is absent or zero bytes.",
 	},
 	"resolvers": {
@@ -1228,7 +1228,7 @@ var nucleiWildcardOwned = map[string]string{
 	"-stats":              "Console presentation.",
 	"-sj":                 "Console presentation.",
 	"-si":                 "Console presentation.",
-	"-duc":                "Should be runner-owned and currently is not passed at all, so every scan may perform an update check before it starts. Fix it in the runner rather than exposing it.",
+	"-duc":                "Already handled at the image level rather than per scan: docker/nuclei/Dockerfile writes disable-update-check into /root/.config/nuclei/config.yaml, so no scan performs an update check even though the flag is never passed. Exposing it would only let an operator turn that protection off.",
 	"-resume":             "Engine lifecycle, not per-scan configuration.",
 	"-reset":              "Engine lifecycle.",
 	"-up":                 "Self-update. It would change the tool under the operator mid-scan.",
@@ -1697,13 +1697,13 @@ func init() {
 			Invocation: "server/utils/amassUtils.go ExecuteAndParseAmassScan",
 			Groups:     amassWildcardGroups, Options: amassWildcardOptions, OwnedFlags: amassWildcardOwned,
 			Notes: "There is no amass container and no amass service in docker-compose.yml. The api container " +
-				"mounts /var/run/docker.sock and shells out `docker run --rm caffix/amass ...` against the HOST " +
-				"daemon, creating a throwaway container per scan. Three runners share this image: wildcard enum, " +
-				"company enum and company intel.\n\n" +
-				"TWO THINGS THAT SHOULD BE FIXED BEFORE THIS SCREEN IS TRUSTED. (1) The invocation is not pinned: " +
-				"`docker run caffix/amass` silently pulls :latest if the image is ever absent, and upstream has " +
-				"moved on by two years and several CLI changes since this build. Pin it to caffix/amass:v4.2.0. " +
-				"(2) The framework supplies no amass config file, so 44 of the 97 data sources are permanently " +
+				"mounts /var/run/docker.sock and shells out `docker run --rm caffix/amass:v4.2.0 ...` against the " +
+				"HOST daemon, creating a throwaway container per scan. Three runners share this image: wildcard " +
+				"enum, company enum and company intel.\n\n" +
+				"ONE THING THAT SHOULD STILL BE FIXED BEFORE THIS SCREEN IS TRUSTED. The invocation IS now pinned " +
+				"(it used to run bare `docker run caffix/amass`, which silently resolves :latest, and upstream has " +
+				"moved on by two years and several CLI changes since this build). What remains: " +
+				"the framework supplies no amass config file, so 44 of the 97 data sources are permanently " +
 				"dead: `enum -list` reports 97 sources of which only 53 are available, and v4 takes API keys only " +
 				"via the YAML passed to -config.\n\n" +
 				"The existing amass_enum_configs and amass_intel_configs tables contribute NOTHING here and were " +
@@ -1759,9 +1759,12 @@ func init() {
 		},
 		WildcardTool{
 			Key: "gau", Name: "GAU", Step: 4, Phase: "Subdomain discovery",
-			Image: "sxcurity/gau:latest", Binary: "gau",
+			Image: "sxcurity/gau@sha256:e5ad95a6fce296e671b83039d84fc0629afd320cc05ac91972ce83b4ac18b862", Binary: "gau",
 			Invocation: "server/utils/subdomainScrapingUtils.go ExecuteAndParseGauScan",
-			Version:    "gau 2.2.4 (image sxcurity/gau:latest is UNPINNED; layers dated 2024-10-28)",
+			// PINNED BY DIGEST, not by tag, and that is forced rather than chosen: the sxcurity/gau
+			// repository publishes exactly ONE tag, "latest", so there is no version tag to pin to.
+			// The digest is the only stable handle. Layers dated 2024-10-28.
+			Version: "gau 2.2.4 (image PINNED by digest sha256:e5ad95a6...; the repo has no version tags)",
 			Groups:     gauWildcardGroups, Options: gauWildcardOptions, OwnedFlags: gauWildcardOwned,
 			Notes: "MEASURED VOCABULARY: every option was run against the real container and the output lines counted, " +
 				"because gau's --help describes intent rather than behaviour.\n\n" +
@@ -1816,7 +1819,12 @@ func init() {
 		},
 		WildcardTool{
 			Key: "subfinder", Name: "Subfinder", Step: 6, Phase: "Subdomain discovery",
-			Container: "ars0n-framework-v2-subfinder-1", Binary: "subfinder", Version: "v2.14.0 (image is :latest, so UNPINNED)",
+			// The option vocabulary below was MEASURED ON v2.14.0 but the image now installs v2.16.0.
+			// docker/subfinder/Dockerfile pins projectdiscovery/subfinder:v2.16.0, which is what the
+			// container actually reports, so the pin is honest and the measurement provenance is not:
+			// subfinderSources in particular records "50 names, of which 37 are..." from `subfinder -ls`
+			// on v2.14.0. Re-run that against v2.16.0 and either confirm the counts or restate them.
+			Container: "ars0n-framework-v2-subfinder-1", Binary: "subfinder", Version: "v2.16.0 installed (image PINNED to :v2.16.0); option vocabulary below measured on v2.14.0",
 			Invocation: "server/utils/subdomainScrapingUtils.go ExecuteAndParseSubfinderScan",
 			Groups:     subfinderWildcardGroups, Options: subfinderWildcardOptions, OwnedFlags: subfinderWildcardOwned,
 			Notes: "THE HIGHEST-VALUE FIX FOR THIS TOOL IS NOT A CONFIG OPTION. Measured: without -silent, stdout " +
@@ -1863,7 +1871,7 @@ func init() {
 				"Any config work has to cover both call sites or half the runs will ignore it.\n\n" +
 				"THE WORDLIST AND RESOLVER PATHS ARE NOW OPTIONS RATHER THAN OWNED FLAGS, which reverses an earlier " +
 				"reading of this runner. /app/wordlists is a BIND MOUNT of ./docker/shuffledns/wordlists " +
-				"(docker-compose.yml:148-149), so files an operator drops in on the host appear in the container " +
+				"(docker-compose.yml:161-162), so files an operator drops in on the host appear in the container " +
 				"immediately: the paths are genuinely selectable, not framework-internal. Today the directory holds " +
 				"exactly two files, all.txt (420,112 lines) and resolvers.txt (117 lines), and the picker must " +
 				"enumerate that directory live rather than trust the Choices baked in here.\n\n" +

@@ -447,3 +447,40 @@ func TestPphackStepsNameTheFindingsOwnKey(t *testing.T) {
 		t.Error("a key from a different finding leaked into the steps")
 	}
 }
+
+// The banner must come off WITHOUT touching the framing of what is left.
+//
+// This is the one place byte-exactness matters: a finding re-sent with raw_mode on carries a
+// deliberate Content-Length / Transfer-Encoding disagreement as its payload, and rewriting CRLF to LF
+// turns that smuggling probe into an ordinary POST. The operator then concludes the target is not
+// vulnerable having never sent the test. The previous implementation split on normalised lines and
+// rejoined with "\n", so it silently did exactly that.
+func TestSplitReconstructedRequestPreservesCRLF(t *testing.T) {
+	body := "POST /x HTTP/1.1\r\nHost: t.example\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+	raw := reconstructedRequestBanner + "\r\n# composed from the attack vector\r\n" + body
+
+	got, composed := SplitReconstructedRequest(raw)
+	if !composed {
+		t.Fatal("a bannered request was not recognised as composed")
+	}
+	if got != body {
+		t.Errorf("framing was altered.\n want %q\n  got %q", body, got)
+	}
+	if strings.Count(got, "\r\n") != strings.Count(body, "\r\n") {
+		t.Errorf("CRLF count changed: want %d, got %d",
+			strings.Count(body, "\r\n"), strings.Count(got, "\r\n"))
+	}
+}
+
+// An LF-framed request must survive unchanged too, and a request with no banner must not be touched
+// at all.
+func TestSplitReconstructedRequestLeavesOtherShapesAlone(t *testing.T) {
+	lf := "GET /y HTTP/1.1\nHost: t.example\n\n"
+	if got, composed := SplitReconstructedRequest(reconstructedRequestBanner + "\n" + lf); !composed || got != lf {
+		t.Errorf("LF body altered: composed=%v got=%q", composed, got)
+	}
+	plain := "GET /z HTTP/1.1\r\nHost: t.example\r\n\r\n"
+	if got, composed := SplitReconstructedRequest(plain); composed || got != plain {
+		t.Errorf("an unbannered request was modified: composed=%v got=%q", composed, got)
+	}
+}

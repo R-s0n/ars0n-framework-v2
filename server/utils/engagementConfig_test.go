@@ -451,7 +451,7 @@ func TestEngagementConfigFollowRedirectsIsAnded(t *testing.T) {
 }
 
 // THE RAILS ARE NOT WIDENABLE. Whatever an engagement config says, the run still has to survive
-// ValidateFlowDetectionConfig, which is where GET-only and the framework's hard ceilings live.
+// ValidateFlowDetectionConfig, which is where the framework's hard ceilings live.
 func TestEngagementConfigCannotWidenTheDetectionRails(t *testing.T) {
 	// A generous engagement config: high rate, huge budget, long timeout, many redirects.
 	eng := ResolveEngagementFrom(&EngagementOverrides{

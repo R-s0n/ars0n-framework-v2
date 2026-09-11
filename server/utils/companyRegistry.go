@@ -14,14 +14,18 @@ func init() {
 	registerCompanyTools(
 		CompanyTool{
 			Key: "amass_intel", Name: "Amass Intel", Step: 1, Phase: "ASN (On-Prem) Network Ranges",
-			Image: "caffix/amass", Binary: "amass intel", Version: "OWASP Amass v4.2.0 (image tag :latest, UNPINNED)",
+			Image: "caffix/amass:v4.2.0", Binary: "amass intel", Version: "OWASP Amass v4.2.0 (image PINNED to :v4.2.0)",
 			Invocation: "server/utils/amassIntelUtils.go ExecuteAmassIntelScan",
 			Groups:     amassIntelCompanyGroups, Options: amassIntelCompanyOptions, OwnedFlags: amassIntelCompanyOwned,
 			Notes: "THERE IS NO AMASS CONTAINER. The api container mounts /var/run/docker.sock and shells out " +
-				"`docker run --rm caffix/amass intel -org <company> -whois -active -timeout 120` against the HOST " +
-				"daemon. The image is named WITHOUT a tag, so docker resolves :latest and will silently pull a " +
-				"newer, CLI-incompatible amass the first time the image is absent. Pin it to caffix/amass:v4.2.0 " +
-				"before trusting a screen that claims to describe the installed version.\n\n" +
+				"`docker run --rm caffix/amass:v4.2.0 intel -org <company> -whois -active -timeout 120` against " +
+				"the HOST daemon.\n\n" +
+				"THE TAG IS NOW PINNED, and this note used to say the opposite. The image was previously named " +
+				"WITHOUT a tag, so docker resolved :latest and would have pulled a newer, CLI-incompatible amass " +
+				"the first time the image was absent - while this screen went on describing v4.2.0. Verified when " +
+				"pinning: :latest and :v4.2.0 carry the same manifest digest " +
+				"(sha256:b11100806a4fd31990103a92d296cd5b7dd5442502e3cf51aceeeaa397305d08, both pushed " +
+				"2023-09-10), so the pin was a no-op on the day and this screen now matches what runs.\n\n" +
 				"SIX THINGS A READER MUST NOT LOSE.\n\n" +
 				"1. THE FLAG SET DIFFERS BETWEEN SUBCOMMANDS OF THE SAME BINARY. `enum` has -brute, -alts, " +
 				"-silent, -nocolor, -dns-qps, -rqps, -trqps and -bl. `intel` has NONE of them, and -nocolor and " +
@@ -268,7 +272,7 @@ func init() {
 		CompanyTool{
 			Key: "amass_enum_company", Name: "Amass Enum (Company)", Step: 9,
 			Phase: "Cloud Asset Enumeration (DNS)",
-			Image: "caffix/amass", Binary: "amass enum", Version: "v4.2.0 (image tag :latest, UNPINNED)",
+			Image: "caffix/amass:v4.2.0", Binary: "amass enum", Version: "v4.2.0 (image PINNED to :v4.2.0)",
 			Invocation: "server/utils/amassEnumUtils.go ExecuteAmassEnumCompanyScan",
 			Groups:     amassEnumCompanyGroups, Options: amassEnumCompanyOptions, OwnedFlags: amassEnumCompanyOwned,
 			Notes: "THE HEADLINE IS THE TIMEOUT. The runner hardcodes -timeout 300, which is FIVE HOURS PER DOMAIN, " +

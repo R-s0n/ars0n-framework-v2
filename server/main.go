@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math"
 	"net/http"
@@ -24,6 +26,16 @@ import (
 )
 
 var dbPool *pgxpool.Pool
+
+// The vendored bug bounty knowledge base, 27 markdown files and 1.4 MB, carried inside the binary so
+// the api container needs no volume for it. The directive lives here rather than next to the
+// handlers in utils/knowledgeBase.go because an embed pattern may not contain "..", so a package in
+// server/utils can only embed what is underneath server/utils. Deleting or moving
+// server/knowledge-base breaks this build, which is the point: the alternative failure is a corpus
+// that quietly stops being served.
+//
+//go:embed knowledge-base
+var knowledgeBaseFiles embed.FS
 
 func min(a, b int) int {
 	return int(math.Min(float64(a), float64(b)))
@@ -69,6 +81,12 @@ func main() {
 		log.Printf("[REQUEST-FLOW-BUILDER] Schema could not be applied, builder routes will fail: %v", err)
 	}
 
+	// Names for detected flows, same arrangement and same reasoning. Non-fatal: without the table the
+	// flow list still works and simply shows every flow under its derived label.
+	if err := utils.EnsureDetectedFlowNamesSchema(context.Background()); err != nil {
+		log.Printf("[FLOW-NAME] Schema could not be applied, flows will show derived labels only: %v", err)
+	}
+
 	// Pick up any auto scan the previous process was running. Must come after createTables, whose
 	// sweep clears the scan rows belonging to whichever step was mid-flight.
 	utils.ResumeInterruptedAutoScans()
@@ -78,6 +96,17 @@ func main() {
 	// second copy of the whole corpus and orphaned the first. Idempotent, soft-delete only, and it
 	// merges operator-owned state onto the surviving row before retiring a duplicate.
 	utils.BackfillEndpointKeys()
+
+	// Hand the embedded knowledge base to the handlers, rooted so their paths start at methodology/
+	// rather than at knowledge-base/. Logged with a count because a zero means the embed stopped
+	// matching and every /knowledge-base route is about to answer 503, which is worth one line here
+	// rather than a mystery in the reader modal. Non-fatal: the corpus is reading material, and losing
+	// it should not cost the API.
+	if kbFS, err := fs.Sub(knowledgeBaseFiles, "knowledge-base"); err != nil {
+		log.Printf("[KNOWLEDGE-BASE] Embedded corpus could not be rooted, reader routes will 503: %v", err)
+	} else {
+		log.Printf("[KNOWLEDGE-BASE] %d documents embedded", utils.SetKnowledgeBaseFS(kbFS))
+	}
 
 	r := mux.NewRouter()
 
@@ -157,6 +186,14 @@ func main() {
 	r.HandleFunc("/tool-guidance", utils.GetToolGuidance).Methods("GET", "OPTIONS")
 	r.HandleFunc("/methodology/{scope_target_id}/advice", utils.GetTargetAdvice).Methods("GET", "OPTIONS")
 	r.HandleFunc("/methodology/{step}", utils.GetMethodology).Methods("GET", "OPTIONS")
+	// The vendored knowledge base: hunting methodology, a checklist, and the accepted and rejected
+	// report corpora, embedded in this binary. Same arrangement and the same reason as the routes
+	// above, one source for the client reader and the MCP browse/read/search tools. /search and /file
+	// are literal segments so they are registered before nothing else can swallow them, and reads are
+	// capped at 20000 characters unless full=true, because one of these documents is 607 KB.
+	r.HandleFunc("/knowledge-base", utils.GetKnowledgeBaseTree).Methods("GET", "OPTIONS")
+	r.HandleFunc("/knowledge-base/search", utils.SearchKnowledgeBase).Methods("GET", "OPTIONS")
+	r.HandleFunc("/knowledge-base/file", utils.GetKnowledgeFile).Methods("GET", "OPTIONS")
 	r.HandleFunc("/attack-vectors/{scope_target_id}/summary", utils.GetAttackVectorSummary).Methods("GET", "OPTIONS")
 	// Above the bare /attack-vectors/{scope_target_id} below, or the literal segment is swallowed by
 	// the {scope_target_id} pattern, exactly as the comment on the category loop warns.
@@ -184,10 +221,15 @@ func main() {
 		r.HandleFunc(prefix+"/finding/{id}/triage", utils.SetVectorFindingTriage).Methods("POST", "OPTIONS")
 		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/settings", utils.GetVectorSettings).Methods("GET", "OPTIONS")
 		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/settings", utils.SaveVectorSettings).Methods("POST", "OPTIONS")
+		// Which vectors this tool runs against. Registered alongside settings because it is the same
+		// kind of per-tool configuration, and it uses the same {tool} segment so a section gets it
+		// for free rather than needing a route per scanner.
+		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/selection", utils.GetVectorSelection).Methods("GET", "OPTIONS")
+		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/selection", utils.SetVectorSelection).Methods("POST", "OPTIONS")
 		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/scan", utils.RunVectorScan).Methods("POST", "OPTIONS")
 		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/cancel", utils.CancelVectorScan).Methods("POST", "OPTIONS")
 		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/status", utils.GetVectorScanStatus).Methods("GET", "OPTIONS")
-		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/results", utils.GetVectorResults).Methods("GET", "OPTIONS")
+		r.HandleFunc(prefix+"/{scope_target_id}/{tool}/results", utils.GetVectorResults(category)).Methods("GET", "OPTIONS")
 		// Full stdout for ONE exec, fetched on demand. The results payload carries only trace summaries
 		// because a single sqlmap run can print megabytes, and pulling all of them on every poll of the
 		// results modal would make the diagnostic feature the reason the UI is slow.
@@ -667,6 +709,18 @@ func main() {
 	r.HandleFunc("/replay-request/flow/{flow_id}/run/{run_id}/cancel", utils.CancelDetectedFlowRun).Methods("POST", "OPTIONS")
 	r.HandleFunc("/replay-request/flow/{flow_id}/run/{run_id}", utils.GetDetectedFlowRun).Methods("GET", "OPTIONS")
 	r.HandleFunc("/replay-request/flow/{flow_id}/run", utils.RunDetectedFlow).Methods("POST", "OPTIONS")
+	// Naming a detected flow. Same reasoning as /run above: a longer path than /flow/{flow_id}, so
+	// gorilla could not confuse them, but declared first to keep the literal-before-variable habit.
+	// The name and description are stored in detected_flow_names and are the only persisted thing
+	// about a flow that is otherwise derived on every request.
+	r.HandleFunc("/replay-request/flow/{flow_id}/name", utils.SetDetectedFlowName).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/replay-request/flow/{flow_id}/name", utils.DeleteDetectedFlowName).Methods("DELETE", "OPTIONS")
+
+	// Which flow demonstrates which STRIDE threat. Registered here rather than under /threat-model
+	// because a link is read far more often from the flow side ("what does this sequence prove?")
+	// than from the threat side, and both directions come out of the same handler.
+	r.HandleFunc("/flow-threat-links/{scope_target_id}", utils.GetFlowThreatLinks).Methods("GET", "OPTIONS")
+	r.HandleFunc("/flow-threat-links/{scope_target_id}", utils.SetFlowThreatLink).Methods("POST", "OPTIONS")
 	r.HandleFunc("/replay-request/flow/{flow_id}", utils.GetReplayRequestFlow).Methods("GET", "OPTIONS")
 	r.HandleFunc("/replay-request/send", utils.SendReplayRequest).Methods("POST", "OPTIONS")
 	// Version history for edited requests. /versions/{id} is the literal-prefixed pair of
@@ -742,6 +796,10 @@ func main() {
 	r.HandleFunc("/request-flow-builder/flow/{flow_id}/steps", utils.AddRequestFlowStep).Methods("POST", "OPTIONS")
 	r.HandleFunc("/request-flow-builder/flow/{flow_id}/preview", utils.PreviewRequestFlow).Methods("GET", "OPTIONS")
 	r.HandleFunc("/request-flow-builder/flow/{flow_id}/replay", utils.ReplayRequestFlow).Methods("POST", "OPTIONS")
+	// The stored traces. A built flow the list calls "stale" HAS run and its map is already recorded;
+	// without a route to read it the only ways to draw that map are to re-send the flow at the
+	// engagement or to pretend there is no map. Both are worse than reading the row that exists.
+	r.HandleFunc("/request-flow-builder/flow/{flow_id}/runs", utils.GetRequestFlowRuns).Methods("GET", "OPTIONS")
 	r.HandleFunc("/request-flow-builder/flow/{flow_id}", utils.GetRequestFlow).Methods("GET", "OPTIONS")
 	r.HandleFunc("/request-flow-builder/flow/{flow_id}", utils.UpdateRequestFlow).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/request-flow-builder/flow/{flow_id}", utils.DeleteRequestFlow).Methods("DELETE", "OPTIONS")
@@ -769,6 +827,16 @@ func main() {
 	r.HandleFunc("/notes", utils.CreateNote).Methods("POST", "OPTIONS")
 	r.HandleFunc("/notes/{note_id}", utils.UpdateNote).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/notes/{note_id}", utils.DeleteNote).Methods("DELETE", "OPTIONS")
+
+	// Notes on a single threat, which are a different thing from the scope target notes above and are
+	// stored in their own table. Same shape ambiguity, same reason: the path variable is named for what
+	// it holds on each route, because gorilla matches on shape alone and /threat-notes/{x} is the same
+	// route whether x is a threat or a note. The methods are what tell them apart, so do not "fix" this
+	// into /threat-notes/threat/{id}.
+	r.HandleFunc("/threat-notes/{threat_id}", utils.GetThreatNotes).Methods("GET", "OPTIONS")
+	r.HandleFunc("/threat-notes", utils.CreateThreatNote).Methods("POST", "OPTIONS")
+	r.HandleFunc("/threat-notes/{note_id}", utils.UpdateThreatNote).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/threat-notes/{note_id}", utils.DeleteThreatNote).Methods("DELETE", "OPTIONS")
 
 	// Multi-endpoint probe run: one scan per selected endpoint, grouped by run_id, executed one at a
 	// time because concurrent probes against the same host corrupt each other's measurements.

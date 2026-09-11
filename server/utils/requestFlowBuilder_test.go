@@ -81,6 +81,40 @@ func requestFlowTestFlow() (captureFlow, map[string]requestFlowSeedCapture) {
 	return captureFlow{Captures: captures, RootKind: flowRootNavigation}, detail
 }
 
+// requestFlowWriteVerbFlow is a flow made of the verbs a builder used to disarm: one read and four
+// writes, every one of them carrying the body that was recorded.
+func requestFlowWriteVerbFlow() (captureFlow, map[string]requestFlowSeedCapture) {
+	t0 := time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC)
+
+	specs := []struct {
+		id, method, url, body string
+	}{
+		{"bbbbbbbb-0000-4000-8000-000000000001", "GET", "https://app.example.com/basket", ""},
+		{"bbbbbbbb-0000-4000-8000-000000000002", "POST", "https://api.example.com/v1/basket/items", `{"sku":"A1"}`},
+		{"bbbbbbbb-0000-4000-8000-000000000003", "PUT", "https://api.example.com/v1/basket/items/1", `{"qty":2}`},
+		{"bbbbbbbb-0000-4000-8000-000000000004", "PATCH", "https://api.example.com/v1/basket", `{"note":"x"}`},
+		{"bbbbbbbb-0000-4000-8000-000000000005", "DELETE", "https://api.example.com/v1/basket/items/1", ""},
+	}
+
+	captures := make([]FlowCapture, 0, len(specs))
+	detail := map[string]requestFlowSeedCapture{}
+	for i, s := range specs {
+		kind := "fetch"
+		if i == 0 {
+			kind = "document"
+		}
+		captures = append(captures, requestFlowTestCapture(s.id, s.method, s.url, kind, 200,
+			s.body != "", t0.Add(time.Duration(i*100)*time.Millisecond)))
+		detail[s.id] = requestFlowSeedCapture{
+			ID: s.id, Method: s.method, URL: s.url,
+			Headers: map[string]interface{}{"Content-Type": "application/json"},
+			Body:    s.body,
+		}
+	}
+
+	return captureFlow{Captures: captures, RootKind: flowRootNavigation}, detail
+}
+
 func mustParseRequestFlowStep(t *testing.T, raw string) *http.Request {
 	t.Helper()
 	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
@@ -99,7 +133,7 @@ func mustParseRequestFlowStep(t *testing.T, raw string) *http.Request {
 func TestRequestFlowBuilderSeedsDetectedFlowInOrder(t *testing.T) {
 	flow, detail := requestFlowTestFlow()
 
-	steps := seedStepsFromFlow(flow, detail, false, nil, false)
+	steps := seedStepsFromFlow(flow, detail, false, nil)
 
 	// The default selection mirrors the diagram: root, xhr, the POST. The script and the image are
 	// the 90% of the corpus the flow view hides, and seeding them would hand back a flow that does
@@ -162,7 +196,7 @@ func TestRequestFlowBuilderSeedsDetectedFlowInOrder(t *testing.T) {
 func TestRequestFlowBuilderIncludeAllSeedsEveryRequest(t *testing.T) {
 	flow, detail := requestFlowTestFlow()
 
-	steps := seedStepsFromFlow(flow, detail, true, nil, false)
+	steps := seedStepsFromFlow(flow, detail, true, nil)
 	if len(steps) != 5 {
 		t.Fatalf("include_all seeded %d steps, want all 5", len(steps))
 	}
@@ -184,7 +218,7 @@ func TestRequestFlowBuilderExplicitSelectionKeepsFlowOrder(t *testing.T) {
 		"aaaaaaaa-0000-4000-8000-000000000004": true, // the POST, last in the flow
 		"aaaaaaaa-0000-4000-8000-000000000002": true, // the script, second in the flow
 	}
-	steps := seedStepsFromFlow(flow, detail, false, only, true)
+	steps := seedStepsFromFlow(flow, detail, false, only)
 
 	if len(steps) != 2 {
 		t.Fatalf("selected 2 captures, got %d steps", len(steps))
@@ -204,7 +238,7 @@ func TestRequestFlowBuilderSkipsCapturesWithNoBytes(t *testing.T) {
 	flow, detail := requestFlowTestFlow()
 	delete(detail, "aaaaaaaa-0000-4000-8000-000000000003")
 
-	steps := seedStepsFromFlow(flow, detail, false, nil, false)
+	steps := seedStepsFromFlow(flow, detail, false, nil)
 	if len(steps) != 2 {
 		t.Fatalf("got %d steps, want 2 (the xhr's bytes are gone)", len(steps))
 	}
@@ -239,7 +273,7 @@ func TestRequestFlowBuilderSeededStepRoundTripsThroughReadRequest(t *testing.T) 
 		Body: body,
 	}
 
-	step := requestFlowSeedStep(seed, true)
+	step := requestFlowSeedStep(seed)
 	req := mustParseRequestFlowStep(t, step.RawRequest)
 
 	if req.Method != "POST" {
@@ -285,7 +319,7 @@ func TestRequestFlowBuilderKeepsMultipartBodyByteForByte(t *testing.T) {
 		Body:    body,
 	}
 
-	step := requestFlowSeedStep(seed, true)
+	step := requestFlowSeedStep(seed)
 	req := mustParseRequestFlowStep(t, step.RawRequest)
 
 	got, _ := io.ReadAll(req.Body)
@@ -299,62 +333,70 @@ func TestRequestFlowBuilderKeepsMultipartBodyByteForByte(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Nothing is armed by seeding
+// Seeding arms every step, whatever its verb
 // ---------------------------------------------------------------------------
 
-// The safety default, and the reason this file exists in the shape it does.
+// THE GUARANTEE THIS TEST EXISTS TO PIN. A step seeded from a capture arrives ENABLED, and the verb
+// has nothing to do with it.
 //
-// Seeding copies captured request bodies in verbatim, and a captured body carries whatever
-// identifier the browser sent: a real phone number, a real account id. On one live target six
-// endpoints dispatch a one-time code to a real customer when hit with a resolvable identifier.
-// A seeded POST that arrived armed would send that body the first time the operator pressed Replay.
-func TestRequestFlowBuilderSeedsStateChangingStepsDisabled(t *testing.T) {
-	flow, detail := requestFlowTestFlow()
+// This used to be the other way round: a seeded POST arrived turned off, so an operator who imported
+// a flow and pressed Replay got a run in which the login submitted nothing, the basket never filled
+// and every step after it answered as an anonymous user, while reporting green. A flow whose writes
+// arrive disabled proves nothing when it passes. If a future edit reintroduces a verb branch in
+// seeding, this fails.
+func TestRequestFlowBuilderSeedsEveryVerbEnabled(t *testing.T) {
+	flow, detail := requestFlowWriteVerbFlow()
 
-	steps := seedStepsFromFlow(flow, detail, true, nil, false)
+	steps := seedStepsFromFlow(flow, detail, true, nil)
+	if len(steps) != 5 {
+		t.Fatalf("expected all 5 captures to seed, got %d", len(steps))
+	}
 
+	seen := map[string]bool{}
 	for _, s := range steps {
 		method := requestFlowMethodOf(s.RawRequest)
-		switch method {
-		case "POST", "PUT", "PATCH", "DELETE":
-			if s.Enabled {
-				t.Errorf("%s arrived ARMED. Replaying it sends the recorded body, "+
-					"which on some endpoints texts or emails a real person.", s.Name)
-			}
-		default:
-			if !s.Enabled {
-				t.Errorf("%s arrived disabled; a GET is the safe default and disarming it "+
-					"makes the operator tick boxes for no reason", s.Name)
-			}
+		seen[method] = true
+		if !s.Enabled {
+			t.Errorf("%s (%s) arrived turned OFF. Seeding must arm every step it creates; the verb "+
+				"is the operator's business and the scope rails are the control.", s.Name, method)
+		}
+	}
+	for _, want := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
+		if !seen[want] {
+			t.Errorf("the fixture must exercise %s", want)
 		}
 	}
 }
 
-// The opt-in exists, is explicit, and is the only way to arm a seeded POST.
-func TestRequestFlowBuilderArmWriteStepsIsTheOnlyWayToArm(t *testing.T) {
-	flow, detail := requestFlowTestFlow()
-
-	for _, s := range seedStepsFromFlow(flow, detail, true, nil, true) {
-		if !s.Enabled {
-			t.Errorf("%s is still disabled with arm_write_steps set", s.Name)
-		}
+// A hand-added step is armed too, and an explicit enabled:false is still honoured. That switch is
+// the operator's and it is the only thing that turns a step off.
+func TestRequestFlowBuilderSeededStepIsArmed(t *testing.T) {
+	seed := requestFlowSeedCapture{
+		ID:      "aaaaaaaa-0000-4000-8000-00000000000a",
+		Method:  "DELETE",
+		URL:     "https://api.example.com/v1/accounts/9182734",
+		Headers: map[string]interface{}{"Authorization": "Bearer tok"},
+	}
+	if step := requestFlowSeedStep(seed); !step.Enabled {
+		t.Error("a seeded DELETE must arrive armed")
 	}
 }
 
 func TestRequestFlowBuilderReadsTheVerbOffUnparseableBytes(t *testing.T) {
 	// Mid-edit bytes that http.ReadRequest would refuse. The verb still has to be readable, because
-	// a request whose method cannot be determined must not be treated as a harmless GET.
-	cases := map[string]bool{
-		"DELETE /v1/accounts/9182734 HTTP/1.1\r\nHost: api.example.com": true,
-		"post /v1/otp/send HTTP/1.1\nHost: api.example.com\nContent-Le": true,
-		"PATCH /v1/profile": true,
-		"GET /v1/tickets?page=1 HTTP/1.1\r\nHost: api.example.com\r\n\r\n": false,
-		"HEAD /":  false,
-		"OPTIONS": false,
+	// it is what labels the step and what the preview shows.
+	cases := map[string]string{
+		"DELETE /v1/accounts/9182734 HTTP/1.1\r\nHost: api.example.com": "DELETE",
+		"post /v1/otp/send HTTP/1.1\nHost: api.example.com\nContent-Le": "POST",
+		"PATCH /v1/profile": "PATCH",
+		"GET /v1/tickets?page=1 HTTP/1.1\r\nHost: api.example.com\r\n\r\n": "GET",
+		"PROPFIND /dav/ HTTP/1.1\r\nHost: api.example.com":                 "PROPFIND",
+		"HEAD /":  "HEAD",
+		"OPTIONS": "OPTIONS",
 	}
 	for raw, want := range cases {
-		if got := requestFlowIsStateChanging(raw); got != want {
-			t.Errorf("requestFlowIsStateChanging(%q) = %v, want %v", raw, got, want)
+		if got := requestFlowMethodOf(raw); got != want {
+			t.Errorf("requestFlowMethodOf(%q) = %q, want %q", raw, got, want)
 		}
 	}
 }
@@ -504,6 +546,41 @@ func TestRequestFlowBuilderRefusesAnOutOfScopeStep(t *testing.T) {
 	}
 }
 
+// Removing the verb gate must not have opened the scope gate. A DELETE, a POST and a PUT aimed at a
+// host outside the boundary or on the operator's deny list are refused exactly as a GET is, and the
+// preview says so before anything is sent.
+func TestRequestFlowBuilderStillRefusesWriteStepsOutsideTheBoundary(t *testing.T) {
+	scope := &ScanScope{
+		domains: map[string]bool{},
+		extra:   map[string]bool{},
+		refused: map[string]int{},
+		primary: "app.example.com",
+	}
+	scope.Allow("example.com")
+	rails := flowSendRails{Scope: scope, Denied: map[string]bool{"analytics.example.com": true}}
+
+	steps := []RequestFlowStep{
+		{ID: "s1", StepOrder: 1, Name: "in scope write", Enabled: true,
+			RawRequest: "POST /v1/basket HTTP/1.1\r\nHost: app.example.com\r\nContent-Length: 3\r\n\r\na=1"},
+		{ID: "s2", StepOrder: 2, Name: "offsite write", Enabled: true,
+			RawRequest: "DELETE /v1/accounts/1 HTTP/1.1\r\nHost: api.thirdparty.io\r\n\r\n"},
+		{ID: "s3", StepOrder: 3, Name: "denied host write", Enabled: true,
+			RawRequest: "PUT /v1/e HTTP/1.1\r\nHost: analytics.example.com\r\nContent-Length: 3\r\n\r\na=1"},
+	}
+
+	rows := requestFlowPreview(steps, "", rails)
+
+	if rows[0].Refusal != "" || !rows[0].InScope {
+		t.Fatalf("an in-scope POST must be sendable: %+v", rows[0])
+	}
+	for _, i := range []int{1, 2} {
+		if rows[i].Refusal == "" || rows[i].InScope {
+			t.Fatalf("%s (%s) was going to be SENT. The scope rails are the control and they must "+
+				"still refuse a write: %+v", rows[i].Name, rows[i].Method, rows[i])
+		}
+	}
+}
+
 // A step with no Host header and no flow base URL has nowhere to go. Sending it somewhere guessed at
 // is the one outcome that is worse than refusing it.
 func TestRequestFlowBuilderRefusesAStepWithNoDestination(t *testing.T) {
@@ -549,14 +626,17 @@ func TestRequestFlowBuilderPreviewMatchesWhatWouldBeSent(t *testing.T) {
 		t.Fatalf("preview returned %d rows for 4 steps", len(rows))
 	}
 
-	if rows[0].Refusal != "" || !rows[0].InScope || rows[0].StateChanging {
+	if rows[0].Refusal != "" || !rows[0].InScope {
 		t.Errorf("step 1 should go out as a plain in-scope GET, got %+v", rows[0])
 	}
-	if !rows[1].StateChanging {
-		t.Errorf("step 2 is a POST and was not flagged as state changing")
+	if rows[1].Method != "POST" {
+		t.Errorf("the preview must report the verb it read off the bytes, got %q", rows[1].Method)
 	}
 	if rows[1].Refusal == "" {
 		t.Errorf("step 2 is turned off and the preview did not say it would be skipped")
+	}
+	if !rows[1].InScope {
+		t.Errorf("step 2 is turned off, not out of scope; the two must not be confused: %+v", rows[1])
 	}
 	if rows[2].InScope || rows[2].Refusal == "" {
 		t.Errorf("step 3 is out of scope and the preview did not refuse it: %+v", rows[2])
@@ -696,14 +776,37 @@ func TestRequestFlowStepURLCarriesThePath(t *testing.T) {
 // A rails load that failed must refuse everything rather than render a preview of green ticks. An
 // empty exclusion list substituted for an unreadable one is how the operator's "this endpoint texts
 // a real customer" rule is lost to a transient database error.
+// EVERYTHING means every verb. Now that nothing narrows a run by verb, a write is not held back by
+// some second rail of its own: this one has to catch it, so a DELETE is checked alongside the read.
 func TestRequestFlowUnreadableRailsRefuseEverything(t *testing.T) {
 	rails := flowSendRails{Unreadable: "the exclusion list could not be read"}
-	_, refusal := requestFlowScopeRefusal(
-		"GET /dashboard HTTP/1.1\r\nHost: app.example.com\r\n\r\n", "", rails)
-	if refusal == "" {
-		t.Fatal("a step was allowed through while the rails were unreadable")
+
+	for _, raw := range []string{
+		"GET /dashboard HTTP/1.1\r\nHost: app.example.com\r\n\r\n",
+		"DELETE /api/orders/7 HTTP/1.1\r\nHost: app.example.com\r\n\r\n",
+	} {
+		verb := strings.SplitN(raw, " ", 2)[0]
+		_, refusal := requestFlowScopeRefusal(raw, "", rails)
+		if refusal == "" {
+			t.Fatalf("a %s step was allowed through while the rails were unreadable", verb)
+		}
+		if !strings.Contains(refusal, "could not be read") {
+			t.Errorf("the %s refusal does not say why: %s", verb, refusal)
+		}
 	}
-	if !strings.Contains(refusal, "could not be read") {
-		t.Errorf("the refusal does not say why: %s", refusal)
+
+	// And the same through the preview the operator actually reads, where a refused step must not
+	// also be reporting itself in scope.
+	steps := []RequestFlowStep{
+		{ID: "w1", StepOrder: 1, Name: "delete", Enabled: true,
+			RawRequest: "DELETE /api/orders/7 HTTP/1.1\r\nHost: app.example.com\r\n\r\n"},
+	}
+	for _, row := range requestFlowPreview(steps, "https://app.example.com", rails) {
+		if row.Refusal == "" {
+			t.Fatalf("%s was previewed as sendable while the rails were unreadable", row.Method)
+		}
+		if row.InScope {
+			t.Errorf("%s reports in_scope=true while the rails could not be read", row.Method)
+		}
 	}
 }

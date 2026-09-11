@@ -16,13 +16,21 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The three states a threat model entry can be in. A threat is untested until it has actually been run
-// against the target; validated means the attack worked; rejected means it did not. Only these three
-// values are accepted, and the same set is enforced by a CHECK constraint on the column.
+// The four states a threat model entry can be in. A threat is untested until it has actually been run
+// against the target; validated means the attack worked; rejected means it was run and did not.
+//
+// not_enough_info is the fourth and it is not a weaker rejection: it means the test was attempted and
+// could not be settled, because a precondition was missing, the refusal shape was ambiguous, or the
+// control arm did not pass. Recording that as rejected buries a real finding behind a verdict nobody
+// re-opens, and leaving it as untested asserts nobody looked. It exists because 30 rows on a live
+// engagement were in exactly that state and had nowhere honest to sit.
+//
+// Only these four values are accepted, and the same set is enforced by a CHECK constraint on the column.
 const (
-	ThreatTestStatusUntested  = "untested"
-	ThreatTestStatusValidated = "validated"
-	ThreatTestStatusRejected  = "rejected"
+	ThreatTestStatusUntested      = "untested"
+	ThreatTestStatusValidated     = "validated"
+	ThreatTestStatusRejected      = "rejected"
+	ThreatTestStatusNotEnoughInfo = "not_enough_info"
 )
 
 // ThreatSeverities is the closed set the UI colour-codes on. Free text here would make the header
@@ -40,7 +48,8 @@ func IsValidThreatSeverity(v string) bool {
 
 func IsValidThreatTestStatus(s string) bool {
 	switch s {
-	case ThreatTestStatusUntested, ThreatTestStatusValidated, ThreatTestStatusRejected:
+	case ThreatTestStatusUntested, ThreatTestStatusValidated, ThreatTestStatusRejected,
+		ThreatTestStatusNotEnoughInfo:
 		return true
 	}
 	return false
@@ -254,7 +263,7 @@ func CreateThreatModel(w http.ResponseWriter, r *http.Request) {
 		payload.TestStatus = ThreatTestStatusUntested
 	}
 	if !IsValidThreatTestStatus(payload.TestStatus) {
-		http.Error(w, "test_status must be one of untested, validated, rejected", http.StatusBadRequest)
+		http.Error(w, "test_status must be one of untested, validated, rejected, not_enough_info", http.StatusBadRequest)
 		return
 	}
 
@@ -379,7 +388,7 @@ func UpdateThreatModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if payload.TestStatus != "" && !IsValidThreatTestStatus(payload.TestStatus) {
-		http.Error(w, "test_status must be one of untested, validated, rejected", http.StatusBadRequest)
+		http.Error(w, "test_status must be one of untested, validated, rejected, not_enough_info", http.StatusBadRequest)
 		return
 	}
 
@@ -497,7 +506,8 @@ func UpdateThreatModel(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(threat)
 }
 
-// SetThreatModelTestStatus flips a single threat between untested, validated and rejected.
+// SetThreatModelTestStatus flips a single threat between untested, validated, rejected and
+// not_enough_info.
 //
 // This exists rather than routing the Validate/Reject buttons through UpdateThreatModel because that
 // handler replaces every column and demands category and url. Marking a threat as tested is a one-field
@@ -517,7 +527,7 @@ func SetThreatModelTestStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !IsValidThreatTestStatus(payload.TestStatus) {
-		http.Error(w, "test_status must be one of untested, validated, rejected", http.StatusBadRequest)
+		http.Error(w, "test_status must be one of untested, validated, rejected, not_enough_info", http.StatusBadRequest)
 		return
 	}
 

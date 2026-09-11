@@ -15,7 +15,7 @@ func GetMechanismsExamples(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	scopeTargetID := vars["scope_target_id"]
 
-	query := `SELECT id, mechanism, url, notes, created_at, updated_at 
+	query := `SELECT id, mechanism, url, notes, COALESCE(flow_id,''), created_at, updated_at 
 	          FROM mechanisms_examples 
 	          WHERE scope_target_id = $1 
 	          ORDER BY mechanism, created_at DESC`
@@ -35,11 +35,12 @@ func GetMechanismsExamples(w http.ResponseWriter, r *http.Request) {
 			Mechanism string    `json:"mechanism"`
 			URL       string    `json:"url"`
 			Notes     string    `json:"notes"`
+			FlowID    string    `json:"flow_id"`
 			CreatedAt time.Time `json:"created_at"`
 			UpdatedAt time.Time `json:"updated_at"`
 		}
 
-		err := rows.Scan(&example.ID, &example.Mechanism, &example.URL, &example.Notes, &example.CreatedAt, &example.UpdatedAt)
+		err := rows.Scan(&example.ID, &example.Mechanism, &example.URL, &example.Notes, &example.FlowID, &example.CreatedAt, &example.UpdatedAt)
 		if err != nil {
 			log.Printf("[ERROR] Failed to scan row: %v", err)
 			continue
@@ -50,6 +51,7 @@ func GetMechanismsExamples(w http.ResponseWriter, r *http.Request) {
 			"mechanism":  example.Mechanism,
 			"url":        example.URL,
 			"notes":      example.Notes,
+			"flow_id":    example.FlowID,
 			"created_at": example.CreatedAt,
 			"updated_at": example.UpdatedAt,
 		})
@@ -67,6 +69,12 @@ func CreateMechanismExample(w http.ResponseWriter, r *http.Request) {
 		Mechanism string `json:"mechanism"`
 		URL       string `json:"url"`
 		Notes     string `json:"notes"`
+		// FlowID points at the request flow that DEMONSTRATES this mechanism, so "how does login
+		// work here" is answerable by replaying the sequence rather than by reading prose about it.
+		// Text and not a foreign key: a detected flow id is the composite "<session>~<tab>~<root>"
+		// and is a row in no table, while a built flow id is a UUID in request_flows. One key could
+		// only ever accept half of them, and the detected half is the half that records real traffic.
+		FlowID string `json:"flow_id"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -80,21 +88,22 @@ func CreateMechanismExample(w http.ResponseWriter, r *http.Request) {
 	}
 
 	exampleID := uuid.New().String()
-	query := `INSERT INTO mechanisms_examples (id, scope_target_id, mechanism, url, notes) 
-	          VALUES ($1, $2, $3, $4, $5) 
-	          RETURNING id, mechanism, url, notes, created_at, updated_at`
+	query := `INSERT INTO mechanisms_examples (id, scope_target_id, mechanism, url, notes, flow_id) 
+	          VALUES ($1, $2, $3, $4, $5, $6) 
+	          RETURNING id, mechanism, url, notes, COALESCE(flow_id,''), created_at, updated_at`
 
 	var example struct {
 		ID        string    `json:"id"`
 		Mechanism string    `json:"mechanism"`
 		URL       string    `json:"url"`
 		Notes     string    `json:"notes"`
+		FlowID    string    `json:"flow_id"`
 		CreatedAt time.Time `json:"created_at"`
 		UpdatedAt time.Time `json:"updated_at"`
 	}
 
-	err := dbPool.QueryRow(context.Background(), query, exampleID, scopeTargetID, payload.Mechanism, payload.URL, payload.Notes).Scan(
-		&example.ID, &example.Mechanism, &example.URL, &example.Notes, &example.CreatedAt, &example.UpdatedAt,
+	err := dbPool.QueryRow(context.Background(), query, exampleID, scopeTargetID, payload.Mechanism, payload.URL, payload.Notes, payload.FlowID).Scan(
+		&example.ID, &example.Mechanism, &example.URL, &example.Notes, &example.FlowID, &example.CreatedAt, &example.UpdatedAt,
 	)
 
 	if err != nil {
@@ -113,8 +122,9 @@ func UpdateMechanismExample(w http.ResponseWriter, r *http.Request) {
 	exampleID := vars["example_id"]
 
 	var payload struct {
-		URL   string `json:"url"`
-		Notes string `json:"notes"`
+		URL    string `json:"url"`
+		Notes  string `json:"notes"`
+		FlowID string `json:"flow_id"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -127,22 +137,25 @@ func UpdateMechanismExample(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// COALESCE so an update that does not mention the flow keeps the one already stored, rather than
+	// clearing a link because the caller only meant to edit the notes.
 	query := `UPDATE mechanisms_examples 
-	          SET url = $1, notes = $2, updated_at = NOW() 
+	          SET url = $1, notes = $2, flow_id = COALESCE(NULLIF($4,''), flow_id), updated_at = NOW() 
 	          WHERE id = $3 
-	          RETURNING id, mechanism, url, notes, created_at, updated_at`
+	          RETURNING id, mechanism, url, notes, COALESCE(flow_id,''), created_at, updated_at`
 
 	var example struct {
 		ID        string    `json:"id"`
 		Mechanism string    `json:"mechanism"`
 		URL       string    `json:"url"`
 		Notes     string    `json:"notes"`
+		FlowID    string    `json:"flow_id"`
 		CreatedAt time.Time `json:"created_at"`
 		UpdatedAt time.Time `json:"updated_at"`
 	}
 
-	err := dbPool.QueryRow(context.Background(), query, payload.URL, payload.Notes, exampleID).Scan(
-		&example.ID, &example.Mechanism, &example.URL, &example.Notes, &example.CreatedAt, &example.UpdatedAt,
+	err := dbPool.QueryRow(context.Background(), query, payload.URL, payload.Notes, exampleID, payload.FlowID).Scan(
+		&example.ID, &example.Mechanism, &example.URL, &example.Notes, &example.FlowID, &example.CreatedAt, &example.UpdatedAt,
 	)
 
 	if err != nil {

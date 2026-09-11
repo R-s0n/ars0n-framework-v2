@@ -19,25 +19,37 @@ import (
 // Redirects are never followed. A 302 to /login is the single most useful observation Validate
 // makes, and a client that follows it reports 200 and destroys the evidence.
 
-// scanSendableMethods is what this transport will put on the wire. The full set: the operator
-// chooses the verb, and a scanner that cannot send a POST cannot reach most of the surface worth
-// testing.
+// IsHTTPMethodToken reports whether s is a syntactically valid HTTP method.
 //
-// Unknown verbs are still refused. That is not a policy, it is a typo check: "GTE" would otherwise
-// become a run's worth of 405s recorded as if the endpoints had been tested.
-var scanSendableMethods = map[string]bool{
-	http.MethodGet:     true,
-	http.MethodHead:    true,
-	http.MethodOptions: true,
-	http.MethodPost:    true,
-	http.MethodPut:     true,
-	http.MethodPatch:   true,
-	http.MethodDelete:  true,
+// This transport has NO list of verbs. RFC 9110 defines a method as a token and says nothing about
+// which tokens a client may send, so PROPFIND, LOCK, REPORT, PURGE and whatever an application
+// invented for itself all go on the wire the same way GET does. Curating the list is how a scanner
+// ends up unable to reach the surface worth testing.
+//
+// What is checked is the SHAPE, and only the shape: 1*tchar, per RFC 9110 section 5.6.2. A method
+// containing a space, a control character or a separator is not a verb the caller meant, it is a
+// mangled string, and Go's own transport would reject it a layer lower with a worse message.
+func IsHTTPMethodToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			continue
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // allowedScanMethods is the safe/idempotent subset, per RFC 9110.
 //
-// THIS IS NOT THE TRANSPORT'S LIMIT. The transport sends scanSendableMethods above. This map is the
+// THIS IS NOT THE TRANSPORT'S LIMIT. The transport sends any valid method token. This map is the
 // policy that two OTHER subsystems apply to themselves, and both have a specific reason:
 //
 //	endpointInvestigationUtils.go  downgrades a recorded verb to GET and records VerbNotReplayed.
@@ -49,18 +61,18 @@ var scanSendableMethods = map[string]bool{
 //	                              POST answering 2xx means the application accepted a new request,
 //	                              not that a refused resource was reached.
 //
-// Widening this map would silently re-arm both. Detection's verb set is chosen in
-// flowDetectionActive.go and enforced by scanSendableMethods; leave this one alone.
+// Widening this map would silently re-arm both. Neither is a request flow replay tool; leave this
+// one alone.
 var allowedScanMethods = map[string]bool{
 	http.MethodGet:     true,
 	http.MethodHead:    true,
 	http.MethodOptions: true,
 }
 
-// ErrMethodNotAllowed is returned rather than silently downgrading to GET. A caller that asked for a
-// verb this transport does not know has a bug, and quietly turning it into a GET hides it.
+// ErrMethodNotAllowed is returned rather than silently downgrading to GET. A caller whose method is
+// not a token has a mangled string, and quietly turning it into a GET hides that.
 var ErrMethodNotAllowed = fmt.Errorf(
-	"scanHTTP: method must be one of GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE")
+	"scanHTTP: method is not a valid HTTP method token")
 
 const (
 	scanMaxBodyBytes  = 2 << 20 // 2 MB decoded; enough for any page worth analysing
@@ -120,9 +132,9 @@ type ScanClient struct {
 	scope *ScanScope
 }
 
-// WithScope restricts every request this client will issue. Enforced in Do, next to the verb
-// allowlist, because a boundary that each call site has to remember is a boundary that leaks: this
-// one already leaked twice, in buildQueue and in Tier 1's host probes.
+// WithScope restricts every request this client will issue. Enforced in Do, before the request is
+// built, because a boundary that each call site has to remember is a boundary that leaks: this one
+// already leaked twice, in buildQueue and in Tier 1's host probes.
 func (c *ScanClient) WithScope(scope *ScanScope) *ScanClient {
 	c.scope = scope
 	return c
@@ -177,7 +189,9 @@ func (c *ScanClient) Do(ctx context.Context, req ScanRequest) ScanResponse {
 	}
 	out := ScanResponse{URL: req.URL, Method: method}
 
-	if !scanSendableMethods[method] {
+	// Shape only, and before the network, so a mangled method costs nothing and reaches nothing. Any
+	// verb the caller can spell is sent; see IsHTTPMethodToken.
+	if !IsHTTPMethodToken(method) {
 		out.Err = ErrMethodNotAllowed
 		return out
 	}

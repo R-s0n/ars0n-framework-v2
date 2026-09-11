@@ -15,10 +15,15 @@ import (
 func achievedRate(tool string, cfg map[string]interface{}) float64 {
 	switch tool {
 	case "arjun":
-		// -d is whole seconds, applied per request within each thread.
+		// --rate-limit is a direct requests-per-second cap and is what the probe writes now. It is
+		// checked first because when both are present the cap is the binding constraint.
+		if rl := numberOr(cfg["rateLimit"], 0); rl > 0 {
+			return rl
+		}
+		// Fallback for a config predating the flag: -d is whole seconds, per request within a thread.
 		d := numberOr(cfg["delay"], 0)
 		if d <= 0 {
-			return math.Inf(1) // no delay flag emitted, so nothing paces it
+			return math.Inf(1) // nothing paces it
 		}
 		return numberOr(cfg["threads"], 5) / d
 	case "x8":
@@ -55,6 +60,7 @@ func applyRate(t *testing.T, tool string, current map[string]interface{}, rps fl
 		_ = UnmarshalConfigTolerant(stored, &cfg)
 		return map[string]interface{}{
 			"delay": float64(cfg.Delay), "threads": float64(cfg.Threads),
+			"rateLimit": float64(cfg.RateLimit),
 		}
 	case "x8":
 		var cfg X8Config
@@ -67,16 +73,17 @@ func applyRate(t *testing.T, tool string, current map[string]interface{}, rps fl
 	return nil
 }
 
-// A fractional delay used to be written as a float, fail to decode into the int column, and leave
-// the field at zero. Zero delay means no flag, which means no rate limit at all: the exact opposite
-// of the measurement being applied.
+// A fractional value used to be written as a float, fail to decode into the int column, and leave
+// the field at zero. Zero means no flag, which means no rate limit at all: the exact opposite of the
+// measurement being applied. That hazard is unchanged now the probe writes rateLimit rather than a
+// derived delay, because rateLimit is an int column too.
 func TestArjunRateSurvivesTheRoundTrip(t *testing.T) {
 	for _, rps := range []float64{1, 2, 3, 5, 7.5, 10} {
 		cfg := applyRate(t, "arjun", map[string]interface{}{"threads": float64(5)}, rps)
 
-		if cfg["delay"].(float64) <= 0 {
-			t.Fatalf("rps=%v: delay came back as %v, so no -d flag is emitted and arjun runs unpaced",
-				rps, cfg["delay"])
+		if cfg["rateLimit"].(float64) <= 0 {
+			t.Fatalf("rps=%v: rateLimit came back as %v, so no --rate-limit flag is emitted and "+
+				"arjun runs unpaced", rps, cfg["rateLimit"])
 		}
 		got := achievedRate("arjun", cfg)
 		if math.IsInf(got, 1) {

@@ -116,8 +116,28 @@ func vectorOptInReason(tool VectorTool, insertionPoint string) string {
 // alreadyFound holds the vector ids an earlier scan in this category has produced findings for, and
 // is what gates the tools that only have work to do once something has been detected. Nil is fine
 // for every tool that detects things itself.
+// BuildVectorEligibilityFor is BuildVectorEligibility plus the operator's own per-vector choices.
+//
+// deselected holds the vector ids this tool has been switched OFF for, loaded from
+// vector_scan_selection. Absent means enabled, so nil is the correct value for "the operator has not
+// said anything" and every caller that does not care about selection can keep using
+// BuildVectorEligibility unchanged.
+func BuildVectorEligibilityFor(tool VectorTool, vectors []vectorRow, settings map[string]any,
+	alreadyFound map[string]bool, sectionSettings map[string]any,
+	deselected map[string]bool) VectorEligibilityReport {
+
+	return buildVectorEligibility(tool, vectors, settings, alreadyFound, sectionSettings, deselected)
+}
+
 func BuildVectorEligibility(tool VectorTool, vectors []vectorRow, settings map[string]any,
 	alreadyFound map[string]bool, sectionSettings map[string]any) VectorEligibilityReport {
+
+	return buildVectorEligibility(tool, vectors, settings, alreadyFound, sectionSettings, nil)
+}
+
+func buildVectorEligibility(tool VectorTool, vectors []vectorRow, settings map[string]any,
+	alreadyFound map[string]bool, sectionSettings map[string]any,
+	deselected map[string]bool) VectorEligibilityReport {
 	report := VectorEligibilityReport{
 		Tool:           tool.Key,
 		ToolName:       tool.Name,
@@ -147,6 +167,18 @@ func BuildVectorEligibility(tool VectorTool, vectors []vectorRow, settings map[s
 		}
 
 		switch {
+		// The operator's own choice is checked FIRST and states itself plainly.
+		//
+		// Deliberately ahead of every capability reason, because when a vector is both switched off
+		// and unreachable by this tool, the decisive fact is that someone switched it off. Reporting
+		// the capability reason instead would hide the selection: the operator would look for their
+		// deselection, see "this tool cannot reach a header insertion point", and reasonably conclude
+		// the switch had not saved. Turning it back on reveals the capability reason underneath,
+		// which is the honest order to learn them in.
+		case deselected[v.ID]:
+			verdict.Reason = "Deselected for " + tool.Name + " in its Config. The vector is still " +
+				"here and still scanned by every other tool it was not deselected for; switch it " +
+				"back on to include it in this one."
 		case !VectorToolCanReach(tool, v.InsertionPoint):
 			verdict.Reason = vectorSkipReason(tool, v.InsertionPoint)
 		case vectorPointNeedsOptIn(tool, v.InsertionPoint, settings):

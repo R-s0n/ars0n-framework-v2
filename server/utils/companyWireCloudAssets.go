@@ -75,7 +75,14 @@ func amassEnumCompanyCommandArgs(domain string, rateLimit int, tool CompanyTool,
 	settings map[string]any) ([]string, []string) {
 	base := []string{
 		"docker", "run", "--rm",
-		"caffix/amass",
+		// Pinned for the same reason amassWildcardCommandArgs is. The flag vocabulary above was
+		// measured against v4.2.0, which is where the "-passive is a deprecated no-op" and the
+		// "-active alongside -passive exits 0 with more results" findings in this comment block came
+		// from, and ParseAmassEnumResults matches on v4.2.0's stdout shape. An untagged reference
+		// would let the binary move to whatever :latest becomes while the composer and the parser
+		// stood still, and the visible result would be a scan that exits 0 having parsed nothing.
+		// :v4.2.0 and :latest resolve to the same image today, so nothing about this run changes.
+		"caffix/amass:v4.2.0",
 		"enum", "-passive", "-alts", "-brute", "-nocolor",
 		"-min-for-recursive", "2", "-timeout", "300",
 		"-d", domain,

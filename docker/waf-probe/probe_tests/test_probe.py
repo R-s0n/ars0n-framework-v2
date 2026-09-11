@@ -609,6 +609,43 @@ class TestRegistryIntegrity(unittest.TestCase):
         orphans = [k for k in TEST_FUNCS if k not in config.TEST_BY_ID]
         self.assertEqual(orphans, [], f"implemented but not in the registry, so unreachable: {orphans}")
 
+    def test_trips_flag_matches_take_trip_callers(self):
+        # trips=True is what estimate_cost reports as trips_required, and the server refuses a run
+        # whose enabled tests need a deliberate block it has no budget for. A hand-maintained list
+        # would rot the first time somebody added or removed a take_trip() call, and the failure would
+        # be silent in the worst direction: a test that provokes blocks without being counted, or a
+        # run refused for a trip nothing actually takes.
+        #
+        # So the flag is checked against the source rather than trusted. Parsed with ast rather than
+        # grepped so that a mention of take_trip in a comment or a docstring does not count.
+        import ast
+        import pathlib
+
+        probe_dir = pathlib.Path(config.__file__).parent
+        callers = set()
+        for path in sorted(probe_dir.glob("tests_*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for inner in ast.walk(node):
+                    if (isinstance(inner, ast.Call)
+                            and isinstance(inner.func, ast.Attribute)
+                            and inner.func.attr == "take_trip"):
+                        callers.add(node.name)
+                        break
+
+        declared = {t["id"] for t in config.TEST_REGISTRY if t.get("trips")}
+        # Only compare names that are registry ids; a helper that takes a trip on a test's behalf is
+        # attributed to the registered test, not to itself.
+        callers &= set(config.TEST_BY_ID)
+
+        self.assertEqual(
+            declared, callers,
+            "TEST_REGISTRY trips=True must match the tests that call governor.take_trip(). "
+            f"declared-but-never-trips={sorted(declared - callers)}, "
+            f"trips-but-undeclared={sorted(callers - declared)}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

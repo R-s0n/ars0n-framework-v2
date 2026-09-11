@@ -2,12 +2,60 @@ package utils
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 )
+
+// expiredBearer reports whether a captured credential is a JWT whose exp has already passed.
+//
+// WHY THIS EXISTS. The capture loader below prefers captured headers over the operator's configured
+// ones on the grounds that a capture is "real: a header the application actually accepted on a 2xx
+// response". That reasoning holds for an API key and is exactly backwards for a bearer token with an
+// expiry: it was real AT CAPTURE TIME, and a short-lived one is worthless minutes later.
+//
+// Measured on a live engagement: the target issues 900-second tokens, a manual crawl captured one,
+// and sixteen hours later Katana was still being handed that dead token in preference to the fresh
+// one sitting in the FFUF config. Every request 401'd, the crawl finished in 19 seconds, and the run
+// was recorded as completed. That is a scanner reporting a clean result for a scan that never
+// authenticated - the exact silent-nothing failure this codebase is otherwise careful about.
+//
+// The signature is deliberately NOT verified. This is not an authorisation decision, it is a
+// freshness check on our own credential, and we hold no key to verify with. A token we cannot parse
+// is treated as NOT expired, because refusing to send something merely because it is unfamiliar
+// would break every non-JWT credential the loader handles.
+func expiredBearer(value string) bool {
+	tok := strings.TrimSpace(value)
+	if i := strings.LastIndex(tok, " "); i >= 0 {
+		tok = tok[i+1:] // strip a "Bearer " style prefix
+	}
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	payload := parts[1]
+	if pad := len(payload) % 4; pad != 0 {
+		payload += strings.Repeat("=", 4-pad)
+	}
+	decoded, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if json.Unmarshal(decoded, &claims) != nil || claims.Exp == 0 {
+		return false
+	}
+	// A small skew allowance, so a token expiring during the scan is not rejected a second early.
+	return time.Now().Add(-30 * time.Second).After(time.Unix(claims.Exp, 0))
+}
 
 // Credentials for validation and investigation, scoped to the host they were captured from.
 //
@@ -39,6 +87,71 @@ type ScopedAuthContext struct {
 	// also put headers here, because naming a domain in the Session Manager is explicit consent for
 	// that domain, which a guess from a capture is not.
 	byDomain map[string]*ScopedAuthMaterial
+
+	// Everything below exists so a long-running scan can pick up a credential that was refreshed
+	// after the run started. See refreshIfStale.
+	mu            sync.RWMutex
+	scopeTargetID string
+	loadedAt      time.Time
+}
+
+// How long a loaded credential set is trusted before For() re-reads it from the database.
+//
+// WHY THIS EXISTS. LoadScopedAuthContext used to be called exactly once per scan phase, before the
+// endpoint loop, and the result was then used for every request in that phase. That is fine for an
+// API key and wrong for a short-lived bearer token, which is what modern auth issues.
+//
+// Measured on a live engagement: the target's authorisation server issues 900-second tokens and
+// returns NO refresh token, so a session cannot be captured once and reused - it has to be re-minted
+// every fifteen minutes. A validate-then-investigate run over ~1,000 endpoints is paced to the rate
+// the WAF probe measured and comfortably outlives that. The token therefore expired part-way through
+// a phase, every endpoint after that point got a 401, and those 401s were recorded as evidence about
+// the endpoints. The run does not fail; it fingerprints the login wall and calls it the application.
+// Every verdict after the expiry moment is wrong, and wrong in the same direction, which is the
+// failure mode this codebase is otherwise careful to refuse (see the acknowledge flag on the endpoint
+// scan, which warns about precisely this and could not detect it here because nothing re-checked).
+//
+// Sixty seconds is the trade: short enough that an operator refreshing a 900-second token sees it
+// used almost immediately, long enough that a thousand-endpoint scan costs about one extra query a
+// minute rather than one per request.
+const scopedAuthRefreshTTL = 60 * time.Second
+
+// refreshIfStale re-reads the credential set when the loaded copy has aged past the TTL.
+//
+// A failed or empty reload KEEPS the existing material rather than replacing it. That asymmetry is
+// deliberate: a transient database error or a config the operator is midway through editing must not
+// silently convert an authenticated scan into an anonymous one, which would produce exactly the
+// login-wall-as-evidence result this refresh exists to prevent. Stale credentials are recoverable;
+// a run that quietly went anonymous is not, because nothing in the results says so.
+func (c *ScopedAuthContext) refreshIfStale() {
+	if c == nil {
+		return
+	}
+	c.mu.RLock()
+	id, age := c.scopeTargetID, time.Since(c.loadedAt)
+	c.mu.RUnlock()
+	// An empty scopeTargetID means this context was hand-built (tests, callers that assembled
+	// material directly). There is nothing to re-read, so leave it alone.
+	if id == "" || age < scopedAuthRefreshTTL {
+		return
+	}
+
+	fresh := buildScopedAuthContext(id)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Re-check under the write lock: several request goroutines can pass the staleness test at once
+	// and only the first should pay for the reload.
+	if time.Since(c.loadedAt) < scopedAuthRefreshTTL {
+		return
+	}
+	c.loadedAt = time.Now()
+	if len(fresh.byHost) == 0 && len(fresh.byDomain) == 0 {
+		log.Printf("[SCAN-CREDS] %s: credential refresh returned nothing usable; "+
+			"keeping the previously loaded material rather than going anonymous mid-run", id)
+		return
+	}
+	c.byHost, c.byDomain = fresh.byHost, fresh.byDomain
 }
 
 // Apply attaches whatever this material permits and reports what happened, so a result can say
@@ -125,9 +238,29 @@ func (m *ScopedAuthMaterial) merge(host string, other *ScopedAuthMaterial) *Scop
 // Captures are preferred because they are real: a header the application actually accepted on a 2xx
 // response. The FFUF config is what an operator typed, which may be stale.
 func LoadScopedAuthContext(scopeTargetID string) *ScopedAuthContext {
+	ctx := buildScopedAuthContext(scopeTargetID)
+	// Recorded so For() can re-read when the credential ages out mid-run. Set here rather than in
+	// buildScopedAuthContext so the refresh path does not reset its own clock from inside itself.
+	ctx.scopeTargetID = scopeTargetID
+	ctx.loadedAt = time.Now()
+	return ctx
+}
+
+// buildScopedAuthContext does the actual loading. Split out from LoadScopedAuthContext so that
+// refreshIfStale can rebuild from the same rules without recursing through the refresh bookkeeping.
+func buildScopedAuthContext(scopeTargetID string) *ScopedAuthContext {
 	ctx := &ScopedAuthContext{
 		byHost:   map[string]*ScopedAuthMaterial{},
 		byDomain: map[string]*ScopedAuthMaterial{},
+	}
+
+	// No pool, no stored credentials. This is reached from the request-flow runner and the parameter
+	// tools as well as the scanners now, and those have unit tests that exercise the send path with
+	// no database at all; pgxpool panics on a nil receiver rather than returning an error. An empty
+	// context is also the honest answer to "what credentials are stored" when there is nowhere to
+	// store them, so this is a real guard and not only a test accommodation.
+	if dbPool == nil {
+		return ctx
 	}
 
 	rows, err := dbPool.Query(context.Background(), `
@@ -138,6 +271,14 @@ func LoadScopedAuthContext(scopeTargetID string) *ScopedAuthContext {
 		  AND status_code BETWEEN 200 AND 299
 		ORDER BY created_at DESC
 		LIMIT 500`, scopeTargetID)
+	// Expired captures are counted and reported once at the end rather than logged per row.
+	//
+	// The per-row line was fine when this loaded once per scan phase. It is not fine now that For()
+	// re-reads every 60 seconds: the query walks up to 500 capture rows, a target whose captures all
+	// carry the same dead bearer logs one line for each, and a single long run turned that into
+	// thousands of identical lines - 1,332 in four minutes, measured. That buries the lines that
+	// matter, including the refresh warnings. One summary per load says the same thing.
+	expiredByHost := map[string]int{}
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -170,6 +311,13 @@ func LoadScopedAuthContext(scopeTargetID string) *ScopedAuthContext {
 					cookie = sv
 				case "authorization", "x-api-key", "x-auth-token", "x-access-token",
 					"x-csrf-token", "x-xsrf-token", "x-session-token":
+					// A captured token whose exp has passed is not a credential, it is a guarantee of
+					// 401s. Dropping it here lets the FFUF fallback below supply a live one instead of
+					// being skipped because this host already looked covered.
+					if expiredBearer(sv) {
+						expiredByHost[host]++
+						continue
+					}
 					hostOnly[canonicalHeaderName(name)] = sv
 				}
 			}
@@ -189,25 +337,62 @@ func LoadScopedAuthContext(scopeTargetID string) *ScopedAuthContext {
 			}
 		}
 	}
+	for host, n := range expiredByHost {
+		log.Printf("[SCAN-CREDS] %s: ignoring %d EXPIRED captured credential(s) for %s; "+
+			"falling back to the configured credential", scopeTargetID, n, host)
+	}
 
-	// FFUF fallback, scoped to the scope target's own host only.
+	// The FFUF config, scoped to the scope target's own host only.
+	//
+	// This OVERLAYS the captured material per header rather than only filling in when the host was
+	// not seen at all, and the difference is not cosmetic. A capture supplies a Cookie as well as an
+	// Authorization header, so under the old rule any host with a captured cookie counted as covered
+	// and the configured credential was never consulted - even after the expiry check above had just
+	// discarded the captured bearer as dead. The operator would set a fresh token, watch the save
+	// succeed, and still be handed the stale one.
+	//
+	// Per-header overlay keeps the file's original intent intact: a capture is still the source for
+	// anything the operator has not spoken about, and inference still fills the gaps. What changes is
+	// that an explicitly configured header now beats a guessed one, which is the same precedence the
+	// Session Manager already gets and for the same reason.
 	targetHost := scopeTargetHost(scopeTargetID)
 	if targetHost != "" {
-		if _, exists := ctx.byHost[targetHost]; !exists {
-			if headers, cookies := ffufAuthMaterial(scopeTargetID); len(headers) > 0 || cookies != "" {
-				hostOnly := map[string]string{}
-				for _, h := range headers {
-					hostOnly[canonicalHeaderName(h.Name)] = h.Value
+		if headers, cookies := ffufAuthMaterial(scopeTargetID); len(headers) > 0 || cookies != "" {
+			existing := ctx.byHost[targetHost]
+			if existing == nil {
+				existing = &ScopedAuthMaterial{
+					Host: targetHost, Headers: map[string]string{}, Source: "ffuf_config",
 				}
-				ctx.byHost[targetHost] = &ScopedAuthMaterial{
-					Host: targetHost, Cookies: cookies, Headers: hostOnly, Source: "ffuf_config",
+				ctx.byHost[targetHost] = existing
+			}
+			if existing.Headers == nil {
+				existing.Headers = map[string]string{}
+			}
+			for _, h := range headers {
+				name := canonicalHeaderName(h.Name)
+				// The same freshness rule the capture path applies, for the same reason. A configured
+				// header was previously trusted unconditionally, so an operator who pasted a bearer
+				// token once had it sent on every scan from then on: expired, guaranteed to 401, and
+				// indistinguishable in the results from the target refusing a live session. Skipping it
+				// lets HasAny() report the truth - that this run has no working credential - instead of
+				// the run fingerprinting a login wall and recording it as evidence about the endpoints.
+				if expiredBearer(h.Value) {
+					log.Printf("[SCAN-CREDS] %s: ignoring EXPIRED configured %s for %s; "+
+						"refresh the credential to scan authenticated",
+						scopeTargetID, name, targetHost)
+					continue
 				}
-				if cookies != "" {
-					d := RegistrableDomain(targetHost)
-					if _, seen := ctx.byDomain[d]; !seen {
-						ctx.byDomain[d] = &ScopedAuthMaterial{
-							Host: targetHost, Cookies: cookies, Source: "ffuf_config",
-						}
+				if _, had := existing.Headers[name]; had && existing.Source != "ffuf_config" {
+					existing.Source = "manual_crawl+ffuf_config"
+				}
+				existing.Headers[name] = h.Value
+			}
+			if cookies != "" {
+				existing.Cookies = cookies
+				d := RegistrableDomain(targetHost)
+				if _, seen := ctx.byDomain[d]; !seen {
+					ctx.byDomain[d] = &ScopedAuthMaterial{
+						Host: targetHost, Cookies: cookies, Source: "ffuf_config",
 					}
 				}
 			}
@@ -240,10 +425,16 @@ func (c *ScopedAuthContext) For(host string) (*ScopedAuthMaterial, string) {
 	if c == nil {
 		return nil, "no_credentials_available"
 	}
+	// Re-read before answering when the loaded copy has aged out, so a scan that outlives a
+	// short-lived token keeps sending a live one instead of 401ing its way through the rest of the
+	// corpus. No-op for a hand-built context or one loaded within the TTL.
+	c.refreshIfStale()
 	host = strings.ToLower(host)
 
+	c.mu.RLock()
 	hostMaterial := c.byHost[host]
 	domainMaterial := c.byDomain[RegistrableDomain(host)]
+	c.mu.RUnlock()
 
 	merged := hostMaterial.merge(host, domainMaterial)
 	if merged == nil {
@@ -261,7 +452,12 @@ func (c *ScopedAuthContext) For(host string) (*ScopedAuthMaterial, string) {
 // HasAny reports whether the run has credentials at all, so a login wall can be reported as
 // "not authenticated" rather than as evidence about the endpoint.
 func (c *ScopedAuthContext) HasAny() bool {
-	return c != nil && (len(c.byHost) > 0 || len(c.byDomain) > 0)
+	if c == nil {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.byHost) > 0 || len(c.byDomain) > 0
 }
 
 // RegistrableDomain approximates the public-suffix boundary well enough to scope cookies.
@@ -341,6 +537,11 @@ func scopeTargetHost(scopeTargetID string) string {
 // ScopeTargetBase returns the scope target's scheme and host, used as the canonical base URL and
 // the default scheme for canonicalisation.
 func ScopeTargetBase(scopeTargetID string) (scheme, host, base string) {
+	// Same reasoning as buildScopedAuthContext: pgxpool panics on a nil receiver, and this is now
+	// reached from paths with unit tests that run without a database.
+	if dbPool == nil {
+		return "https", "", ""
+	}
 	var raw string
 	if err := dbPool.QueryRow(context.Background(),
 		`SELECT scope_target FROM scope_targets WHERE id = $1`, scopeTargetID).Scan(&raw); err != nil {

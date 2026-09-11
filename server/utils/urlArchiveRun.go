@@ -148,7 +148,16 @@ func archiveHostOutcome(tool string, t ScanHostTarget, run archiveHostRun) (Host
 func buildGAUCommand(plan archiveQuery, cfg GAUURLConfig) []string {
 	cmd := []string{
 		"docker", "run", "--rm",
-		"sxcurity/gau:latest",
+		// Pinned by digest because sxcurity/gau ships only a "latest" tag, so there is no version tag
+		// to name (Docker Hub v2 API reports count:1 for the repository, checked 2026-09-08). The pin
+		// matters here for the same reason the comment above matters: "every flag here appears in gau
+		// --help" is a claim about gau 2.2.4's help, and normaliseGAUConfig drops providers this
+		// version does not know precisely because an unrecognised provider makes it exit. Let the tag
+		// float and the binary can move under all of that without a single error surfacing, since a
+		// gau that rejects a flag or renames a provider still leaves the run looking like an archive
+		// with nothing in it. This digest is what "latest" resolves to now and what is installed on
+		// this host, so behaviour is unchanged today.
+		"sxcurity/gau@sha256:e5ad95a6fce296e671b83039d84fc0629afd320cc05ac91972ce83b4ac18b862",
 		plan.Host,
 		"--providers", strings.Join(cfg.Providers, ","),
 		"--threads", strconv.Itoa(cfg.Threads),

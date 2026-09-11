@@ -18,18 +18,36 @@ type ArjunConfig struct {
 	// Method and PassiveMode are retained only so stored rows still unmarshal. The verb is now
 	// decided by the scan's verb groups rather than a single config value, and --passive aborts the
 	// process when combined with -i, so neither is emitted. See buildArjunArgs.
-	Method          string              `json:"method"`
-	PassiveMode     bool                `json:"passiveMode"`
-	Headers         []map[string]string `json:"headers"`
-	Threads         int                 `json:"threads"`
-	Delay           int                 `json:"delay"`
-	Timeout         int                 `json:"timeout"`
-	ChunkSize       int                 `json:"chunkSize"`
-	Wordlist        string              `json:"wordlist"`
-	StableDetection bool                `json:"stableDetection"`
-	JSONOutput      bool                `json:"jsonOutput"`
-	IncludeParams   string              `json:"includeParams"`
-	ExcludeParams   string              `json:"excludeParams"`
+	Method      string              `json:"method"`
+	PassiveMode bool                `json:"passiveMode"`
+	Headers     []map[string]string `json:"headers"`
+	Threads     int                 `json:"threads"`
+	Delay       int                 `json:"delay"`
+	Timeout     int                 `json:"timeout"`
+
+	// RateLimit caps requests per second, mapping to Arjun's --rate-limit (its own default is 9999,
+	// i.e. effectively uncapped).
+	//
+	// WHY THIS IS NOT THE SAME KNOB AS Delay OR Threads. Delay sleeps between requests inside a
+	// thread and Threads sets how many run at once, so the actual rate is a product of the two and
+	// of the target's latency. Neither expresses "never exceed N requests per second", which is the
+	// only form a measured pacing budget comes in.
+	//
+	// Measured 2026-09-08: Arjun's full 25,889-name default list finished one endpoint on a 53ms
+	// target in 7.1 seconds - 103 chunks, roughly 15 req/s. The Routing & WAF Probe for that same
+	// target reported safe_rps 5. So the default configuration overruns a measured budget by 3x with
+	// nothing in the config able to say otherwise, on an engagement whose programme carries a
+	// service-degradation clause that applies below its stated ceiling.
+	//
+	// Note this is a CEILING, not a target: leaving it 0 preserves the previous behaviour exactly.
+	RateLimit int `json:"rateLimit"`
+
+	ChunkSize       int    `json:"chunkSize"`
+	Wordlist        string `json:"wordlist"`
+	StableDetection bool   `json:"stableDetection"`
+	JSONOutput      bool   `json:"jsonOutput"`
+	IncludeParams   string `json:"includeParams"`
+	ExcludeParams   string `json:"excludeParams"`
 	// IncludeScripts brings content_class='script' endpoints into the target set. Off by default:
 	// a JavaScript bundle has no server-side parameter surface, and on the reference target scripts
 	// are 34 of the 80 valid rows, so including them triples the work for nothing reachable.
@@ -59,6 +77,7 @@ type ArjunVerbOverride struct {
 	Threads         *int                `json:"threads,omitempty"`
 	Delay           *int                `json:"delay,omitempty"`
 	Timeout         *int                `json:"timeout,omitempty"`
+	RateLimit       *int                `json:"rateLimit,omitempty"`
 	ChunkSize       *int                `json:"chunkSize,omitempty"`
 	Wordlist        *string             `json:"wordlist,omitempty"`
 	StableDetection *bool               `json:"stableDetection,omitempty"`
@@ -84,6 +103,9 @@ func (c ArjunConfig) ForVerb(verb string) ArjunConfig {
 	}
 	if o.Timeout != nil {
 		out.Timeout = *o.Timeout
+	}
+	if o.RateLimit != nil {
+		out.RateLimit = *o.RateLimit
 	}
 	if o.ChunkSize != nil {
 		out.ChunkSize = *o.ChunkSize
@@ -224,6 +246,11 @@ func ExecuteArjunScan(scanID, scopeTargetID string) {
 		scopeTargetID).Scan(&configJSON); err == nil {
 		_ = UnmarshalConfigTolerant(configJSON, &config)
 	}
+
+	// Overlay the framework's stored credentials for this target's own host. Without this, arjun is
+	// authenticated only by whatever was pasted into its config, which on a target issuing
+	// short-lived tokens is guaranteed to be dead before a full pass finishes. See ParamAuthHeaders.
+	config.Headers = ParamAuthHeaders(scopeTargetID, config.Headers)
 
 	sel, err := SelectParamEnumTargets(ctx, scopeTargetID,
 		ParamTargetOptions{Tool: "arjun", IncludeScripts: config.IncludeScripts})
@@ -379,6 +406,11 @@ func buildArjunArgs(config ArjunConfig, mode, urlsFile, outputFile string) []str
 	}
 	if config.Timeout > 0 {
 		args = append(args, "-T", fmt.Sprintf("%d", config.Timeout))
+	}
+	// Arjun's own default is 9999, which is no cap in practice. Emitting it only when set keeps a
+	// stored config that predates this field behaving exactly as it did.
+	if config.RateLimit > 0 {
+		args = append(args, "--rate-limit", fmt.Sprintf("%d", config.RateLimit))
 	}
 	// Arjun overrides -c to 500 internally for any non-GET mode, so sending it there would report a
 	// chunk size in the command string that Arjun did not use.

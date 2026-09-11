@@ -40,9 +40,10 @@ var amassIntelCompanyBaseArity = map[string]int{
 // scan.
 //
 // With no stored settings this is token for token the command ExecuteAmassIntelScan built inline
-// before this file existed:
+// before this file existed, with the single exception of the image tag (see the pin below, which was
+// added later and resolves to the same image the untagged reference did):
 //
-//	docker run --rm caffix/amass intel -org <company> -whois -active -timeout 120
+//	docker run --rm caffix/amass:v4.2.0 intel -org <company> -whois -active -timeout 120
 //
 // UNIT TRAP, LEFT INTACT ON PURPOSE: timeoutMinutes composes straight to -timeout because that flag
 // really is minutes on this binary. Nothing here multiplies or divides it. The vocabulary spells the
@@ -56,7 +57,14 @@ var amassIntelCompanyBaseArity = map[string]int{
 func amassIntelCompanyCommandArgs(companyName string, tool CompanyTool, settings map[string]any) ([]string, []string) {
 	base := []string{
 		"docker", "run", "--rm",
-		"caffix/amass",
+		// Pinned for the same reason amassWildcardCommandArgs is. `intel` is the subcommand whose
+		// measured behaviour this file documents (the -timeout that does not bound the run, the
+		// -exclude that companyOptionsNetwork.go records as broken on this image), and those notes are
+		// only true of v4.2.0. An untagged reference would let the binary move to whatever :latest
+		// becomes while the notes, the arity table and the parser stayed written for this one, and a
+		// changed CLI would surface as an empty result rather than an error. :v4.2.0 and :latest are
+		// the same image today, so this changes no behaviour now.
+		"caffix/amass:v4.2.0",
 		"intel",
 		"-org", companyName,
 		"-whois",

@@ -795,9 +795,10 @@ func createTables() {
 			updated_at TIMESTAMP DEFAULT NOW()
 		);`,
 
-		// A threat starts life untested and is moved to validated or rejected once it has actually been
-		// run against the target. Added by ALTER as well as in the CREATE above, so an existing install
-		// converges on the same schema as a fresh one.
+		// A threat starts life untested and is moved to validated, rejected or not_enough_info once it
+		// has actually been run against the target. Added by ALTER as well as in the CREATE above, so an
+		// existing install converges on the same schema as a fresh one. The full set and what the fourth
+		// value means are on the CHECK constraint below, which is the thing that enforces it.
 		`ALTER TABLE threat_model ADD COLUMN IF NOT EXISTS test_status TEXT NOT NULL DEFAULT 'untested';`,
 
 		// Two reader-facing fields added because the model had become unreadable at a glance: every
@@ -834,14 +835,72 @@ func createTables() {
 		// The constraint is applied from one place rather than inline in the CREATE, so a migrated
 		// database and a fresh one cannot end up with different schemas. ADD CONSTRAINT is not itself
 		// idempotent, hence the guard.
-		`DO $$ BEGIN
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_constraint WHERE conname = 'threat_model_test_status_check'
-			) THEN
+		//
+		// not_enough_info is the fourth state: the test was run or attempted and could not be settled
+		// (a missing precondition, an ambiguous refusal shape, a control arm that did not pass). It is
+		// NOT a rejection, and recording it as one buries real findings.
+		//
+		// THE TRAP, for whoever adds a fifth status. This guard used to be a plain "add it if it is
+		// not already there", which meant editing the value list inside it did NOTHING on any database
+		// that had run an earlier build. The three-value constraint survived, Postgres refused the new
+		// value at write time, and since nothing fails at startup the only symptom was a 500 from
+		// PATCH /threat-model/{id}/test-status the first time somebody clicked the button. Fresh
+		// databases worked, which is the worst possible split. So the guard now reads the STORED
+		// definition and rebuilds the constraint whenever it does not already name the newest value:
+		// that converges whether the old constraint is there, the new one is, or neither.
+		//
+		// Deliberately ONE statement rather than a DROP entry followed by an ADD entry. The loop at the
+		// end of this function Execs each entry on its own with no surrounding transaction, so a
+		// failure between the two would leave threat_model with no status constraint at all and then
+		// log.Fatalf the API out of the process. It stays guarded rather than unconditional for a
+		// second reason: ADD CONSTRAINT re-validates every row in the table, and doing that on every
+		// startup is a cost for nothing once the database has converged.
+		`DO $$
+		DECLARE
+			existing_def TEXT;
+		BEGIN
+			SELECT pg_get_constraintdef(oid) INTO existing_def
+			  FROM pg_constraint
+			 WHERE conname = 'threat_model_test_status_check'
+			   AND conrelid = 'threat_model'::regclass;
+
+			IF existing_def IS NULL OR position('not_enough_info' in existing_def) = 0 THEN
+				ALTER TABLE threat_model DROP CONSTRAINT IF EXISTS threat_model_test_status_check;
 				ALTER TABLE threat_model ADD CONSTRAINT threat_model_test_status_check
-					CHECK (test_status IN ('untested', 'validated', 'rejected'));
+					CHECK (test_status IN ('untested', 'validated', 'rejected', 'not_enough_info'));
 			END IF;
 		END $$;`,
+
+		// Ad hoc notes the operator writes against ONE threat while reading and testing it. Three
+		// similarly named things now exist and they are not the same thing: scope_target_notes is this
+		// same shape one level up (free text on a target), the threat_model_* tables above are the
+		// supporting material for the model as a whole, and this one hangs off a single threat row.
+		//
+		// Nothing reads these except the threat accordion and the MCP, so there are no constraints
+		// beyond "belongs to a threat and has a title".
+		//
+		// content defaults to '' rather than allowing NULL for the same reason scope_target_notes does
+		// it: a note with a title and an empty body is a normal thing to create, and NULL would make
+		// every reader handle two spellings of the same emptiness.
+		//
+		// ON DELETE CASCADE is deliberate. A note about a threat has no meaning once the threat is
+		// gone, and DeleteThreatModel is already a hard delete with no restore, so there is nothing an
+		// orphaned note could ever be reattached to.
+		//
+		// The foreign key is left unnamed so Postgres generates threat_notes_threat_id_fkey. The Go
+		// handler sniffs that exact string to turn "valid UUID, no such threat" into a 400 instead of
+		// a 500, so renaming it here silently breaks the caller-fixable case.
+		`CREATE TABLE IF NOT EXISTS threat_notes (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			threat_id UUID NOT NULL REFERENCES threat_model(id) ON DELETE CASCADE,
+			title TEXT NOT NULL,
+			content TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		);`,
+		// Matches the only query that runs: notes for one threat, most recently edited first.
+		`CREATE INDEX IF NOT EXISTS idx_threat_notes_threat
+		   ON threat_notes(threat_id, updated_at DESC);`,
 
 		`CREATE TABLE IF NOT EXISTS nuclei_scans (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1937,6 +1996,46 @@ func createTables() {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_param_enum_selection_lookup
 		   ON param_enum_endpoint_selection(scope_target_id, tool);`,
+
+		// Which attack vectors each VECTOR scanner runs against. The sibling of the table above, and
+		// sparse for the same reason: a row exists only when the operator makes an explicit choice,
+		// and an absent row means enabled, so a newly consolidated vector is scanned by default
+		// rather than silently excluded because it did not exist when the modal was last opened.
+		//
+		// PER TOOL, not per section. Deselecting a vector for sqlmap must leave dalfox scanning it:
+		// the whole point is running a scanner at the handful of vectors its own evidence justifies
+		// rather than at all 215, and a section-wide switch cannot express that.
+		//
+		// vector_id IS DELIBERATELY NOT A FOREIGN KEY, and this is the trap worth stating. A vector
+		// scan's unit of work comes from three different id spaces depending on the tool: ordinary
+		// rows from attack_vectors, access-bypass rows from bypass_targets, sensitive-leak rows from
+		// their own table, and GraphQL targets which exist in NO table at all because the URL is the
+		// only identity they have. vector_scan_vectors already models this with separate nullable
+		// columns per space. Pointing a single FK at attack_vectors would silently refuse every
+		// bypass and leak selection, which is the same foreign-key trap the access-bypass work hit
+		// once already. The id stored here is whatever vectorRow.ID is for that tool's row source,
+		// which is the exact string BuildVectorEligibility keys its verdicts on.
+		//
+		// The cost of no FK is that a deselection outlives the vector it names. That is harmless: an
+		// id nobody loads is never consulted, the rows are tiny, and the scope_targets cascade still
+		// cleans up when the target itself goes.
+		`CREATE TABLE IF NOT EXISTS vector_scan_selection (
+		    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		    scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+		    tool VARCHAR(40) NOT NULL,
+		    vector_id TEXT NOT NULL,
+		    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+		    updated_at TIMESTAMP DEFAULT NOW(),
+		    UNIQUE (scope_target_id, tool, vector_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_vector_scan_selection_lookup
+		   ON vector_scan_selection(scope_target_id, tool);`,
+
+		// Which request flow demonstrates a mechanism. Added rather than created with the table,
+		// because mechanisms_examples predates request flows existing at all. TEXT and no foreign
+		// key: a detected flow id is the composite "<session>~<tab>~<root capture>" and is a row in
+		// no table, while a built flow id is a UUID in request_flows.
+		`ALTER TABLE mechanisms_examples ADD COLUMN IF NOT EXISTS flow_id TEXT NOT NULL DEFAULT '';`,
 		// Which of a tool's request shapes an endpoint is tested with. NULL means "whatever the
 		// auto-categoriser decides", so a newly consolidated endpoint is classified from its own
 		// recorded request rather than inheriting a stale choice. Only Arjun uses this today: its

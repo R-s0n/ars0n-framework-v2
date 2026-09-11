@@ -255,7 +255,21 @@ func amassWildcardCommandArgs(domain string, rateLimit int, stored map[string]an
 	enum = wildcardWireApply("amass", enum, supersede)
 	enum = append(enum, extra...)
 
-	return append([]string{"run", "--rm", "caffix/amass"}, enum...), notes
+	// THE TAG IS PART OF THE CONTRACT, NOT DECORATION. Everything downstream of this argv is written
+	// against amass v4.2.0 specifically: ParseAmassResults keys on that release's textual relationship
+	// output (`<n> (ASN) --> managed_by --> <org> (RIROrganization)`, `... --> contains --> ...
+	// (IPAddress)`), and the allow/deny lists wildcardWireApply enforces were measured flag by flag
+	// against this exact binary. An untagged reference is not a version, it is "whatever :latest points
+	// at on the day this host first has to fetch the image", so the tool could cross a major version
+	// while the regexes reading it stood still. That failure is invisible from the outside: docker
+	// exits 0, the parser matches nothing, and the scan stores an empty result that looks like a domain
+	// with no subdomains.
+	//
+	// Pinning costs nothing today. :v4.2.0 and :latest are the same image, both resolving to manifest
+	// list sha256:b11100806a4fd31990103a92d296cd5b7dd5442502e3cf51aceeeaa397305d08 and both pushed
+	// 2023-09-10 (Docker Hub v2 API, checked 2026-09-08). It is fixed here so it is already right
+	// whenever upstream does push again.
+	return append([]string{"run", "--rm", "caffix/amass:v4.2.0"}, enum...), notes
 }
 
 // ---------------------------------------------------------------------------------------------

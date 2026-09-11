@@ -42,6 +42,18 @@ const CUSTOM_ATTACK = '__custom__';
 
 const ATTACK_NAME_BY_ID = ATTACK_CATALOG.reduce((acc, a) => { acc[a.id] = a.name; return acc; }, {});
 
+// The card title is two halves joined by " - ": the attack name, then what makes this instance of it
+// specific. Both halves are capped where they are TYPED rather than truncated where they are read,
+// so what the operator approves in the form is exactly what the accordion header shows.
+const MAX_ATTACK_CUSTOM_NAME = 65;
+const MAX_THREAT_NAME = 125;
+
+// The second half, composed exactly as threatTitle() in App.js composes it. Duplicated rather than
+// imported because the cap has to be enforced against the real rendered string, and a cap computed
+// from a different formula than the renderer uses is a cap that does not hold.
+const threatNameOf = (mechanism, targetObject) =>
+  `${mechanism || ''}${targetObject ? ` on ${targetObject}` : ''}`;
+
 const MODAL_SEVERITY_COLORS = {
   critical:      { bg: '#7f1d1d', fg: '#fecaca' },
   high:          { bg: '#9a3412', fg: '#fed7aa' },
@@ -422,6 +434,23 @@ export const ThreatModelModal = ({
     }));
   };
 
+  // Mechanism and Target Object share ONE character budget, because they are not two independent
+  // fields: they are the two pieces of a single rendered name, and capping them separately would let
+  // two in-range values compose an out-of-range title.
+  //
+  // A change that SHORTENS an already-over-budget name is always accepted. Rows written through the
+  // MCP before this cap existed would otherwise be frozen at a value the form itself rejects, with
+  // no keystroke able to bring them back into range.
+  const setThreatNamePart = (field, value) => {
+    setEditedThreat((prev) => {
+      const next = { ...prev, [field]: value };
+      const after = threatNameOf(next.mechanism, next.target_object).length;
+      const before = threatNameOf(prev.mechanism, prev.target_object).length;
+      return (after <= MAX_THREAT_NAME || after < before) ? next : prev;
+    });
+  };
+  const threatNameLength = threatNameOf(editedThreat.mechanism, editedThreat.target_object).length;
+
   const currentThreats = threats[activeTab] || [];
   const mechanismsList = mechanisms && Array.isArray(mechanisms) ? mechanisms : [];
   const objectsList = notableObjects && Array.isArray(notableObjects) ? notableObjects : [];
@@ -573,7 +602,7 @@ export const ThreatModelModal = ({
                             value={editedThreat.attack_custom_name}
                             onChange={(e) => setEditedThreat(prev => ({ ...prev, attack_custom_name: e.target.value }))}
                             placeholder="Name the attack, e.g. Insufficient Audit Logging"
-                            maxLength={120}
+                            maxLength={MAX_ATTACK_CUSTOM_NAME}
                             data-bs-theme="dark"
                             autoFocus
                           />
@@ -582,7 +611,7 @@ export const ThreatModelModal = ({
                           {/* Filtered to the open STRIDE tab, so the options are only attacks that are
                               actually weaponized to achieve this category. */}
                           {editedThreat.attack_id === CUSTOM_ATTACK
-                            ? 'Stored on this threat only. It is not added to the Possible Attacks list.'
+                            ? `Stored on this threat only. It is not added to the Possible Attacks list. ${editedThreat.attack_custom_name.length}/${MAX_ATTACK_CUSTOM_NAME}`
                             : `The Possible Attacks entry this threat is an instance of. Only attacks that achieve ${
                                 STRIDE_CATEGORIES.find(c => c.key === activeTab)?.label.replace(/[()]/g, '')
                               } are listed (${categoryAttacks.length} available).`}
@@ -669,41 +698,54 @@ export const ThreatModelModal = ({
                         </Form.Text>
                       </Form.Group>
 
+                      {/* MEASURED CORRECTION. Both of these were <Form.Select> limited to the values
+                          recon had already documented, while the MCP writes them as free text. A
+                          threat written through the MCP therefore held a value that matched no
+                          <option>, and a controlled select with no matching option renders BLANK.
+                          The value was in the record and in the accordion title the whole time, and
+                          the form was the one place it could not be seen: "Password wrapped under a
+                          published key on SHARED_SECRET in /env.js" displayed as two empty boxes.
+
+                          A text input always shows what it holds, so the recon values move to a
+                          datalist where they stay one click away without being the only thing
+                          accepted. The counter is shared because the budget is. */}
                       <Form.Group className="mb-3">
                         <Form.Label className="text-white">Mechanism</Form.Label>
-                        <Form.Select
+                        <Form.Control
+                          type="text"
+                          list="threat-mechanism-options"
                           value={editedThreat.mechanism}
-                          onChange={(e) => setEditedThreat(prev => ({ ...prev, mechanism: e.target.value }))}
+                          onChange={(e) => setThreatNamePart('mechanism', e.target.value)}
+                          placeholder="Pick one you have documented, or type a new one"
                           data-bs-theme="dark"
-                        >
-                          <option value="">Select a mechanism...</option>
+                        />
+                        <datalist id="threat-mechanism-options">
                           {mechanismsList.map((mech, idx) => (
-                            <option key={idx} value={mech}>
-                              {mech}
-                            </option>
+                            <option key={idx} value={mech} />
                           ))}
-                        </Form.Select>
+                        </datalist>
                         <Form.Text className="text-white-50">
-                          The application mechanism being targeted
+                          The application mechanism being targeted. Threat name: {threatNameLength}/{MAX_THREAT_NAME}
                         </Form.Text>
                       </Form.Group>
 
                       <Form.Group className="mb-3">
                         <Form.Label className="text-white">Target Object</Form.Label>
-                        <Form.Select
+                        <Form.Control
+                          type="text"
+                          list="threat-target-object-options"
                           value={editedThreat.target_object}
-                          onChange={(e) => setEditedThreat(prev => ({ ...prev, target_object: e.target.value }))}
+                          onChange={(e) => setThreatNamePart('target_object', e.target.value)}
+                          placeholder="Pick one you have documented, or type a new one"
                           data-bs-theme="dark"
-                        >
-                          <option value="">Select a target object...</option>
+                        />
+                        <datalist id="threat-target-object-options">
                           {objectsList.map((obj, idx) => (
-                            <option key={idx} value={obj}>
-                              {obj}
-                            </option>
+                            <option key={idx} value={obj} />
                           ))}
-                        </Form.Select>
+                        </datalist>
                         <Form.Text className="text-white-50">
-                          The object that would be the target of the attack
+                          The object that would be the target of the attack. Threat name: {threatNameLength}/{MAX_THREAT_NAME}
                         </Form.Text>
                       </Form.Group>
 
@@ -1177,8 +1219,14 @@ export const ThreatModelModal = ({
       <Modal.Header closeButton className="bg-dark border-danger">
         <Modal.Title className="text-danger">Confirm Delete</Modal.Title>
       </Modal.Header>
+      {/* NAMING WHAT ELSE GOES. threat_notes and flow_threat_links both reference threat_model(id)
+          ON DELETE CASCADE, so this button silently takes the operator's own notes on this threat
+          and every flow mapped to it as well. "Cannot be undone" was true before those existed and
+          understates it now: there is no restore, and the notes are prose nothing else holds a copy
+          of. */}
       <Modal.Body className="bg-dark text-white">
-        Are you sure you want to delete this threat? This action cannot be undone.
+        Are you sure you want to delete this threat? Its notes and its mapped flows go with it.
+        This action cannot be undone.
       </Modal.Body>
       <Modal.Footer className="bg-dark border-danger">
         <Button variant="outline-secondary" onClick={handleCancelDelete}>

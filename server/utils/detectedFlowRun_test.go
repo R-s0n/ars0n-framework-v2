@@ -290,74 +290,82 @@ func TestDetectedFlowRunSkipsWebSocketNodes(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// State-changing steps
+// The verb is never a filter
 // ---------------------------------------------------------------------------
 
-// The whole flow runs by default, POST and DELETE included. Replaying a captured flow while
-// silently omitting its POST produces a run that did not test the flow.
-func TestDetectedFlowRunSendsStateChangingStepsByDefault(t *testing.T) {
+// EVERY VERB IN THE FLOW IS SENT. There is no option that narrows a run to its reads and there is
+// not meant to be one: a run that replays a captured flow while omitting its writes is a run that
+// did not test the flow, and it reports green while proving nothing.
+//
+// This test exists to fail loudly if a verb filter is ever reintroduced.
+func TestDetectedFlowRunSendsEveryVerbWithNoWayToNarrowByVerb(t *testing.T) {
 	nodes := []detectedFlowNode{
 		dfrRoot("root", "GET", "https://app.example.com/new"),
 		dfrWithBody(dfrNode("post", "POST", "https://app.example.com/api/claims", "xhr"), `{"phone":"+15551234567"}`),
+		dfrWithBody(dfrNode("put", "PUT", "https://app.example.com/api/claims/1", "xhr"), `{"a":1}`),
+		dfrWithBody(dfrNode("patch", "PATCH", "https://app.example.com/api/claims/1", "xhr"), `{"a":2}`),
 		dfrWithBody(dfrNode("del", "DELETE", "https://app.example.com/api/claims/1", "xhr"), ""),
 	}
 
 	plan := dfrPlan(nodes, DetectedFlowRunOptions{})
 
-	for _, id := range []string{"post", "del"} {
+	for _, id := range []string{"post", "put", "patch", "del"} {
 		step := dfrStep(t, plan, id)
 		if !step.WillSend {
-			t.Fatalf("%s must be sent by default, got skip %q: %s", id, step.SkipReason, step.SkipDetail)
-		}
-		// Still REPORTED, so the operator can see what the run contains before pressing it.
-		if !step.StateChanging {
-			t.Errorf("%s must still be flagged state_changing so the plan shows what it will do", id)
+			t.Fatalf("%s must be sent, got skip %q: %s", id, step.SkipReason, step.SkipDetail)
 		}
 	}
-	if plan.RequestCount != 3 {
-		t.Fatalf("all three steps should be sent, got %d", plan.RequestCount)
-	}
-	if plan.SkipStateChanging {
-		t.Error("skip_state_changing must default to false")
+	if plan.RequestCount != len(nodes) {
+		t.Fatalf("all %d steps should be sent, got %d", len(nodes), plan.RequestCount)
 	}
 }
 
-// The option still works when the operator wants to narrow a run to its reads.
-func TestDetectedFlowRunSkipStateChangingIsOptIn(t *testing.T) {
+// A verb nobody curated for is sent too. PROPFIND, REPORT and an application's own invented method
+// are method tokens like any other, and a flow that recorded one must replay it.
+func TestDetectedFlowRunSendsUncuratedVerbs(t *testing.T) {
 	nodes := []detectedFlowNode{
 		dfrRoot("root", "GET", "https://app.example.com/new"),
-		dfrWithBody(dfrNode("post", "POST", "https://app.example.com/api/claims", "xhr"), `{"a":1}`),
+		dfrWithBody(dfrNode("propfind", "PROPFIND", "https://app.example.com/dav/", "xhr"), "<propfind/>"),
+		dfrNode("purge", "PURGE", "https://app.example.com/cache/x", "xhr"),
 	}
 
-	plan := dfrPlan(nodes, DetectedFlowRunOptions{SkipStateChanging: true})
+	plan := dfrPlan(nodes, DetectedFlowRunOptions{})
 
-	step := dfrStep(t, plan, "post")
-	if step.WillSend {
-		t.Fatal("skip_state_changing must skip the POST")
-	}
-	if step.SkipReason != detectedFlowSkipStateChanging {
-		t.Errorf("skip reason %q, want %q", step.SkipReason, detectedFlowSkipStateChanging)
-	}
-	if !dfrStep(t, plan, "root").WillSend {
-		t.Error("the GET must still be sent")
+	for _, id := range []string{"propfind", "purge"} {
+		step := dfrStep(t, plan, id)
+		if !step.WillSend {
+			t.Fatalf("%s must be sent, got skip %q: %s", id, step.SkipReason, step.SkipDetail)
+		}
 	}
 }
 
-// A flow emptied by skip_state_changing must blame skip_state_changing. Sending an operator to
-// re-read their exclusion list for something their own option did is how a correct message becomes
-// a wrong one.
+// An empty plan must blame whatever actually emptied it. Sending an operator to re-read their
+// exclusion list for something the subresource filter did is how a correct message becomes a wrong
+// one.
 func TestDetectedFlowRunEmptyPlanExplainsItself(t *testing.T) {
-	root := dfrWithBody(dfrNode("root", "POST", "https://app.example.com/submit", "document"), "x=1")
-	root.IsRoot = true
-	root.Significant = true
+	// Emptied by the boundary: a POST body does not change the reason, and the reason must be the
+	// boundary rather than anything about the verb.
+	scoped := dfrPlan([]detectedFlowNode{
+		dfrWithBody(dfrRoot("root", "POST", "https://elsewhere.thirdparty.net/submit"), "x=1"),
+	}, DetectedFlowRunOptions{})
 
-	plan := dfrPlan([]detectedFlowNode{root}, DetectedFlowRunOptions{SkipStateChanging: true})
-
-	if plan.RequestCount != 0 {
-		t.Fatalf("nothing should be sendable here, got %d", plan.RequestCount)
+	if scoped.RequestCount != 0 {
+		t.Fatalf("nothing should be sendable here, got %d", scoped.RequestCount)
 	}
-	if !strings.Contains(plan.Warning, "skip_state_changing") {
-		t.Errorf("the warning must name the rule that emptied the plan, got %q", plan.Warning)
+	if !strings.Contains(scoped.Warning, detectedFlowSkipOutOfScope) {
+		t.Errorf("the warning must name the rule that emptied the plan, got %q", scoped.Warning)
+	}
+
+	// Emptied by the noise filter: the message points at include_all, which is the control that
+	// would actually change the answer.
+	css := dfrNode("css", "GET", "https://app.example.com/a.css", "stylesheet")
+	css.Significant = false
+	hidden := dfrPlan([]detectedFlowNode{css}, DetectedFlowRunOptions{})
+	if hidden.RequestCount != 0 {
+		t.Fatalf("a lone hidden subresource should not be sendable, got %d", hidden.RequestCount)
+	}
+	if !strings.Contains(hidden.Warning, "include_all") {
+		t.Errorf("the warning must name include_all, got %q", hidden.Warning)
 	}
 }
 
@@ -442,6 +450,59 @@ func TestDetectedFlowRunHonoursExclusionRules(t *testing.T) {
 	if len(plan.ExclusionPatterns) != 1 {
 		t.Errorf("the plan must list the rules in force, not only the ones that fired, got %v",
 			plan.ExclusionPatterns)
+	}
+}
+
+// THE MOST IMPORTANT TEST IN THIS FILE.
+//
+// The verb gate is gone: a POST, PUT, PATCH or DELETE is sent like anything else. The three checks
+// that decide WHOSE DATA a request touches are not, and every one of them must still refuse a write.
+// If a future edit ever makes a write reachable on a host the operator excluded, this fails.
+func TestDetectedFlowRunStillRefusesWritesOutsideTheBoundary(t *testing.T) {
+	rules := []FlowExclusion{{
+		ID: "e1", Pattern: "app.example.com/api/otp*", Reason: "dispatches a one-time code to a real customer",
+	}}
+	nodes := []detectedFlowNode{
+		dfrRoot("root", "GET", "https://app.example.com/x"),
+		// Out of the target's boundary entirely.
+		dfrWithBody(dfrNode("offsite", "POST", "https://cdn.thirdparty.net/api/track", "xhr"), `{"a":1}`),
+		// Inside the boundary, but on a host the operator marked in_scope=false.
+		dfrWithBody(dfrNode("denied", "DELETE", "https://analytics.example.com/api/e/1", "xhr"), ""),
+		// Inside the boundary, on an allowed host, but covered by an exclusion rule.
+		dfrWithBody(dfrNode("excluded", "PUT", "https://app.example.com/api/otp/resend", "xhr"), `{"a":1}`),
+	}
+
+	plan := planDetectedFlowRun(detectedFlowPlanInput{
+		FlowID: "f", Nodes: nodes, Options: DetectedFlowRunOptions{},
+		Scope:      dfrScope("example.com"),
+		Denied:     map[string]bool{"analytics.example.com": true},
+		Exclusions: rules,
+		Engagement: dfrEngagement(),
+	})
+
+	for _, tc := range []struct{ id, want string }{
+		{"offsite", detectedFlowSkipOutOfScope},
+		{"denied", detectedFlowSkipHostExcluded},
+		{"excluded", detectedFlowSkipExclusion},
+	} {
+		step := dfrStep(t, plan, tc.id)
+		if step.WillSend {
+			t.Fatalf("%s (%s) was going to be SENT. Removing the verb gate must not open the scope "+
+				"gate; this is the rail that keeps the operator inside their programme.",
+				tc.id, step.Method)
+		}
+		if step.SkipReason != tc.want {
+			t.Errorf("%s: skip reason %q, want %q", tc.id, step.SkipReason, tc.want)
+		}
+	}
+
+	// The in-scope GET still goes, so the test above is measuring the boundary and not a planner
+	// that refused everything.
+	if !dfrStep(t, plan, "root").WillSend {
+		t.Fatal("the in-scope root must still be sent")
+	}
+	if plan.RequestCount != 1 {
+		t.Errorf("exactly one request should be sendable, got %d", plan.RequestCount)
 	}
 }
 
@@ -576,19 +637,8 @@ func TestDetectedFlowRunOverrideIsJudgedNotTheCapture(t *testing.T) {
 	if a.Method != "POST" {
 		t.Errorf("the method judged must be the one the edited bytes name, got %q", a.Method)
 	}
-	if !a.StateChanging {
-		t.Error("an edited POST must still be REPORTED as state changing so the plan shows it")
-	}
 	if !a.WillSend {
 		t.Errorf("an edited POST is what the operator typed and must be sent, got skip %q", a.SkipReason)
-	}
-
-	// And skip_state_changing is still judged on the bytes rather than the capture's original GET.
-	narrowed := dfrPlan(nodes, DetectedFlowRunOptions{
-		Overrides: overrides, SkipStateChanging: true,
-	})
-	if s := dfrStep(t, narrowed, "a"); s.WillSend || s.SkipReason != detectedFlowSkipStateChanging {
-		t.Errorf("skip_state_changing must judge the edited POST, got %v/%q", s.WillSend, s.SkipReason)
 	}
 
 	b := dfrStep(t, plan, "b")

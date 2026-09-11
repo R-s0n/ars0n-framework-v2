@@ -121,7 +121,7 @@ TEST_REGISTRY = [
          group="Security Controls", cost=10, seconds=8,
          question="Does this target block benign traffic too, making any WAF verdict a false positive?"),
     dict(id="waf_class_matrix", name="Ruleset Shape: Payload Classes", phase=4, locked=False,
-         group="Security Controls", cost=20, seconds=16,
+         group="Security Controls", cost=20, seconds=16, trips=True,
          question="Which classes of input does the ruleset actually inspect?"),
     dict(id="waf_response_mode", name="Block Response Mode", phase=4, locked=False,
          group="Security Controls", cost=6, seconds=6,
@@ -133,13 +133,13 @@ TEST_REGISTRY = [
          group="Security Controls", cost=6, seconds=6,
          question="Does it treat a scanner client differently from a browser?"),
     dict(id="waf_surface_matrix", name="Injection-Surface Inspection Matrix", phase=4, locked=False,
-         group="Security Controls", cost=12, seconds=10,
+         group="Security Controls", cost=12, seconds=10, trips=True,
          question="Does it inspect the body and headers, or only the query string?"),
     dict(id="waf_normalization", name="Ruleset Normalization Depth", phase=4, locked=False,
-         group="Security Controls", cost=10, seconds=8,
+         group="Security Controls", cost=10, seconds=8, trips=True,
          question="How deeply does it decode before matching? (Never auto-applied.)"),
     dict(id="waf_stickiness", name="Escalating / Sticky Blocking", phase=4, locked=False,
-         group="Security Controls", cost=14, seconds=60,
+         group="Security Controls", cost=14, seconds=60, trips=True,
          question="Does one block turn into an IP ban, and how long does it last?"),
 
     # ---- Phase 5: load (exclusive) --------------------------------------------------------
@@ -147,10 +147,10 @@ TEST_REGISTRY = [
          group="Load", cost=6, seconds=6,
          question="Is the target quiet enough right now for a load measurement to be valid?"),
     dict(id="load_ramp", name="Sustained-Rate Staircase", phase=5, locked=False,
-         group="Load", cost=90, seconds=45,
+         group="Load", cost=90, seconds=45, trips=True,
          question="What sustained request rate does this target actually tolerate?"),
     dict(id="load_burst", name="Burst Capacity / Token-Bucket Depth", phase=5, locked=False,
-         group="Load", cost=50, seconds=30,
+         group="Load", cost=50, seconds=30, trips=True,
          question="How big a burst absorbs before throttling, which is a different number from sustained?"),
     dict(id="load_concurrency", name="Concurrency Ceiling", phase=5, locked=False,
          group="Load", cost=48, seconds=24,
@@ -165,7 +165,7 @@ TEST_REGISTRY = [
          group="Load", cost=40, seconds=24,
          question="Is the expensive endpoint limited differently from a static asset?"),
     dict(id="load_scope", name="Limit Scope Attribution", phase=5, locked=False,
-         group="Load", cost=60, seconds=40,
+         group="Load", cost=60, seconds=40, trips=True,
          question="Is the limit per-IP, per-session, or per-endpoint?"),
     dict(id="load_validation", name="Derived-Budget Validation Hold", phase=5, locked=False,
          group="Load", cost=45, seconds=30,
@@ -626,6 +626,7 @@ def estimate_cost(cfg):
     requests = 0
     seconds = 0
     counted = []
+    trips_required = []
 
     for meta in TEST_REGISTRY:
         block = cfg["tests"].get(meta["id"], {})
@@ -635,6 +636,13 @@ def estimate_cost(cfg):
         requests += int(round(meta["cost"] * scale))
         seconds += int(round(meta["seconds"] * scale))
         counted.append(meta["id"])
+        # A test that calls governor.take_trip() cannot do its job with a trip budget of zero: the
+        # governor refuses the trip, the test skips itself, and the run reports it as skipped rather
+        # than as unaffordable. Counted here so the caller can tell "no deliberate blocks wanted"
+        # apart from "deliberate blocks wanted but not affordable", which look identical from a
+        # trip_budget of 0 alone. TestTripFlagMatchesTakeTripCallers keeps this list honest.
+        if meta.get("trips"):
+            trips_required.append(meta["id"])
 
     # Phase 3 runs as one concurrent pool, so summing its tests serially overestimates wall clock
     # by roughly the concurrency factor. Every other phase is sequential by design.
@@ -654,6 +662,12 @@ def estimate_cost(cfg):
         "tests_total": len(TEST_REGISTRY),
         "peak_concurrency": cfg["global"]["max_concurrency"],
         "trip_budget": cfg["global"]["trip_budget"],
+        # How many of the ENABLED tests deliberately provoke a block. Zero means a trip_budget of 0 is
+        # a perfectly coherent config with nothing to skip, which is exactly what the passive and safe
+        # presets ship. Non-zero with a budget of 0 means this run is configured to measure something
+        # it has not been authorised to measure.
+        "trips_required": len(trips_required),
+        "trips_required_tests": trips_required,
     }
 
 

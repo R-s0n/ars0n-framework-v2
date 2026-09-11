@@ -58,8 +58,8 @@ import (
 //	                          run that re-sends 37 hidden subresources to replay one form submit is
 //	                          load nobody asked for against a diagram nobody was shown.
 //	THE WHOLE FLOW RUNS.      Every verb in the flow is sent, POST included, because replaying a flow
-//	                          while omitting its POST is a run that did not test the flow. The
-//	                          optional skip_state_changing narrows a run to its reads; it is off.
+//	                          while omitting its POST is a run that did not test the flow. There is
+//	                          no verb filter here and there is not meant to be one.
 //	SCOPE, AND THE DENY LIST. Hosts marked in_scope=false are refused FIRST and unconditionally, then
 //	                          the boundary, then the flow exclusion rules - the same order and the
 //	                          same three readers active detection uses, because a rule that only some
@@ -145,7 +145,6 @@ const (
 	detectedFlowSkipHostExcluded   = "host_excluded"
 	detectedFlowSkipOutOfScope     = "out_of_scope"
 	detectedFlowSkipExclusion      = "exclusion"
-	detectedFlowSkipStateChanging  = "state_changing"
 	detectedFlowSkipOverBudget     = "over_budget"
 	detectedFlowSkipNotReachedStop = "not_reached"
 )
@@ -182,16 +181,6 @@ type DetectedFlowRunOptions struct {
 	// Send the subresources the diagram hides. Same escape hatch as show_all on the graph.
 	IncludeAll bool `json:"include_all"`
 
-	// Skip the flow's POST/PUT/PATCH/DELETE steps instead of sending them. OFF by default, so the
-	// whole flow runs.
-	//
-	// Default-on was wrong. Replaying a captured flow while silently omitting its POST produces a run
-	// that did not test the flow: the login submits nothing, the basket never fills, and every step
-	// after it answers as an anonymous user while reporting green. This is here as an option because
-	// narrowing a run to its reads is occasionally useful, not because sending a POST needs
-	// permission.
-	SkipStateChanging bool `json:"skip_state_changing"`
-
 	// Lower the execution budget for this run. Cannot raise it past detectedFlowMaxStepBudget, and a
 	// zero or absent value means the default.
 	MaxSteps int `json:"max_steps"`
@@ -219,7 +208,6 @@ type DetectedFlowRunStep struct {
 	RawBytes   int    `json:"raw_bytes"`
 	Overridden bool   `json:"overridden"`
 
-	StateChanging bool `json:"state_changing"`
 	// Whether these bytes carry a Cookie or Authorization header. Reported rather than stripped; see
 	// the comment on planDetectedFlowRun.
 	CarriesCredentials bool `json:"carries_credentials"`
@@ -281,9 +269,8 @@ type DetectedFlowRunPlan struct {
 	// that it happened.
 	Engagement *ResolvedEngagementConfig `json:"engagement,omitempty"`
 
-	IncludeAll        bool `json:"include_all"`
-	SkipStateChanging bool `json:"skip_state_changing"`
-	StopOnError       bool `json:"stop_on_error"`
+	IncludeAll  bool `json:"include_all"`
+	StopOnError bool `json:"stop_on_error"`
 
 	// Capture ids the caller sent an override for that are not in this flow. Never silently dropped.
 	UnusedOverrides []string `json:"unused_overrides,omitempty"`
@@ -581,21 +568,20 @@ func planDetectedFlowRun(in detectedFlowPlanInput) *DetectedFlowRunPlan {
 	budget, budgetSource := resolveDetectedFlowBudget(in.Options.MaxSteps, in.Engagement.MaxRequestsPerRun)
 
 	plan := &DetectedFlowRunPlan{
-		FlowID:             in.FlowID,
-		ScopeTargetID:      in.ScopeTargetID,
-		Label:              in.Label,
-		Steps:              make([]DetectedFlowRunStep, 0, len(in.Nodes)),
-		NodeCount:          len(in.Nodes),
-		Hosts:              []string{},
-		StepBudget:         budget,
-		BudgetSource:       budgetSource,
-		RPS:                in.Engagement.MaxRPS,
-		TimeoutS:           in.Engagement.RequestTimeoutS,
+		FlowID:            in.FlowID,
+		ScopeTargetID:     in.ScopeTargetID,
+		Label:             in.Label,
+		Steps:             make([]DetectedFlowRunStep, 0, len(in.Nodes)),
+		NodeCount:         len(in.Nodes),
+		Hosts:             []string{},
+		StepBudget:        budget,
+		BudgetSource:      budgetSource,
+		RPS:               in.Engagement.MaxRPS,
+		TimeoutS:          in.Engagement.RequestTimeoutS,
 		ScopeBoundary:     in.Scope.Describe(),
 		DeniedHosts:       sortedDetectedFlowHostSet(in.Denied),
 		ExclusionPatterns: SortedFlowExclusionPatterns(in.Exclusions),
 		IncludeAll:        in.Options.IncludeAll,
-		SkipStateChanging: in.Options.SkipStateChanging,
 		StopOnError:       in.Options.StopOnError,
 		Engagement:        &in.Engagement,
 	}
@@ -628,8 +614,8 @@ func planDetectedFlowRun(in detectedFlowPlanInput) *DetectedFlowRunPlan {
 		}
 
 		// Method, URL and host all come from the BYTES BEING SENT, not from the capture row. An
-		// operator who edited a GET into a POST must meet the disarm, and one who edited the Host
-		// header must meet the scope check for the host they typed.
+		// operator who edited the Host header must meet the scope check for the host they typed, and
+		// the plan must report the verb they actually typed rather than the one that was recorded.
 		step.Method = requestFlowMethodOf(raw)
 		if step.Method == "" {
 			step.Method = node.Method
@@ -639,7 +625,6 @@ func planDetectedFlowRun(in detectedFlowPlanInput) *DetectedFlowRunPlan {
 			step.URL = node.URL
 		}
 		step.Path = flowURLPath(step.URL)
-		step.StateChanging = requestFlowIsStateChanging(raw)
 		step.CarriesCredentials = detectedFlowCarriesCredentials(raw)
 
 		reason, detail, pattern := detectedFlowStepRefusal(node, step, in, overridden)
@@ -754,14 +739,10 @@ func detectedFlowStepRefusal(node detectedFlowNode, step DetectedFlowRunStep,
 			"not sent: an exclusion rule covers this URL (%s). Reason: %s", d.Pattern, why), d.Pattern
 	}
 
-	// The operator's optional narrowing to read-only steps, last of the refusals so a step that is
-	// ALSO out of scope reports the harder rail. state_changing is set on every step regardless of
-	// which reason won, so it is visible either way.
-	if step.StateChanging && in.Options.SkipStateChanging {
-		return detectedFlowSkipStateChanging, fmt.Sprintf(
-			"not sent: skip_state_changing is set and this step is a %s.", step.Method), ""
-	}
-
+	// Nothing below this line judges the verb. A POST, a PUT, a PATCH, a DELETE or a verb nobody has
+	// heard of is sent exactly like a GET is: the operator recorded this flow and asked for it back.
+	// The four checks above are the ones that matter, and they are about WHOSE data the request
+	// touches, not which verb it uses.
 	return "", "", ""
 }
 
@@ -814,8 +795,8 @@ func detectedFlowPlanNotes(plan *DetectedFlowRunPlan, in detectedFlowPlanInput) 
 
 // detectedFlowPlanWarning explains an empty plan, in the terms of whatever actually emptied it.
 //
-// Sending an operator to re-read their exclusion list for something the state-changing default did is
-// how a correct message becomes a wrong one.
+// Sending an operator to re-read their exclusion list for something the subresource filter did is how
+// a correct message becomes a wrong one.
 func detectedFlowPlanWarning(plan *DetectedFlowRunPlan) string {
 	if plan.RequestCount > 0 {
 		return ""
@@ -832,7 +813,7 @@ func detectedFlowPlanWarning(plan *DetectedFlowRunPlan) string {
 
 	parts := make([]string, 0, len(counts))
 	for _, reason := range []string{
-		detectedFlowSkipStateChanging, detectedFlowSkipSubresource, detectedFlowSkipOutOfScope,
+		detectedFlowSkipSubresource, detectedFlowSkipOutOfScope,
 		detectedFlowSkipHostExcluded, detectedFlowSkipExclusion, detectedFlowSkipNotReplayable,
 		detectedFlowSkipNoBytes, detectedFlowSkipNoHost, detectedFlowSkipOverBudget,
 	} {
@@ -842,10 +823,7 @@ func detectedFlowPlanWarning(plan *DetectedFlowRunPlan) string {
 	}
 
 	msg := "Nothing would be sent. Every step was skipped: " + strings.Join(parts, ", ") + "."
-	if counts[detectedFlowSkipStateChanging] > 0 {
-		msg += " This flow is all state-changing requests; clearing skip_state_changing would send them."
-	}
-	if counts[detectedFlowSkipSubresource] > 0 && counts[detectedFlowSkipStateChanging] == 0 {
+	if counts[detectedFlowSkipSubresource] > 0 {
 		msg += " This flow is all subresources; include_all would send them."
 	}
 	return msg

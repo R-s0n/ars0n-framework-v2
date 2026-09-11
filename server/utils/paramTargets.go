@@ -480,6 +480,97 @@ func TotalGroupWork(groups []VerbGroup) int {
 	return n
 }
 
+// ParamAuthHeaders overlays the framework's stored credentials for the scope target's own host onto
+// the headers configured for a parameter-enumeration tool.
+//
+// WHY THIS EXISTS. Arjun and x8 were the only request-issuing tools in the framework that never
+// consulted LoadScopedAuthContext. They read config.Headers and nothing else, so the only way to
+// scan authenticated was to paste a credential into the tool's own config and keep it fresh by hand.
+// Every other scanner - the crawlers, the endpoint scan, ffuf, the vector tools - shares one
+// credential source and picks up a refresh automatically.
+//
+// That gap is not cosmetic on a modern target. Measured on this engagement: the authorisation server
+// issues 900-second bearer tokens with NO refresh token, and a full 83-endpoint arjun pass runs well
+// past fifteen minutes. A pasted token is therefore guaranteed to die mid-scan, after which every
+// remaining endpoint is probed logged out. On a client-routed SPA that means the login shell for
+// pages and a 401 for the API - responses which are perfectly stable and perfectly identical, so the
+// differential detector these tools rely on finds nothing and the scan reports a clean zero. That is
+// the "silent zero" failure this section has now produced in five distinct ways.
+//
+// The overlay is deliberately one-directional: an explicitly configured header WINS over the stored
+// credential. An operator who typed a header meant it, and a guess must not overwrite it. The stored
+// material only fills what the operator did not speak about, which is the same precedence rule
+// LoadScopedAuthContext already applies internally.
+//
+// Scoped to the scope target's own host, never the endpoint's. These corpora can contain adjacent
+// hosts, and a bearer minted for app.example.com must not be sprayed at a third party that happens
+// to appear in the endpoint list.
+func ParamAuthHeaders(scopeTargetID string, configured []map[string]string) []map[string]string {
+	// Guard before touching the database. ScopeTargetBase queries unconditionally, so an empty id
+	// reaches the pool and there is nothing useful to look up anyway: no scope target means no host
+	// to scope a credential to, and the honest answer is to send exactly what was configured.
+	if strings.TrimSpace(scopeTargetID) == "" {
+		return configured
+	}
+	_, host, _ := ScopeTargetBase(scopeTargetID)
+	if host == "" {
+		return configured
+	}
+	material, _ := LoadScopedAuthContext(scopeTargetID).For(strings.ToLower(host))
+	if material == nil {
+		return configured
+	}
+
+	// What the operator already set, by canonical name, so the overlay can skip those.
+	spoken := map[string]bool{}
+	for _, line := range ParamHeaderLines(configured) {
+		if i := strings.Index(line, ":"); i > 0 {
+			spoken[strings.ToLower(strings.TrimSpace(line[:i]))] = true
+		}
+	}
+
+	out := append([]map[string]string{}, configured...)
+	names := make([]string, 0, len(material.Headers))
+	for k := range material.Headers {
+		names = append(names, k)
+	}
+	sort.Strings(names) // stable command lines keep a stored `command` string comparable
+	for _, name := range names {
+		if spoken[strings.ToLower(name)] {
+			continue
+		}
+		out = append(out, map[string]string{name: material.Headers[name]})
+	}
+	// The cookie jar is attached ONLY when nothing else authenticates the request.
+	//
+	// WHY, measured 2026-09-08 and caught in a live run. Attaching it unconditionally alongside a
+	// bearer sent the target's ENTIRE captured jar on every probe, which on this engagement meant a
+	// Cognito refreshToken, idToken, accessToken and randomPasswordKey riding on thousands of
+	// scan requests. The refresh token is the dangerous one: it is long-lived and can mint new
+	// sessions indefinitely, so it is a far more valuable credential than the 900-second bearer it
+	// was travelling next to. It was also visible in `ps` output on the host and is persisted
+	// verbatim into the scan's stored `command` column, so a scan record becomes a credential store.
+	//
+	// A bearer already authenticates the request, so the jar adds nothing there. Keeping the
+	// fallback matters though: plenty of targets authenticate by cookie alone, and dropping cookies
+	// outright would silently log those scans out - the same silent-zero this overlay exists to
+	// prevent. Authorization first, cookies only if there is no Authorization to be had.
+	hasAuthHeader := false
+	for _, name := range names {
+		if strings.EqualFold(name, "Authorization") {
+			hasAuthHeader = true
+			break
+		}
+	}
+	if spoken["authorization"] {
+		hasAuthHeader = true
+	}
+	if material.Cookies != "" && !spoken["cookie"] && !hasAuthHeader {
+		out = append(out, map[string]string{"Cookie": material.Cookies})
+	}
+	return out
+}
+
 // ParamHeaderLines renders configured headers as "Name: value", accepting both shapes that exist in
 // the wild.
 //

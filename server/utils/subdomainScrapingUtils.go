@@ -803,7 +803,21 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 	// Build base command
 	baseCmd := []string{
 		"docker", "run", "--rm",
-		"sxcurity/gau:latest",
+		// PINNED BY DIGEST, BECAUSE THERE IS NO VERSION TAG TO PIN TO. sxcurity/gau publishes exactly
+		// one tag, "latest" (Docker Hub v2 API reports count:1 for the repository, checked 2026-09-08),
+		// so `sxcurity/gau:2.2.4` and every other version-shaped tag simply does not exist and would
+		// turn this into an unpullable image. A digest is the only pin available.
+		//
+		// It needs one because the code around this command is written against gau 2.2.4 and not
+		// against "gau": the flag names below and the provider vocabulary in wildcardOptions.go were
+		// measured in this container, and the reader further down this function parses stdout as one
+		// JSON object per line with a "url" key, which is 2.2.4's --json shape. A floating tag lets the
+		// binary drift away from the code that reads it, and the failure is silent: docker exits 0, no
+		// line parses, and the scan records zero URLs the same way a genuinely empty archive does.
+		//
+		// This digest is what "latest" points at now (pushed 2024-10-28) and what is installed on this
+		// host, so pinning changes nothing about what runs today.
+		"sxcurity/gau@sha256:e5ad95a6fce296e671b83039d84fc0629afd320cc05ac91972ce83b4ac18b862",
 		domain,
 		"--providers", "wayback",
 		"--json",
@@ -858,7 +872,12 @@ func ExecuteAndParseGauScan(scanID, domain string) {
 		// wayback,otx,urlscan at 5 threads whenever it did.
 		retryBase := []string{
 			"docker", "run", "--rm",
-			"sxcurity/gau:latest",
+			// The same digest as the first attempt, and it has to be: the retry exists to try
+			// different flags against the SAME binary, so if these two references could ever resolve
+			// to different images the retry would be testing a second variable and its result would
+			// not mean what this comment block says it means. See the first attempt above for why gau
+			// is pinned by digest rather than by tag.
+			"sxcurity/gau@sha256:e5ad95a6fce296e671b83039d84fc0629afd320cc05ac91972ce83b4ac18b862",
 			domain,
 			"--providers", "wayback,otx,urlscan",
 			"--subs",

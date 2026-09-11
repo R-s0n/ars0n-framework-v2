@@ -99,7 +99,7 @@ func ExecuteAmassIntelScan(scanID, companyName string) {
 
 	// The per-target Company settings, from the ONE store the Settings screen and the MCP company tool
 	// both write. Absent is the normal case and produces the command line this runner has always built:
-	// docker run --rm caffix/amass intel -org <company> -whois -active -timeout 120.
+	// docker run --rm caffix/amass:v4.2.0 intel -org <company> -whois -active -timeout 120.
 	scopeTargetID := companyScopeTargetForScan(context.Background(), "amass_intel_scans", scanID, "amass_intel")
 	tool, settings, loadNotes := companyRunnerSettings(scopeTargetID, "amass_intel")
 	argv, configNotes := amassIntelCompanyCommandArgs(companyName, tool, settings)

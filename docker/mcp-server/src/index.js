@@ -21,6 +21,7 @@ const { manageManualCrawlSchema, manageManualCrawl, captureManualCrawlSchema, ca
 const { manageScopeRulesSchema, manageScopeRules } = require('./tools/scoperules');
 const { manageNotesSchema, manageNotes } = require('./tools/notes');
 const { manageParamEnumSchema, manageParamEnum } = require('./tools/paramenum');
+const { manageVectorSelectionSchema, manageVectorSelection } = require('./tools/vectorselection');
 const { manageXSSSchema, manageXSS, manageSQLiSchema, manageSQLi, manageCacheSchema, manageCache, manageCmdiSchema, manageCmdi, manageRedirectSchema, manageRedirect, manageLfiSchema, manageLfi, manageSmugglingSchema, manageSmuggling, manageBypassSchema, manageBypass, manageGraphqlSchema, manageGraphql, manageLeakSchema, manageLeak, manageGitSchema, manageGit, manageMiscSchema, manageMisc } = require('./tools/vectortools');
 const { manageFuzzSchema, manageFuzz } = require('./tools/fuzz');
 const methodology = require('./tools/methodology');
@@ -57,6 +58,10 @@ const { listAuthFlowsSchema, listAuthFlows, createAuthFlowSchema, createAuthFlow
 const { replayRequestSchema, replayRequest, manageRequestVersionsSchema, manageRequestVersions, manageDetectedFlowsSchema, manageDetectedFlows } = require('./tools/requestflows');
 const { manageFlowDetectionSchema, manageFlowDetection, manageFlowConfigSchema, manageFlowConfig, getFlowMetricsSchema, getFlowMetrics } = require('./tools/flowdetection');
 const { manageFlowBuilderSchema, manageFlowBuilder } = require('./tools/flowbuilder');
+const { browseKnowledgeBaseSchema, browseKnowledgeBase, readKnowledgeFileSchema, readKnowledgeFile, searchKnowledgeBaseSchema, searchKnowledgeBase } = require('./tools/knowledgebase');
+
+const guidance = require('./guidance');
+const guidanceSession = require('./guidance/session');
 
 const pkg = require('../package.json');
 
@@ -68,16 +73,103 @@ const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
 // can't drift from the actual number the way a hardcoded constant did.
 let toolCount = 0;
 
+// Merge guidance into one tool result. Returns the envelope UNCHANGED whenever it cannot do this
+// safely, which is most of the interesting cases.
+//
+// The wrapper sits at registration and therefore sees the MCP envelope, not the handler's own object,
+// so the text has to be parsed back out, merged, and re-serialised. That is a JSON round trip per
+// call and it is the price of not editing 140 handlers. The parse is unavoidable: the rule that a
+// tool already answering with a guidance key keeps its own words cannot be checked on the text.
+// Re-serialising rather than splicing the key into the original string is a CHOICE, and it has one
+// consequence worth knowing: a JSON integer above 2^53 comes back rounded, so 12345678901234567890
+// would be re-emitted as 12345678901234567000. Nothing served here produces one (ids are UUID
+// strings and the only bigint column is content_length), which is why the simpler code won, but a
+// future route returning epoch nanoseconds or a snowflake id would need the splice.
+function attachGuidance(toolName, params, extra, envelope) {
+  const entry = guidance.lookup(toolName, params && params.action);
+  if (!entry) return envelope;  // no entry means say nothing, not say nothing loudly
+
+  // Only the single-text envelope every handler in this file returns is touched. isError is left
+  // alone on purpose: the client reads that flag, and teaching over a failure is noise on top of a
+  // problem the caller is already dealing with.
+  if (!envelope || typeof envelope !== 'object' || envelope.isError) return envelope;
+  if (!Array.isArray(envelope.content) || envelope.content.length !== 1) return envelope;
+  const item = envelope.content[0];
+  if (!item || item.type !== 'text' || typeof item.text !== 'string') return envelope;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(item.text);
+  } catch (err) {
+    // A handler that returned prose rather than JSON is not one of ours, and rewriting its answer
+    // into a JSON wrapper would change the shape a caller is already parsing. Leave it.
+    return envelope;
+  }
+
+  const isPlainObject = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
+  if (isPlainObject && Object.prototype.hasOwnProperty.call(parsed, 'guidance')) return envelope;
+
+  // The brief is consumed only now, once it is certain something is going to be attached. Consuming
+  // it earlier would mark a tool as taught on a call that taught nothing.
+  const sessionId = extra && typeof extra === 'object' ? extra.sessionId : undefined;
+  const first = guidanceSession.firstBrief(sessionId, toolName);
+  const payload = first ? entry : guidance.compactLine(entry);
+
+  // Guidance goes FIRST. A caller that reads the head of a five hundred line result should still see
+  // it; appended, it is the thing most likely to be scrolled past or clipped.
+  const merged = isPlainObject
+    ? { guidance: payload, ...parsed }
+    : { result: parsed, guidance: payload };
+
+  return { ...envelope, content: [{ ...item, text: JSON.stringify(merged, null, 2) }] };
+}
+
+// Wrap one handler so its result carries guidance. Nothing here is allowed to change whether the
+// tool works: a throw from the guidance layer returns the untouched envelope, and a throw from the
+// tool itself propagates exactly as it did before.
+function teach(toolName, handler) {
+  return async (params, extra) => {
+    const envelope = await handler(params, extra);
+    try {
+      return attachGuidance(toolName, params, extra, envelope);
+    } catch (err) {
+      console.error(`[MCP] guidance failed for ${toolName}, returning result unchanged:`, err && err.message);
+      return envelope;
+    }
+  };
+}
+
 function createServer() {
   const server = new McpServer({
     name: 'ars0n-framework',
     version: pkg.version,
   });
 
-  // Count tool registrations without having to touch every server.tool(...) call below.
+  // ONE change point for all 140 registrations, not 140 edits.
+  //
+  // Every server.tool call below has the same four-argument shape, so replacing server.tool reaches
+  // every one of them, including the four that tools/methodology.js registers on its own. This
+  // assignment already existed to keep the /health tool count honest; guidance rides the same hook.
+  // Editing the call sites by hand would have been an enormous diff that drifts the first time
+  // someone adds a tool and copies a neighbour that was never wrapped.
+  //
+  // WRAPPED BY POSITION, NOT BY ARITY. The SDK's tool() is overloaded: (name, cb),
+  // (name, description, cb), (name, schema, cb), (name, description, schema, cb), and the variants
+  // that take annotations. Every call below uses the four argument form, but a signature fixed at
+  // four would hand registerTool a handler in the schema slot the day someone registers a tool
+  // without a description, and the failure would be at call time rather than at registration. The
+  // callback is always last, so that is what gets replaced and everything else is forwarded
+  // untouched.
   let count = 0;
   const registerTool = server.tool.bind(server);
-  server.tool = (...args) => { count += 1; return registerTool(...args); };
+  server.tool = (...args) => {
+    count += 1;
+    const last = args.length - 1;
+    if (typeof args[0] === 'string' && typeof args[last] === 'function') {
+      args[last] = teach(args[0], args[last]);
+    }
+    return registerTool(...args);
+  };
 
   // ============================================================
   // SCOPE & OVERVIEW (existing)
@@ -315,6 +407,11 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
+  server.tool('manage_vector_selection', 'See and control which attack vectors each vector-testing scanner runs against, per tool, across all twelve sections (xss, sqli, cmdi, redirect-ssrf, lfi, cache, smuggling, access-bypass, graphql, sensitive-leak, exposed-git, misc). The per-vector twin of manage_param_enum. IT RETURNS TWO COUNTS THAT ARE NOT THE SAME NUMBER, and collapsing them is how a scan gets misreported: selected is what the operator chose, and defaults to everything because selection is stored sparsely as deselections only; eligible is what the scan WILL ACTUALLY SEND, and is always smaller when the tool cannot reach an insertion point or a setting has it off. Measured on the reference target, Dalfox is selected for 215 vectors and sends to 78, so selected_but_unreachable is 137 vectors that are unknown rather than clean. Always quote eligible as coverage. Takes category explicitly rather than inferring it from the tool name: the route is category-prefixed, an unknown category 404s at the router, and a valid-but-wrong category returns 200 with data read through the wrong route, so a guess can be silently wrong. Selection is per tool, so deselecting a vector for sqlmap leaves Ghauri still scanning it.', manageVectorSelectionSchema.shape, async (params) => {
+    const result = await manageVectorSelection(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
   server.tool('manage_xss', 'Configure and run the XSS scanners (Dalfox, domdig, xssFuzz) against the unique attack vectors of this target. Settings live in the same server-side store the Config modal writes, so a change here is visible there and the other way round. Start with the eligibility action: only Dalfox can reach header, body, cookie and path insertion points, so a clean result from domdig or xssFuzz says nothing about the vectors they never sent.', manageXSSSchema.shape, async (params) => {
     const result = await manageXSS(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -433,6 +530,31 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
 
   methodology.register(server);
 
+  // ============================================================
+  // KNOWLEDGE BASE
+  // ============================================================
+  // The vendored corpus, read through the Go API. methodology.register above serves the framework's
+  // OWN methodology, which is a different thing from the knowledge base's methodology/ directory:
+  // one is the workflow this software implements, the other is vendored prose about how web
+  // application testing is done in general. Nothing here is named get_methodology for that reason.
+  //
+  // The three names mirror the standalone rs0n-bug-bounty-mcp-server these replace, so an operator's
+  // muscle memory carries over.
+  server.tool('browse_knowledge_base', 'What is in the vendored bug bounty knowledge base: every file with its path, title, size and category. START HERE before reading or searching, because the corpus is not one kind of thing. methodology/ and checklists/ are short instructional prose meant to be read whole with read_knowledge_file. reports/accepted/ is 1.26 MB of disclosed reports that paid and reports/rejected/ is why reports get closed as informational or duplicate; those are corpora, not documents, and the way into them is search_knowledge_base. The size on each row is the number that decides which of the two a file wants.', browseKnowledgeBaseSchema.shape, async (params) => {
+    const result = await browseKnowledgeBase(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('read_knowledge_file', 'Read one knowledge base file, a window at a time. offset and limit are in LINES and the numbering is the same one search_knowledge_base reports, so the intended move on a report corpus is search first and then read the block around a hit rather than reading from the top. A hard character ceiling applies to every read on top of the line limit and cannot be raised by any caller, so a large limit on a file with long lines returns fewer lines than asked and says so; continue with next_offset instead of raising the limit. Use this on methodology/ and checklists/, which are short enough to read whole.', readKnowledgeFileSchema.shape, async (params) => {
+    const result = await readKnowledgeFile(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('search_knowledge_base', 'Line-level search across the whole knowledge base, returning matching lines with their file, line number and nearest heading. This is the way into the report corpora: one 607 KB file is an index of disclosed reports, one per line with its link and bounty, so a query answers with exactly the lines that matched and nothing else. It is a case-insensitive SUBSTRING and not a regex and not a concept, so "IDOR" will not find a report titled "Broken Access Control"; search for both and prefer the words a report title would use. A hit proves the words appear in the corpus, not that the finding applies to your target.', searchKnowledgeBaseSchema.shape, async (params) => {
+    const result = await searchKnowledgeBase(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
   server.tool('manage_fuzz', 'The live ffuf fuzz flow: review what a run found, change what a step sends, price it, run it and follow it. This is the implementation the URL workflow actually executes; run_scan "ffuf_url" and manage_tool_config "ffuf" drive an older one whose tables are empty, so use this for anything ffuf. Start with action summary, which reports per step whether the findings are discoveries or one response repeated, and the option that would exclude that response.', manageFuzzSchema.shape, async (params) => {
     const result = await manageFuzz(params);
     // Guidance rides along with the RESULT rather than waiting to be asked for. A caller who knew to
@@ -505,7 +627,7 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_threat_model', 'Create, read, update and delete threat model entries for a target.', manageThreatModelSchema.shape, async (params) => {
+  server.tool('manage_threat_model', 'Create, read, update and delete threat model entries for a target, and MAP A FLOW ONTO A THREAT so the claim carries the request sequence that demonstrates it. link_flow, list_flow_links and unlink_flow take either kind of flow id: a built flow is a UUID, a detected flow is the composite <session>~<tab>~<root capture>, and neither is validated as a UUID because that would reject the majority of them. The flow side is not a foreign key and the server accepts a link to a flow that no longer exists, so every read here resolves the id against the target current flow list and marks the ones that do not resolve. It also carries AD HOC NOTES ON ONE THREAT, which is where the working goes when a test does not settle cleanly: list_notes and add_note are addressed by threat_id, update_note and delete_note by the note\'s own note_id, and the update route preserves any field you leave out. Those are notes on a single threat and are not the four supporting collections in manage_threat_model_notes, nor the whole-target notes in manage_notes.', manageThreatModelSchema.shape, async (params) => {
     const result = await manageThreatModel(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
@@ -831,7 +953,7 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
   // reachable here, and nothing here does something those screens cannot. The feature added 42
   // HTTP routes; these seven tools are the whole of it.
   // ============================================================
-  server.tool('replay_request', `The repeater. Search the manual-crawl capture corpus with the full query language, pull one capture out as raw HTTP bytes, edit them and SEND THEM TO THE LIVE TARGET. send puts a real request on somebody's production host. Start with query_syntax if you are about to write a search: the q parameter is a grammar, not a substring, and a bare phrase usually returns nothing.`, replayRequestSchema.shape, async (params) => {
+  server.tool('replay_request', `The repeater. Search the manual-crawl capture corpus with the full query language, pull one capture out as raw HTTP bytes, edit them and SEND THEM TO THE LIVE TARGET. send puts a real request on somebody's production host. Start with query_syntax if you are about to write a search: the q parameter is a grammar, not a substring, and a bare phrase usually returns nothing. It also loads SCANNER FINDINGS into the repeater: list_findings indexes what the twelve vector sections found without pulling their prose, and load_finding turns one finding into pasteable raw bytes plus the base_url to aim them at, sending nothing. Composed request bytes are stored behind a banner that is not valid HTTP; load_finding strips it and tells you it was there, because "reconstructed" and "captured" are different claims about the same field.`, replayRequestSchema.shape, async (params) => {
     const result = await replayRequest(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
@@ -841,7 +963,7 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_detected_flows', `The flows reconstructed from the capture corpus: a form POST and the page its 302 produced, an OAuth dance across three hosts. List them, read one as a graph, and re-run the whole thing at the live target. run is a DRY RUN unless you pass dry_run:false, and the dry run is the right first call every time.`, manageDetectedFlowsSchema.shape, async (params) => {
+  server.tool('manage_detected_flows', `Every flow on a target, of BOTH kinds: the ones reconstructed from the capture corpus (a form POST and the page its 302 produced, an OAuth dance across three hosts) and the ones an operator assembled in the flow builder. List them, read one as a graph, RENAME the ones worth coming back to, and re-run the whole thing at the live target. An unnamed flow shows a placeholder rather than a title anybody chose, and a derived label taken from the request that rooted it, which repeats across a corpus because a session roots most of its flows at the same few navigations - so naming is what makes a list of forty flows navigable by you or by the operator. THE TWO KINDS HAVE DIFFERENT ID SHAPES: a detected flow id is <session>~<tab>~<root capture> and is NOT a UUID, a built flow id is; the name action accepts either and routes to the right store, everything else here takes detected ids only. Built flows are never filtered by the query, because the query grammar matches captured requests and a built flow holds steps that may never have been sent. run is a DRY RUN unless you pass dry_run:false, and the dry run is the right first call every time.`, manageDetectedFlowsSchema.shape, async (params) => {
     const result = await manageDetectedFlows(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
@@ -861,7 +983,7 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_flow_builder', `Build, edit and run multi-step request flows: the ordered list of raw HTTP requests, with values carried from one step into the next and conditions that branch on what the target answers. This is the shape almost every access-control and business-logic test actually takes, and it is the only way to test a sequence rather than a request. Seed one from a flow the detector already found (seed_from_detected_flow), change the step you care about, preview, then replay. Seeded POST/PUT/PATCH/DELETE steps arrive TURNED OFF because they carry the recorded body. Call action:"grammar" before writing any condition or retry loop: it returns the field/operator/action grammar, the save-time rules, worked examples, and every loop-protection cap with its default and ceiling.`, manageFlowBuilderSchema.shape, async (params) => {
+  server.tool('manage_flow_builder', `Build, edit and run multi-step request flows: the ordered list of raw HTTP requests, with values carried from one step into the next and conditions that branch on what the target answers. This is the shape almost every access-control and business-logic test actually takes, and it is the only way to test a sequence rather than a request. Seed one from a flow the detector already found (seed_from_detected_flow), change the step you care about, preview, then replay. The steps that run are the ones the operator enabled, whatever verb they carry, and scope and the exclusion rules still decide what may be sent. Call action:"grammar" before writing any condition or retry loop: it returns the field/operator/action grammar, the save-time rules, worked examples, and every loop-protection cap with its default and ceiling.`, manageFlowBuilderSchema.shape, async (params) => {
     const result = await manageFlowBuilder(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
@@ -943,4 +1065,12 @@ async function main() {
   });
 }
 
-main().catch(console.error);
+// Start only when run as the entrypoint, which is how the container starts it (CMD node src/index.js)
+// and how npm start does. Requiring this file instead gives you createServer() without a database
+// connection or a listening port, which is what lets the guidance test enumerate the REAL
+// registration list rather than a hardcoded copy of it that would go stale the day a tool is added.
+if (require.main === module) {
+  main().catch(console.error);
+}
+
+module.exports = { createServer, attachGuidance, teach };

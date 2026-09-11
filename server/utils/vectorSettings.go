@@ -56,9 +56,10 @@ func GetVectorSettings(w http.ResponseWriter, r *http.Request) {
 	// cannot show that is a screen that hides the consequence of its own controls.
 	var report VectorEligibilityReport
 	if vectors, err := loadRowsFor(ctx, tool, scopeTargetID); err == nil {
-		report = BuildVectorEligibility(tool, vectors, settings,
+		report = BuildVectorEligibilityFor(tool, vectors, settings,
 			loadFoundVectorIDs(ctx, scopeTargetID, findingCategoryFor(tool)),
-			loadVectorSectionSettings(ctx, scopeTargetID, tool.Category))
+			loadVectorSectionSettings(ctx, scopeTargetID, tool.Category),
+			LoadVectorDeselections(ctx, scopeTargetID, tool.Key))
 		report.Vectors = nil // The per-vector list is for the scan, not for the settings form.
 	}
 

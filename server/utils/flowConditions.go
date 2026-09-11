@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/mux"
 )
 
 // Conditional branching for BUILT request flows, and the loop protection that makes it safe.
@@ -1253,6 +1254,28 @@ func runRequestFlowConditional(flow RequestFlow, steps []RequestFlowStep, rails 
 		outbound, engNotes := applyEngagementToRawRequest(request, eng)
 		entry.Notes = append(entry.Notes, engNotes...)
 
+		// Refresh the credential headers this step already carries, from the same source the fuzz
+		// composer and the parameter tools use.
+		//
+		// WHY. A flow step is raw bytes captured or written once, so its Authorization header is
+		// frozen at the moment it was seeded. Measured on this engagement 2026-09-08: ALL THIRTEEN
+		// steps across the three stored IDOR flows carried bearers that had expired about twenty
+		// hours earlier, because the target issues 900-second tokens with no refresh token.
+		//
+		// Replaying those flows would not have failed loudly. Every step would 401, and on a
+		// cross-account probe a 401 on the "test" arm is indistinguishable from the target correctly
+		// refusing - so the flow reads as "properly refused" having proven nothing. That is the
+		// worst shape a security result can take: a false negative that looks like evidence.
+		//
+		// applySessionTokens only REPLACES headers the request already has; it never adds a
+		// credential to a request that deliberately carried none, because a step probing an endpoint
+		// logged out is a legitimate thing to want. It also appends a note, so the trace says the
+		// substitution happened rather than silently diverging from the stored bytes.
+		if fresh, credNotes := applySessionTokens(outbound, flow.ScopeTargetID); fresh != outbound {
+			outbound = fresh
+			entry.Notes = append(entry.Notes, credNotes...)
+		}
+
 		effBase := resolveBaseURL(outbound, flow.BaseURL)
 		status, headers, body, ms, sendErr := deps.send(outbound, effBase, jar, timeout)
 		result.RequestsSent++
@@ -1670,11 +1693,83 @@ func orEmptyStrings(in []string) []string {
 	return in
 }
 
-// ListRequestFlowRuns handles GET /request-flow-builder/flow/{flow_id}/runs.
+// GetRequestFlowRuns handles GET /request-flow-builder/flow/{flow_id}/runs?limit=N.
 //
-// Registered by whoever owns the router; harmless if it is not, because the runs table is written
-// either way and the trace comes back on the replay response too. The history matters because a
-// branching flow that behaved differently yesterday is the whole reason to keep a trace at all.
+// WHY THIS ROUTE EXISTS AT ALL, given the replay already returns its own trace. A trace that is only
+// readable in the response to the run that produced it is a trace that lives for one page load. The
+// flow list reports a built flow as "stale" - it HAS run, and a step has been edited since - and the
+// only honest way to draw a stale flow's map is to read the run that is already stored. Without this
+// the screen has two choices, both wrong: claim there is no map, or send live traffic at the
+// engagement to redraw one it already has.
+//
+// GET, and it sends nothing. The route that sends is POST .../replay, and the split is the same one
+// preview/replay already makes.
+func GetRequestFlowRuns(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	flowID := mux.Vars(r)["flow_id"]
+	if _, err := uuid.Parse(flowID); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "flow_id_required", "flow_id must be a UUID")
+		return
+	}
+	// The flow is checked FIRST, so a mistyped id answers 404 rather than an empty run list. An empty
+	// list means "this flow has never run", which is a fact an operator acts on; returning it for a
+	// flow that does not exist would be that fact invented.
+	if _, err := getRequestFlow(flowID); err != nil {
+		writeJSONError(w, http.StatusNotFound, "flow_not_found", "No request flow with that id")
+		return
+	}
+
+	limit := 5
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	runs, err := ListRequestFlowRuns(flowID, limit)
+	if err != nil {
+		log.Printf("[REQUEST-FLOW] Failed to list runs for %s: %v", flowID, err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error", "Failed to read this flow's runs")
+		return
+	}
+
+	// The same verification state the flow list paints, derived by the same function, so the map and
+	// the badge over it can never disagree about whether the run below is current.
+	var lastRun, newestStep *time.Time
+	if len(runs) > 0 {
+		started := runs[0].Started
+		lastRun = &started
+	}
+	if dbPool != nil {
+		var t *time.Time
+		if err := dbPool.QueryRow(context.Background(),
+			`SELECT max(updated_at) FROM request_flow_steps WHERE request_flow_id = $1`,
+			flowID).Scan(&t); err != nil {
+			// Fails LOUD rather than defaulting to "verified": a step timestamp that could not be read
+			// is exactly the input that decides whether the map below is current, and guessing it in
+			// the flattering direction is the one error this whole state machine exists to prevent.
+			log.Printf("[REQUEST-FLOW] Newest step time unreadable for %s: %v", flowID, err)
+			writeJSONError(w, http.StatusInternalServerError, "steps_unreadable",
+				"This flow's runs were read, but the step edit times were not, so whether the run is "+
+					"still current could not be decided. Nothing is shown rather than a map that may be stale.")
+			return
+		}
+		newestStep = t
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"flow_id":      flowID,
+		"runs":         runs,
+		"count":        len(runs),
+		"verification": FlowVerificationState(lastRun, newestStep),
+	})
+}
+
+// ListRequestFlowRuns reads a flow's run history, newest first.
+//
+// The history matters because a branching flow that behaved differently yesterday is the whole
+// reason to keep a trace at all.
 func ListRequestFlowRuns(flowID string, limit int) ([]FlowRunResult, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20

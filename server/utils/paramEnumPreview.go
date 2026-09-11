@@ -81,6 +81,12 @@ func GetParamEnumPreview(w http.ResponseWriter, r *http.Request) {
 			scopeTargetID).Scan(&configJSON) == nil {
 			_ = UnmarshalConfigTolerant(configJSON, &arjun)
 		}
+		// The runner overlays the framework's stored credentials onto the configured headers, so the
+		// preview has to do it too or it under-reports what goes on the wire. This file's own header
+		// comment is the rule being followed: a preview assembled from a second source drifts, and a
+		// preview that drifts is worse than none. Caught live - the runner sent an Authorization
+		// header the preview did not show.
+		arjun.Headers = ParamAuthHeaders(scopeTargetID, arjun.Headers)
 		includeScripts = arjun.IncludeScripts
 	} else {
 		x8 = DefaultX8Config()
@@ -88,6 +94,7 @@ func GetParamEnumPreview(w http.ResponseWriter, r *http.Request) {
 			scopeTargetID).Scan(&configJSON) == nil {
 			_ = UnmarshalConfigTolerant(configJSON, &x8)
 		}
+		x8.Headers = ParamAuthHeaders(scopeTargetID, x8.Headers)
 		includeScripts = x8.IncludeScripts
 	}
 

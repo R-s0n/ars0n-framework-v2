@@ -47,6 +47,13 @@ const NOTES_CHARS = 1200;
 const BODY_PREVIEW_CHARS = 200;
 const ERROR_CHARS = 400;
 
+// An HTTP method is a token, per RFC 9110: one or more tchar, no spaces, no control characters, no
+// separators. That is the ONLY thing worth checking about a verb here. A curated list of the seven
+// verbs a browser happens to use would refuse PROPFIND, LOCK, REPORT and every verb an application
+// invented for itself, which is a gate on the tester rather than a check on the input. Validate the
+// shape of the word; let the target decide what it does with it.
+const METHOD_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
 // === manage_flow_detection =====================================================================
 
 const manageFlowDetectionSchema = z.object({
@@ -86,13 +93,15 @@ const manageFlowDetectionSchema = z.object({
     'scope target id.'),
 
   // --- run config, shared by dry_run and run ---
-  methods: z.array(z.enum(['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE']))
+  methods: z.array(z.string().regex(METHOD_TOKEN, 'not a valid HTTP method token'))
     .optional().describe(
-      'dry_run / run: which verbs to send. ALL SEVEN ARE AVAILABLE and the operator chooses; GET ' +
-      'is merely the default when this is omitted, not a restriction. A recorded body is attached ' +
-      'to POST, PUT, PATCH and DELETE when the corpus has one (see send_recorded_bodies); GET, ' +
-      'HEAD and OPTIONS never carry one. Only an unknown verb is refused, and that is a typo ' +
-      'check, not a policy.'),
+      'dry_run / run: which verbs to send. ANY valid HTTP method token is accepted, not a curated ' +
+      'list: GET, POST, PUT, PATCH and DELETE, and equally PROPFIND, LOCK, REPORT or a verb this ' +
+      'application invented. GET is merely the default when this is omitted, not a restriction. ' +
+      'A recorded body is attached when the corpus has one for that endpoint (see ' +
+      'send_recorded_bodies). The only thing refused is a string that is not a method token at ' +
+      'all - one with a space, a slash, a quote or a control character in it - and that is a typo ' +
+      'check on the SHAPE of the word, not a policy about which verbs may be sent.'),
   rps: z.number().optional().describe(
     'dry_run / run: requests per second, per host, with jitter. Default 1, ceiling 10. A ' +
     'per-target engagement cap overrides a higher number, and the dry run shows the value that ' +
@@ -256,6 +265,9 @@ async function manageFlowDetection(params) {
 function detectionConfig(p) {
   const cfg = {};
   if (Array.isArray(p.methods) && p.methods.length) {
+    // Uppercased to match what the server does to the same list, so the value echoed back by the
+    // dry run is the value that will be sent. This is a normalisation, not a filter: no verb is
+    // dropped here and the list is not checked against any set of allowed ones.
     cfg.methods = p.methods.map((m) => String(m).toUpperCase());
   }
   if (p.rps !== undefined) cfg.rps = p.rps;
@@ -405,8 +417,12 @@ const manageFlowConfigSchema = z.object({
       'list_endpoints: sendable is the one that matters most, because it is what a run would ' +
       'actually touch. On one live target here total was 1,872 and sendable was 22: the other ' +
       '1,850 sat on hosts outside the boundary.'),
-  source: z.enum(['consolidated', 'attack_vector']).optional().describe(
-    'list_endpoints: which corpus the endpoint came from. Omit for both.'),
+  source: z.enum(['manual_crawl', 'consolidated', 'attack_vector']).optional().describe(
+    'list_endpoints: which corpus the endpoint came from. Omit for all three. manual_crawl is the ' +
+    'operator\'s own recorded browsing and is populated the moment a crawl stops; consolidated only ' +
+    'appears once consolidate_endpoints has run; attack_vector is the hand-curated list. An endpoint ' +
+    'found in more than one carries all of them, so filtering on manual_crawl is how you see what a ' +
+    'recording reached that consolidation has not caught up with.'),
   offset: z.number().optional().describe(
     'list_endpoints: rows to skip, for paging past the cap. The summary counts stay whole-corpus ' +
     'whatever this is set to.'),

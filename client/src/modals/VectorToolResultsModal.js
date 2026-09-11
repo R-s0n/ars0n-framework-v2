@@ -88,6 +88,52 @@ export const kindPresentation = (kind) => {
 
 const TRIAGE_ORDER = ['new', 'interesting', 'dismissed'];
 
+// The first line the server puts on a request it COMPOSED rather than recorded. Matched literally,
+// exactly as the server matches it (vectorReproduce.go, reconstructedRequestBanner). If it ever
+// changes there and not here, the strip below stops firing and the repeater is handed a request
+// whose first line is a row of hashes.
+const RECONSTRUCTED_BANNER = '#### RECONSTRUCTED REQUEST, NOT CAPTURED BYTES ####';
+
+// finding.raw_request is returned "exactly as stored, banner and all", and for a composed request
+// that banner is six or seven lines of '#' commentary in front of the request line. It is an
+// annotation for a human reading a <pre>, not part of the request: handed to the repeater with the
+// banner still on it the bytes do not parse as HTTP at all, and the send comes back "This does not
+// parse as an HTTP request" for a request that is perfectly well formed underneath.
+//
+// So the banner comes off on the way to the editor and NOTHING ELSE DOES. No trimming, no header
+// reordering, no re-terminating lines: what is left is the bytes the scanner sent or the framework
+// composed, and the pane is byte-exact from here on.
+//
+// Deliberately the same shape as the server's SplitReconstructedRequest: drop the first line, then
+// every '#' line that follows it, and keep everything from the first line that is neither.
+export const stripReconstructedBanner = (raw) => {
+  const text = typeof raw === 'string' ? raw : '';
+  if (!text.replace(/^[\s]+/, '').startsWith(RECONSTRUCTED_BANNER)) return text;
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    if (i === 0 || lines[i].startsWith('#')) continue;
+    return lines.slice(i).join('\n');
+  }
+  // A banner and nothing under it. There is no request here, and saying so by returning empty is
+  // what makes the button hide itself rather than open an empty repeater.
+  return '';
+};
+
+// Where to send it. The connection target only; the Host header in the bytes is preserved by the
+// framework and is not touched here.
+//
+// This matters more than it looks. With no base_url the send falls back to the Host header AND
+// ASSUMES HTTPS, so a finding on an http origin would be replayed over TLS against a different port
+// and the response would be about a request the tool never made. The finding's own url is the origin
+// the tool was aimed at, so that is what travels.
+export const originOf = (url) => {
+  try {
+    return new URL(String(url)).origin;
+  } catch (err) {
+    return '';
+  }
+};
+
 // A copyable block. Reproduction only helps if getting it out of the modal is one click: an
 // operator who has to select 30 lines of a raw request by hand will not bother, and a finding
 // nobody reproduces is a finding nobody can act on.
@@ -246,7 +292,51 @@ const Exchange = ({ request, response }) => {
   );
 };
 
-function VectorToolResultsModal({ show, handleClose, activeTarget, tool, category }) {
+// The Send to Replay button, next to the bytes it is about.
+//
+// WHY IT IS HIDDEN RATHER THAN DISABLED when a finding has no request bytes.
+//
+// A disabled button would be the third thing on the same screen saying the same thing. The evidence
+// note above already says this tool "recorded neither the request nor the response", and the
+// Exchange block immediately below already says "No raw exchange was captured for this finding."
+// Adding a greyed-out control with a tooltip repeating it does not inform anybody; it just puts a
+// dead control on every row of a list that can be forty rows long, and a control an operator has
+// learned is usually dead is a control they stop reading. The information is not lost by hiding the
+// button, because the two sentences that explain the absence are still there. What is lost is a
+// piece of furniture.
+//
+// Composed bytes still get a button, and say so on it. They are not a measurement, but sending them
+// is precisely how an operator turns them into one, which is what the evidence note tells them to do.
+const SendToReplay = ({ finding, onSend }) => {
+  if (!onSend) return null;
+  const bytes = stripReconstructedBanner(finding.raw_request);
+  if (bytes.trim() === '') return null;
+  const composed = finding.raw_request_origin === 'reconstructed';
+  return (
+    <Button
+      size="sm"
+      variant="outline-danger"
+      onClick={() => onSend({
+        raw_request: bytes,
+        base_url: originOf(finding.url),
+        label: `${finding.tool || 'a tool'} finding`,
+      })}
+      title={composed
+        ? 'Loads these bytes into the repeater, ready to send. They were COMPOSED by the framework, '
+          + 'not recorded, so sending them is how this finding gets a real response to read. '
+          + 'Nothing is sent until you press Replay.'
+        : 'Loads the bytes the scanner sent into the repeater, ready to send. '
+          + 'Nothing is sent until you press Replay.'}
+    >
+      <i className="bi bi-arrow-repeat me-1" />
+      Send to Replay
+    </Button>
+  );
+};
+
+function VectorToolResultsModal({
+  show, handleClose, activeTarget, tool, category, onSendToRepeater,
+}) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [findings, setFindings] = useState([]);
@@ -299,6 +389,21 @@ function VectorToolResultsModal({ show, handleClose, activeTarget, tool, categor
   }, [activeTarget, toolKey, category]);
 
   useEffect(() => { if (show) load(); }, [show, load]);
+
+  // Forwarded, and deliberately NOT paired with a handleClose() of our own.
+  //
+  // The parent closes this modal, records the bytes and opens the repeater in ONE commit, because
+  // the repeater mounts with its handover prop already set or it mounts with nothing to load. Adding
+  // a close here would be this modal changing a flag the parent is changing in the same breath, which
+  // is a second writer to one piece of state for no gain. See handleOpenRawRequestInRepeater in
+  // App.js, and the longer note above handleOpenCaptureInRepeater next to it.
+  // Null, not a no-op function, when the parent did not wire it up: the button hides on a falsy
+  // handler, and a handler that silently does nothing would render a button that silently does
+  // nothing.
+  const sendToRepeater = useMemo(
+    () => (onSendToRepeater ? (payload) => onSendToRepeater(payload) : null),
+    [onSendToRepeater],
+  );
 
   const setTriage = async (id, triage) => {
     // Updated locally first so the badge responds immediately; a triage call that fails reloads and
@@ -675,8 +780,14 @@ function VectorToolResultsModal({ show, handleClose, activeTarget, tool, categor
                                 && f.reproduction.steps.length > 0)}
                             />
                             <Reproduce repro={f.reproduction} />
-                            <div className="text-white-50 mb-1" style={{ fontSize: '0.72rem', letterSpacing: '0.04em' }}>
-                              WHAT THE SCANNER ACTUALLY SENT AND RECEIVED
+                            <div className="d-flex align-items-center justify-content-between mb-1 gap-2">
+                              <span className="text-white-50" style={{ fontSize: '0.72rem', letterSpacing: '0.04em' }}>
+                                WHAT THE SCANNER ACTUALLY SENT AND RECEIVED
+                              </span>
+                              {/* Here rather than down with the triage buttons: the operator decides
+                                  to re-send after reading the request, and this is where they are
+                                  when they decide it. */}
+                              <SendToReplay finding={f} onSend={sendToRepeater} />
                             </div>
                             <Exchange request={f.raw_request} response={f.raw_response} />
                             <div className="d-flex gap-2 mt-3">

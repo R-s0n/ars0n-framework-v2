@@ -56,9 +56,13 @@ func StartVectorScan(ctx context.Context, scopeTargetID, toolKey string) (string
 	}
 	settings := loadVectorSettings(ctx, scopeTargetID, toolKey)
 	sectionSettings := loadVectorSectionSettings(ctx, scopeTargetID, tool.Category)
-	report := BuildVectorEligibility(tool, vectors, settings,
+	// The operator's per-vector selection, applied here so a deselected vector is recorded as
+	// skipped-with-a-reason up front rather than quietly never attempted. This is the call site that
+	// decides what traffic goes out; the other two only draw cards.
+	report := BuildVectorEligibilityFor(tool, vectors, settings,
 		loadFoundVectorIDs(ctx, scopeTargetID, findingCategoryFor(tool)),
-		sectionSettings)
+		sectionSettings,
+		LoadVectorDeselections(ctx, scopeTargetID, toolKey))
 
 	scanID := uuid.New().String()
 	if _, err := dbPool.Exec(ctx, `

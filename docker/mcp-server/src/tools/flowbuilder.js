@@ -18,7 +18,15 @@ const { clip, resolveLimit, DEFAULTS } = require('../utils/clip');
 // step_id, conditions, caps) and splitting them multiplies that vocabulary across a tool list the
 // model has to read in full before it can choose.
 //
-// THREE THINGS TO KNOW BEFORE AUTHORING ANYTHING HERE.
+// FOUR THINGS TO KNOW BEFORE AUTHORING ANYTHING HERE.
+//
+// WHAT DECIDES WHETHER A STEP IS SENT. Two things, and the verb is not one of them. First, the
+// step's own `enabled` switch, which is the operator's control: a turned-off step keeps its place
+// in the sequence and is skipped. Second, the boundary, judged on every send in this order - the
+// operator's out-of-scope host list, the target's scope boundary, then the flow exclusion rules. A
+// GET and a POST are treated identically by both. Nothing here refuses a step for being a POST,
+// PUT, PATCH or DELETE, and nothing seeds one turned off for that reason, because a flow whose
+// write steps silently did not run proves nothing when it comes back green.
 //
 // CONDITIONS are the feature and are the easiest thing to get wrong, so the grammar is a first
 // class action (action:"grammar") as well as being summarised in the parameter descriptions. They
@@ -31,12 +39,6 @@ const { clip, resolveLimit, DEFAULTS } = require('../utils/clip');
 // answer. The defaults are stated in the schema so a model authoring a retry loop knows what it is
 // working inside, and a capped run comes back with cap_hit naming the cap, its value, and the fact
 // that it was a cap rather than the target.
-//
-// SEEDING NEVER ARMS A WRITE. A seeded POST, PUT, PATCH or DELETE arrives DISABLED, because a
-// captured body carries whatever identifier the operator's browser sent and replaying it is not a
-// probe, it is the application doing its job again to a real person. arm_write_steps is the
-// deliberate opt-out and defaults to false. Any tool that quietly flipped it would be removing the
-// only thing standing between an import and a text message to a real customer.
 //
 // SIZE. A step holds a whole raw HTTP request and, after a run, a whole response body. A flow of
 // twelve steps returned verbatim is a context window. So: raw requests and bodies are CLIPPED in
@@ -169,7 +171,7 @@ const CAPS = {
     default: 50, ceiling: 300,
     what: 'Executions, NOT steps. A 4-step flow that jumps backwards reaches this long before it ' +
           'runs out of steps. Every visit counts, including a step that was skipped or refused, ' +
-          'because two disarmed steps that goto each other would otherwise spin forever without ' +
+          'because two turned-off steps that goto each other would otherwise spin forever without ' +
           'sending a single request.',
   },
   per_step_max_executions: {
@@ -240,8 +242,8 @@ const manageFlowBuilderSchema = z.object({
     'delete_flow: remove the flow and its steps. No restore. ' +
     'seed_from_detected_flow: THE PATH MOST OPERATORS WANT. Take a flow the detector found, turn ' +
     'its captured requests into editable steps in flow order, and then modify one. Detect, then ' +
-    'change. Every seeded POST/PUT/PATCH/DELETE arrives TURNED OFF; read arm_write_steps before ' +
-    'you consider changing that. ' +
+    'change. The steps you asked for arrive ENABLED whatever verb they carry; scope and the ' +
+    'exclusion rules still decide what a run may send. ' +
     'seed_from_captures: the same thing from an explicit list of capture ids, ordered by when they ' +
     'were recorded rather than by the order you list them. For a flow the detector did not segment ' +
     'the way you want. ' +
@@ -251,8 +253,8 @@ const manageFlowBuilderSchema = z.object({
     'its stored response. There is no route for this, so it reads the flow and picks the step out; ' +
     'pass flow_id or it has to ask every flow on the target. ' +
     'update_step: edit a step. Every field is optional and an omitted one is left alone; ' +
-    'extractions:[] and conditions:[] CLEAR those lists. This is how you arm a seeded write step ' +
-    '(enabled:true) once you have read what its body contains. ' +
+    'extractions:[] and conditions:[] CLEAR those lists. This is also how you turn a step off ' +
+    '(enabled:false) or back on. ' +
     'delete_step: remove a step. The rest close up into 1..n. ' +
     'reorder_steps: set the whole order at once. step_ids must be EVERY step id in the flow. ' +
     'move_step: lift one step out and drop it at a 1-based position. The convenience form. ' +
@@ -308,13 +310,6 @@ const manageFlowBuilderSchema = z.object({
     'seed_from_detected_flow: bring in the subresources the flow diagram hides (images, ' +
     'stylesheets, fonts). Default false, which seeds the root plus the significant requests - the ' +
     'same selection the diagram drew, so the flow you get resembles the flow you picked.'),
-  arm_write_steps: z.boolean().optional().describe(
-    'Seeds only. Default FALSE, and leaving it false is the whole safety model. A seeded POST, PUT, ' +
-    'PATCH or DELETE carries the request body that was RECORDED, and that body holds whatever ' +
-    'identifier the operator\'s browser sent: a real phone number, a real account id, a real order. ' +
-    'Replaying it is not a probe, it is the application doing its job again to a real person. So ' +
-    'those steps arrive turned OFF and the response says how many and why. Read each one and arm it ' +
-    'with update_step enabled:true. Set this true only when a human has said to.'),
 
   // --- steps ---
   raw_request: z.string().optional().describe(
@@ -324,13 +319,13 @@ const manageFlowBuilderSchema = z.object({
     'are substituted at send time from what earlier steps captured.'),
   capture_id: z.string().uuid().optional().describe(
     'add_step: build the step from a recorded manual-crawl capture instead of writing bytes. Same ' +
-    'rebuild the repeater uses. A state-changing capture added this way arrives TURNED OFF unless ' +
-    'you pass enabled explicitly.'),
+    'rebuild the repeater uses. It arrives enabled whatever verb it carries; pass enabled:false if ' +
+    'you want it parked. Nothing is sent on add.'),
   enabled: z.boolean().optional().describe(
-    'add_step / update_step: whether the step is armed. A disabled step keeps its place in the ' +
-    'sequence and is skipped on a run, rather than being deleted, because deleting to prune would ' +
-    'destroy the sequence and the sequence is the flow. Turning a seeded write step on is the ' +
-    'deliberate act the seed defaults are protecting.'),
+    'add_step / update_step: whether the step is armed. Default true. A disabled step keeps its ' +
+    'place in the sequence and is skipped on a run, rather than being deleted, because deleting to ' +
+    'prune would destroy the sequence and the sequence is the flow. This is the switch that decides ' +
+    'what a run sends, and it is yours: the verb never overrides it in either direction.'),
   raw_mode: z.boolean().optional().describe(
     'update_step: keep the bytes EXACTLY as sent, with no framing repair and no Content-Length ' +
     'recompute. For a deliberate Content-Length / Transfer-Encoding disagreement: "helpfully" ' +
@@ -462,8 +457,9 @@ function grammar() {
             'REFUSES the step that needs it, rather than sending a literal {{af:NAME}} at the target.',
     },
     safety: {
-      seeded_writes: 'A seeded POST, PUT, PATCH or DELETE arrives turned OFF. arm_write_steps is ' +
-            'the opt-out and defaults to false. Arm one deliberately, per step, after reading its body.',
+      what_runs: 'The steps that run are the ones the operator ENABLED, in order. The verb has no ' +
+            'say in it: a POST, PUT, PATCH or DELETE step is planned and sent exactly like a GET. ' +
+            'Turn a step off with update_step enabled:false when you do not want it sent.',
       boundary: 'Every send is judged three times, in this order: the operator\'s out-of-scope host ' +
             'list, the target\'s scope boundary, then the flow exclusion rules. A refusal is ' +
             'recorded on the step and shown by preview BEFORE a run, not discovered during one. A ' +
@@ -549,7 +545,6 @@ async function seedFromDetectedFlow(params) {
     name: params.name || '',
     include_all: params.include_all === true,
     capture_ids: params.capture_ids || [],
-    arm_write_steps: params.arm_write_steps === true,
   });
   return seedView(out, params);
 }
@@ -562,7 +557,6 @@ async function seedFromCaptures(params) {
   const out = await apiPost(`/request-flow-builder/${params.target_id}/from-captures`, {
     name: params.name || '',
     capture_ids: params.capture_ids,
-    arm_write_steps: params.arm_write_steps === true,
   });
   return seedView(out, params);
 }
@@ -587,9 +581,8 @@ async function addStep(params) {
   return {
     added: true,
     step: stepRecord(out.step, limit, limit, params),
-    // Both of these are the point of returning anything at all. note carries the disarm reason for a
-    // seeded write; cycle_warnings is how a loop is announced when it is created rather than when it
-    // fires at a live target.
+    // note is whatever the server had to say about the step it just wrote; cycle_warnings is how a
+    // loop is announced when it is created rather than when it fires at a live target.
     note: out.note || undefined,
     cycle_warnings: nonEmpty(out.cycle_warnings),
     reminder: 'Nothing was sent. add_step never replays; use replay_step when you mean to send it.',
@@ -638,8 +631,9 @@ async function updateStep(params) {
   const warnings = nonEmpty(step.cycle_warnings);
   if (warnings) out.cycle_warnings = warnings;
   if (params.enabled === true) {
-    out.note = 'This step is now ARMED and will be sent by the next replay. If it is a POST, PUT, ' +
-               'PATCH or DELETE seeded from a capture, it carries the recorded body.';
+    out.note = 'This step is now ARMED and will be sent by the next replay, subject to scope and ' +
+               'the exclusion rules. A step seeded from a capture carries the bytes that were ' +
+               'recorded, body included.';
   }
   return out;
 }
@@ -811,17 +805,12 @@ function flowView(body, params, extra = {}) {
 }
 
 function seedView(body, params) {
-  const disabled = body.disabled_count || 0;
   return flowView(body, params, {
     created: true,
-    disabled_count: disabled,
-    // The server writes this sentence and it is the whole reason the safety default is not silent:
-    // "I imported the login flow and it did nothing" is what happens without it.
-    seed_note: body.note || undefined,
-    next: disabled > 0
-      ? 'Those steps will NOT be sent. Read each one with get_step, and arm the ones you mean to ' +
-        'send with update_step enabled:true. Then preview, then replay.'
-      : 'Run preview before replay: it says which steps would go out and to which hosts, and sends nothing.',
+    next: 'Every step your include choice brought in is ENABLED, whatever verb it carries. Run ' +
+      'preview before replay: it says which steps would go out and to which hosts, which would be ' +
+      'refused by scope or an exclusion rule, and it sends nothing. Turn off any step you do not ' +
+      'want sent with update_step enabled:false.',
   });
 }
 
@@ -858,8 +847,8 @@ function flowRow(f) {
     source: f.source,
     seeded_from_flow_id: f.seeded_from_flow_id || undefined,
     step_count: f.step_count,
-    // Steps that would actually be sent. On a seeded flow this is usually lower than step_count,
-    // and the difference is the disarmed writes rather than anything being broken.
+    // Steps that would actually be sent. Lower than step_count only where somebody turned a step
+    // off, which is the one control that decides this.
     enabled_count: f.enabled_count,
     created_at: f.created_at,
     updated_at: f.updated_at,
@@ -1105,9 +1094,9 @@ function hintFor(code, status, params) {
              'pacer is per-run and two runs each holding to the limit put double that on the ' +
              'programme. Wait for the other run, or read its result.';
     case 'step_disabled':
-      return 'This step is turned off, so nothing was sent. That is the safety mechanism for a ' +
-             'seeded write step. Read its body with get_step, and if you mean to send it, arm it ' +
-             'with update_step enabled:true first.';
+      return 'Somebody turned this step off, so nothing was sent. A turned-off step keeps its ' +
+             'place in the sequence and is skipped. Turn it back on with update_step enabled:true ' +
+             'if you meant to send it.';
     case 'flow_empty':
       return 'The flow has no steps. Add one with add_step, or seed the flow from a detected flow.';
     case 'rails_unreadable':

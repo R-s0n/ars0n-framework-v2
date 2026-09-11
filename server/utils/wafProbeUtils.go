@@ -190,6 +190,14 @@ type probeEstimate struct {
 	Requests     int `json:"requests"`
 	Seconds      int `json:"seconds"`
 	TestsEnabled int `json:"tests_enabled"`
+	// How many of the enabled tests deliberately provoke a block, reported by the container because
+	// that is where the knowledge lives: a test needs a trip when its implementation calls
+	// governor.take_trip(), and re-deriving that list in Go is exactly the mistake that made an
+	// earlier version of planProbeRun invent a request floor the container disagreed with.
+	//
+	// Zero is the common and correct case. The passive and safe presets both ship trip_budget 0 AND
+	// disable every trip-taking test, so for them a budget of zero has nothing to skip.
+	TripsRequired int `json:"trips_required"`
 }
 
 // estimateProbeCost asks the probe container what one scan of this config would cost, and whether
@@ -226,6 +234,53 @@ func estimateProbeCost(cfgJSON []byte) (probeEstimate, []string, error) {
 		return probeEstimate{}, nil, fmt.Errorf("could not read the probe estimate: %w", err)
 	}
 	return est.Estimate, est.Problems, nil
+}
+
+// tripBudgetProblem decides whether a run's trip budget leaves it unable to do what it was
+// configured to do, returning the operator-facing reason or "" when the run is fine.
+//
+// Pure, and separated from planProbeRun for the same reason BuildFlowEndpointList is: the alternative
+// is a rule that can only be exercised by starting a real probe against a live bug bounty target,
+// which is a rule nobody will ever check. Its whole test matrix is in wafProbeUtils_test.go.
+//
+// perScanTrips is the share ONE scan receives, already divided. totalTrips is the operator's
+// undivided figure, needed only so the message can quote what they actually typed.
+//
+// A BUDGET OF ZERO IS NOT AN ERROR BY ITSELF, and treating it as one was a bug that made the two
+// presets most appropriate for a live bug bounty target impossible to run at all. Zero is a
+// deliberate instruction to provoke no blocks, which is the correct posture when a block is charged
+// against the egress IP's reputation across every target and outlives the run. It is also exactly
+// what the passive and safe presets ship: each sets trip_budget 0 AND disables every trip-taking
+// test, so nothing is skipped and the config is entirely coherent. The container agrees, returning no
+// problems and running the scan happily. The old guard refused all of it, and on a single endpoint it
+// did so while claiming the budget had been "split across 1 endpoints" and advising the operator to
+// select fewer than one endpoint.
+func tripBudgetProblem(perScanTrips, totalTrips, endpointCount, tripsRequired, testsEnabled int) string {
+	if perScanTrips >= 1 {
+		return ""
+	}
+
+	// The division surprise: deliberate blocks were authorised and the split floored the share to
+	// nothing. Only reachable above one endpoint, because with a single endpoint nothing is divided
+	// and the share IS the total, so the "split across" wording is always true when it prints.
+	if totalTrips >= 1 {
+		return fmt.Sprintf(
+			"trip_budget %d split across %d endpoints gives 0 deliberate blocks each, so every test that needs one would be skipped; raise trip_budget to at least %d or select fewer endpoints",
+			totalTrips, endpointCount, endpointCount)
+	}
+
+	// The incoherent config: no blocks authorised, yet tests enabled whose entire purpose is to
+	// provoke one. Each would skip itself and the run would report them as untested rather than as
+	// unaffordable, which is the silent-nothing result worth refusing. Kept separate from the case
+	// above because the remedy differs: raise the budget, or turn those tests off and accept that this
+	// run cannot classify the WAF.
+	if tripsRequired > 0 {
+		return fmt.Sprintf(
+			"trip_budget is 0, but %d of the %d enabled tests exist to provoke a deliberate block and would each skip themselves, so the run would report them as untested rather than measure anything; either raise trip_budget to at least %d, or disable those tests and accept that this run cannot classify the WAF",
+			tripsRequired, testsEnabled, endpointCount)
+	}
+
+	return ""
 }
 
 // planProbeRun validates the selected endpoints and works out what the run will cost.
@@ -343,17 +398,30 @@ func planProbeRun(scopeTargetID string, requested []probeRunEndpoint, inline jso
 		return nil, est, fmt.Errorf("the probe would refuse this run: %s. %s; raise the budget, disable tests, or select fewer endpoints", msg, detail)
 	}
 
-	// Not a container rule: trip_budget is not one of the things it refuses over. It is a framework
-	// guard, because a share of zero silently skips every test that needs a deliberate block and the
-	// run would report those as untested rather than as unaffordable.
+	// Not a container rule: trip_budget is not one of the things validate_config refuses over, and the
+	// container handles a budget of zero perfectly well - take_trip returns False, the test skips
+	// itself, and the run reports it as skipped. This is a framework guard against a run that would
+	// come back having measured nothing it was asked to measure.
 	//
-	// probe.Global is the resolved config for ONE scan, so this value is already the per-scan share.
+	// A TRIP BUDGET OF ZERO IS NOT BY ITSELF AN ERROR, and treating it as one was a bug that made the
+	// two presets most appropriate for a live bug bounty target impossible to run at all. Zero is a
+	// deliberate instruction to provoke no blocks, which is the right posture when a block is charged
+	// against the egress IP's reputation across every target and outlives the run. It is also what
+	// passive and safe both ship: each sets trip_budget 0 and disables every trip-taking test, so
+	// there is nothing left to skip and the config is entirely coherent. The old guard refused all of
+	// them, and on a single endpoint it did so while claiming the budget had been "split across 1
+	// endpoints" and advising the operator to select fewer than one.
+	//
+	// probe.Global is the resolved config for ONE scan, so its value is already the per-scan share.
 	// Dividing by n here would divide a second time.
-	if perScanTrips, ok := numberFromConfig(probe.Global["trip_budget"]); ok && perScanTrips < 1 {
-		total, _ := numberFromConfig(totals["trip_budget"])
-		return nil, est, fmt.Errorf(
-			"trip_budget %d split across %d endpoints gives 0 deliberate blocks each, so every test that needs one would be skipped; raise trip_budget to at least %d or select fewer endpoints",
-			total, n, n)
+	if perScanTrips, ok := numberFromConfig(probe.Global["trip_budget"]); ok {
+		totalTrips, hasTotal := numberFromConfig(totals["trip_budget"])
+		if !hasTotal {
+			totalTrips = perScanTrips
+		}
+		if problem := tripBudgetProblem(perScanTrips, totalTrips, n, est.TripsRequired, est.TestsEnabled); problem != "" {
+			return nil, est, fmt.Errorf("%s", problem)
+		}
 	}
 
 	return planned, est, nil
@@ -1026,17 +1094,23 @@ func translateField(tool string, current map[string]interface{}, field string,
 		case "nuclei":
 			return "rate_limit", maxInt(1, int(rps)), true
 		case "arjun":
-			// arjun has no rate flag; it has a per-request delay applied within each thread, so
-			// the aggregate rate is threads/delay. Solving for delay gives threads/rps.
+			// arjun DOES have a rate flag: --rate-limit, "max number of requests to be sent out per
+			// second", default 9999. Verified present in the installed arjun 2.2.7 and measured
+			// actually pacing (835 names took 3.5s uncapped and 8.0s at --rate-limit 5).
 			//
-			// arjun -d is WHOLE SECONDS and ArjunConfig.Delay is an int. This used to return a
-			// rounded float, and two things went wrong with it. A fractional result such as 1.67
-			// cannot be unmarshalled into an int field, and ExecuteArjunScan ignores the unmarshal
-			// error, so Delay silently became 0 and the `-d` flag was never emitted: applying a
-			// rate limit left arjun running with no rate limit at all. Ceiling to a whole second
-			// keeps the achieved rate at or under what was measured, which is the direction an
-			// error has to fall.
-			return "delay", maxInt(1, int(math.Ceil(numberOr(current["threads"], 5)/rps))), true
+			// This used to derive a per-thread delay instead, on the belief that no rate flag
+			// existed, via delay = ceil(threads/rps). That is lossy in a way the direct flag is not:
+			// arjun -d is WHOLE SECONDS, so the smallest expressible non-zero delay already forces
+			// the rate down to threads-per-second, and every rps between those steps rounds to the
+			// same coarse value. Asking for the cap directly says exactly what was measured.
+			//
+			// The earlier note on that path is still worth keeping, because it is why this must stay
+			// an int: a fractional value cannot unmarshal into the int config field, and
+			// ExecuteArjunScan ignores the unmarshal error, so a bad type silently became 0 and the
+			// flag was never emitted - applying a rate limit left arjun running with no rate limit
+			// at all. Truncating rather than rounding keeps the applied rate at or below the
+			// measured one, which is the direction an error has to fall.
+			return "rateLimit", maxInt(1, int(rps)), true
 		case "x8":
 			// x8 --delay is MILLISECONDS, not seconds, and --workers is the concurrency. The old
 			// formula computed a delay in seconds and wrote it into a millisecond field, so a

@@ -20,8 +20,12 @@ RUN useradd -m -r -u 1000 cewl && \
     mkdir -p /tmp/cewl && \
     chown -R cewl:cewl /tmp/cewl
 
-# Create an entrypoint script
-RUN echo '#!/bin/sh\nwhile true; do sleep 3600; done' > /entrypoint.sh && \
+# Create an entrypoint script. printf rather than echo, because whether echo expands the \n depends
+# on which shell runs the RUN: this base's /bin/sh is dash, whose echo does expand it, so the file
+# came out correct - but bash's echo does not, and under a different base or an added SHELL
+# directive the script would silently become one line holding a literal backslash-n and the
+# container would fail to start. printf '%s\n' produces the same two lines under any shell.
+RUN printf '%s\n' '#!/bin/sh' 'while true; do sleep 3600; done' > /entrypoint.sh && \
     chmod +x /entrypoint.sh
 
 USER cewl

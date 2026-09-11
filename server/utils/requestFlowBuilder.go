@@ -79,17 +79,14 @@ import (
 // Safety
 // ---------------------------------------------------------------------------
 //
-// A hand-authored step is the repeater's risk profile: the operator typed the bytes. Two things are
-// still enforced here, because neither is the operator's typing.
+// A hand-authored step is the repeater's risk profile: the operator typed the bytes. What is
+// enforced here is not the operator's typing.
 //
-// SEEDING NEVER ARMS A STATE-CHANGING REQUEST. Importing a detected flow copies in captured POST,
-// PUT, PATCH and DELETE bodies, and those bodies carry real identifiers: the operator's own notes on
-// one live target record six endpoints that dispatch a one-time code to a real customer when hit
-// with a resolvable identifier. So a seeded step whose verb can change state arrives DISABLED, and
-// the seed response says how many and why. Turning one on is a separate, deliberate action on a step
-// the operator is looking at. This is the GET-only-by-default rule expressed for a builder: refusing
-// POST outright would make the feature pointless, but nothing this code puts in a flow will fire a
-// captured body at the target unless a human armed it.
+// THE VERB IS NOT A RAIL. Nothing in this file looks at whether a request is a POST, a PUT, a PATCH
+// or a DELETE when deciding what to seed, what to arm or what to send. A flow whose write steps
+// arrive turned off is a flow that proves nothing when it passes, and an IDOR probe or an auth
+// replay is usually a write. Which verb to send is the operator's business; the per-step enabled
+// switch below is theirs to set, and the scope rails below are the real control.
 //
 // THE BOUNDARY IS ENFORCED ON EVERY SEND, and it is three checks, not one. flowSendRails carries
 // them: the operator's in_scope=false deny list, the scope boundary, and the flow exclusion rules,
@@ -143,7 +140,7 @@ var RequestFlowBuilderSchema = []string{
 		source_capture_id UUID,
 		-- A disabled step keeps its place and is skipped on replay. Deleting to prune, as with
 		-- auth_recorded_requests.included, would destroy the sequence, and the sequence is the flow.
-		-- Seeded state-changing steps arrive disabled; see requestFlowSeedEnabled.
+		-- This is the operator's own switch and nothing derives it from the verb.
 		enabled BOOLEAN NOT NULL DEFAULT TRUE,
 		-- Same shape and same code path as auth_flow_steps.extractions: {{af:NAME}} carried forward.
 		extractions JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -271,15 +268,14 @@ type RequestFlowStep struct {
 // RequestFlowStepPreview is one row of the dry run: what a replay WOULD do to this step, worked out
 // without sending anything.
 type RequestFlowStepPreview struct {
-	StepID        string `json:"step_id"`
-	StepOrder     int    `json:"step_order"`
-	Name          string `json:"name"`
-	Method        string `json:"method"`
-	Host          string `json:"host"`
-	Target        string `json:"target"`
-	Enabled       bool   `json:"enabled"`
-	InScope       bool   `json:"in_scope"`
-	StateChanging bool   `json:"state_changing"`
+	StepID    string `json:"step_id"`
+	StepOrder int    `json:"step_order"`
+	Name      string `json:"name"`
+	Method    string `json:"method"`
+	Host      string `json:"host"`
+	Target    string `json:"target"`
+	Enabled   bool   `json:"enabled"`
+	InScope   bool   `json:"in_scope"`
 	// Placeholders this step refers to. Whether they resolve depends on responses that have not
 	// happened yet, so what is reported is which earlier step is expected to produce each one.
 	Placeholders []string `json:"placeholders,omitempty"`
@@ -298,21 +294,12 @@ type RequestFlowStepPreview struct {
 // exercised against a live table is a decision nobody will ever check.
 // ---------------------------------------------------------------------------
 
-// requestFlowStateChangingVerbs is what "state-changing" means here.
-//
-// Deliberately by VERB and not by path heuristics. A GET can change state on a badly built
-// application, but guessing which one costs the operator a working step, while treating every POST
-// as harmless costs somebody a text message. The conservative direction is to arm nothing
-// automatically and let the operator arm what they recognise.
-var requestFlowStateChangingVerbs = map[string]bool{
-	"POST":   true,
-	"PUT":    true,
-	"PATCH":  true,
-	"DELETE": true,
-}
-
 // requestFlowMethodOf reads the verb off a raw request without parsing the whole thing, so it works
 // on bytes that are mid-edit and will not currently parse.
+//
+// The verb is read to LABEL a step and to show it in the preview. Nothing branches on it: there is
+// no set of verbs this builder treats differently, and adding one back would put a working step
+// behind a checkbox for no reason the scope rails do not already cover.
 func requestFlowMethodOf(raw string) string {
 	line := raw
 	if i := strings.IndexAny(line, "\r\n"); i >= 0 {
@@ -320,28 +307,6 @@ func requestFlowMethodOf(raw string) string {
 	}
 	verb, _, _ := strings.Cut(strings.TrimSpace(line), " ")
 	return strings.ToUpper(strings.TrimSpace(verb))
-}
-
-// requestFlowIsStateChanging reports whether replaying these bytes could change something.
-func requestFlowIsStateChanging(raw string) bool {
-	return requestFlowStateChangingVerbs[requestFlowMethodOf(raw)]
-}
-
-// requestFlowSeedEnabled decides whether a SEEDED step arrives armed.
-//
-// This is the single most important line in the file. Seeding copies captured request bodies in
-// verbatim, and a captured body carries whatever identifier the operator's browser sent: a real
-// phone number, a real account id, a real order. Replaying it is not a probe, it is the application
-// doing its job again, to a real person.
-//
-// So a seeded state-changing step is stored disabled. allowStateChanging is the operator's explicit
-// per-seed opt-in and defaults to false, which is what makes the default path safe rather than the
-// careful path safe.
-func requestFlowSeedEnabled(rawRequest string, allowStateChanging bool) bool {
-	if allowStateChanging {
-		return true
-	}
-	return !requestFlowIsStateChanging(rawRequest)
 }
 
 // requestFlowSeedCapture is one capture's worth of bytes, looked up by id after the detector has
@@ -390,8 +355,14 @@ func requestFlowSeedName(method, rawURL string) string {
 // A capture the detector listed but whose bytes could not be loaded is SKIPPED rather than emitted
 // as an empty step. A step with no request in it is not a step, and one sitting in the middle of a
 // flow would silently break the ordering the operator is relying on.
+//
+// The include choice above is the ONLY thing that decides what gets seeded. The verb is not
+// consulted, and this is where it used to be: a seeded POST once arrived turned off, so a flow that
+// "passed" had never submitted anything. The verb is the operator's business. The scope boundary,
+// the in_scope=false deny list and the flow exclusion rules are the real control, and they are
+// applied on every send in requestFlowScopeRefusal.
 func seedStepsFromFlow(flow captureFlow, detail map[string]requestFlowSeedCapture,
-	includeAll bool, only map[string]bool, allowStateChanging bool) []requestFlowSeededStep {
+	includeAll bool, only map[string]bool) []requestFlowSeededStep {
 
 	steps := []requestFlowSeededStep{}
 	for i, c := range flow.Captures {
@@ -407,7 +378,7 @@ func seedStepsFromFlow(flow captureFlow, detail map[string]requestFlowSeedCaptur
 		if !ok {
 			continue
 		}
-		steps = append(steps, requestFlowSeedStep(d, allowStateChanging))
+		steps = append(steps, requestFlowSeedStep(d))
 	}
 	return steps
 }
@@ -420,13 +391,16 @@ func seedStepsFromFlow(flow captureFlow, detail map[string]requestFlowSeedCaptur
 // included, and recomputes the length from the shortened bytes: self-consistent and corrupt. On a
 // multipart body that rewrites every boundary and the request stops being the request that was
 // captured. This is the same reason refreshContentLength exists rather than reusing the normalizer.
-func requestFlowSeedStep(d requestFlowSeedCapture, allowStateChanging bool) requestFlowSeededStep {
+// Every seeded step arrives ENABLED, whatever its verb. The operator asked for these requests by
+// picking the flow or ticking the captures; handing them back a flow half of which is switched off
+// is answering a question they did not ask.
+func requestFlowSeedStep(d requestFlowSeedCapture) requestFlowSeededStep {
 	raw := BuildRawHTTPRequest(d.Method, d.URL, d.Headers, d.Body)
 	return requestFlowSeededStep{
 		Name:            requestFlowSeedName(d.Method, d.URL),
 		RawRequest:      raw,
 		SourceCaptureID: d.ID,
-		Enabled:         requestFlowSeedEnabled(raw, allowStateChanging),
+		Enabled:         true,
 	}
 }
 
@@ -1006,18 +980,17 @@ func requestFlowPreview(steps []RequestFlowStep, baseURL string, rails flowSendR
 	for _, s := range steps {
 		host, refusal := requestFlowScopeRefusal(s.RawRequest, baseURL, rails)
 		row := RequestFlowStepPreview{
-			StepID:        s.ID,
-			StepOrder:     s.StepOrder,
-			Name:          s.Name,
-			Method:        requestFlowMethodOf(s.RawRequest),
-			Host:          host,
-			Target:        resolveBaseURL(s.RawRequest, baseURL),
-			Enabled:       s.Enabled,
-			InScope:       refusal == "",
-			StateChanging: requestFlowIsStateChanging(s.RawRequest),
-			Placeholders:  authFlowVarNames(s.RawRequest),
-			Conditions:    len(s.Conditions),
-			Refusal:       refusal,
+			StepID:       s.ID,
+			StepOrder:    s.StepOrder,
+			Name:         s.Name,
+			Method:       requestFlowMethodOf(s.RawRequest),
+			Host:         host,
+			Target:       resolveBaseURL(s.RawRequest, baseURL),
+			Enabled:      s.Enabled,
+			InScope:      refusal == "",
+			Placeholders: authFlowVarNames(s.RawRequest),
+			Conditions:   len(s.Conditions),
+			Refusal:      refusal,
 		}
 		if !s.Enabled && row.Refusal == "" {
 			row.Refusal = "not sent: this step is turned off"
@@ -1173,9 +1146,6 @@ func CreateRequestFlowFromDetectedFlow(w http.ResponseWriter, r *http.Request) {
 		IncludeAll bool `json:"include_all"`
 		// An explicit selection, which wins over the noise filter.
 		CaptureIDs []string `json:"capture_ids"`
-		// Off by default and named for what it does. With it false, every seeded POST, PUT, PATCH and
-		// DELETE arrives disabled, because a captured body carries a real identifier.
-		ArmWriteSteps bool `json:"arm_write_steps"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
@@ -1251,7 +1221,7 @@ func CreateRequestFlowFromDetectedFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	seeded := seedStepsFromFlow(*found, detail, payload.IncludeAll, only, payload.ArmWriteSteps)
+	seeded := seedStepsFromFlow(*found, detail, payload.IncludeAll, only)
 	if len(seeded) == 0 {
 		writeJSONError(w, http.StatusBadRequest, "nothing_to_seed",
 			"None of that flow's requests could be turned into steps. If you selected specific "+
@@ -1260,12 +1230,35 @@ func CreateRequestFlowFromDetectedFlow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	summary := summarizeFlow(*found)
+
+	// The name the operator gave the DETECTED flow is inherited when the caller supplies none, and the
+	// derived label is the fallback only when neither exists. Seeding from a flow called "Place an
+	// order" and getting a built flow back called "GET /trade" would discard the one piece of
+	// information that made the source flow findable in the first place.
+	labelling, lerr := lookupDetectedFlowName(payload.FlowID)
+	if lerr != nil {
+		log.Printf("[REQUEST-FLOW] Failed to read the detected flow's name for %s: %v",
+			payload.FlowID, lerr)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error",
+			"The detected flow's name could not be read: "+lerr.Error())
+		return
+	}
+
 	name := strings.TrimSpace(payload.Name)
+	if name == "" {
+		name = labelling.Name
+	}
 	if name == "" {
 		name = summary.Label
 	}
+
 	description := fmt.Sprintf("Built from the detected flow %s on %s",
 		summary.Label, time.Now().Format("2006-01-02 15:04"))
+	if labelling.Description != "" {
+		// The operator's own words first and the provenance line after, so the detail column reads as
+		// prose rather than as a machine note with prose stapled to the end of it.
+		description = labelling.Description + "\n\n" + description
+	}
 
 	baseURL := ""
 	if summary.Host != "" {
@@ -1275,7 +1268,7 @@ func CreateRequestFlowFromDetectedFlow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeSeededRequestFlow(w, scopeTargetID, name, description, baseURL, "detected_flow",
-		payload.FlowID, seeded, payload.ArmWriteSteps)
+		payload.FlowID, seeded)
 }
 
 // CreateRequestFlowFromCaptures handles POST /request-flow-builder/{scope_target_id}/from-captures:
@@ -1290,9 +1283,8 @@ func CreateRequestFlowFromCaptures(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var payload struct {
-		Name               string   `json:"name"`
-		CaptureIDs         []string `json:"capture_ids"`
-		ArmWriteSteps bool     `json:"arm_write_steps"`
+		Name       string   `json:"name"`
+		CaptureIDs []string `json:"capture_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
@@ -1324,7 +1316,7 @@ func CreateRequestFlowFromCaptures(w http.ResponseWriter, r *http.Request) {
 				baseURL = u.Scheme + "://" + u.Host
 			}
 		}
-		seeded = append(seeded, requestFlowSeedStep(d, payload.ArmWriteSteps))
+		seeded = append(seeded, requestFlowSeedStep(d))
 	}
 
 	name := strings.TrimSpace(payload.Name)
@@ -1334,17 +1326,16 @@ func CreateRequestFlowFromCaptures(w http.ResponseWriter, r *http.Request) {
 	description := fmt.Sprintf("Built from %d recorded request(s) on %s",
 		len(seeded), time.Now().Format("2006-01-02 15:04"))
 
-	writeSeededRequestFlow(w, scopeTargetID, name, description, baseURL, "captures", "",
-		seeded, payload.ArmWriteSteps)
+	writeSeededRequestFlow(w, scopeTargetID, name, description, baseURL, "captures", "", seeded)
 }
 
-// writeSeededRequestFlow inserts a flow and its steps, and reports how many arrived disarmed.
+// writeSeededRequestFlow inserts a flow and its steps.
 //
-// The disabled count is in the RESPONSE and not only in the rows, because "I imported the login flow
-// and it did nothing" is what happens when the safety default is silent. The operator is told the
-// number and the reason at the moment it applies.
+// Every step goes in enabled. The response carries the flow, its steps and the preview, so what the
+// operator gets back is the flow they asked for and a dry run of it, with no count of things this
+// code turned off behind their back.
 func writeSeededRequestFlow(w http.ResponseWriter, scopeTargetID, name, description, baseURL,
-	source, seededFrom string, seeded []requestFlowSeededStep, allowStateChanging bool) {
+	source, seededFrom string, seeded []requestFlowSeededStep) {
 
 	flow, err := insertRequestFlow(scopeTargetID, name, description, baseURL, source, seededFrom)
 	if err != nil {
@@ -1353,7 +1344,6 @@ func writeSeededRequestFlow(w http.ResponseWriter, scopeTargetID, name, descript
 		return
 	}
 
-	disabled := 0
 	for i, step := range seeded {
 		var captureID interface{}
 		if step.SourceCaptureID != "" {
@@ -1367,32 +1357,16 @@ func writeSeededRequestFlow(w http.ResponseWriter, scopeTargetID, name, descript
 			log.Printf("[REQUEST-FLOW] Failed to insert seeded step %d: %v", i+1, err)
 			continue
 		}
-		if !step.Enabled {
-			disabled++
-		}
 	}
 
 	flow, _ = getRequestFlow(flow.ID)
 	steps, _ := getRequestFlowSteps(flow.ID)
 	rails, _ := LoadFlowSendRails(scopeTargetID)
 
-	note := ""
-	if disabled > 0 {
-		note = fmt.Sprintf("%d of %d step(s) arrived turned OFF because they are POST, PUT, PATCH or "+
-			"DELETE and carry the body that was recorded. Replaying a captured body sends the real "+
-			"identifier it contains, which on some endpoints means the application texts or emails a "+
-			"real person. Read each one and turn on the ones you mean to send.", disabled, len(seeded))
-	} else if allowStateChanging {
-		note = "arm_write_steps was set, so every seeded step is armed, including the ones that " +
-			"carry recorded request bodies. Check what those bodies contain before replaying."
-	}
-
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"flow":           flow,
 		"steps":          steps,
-		"disabled_count": disabled,
-		"note":           note,
 		"scope_boundary": rails.Scope.Describe(),
 		"preview":        requestFlowPreview(steps, flow.BaseURL, rails),
 	})
@@ -1425,8 +1399,8 @@ func AddRequestFlowStep(w http.ResponseWriter, r *http.Request) {
 		// Ordered, first match wins. Validated here rather than at replay time, because a condition
 		// that cannot work is far cheaper to explain while the operator is still looking at it.
 		Conditions []FlowCondition `json:"conditions"`
-		// Omitted means: armed for a hand-typed step (the operator wrote the bytes), disarmed for a
-		// state-changing step seeded from a capture (the recorder wrote the bytes).
+		// Omitted means armed. A step the operator just added is a step they want; turning it off is
+		// their call to make afterwards, on the step they are looking at.
 		Enabled *bool `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -1437,7 +1411,6 @@ func AddRequestFlowStep(w http.ResponseWriter, r *http.Request) {
 	raw := payload.RawRequest
 	name := payload.Name
 	sourceCapture := ""
-	seeded := false
 
 	if strings.TrimSpace(payload.CaptureID) != "" {
 		if _, uerr := uuid.Parse(payload.CaptureID); uerr != nil {
@@ -1462,7 +1435,6 @@ func AddRequestFlowStep(w http.ResponseWriter, r *http.Request) {
 			name = requestFlowSeedName(d.Method, d.URL)
 		}
 		sourceCapture = d.ID
-		seeded = true
 	} else {
 		if strings.TrimSpace(raw) == "" {
 			writeJSONError(w, http.StatusBadRequest, "raw_request_required",
@@ -1497,8 +1469,6 @@ func AddRequestFlowStep(w http.ResponseWriter, r *http.Request) {
 	enabled := true
 	if payload.Enabled != nil {
 		enabled = *payload.Enabled
-	} else if seeded {
-		enabled = requestFlowSeedEnabled(raw, false)
 	}
 
 	extractionsJSON, _ := json.Marshal(orEmptyExtractions(payload.Extractions))
@@ -1534,15 +1504,10 @@ func AddRequestFlowStep(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Never replayed on add. AddAuthFlowStep sends the step as soon as it is saved, which is right for
-	// an auth flow the operator is wiring up against their own account and wrong here: a step seeded
-	// from a capture would fire a recorded body at the target the moment it was added, before anybody
-	// had read it.
-	note := ""
-	if seeded && !enabled {
-		note = "Added turned OFF: this is a " + requestFlowMethodOf(raw) + " carrying the body that " +
-			"was recorded. Read it before turning it on."
-	}
-
+	// an auth flow the operator is wiring up against their own account and wrong here: adding a step
+	// to a flow is composing it, and composing is not sending. The operator presses Replay when they
+	// mean to send.
+	//
 	// Cycles are WARNED about at the moment they are created, not refused, and not left to be
 	// discovered when the flow fires at a live target. A bounded retry loop is legitimate; an
 	// unnoticed one is a denial of service with the operator's name on it.
@@ -1550,7 +1515,6 @@ func AddRequestFlowStep(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"step":           step,
-		"note":           note,
 		"cycle_warnings": DetectFlowConditionCycles(requestFlowGraph(after)),
 	})
 }
@@ -1784,8 +1748,8 @@ func MoveRequestFlowStep(w http.ResponseWriter, r *http.Request) {
 
 // ReplayRequestFlowStep handles POST /request-flow-builder/steps/{step_id}/replay.
 //
-// A disabled step is refused rather than quietly sent. The operator turning a step off is the safety
-// mechanism for seeded state-changing requests, and an endpoint that ignores it is a hole in it.
+// A disabled step is refused rather than quietly sent. The switch is the operator's own, and an
+// endpoint that ignores it is a control that does nothing.
 func ReplayRequestFlowStep(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -2006,9 +1970,24 @@ func updateRequestFlowStepResponse(stepID string, status int, headers map[string
 	if status > 0 {
 		statusVal = status
 	}
+	// updated_at IS DELIBERATELY NOT TOUCHED HERE, and this is not a tidy-up.
+	//
+	// These five columns are the OUTPUT of a run, not the step's definition. updated_at means "when
+	// was this step last edited", and it is the timestamp the verification state is derived against
+	// (FlowVerificationState): a run is current when it is newer than the newest step edit.
+	//
+	// Bumping it here made that comparison self-defeating. The runner calls this function DURING the
+	// run, so every step it touched came out with an updated_at a few hundred milliseconds after the
+	// run's started_at, and the flow was reported STALE the instant it finished. Measured on the live
+	// target: run started 18:59:11.682, step 1 updated_at 18:59:11.924, verification "stale" on a run
+	// that had just happened. "verified" was not merely rare, it was unreachable - every built flow
+	// on the target was permanently unverified or permanently stale, and a state that can never be
+	// reached is a state the screen above it can never tell the truth about.
+	//
+	// Nothing else reads this column. The only two readers are FlowVerificationState's two callers.
 	_, err := dbPool.Exec(context.Background(), `
 		UPDATE request_flow_steps SET response_status = $1, response_headers = $2, response_body = $3,
-		  response_time_ms = $4, error = $5, updated_at = NOW() WHERE id = $6`,
+		  response_time_ms = $4, error = $5 WHERE id = $6`,
 		statusVal, headersJSON, sanitizeForTextColumn(body), ms, errStr, stepID)
 	return err
 }

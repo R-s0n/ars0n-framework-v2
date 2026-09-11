@@ -629,3 +629,146 @@ func TestArjunXMLAlwaysSendsAnIncludeTemplate(t *testing.T) {
 		t.Fatalf("GET mode must not carry the XML template: %s", a)
 	}
 }
+
+// --rate-limit must reach the command line, and must stay absent when unset.
+//
+// Two things this guards. The flag exists in arjun 2.2.7 and was measured pacing (835 names took
+// 3.5s uncapped and 8.0s at --rate-limit 5), but nothing emitted it, so a measured safe_rps could
+// not be applied to arjun at all. And an unset value must emit nothing, so a config stored before
+// the field existed keeps its previous behaviour rather than silently acquiring a cap of 0.
+func TestArjunRateLimitReachesTheCommandLine(t *testing.T) {
+	cfg := DefaultArjunConfig()
+
+	cfg.RateLimit = 0
+	if a := strings.Join(buildArjunArgs(cfg, "GET", "/tmp/u", "/tmp/o"), " "); strings.Contains(a, "--rate-limit") {
+		t.Errorf("unset rateLimit still emitted the flag: %s", a)
+	}
+
+	cfg.RateLimit = 5
+	a := strings.Join(buildArjunArgs(cfg, "GET", "/tmp/u", "/tmp/o"), " ")
+	if !strings.Contains(a, "--rate-limit 5") {
+		t.Errorf("rateLimit 5 did not reach the command line: %s", a)
+	}
+}
+
+// A per-verb override must win, because a POST pass writes to a body-parsing route and frequently
+// wants a different budget from a wide GET sweep.
+func TestArjunRateLimitPerVerbOverride(t *testing.T) {
+	two := 2
+	cfg := DefaultArjunConfig()
+	cfg.RateLimit = 10
+	cfg.Verbs = map[string]ArjunVerbOverride{"POST": {RateLimit: &two}}
+
+	if got := cfg.ForVerb("GET").RateLimit; got != 10 {
+		t.Errorf("GET should fall back to the base rate limit, got %d", got)
+	}
+	if got := cfg.ForVerb("POST").RateLimit; got != 2 {
+		t.Errorf("POST override did not win, got %d", got)
+	}
+	// The override must not leak into the stored base config, which is the shape that made an
+	// earlier verbs bug wipe a sibling verb's settings.
+	if cfg.RateLimit != 10 {
+		t.Errorf("ForVerb mutated the base config: %d", cfg.RateLimit)
+	}
+}
+
+// The operator's explicitly configured header must WIN over a stored credential.
+//
+// Arjun and x8 were the only request-issuing tools that never consulted the shared credential
+// source, so this overlay is new behaviour and the precedence has to be the safe direction: a header
+// someone typed is an instruction, a stored credential is inference.
+func TestParamAuthHeadersDoNotOverwriteWhatTheOperatorTyped(t *testing.T) {
+	configured := []map[string]string{
+		{"Authorization": "Bearer OPERATOR-TYPED"},
+		{"X-BUG-BOUNTY": "HackerOne_rs0n2"},
+	}
+	// Empty scope target id: ScopeTargetBase finds no host, so nothing is overlaid and the
+	// configured set must come back untouched rather than being dropped.
+	got := ParamAuthHeaders("", configured)
+	lines := strings.Join(ParamHeaderLines(got), "\n")
+
+	if !strings.Contains(lines, "Authorization: Bearer OPERATOR-TYPED") {
+		t.Errorf("the operator's Authorization header was lost: %s", lines)
+	}
+	if !strings.Contains(lines, "X-BUG-BOUNTY: HackerOne_rs0n2") {
+		t.Errorf("a non-credential header was dropped by the overlay: %s", lines)
+	}
+	if strings.Count(lines, "Authorization:") != 1 {
+		t.Errorf("Authorization appears more than once, which sends two headers: %s", lines)
+	}
+}
+
+// A nil configured set must survive the overlay, because that is what a target with no tool config
+// looks like and it must not panic or produce a header with an empty name.
+func TestParamAuthHeadersHandlesNoConfiguredHeaders(t *testing.T) {
+	if got := ParamAuthHeaders("", nil); len(got) != 0 {
+		t.Errorf("expected nothing from an empty config, got %v", got)
+	}
+}
+
+// A bearer must not drag the whole cookie jar along with it.
+//
+// Caught live: the overlay attached the captured Cookie header unconditionally, so every probe
+// carried a Cognito refreshToken, idToken, accessToken and randomPasswordKey. The refresh token is
+// long-lived and can mint new sessions, and it was persisted verbatim into the scan's stored
+// `command` column. A bearer already authenticates the request, so the jar buys nothing.
+func TestParamAuthHeadersDoNotAttachCookiesAlongsideABearer(t *testing.T) {
+	withBearer := []map[string]string{{"Authorization": "Bearer live-token"}}
+	got := ParamAuthHeaders("", withBearer)
+	lines := strings.Join(ParamHeaderLines(got), "\n")
+	if strings.Contains(strings.ToLower(lines), "cookie:") {
+		t.Errorf("a cookie jar was attached next to a bearer: %s", lines)
+	}
+}
+
+// The real result set that prompted the guard: 37 findings on one PATCH order-replace route, which
+// was 67% of an entire scan's output while every other endpoint returned 1 to 5.
+func TestX8NoiseGuardDiscardsTheMeasuredRunawaySet(t *testing.T) {
+	names := []string{"admin", "bot", "captcha", "debug", "disable", "encryption", "env",
+		"order_id", "organization", "origin", "os", "otp", "out", "output", "overwrite", "owner",
+		"p", "page", "pager", "page_size", "show", "sso", "test", "try", "tx", "type", "u", "ui",
+		"uid", "unlock", "unsafe", "unsubscribe", "update", "updated", "updated_at", "upgrade", "waf"}
+	hits := make([]x8Hit, 0, len(names))
+	for _, n := range names {
+		hits = append(hits, x8Hit{name: n, reason: "Code"})
+	}
+
+	reason, noisy := x8ResultSetIsImplausible(hits)
+	if !noisy {
+		t.Fatalf("the measured runaway set was accepted as real findings")
+	}
+	t.Logf("discarded, reason: %s", reason)
+}
+
+// The genuine findings from the same scan must survive untouched. These are the semantically correct
+// parameters for their routes and are exactly what the section exists to find.
+func TestX8NoiseGuardKeepsRealFindings(t *testing.T) {
+	real := [][]string{
+		{"exchange", "limit", "offset", "status"},               // /api/v1/assets/search
+		{"after", "date", "direction", "order_id", "page_size"}, // /paper_accounts/{id}/activities
+		{"end", "start", "timeframe"},                           // /paper_accounts/{id}/portfolio/history
+		{"featured"},                                            // /oauth/connect/clients
+	}
+	for _, set := range real {
+		hits := make([]x8Hit, 0, len(set))
+		for _, n := range set {
+			hits = append(hits, x8Hit{name: n, reason: "Code"})
+		}
+		if reason, noisy := x8ResultSetIsImplausible(hits); noisy {
+			t.Errorf("a real result set %v was discarded: %s", set, reason)
+		}
+	}
+}
+
+// A large set that shows neither signature is kept. The guard is about shape, not size alone: an
+// endpoint really can take many parameters, and discarding on count would lose them.
+func TestX8NoiseGuardKeepsALargeButPlausibleSet(t *testing.T) {
+	hits := []x8Hit{}
+	for _, n := range []string{"after", "before", "cursor", "direction", "end", "filter", "group",
+		"include", "limit", "offset", "order", "page", "query", "sort", "start", "status", "timeframe"} {
+		hits = append(hits, x8Hit{name: n, reason: "Reflected"})
+	}
+	if reason, noisy := x8ResultSetIsImplausible(hits); noisy {
+		t.Errorf("a plausible 17-name set was discarded: %s", reason)
+	}
+}

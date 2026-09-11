@@ -303,15 +303,22 @@ func TestFlowDetectionResolvesRelativeRedirects(t *testing.T) {
 // Methods
 // ---------------------------------------------------------------------------
 
-// GET is the DEFAULT, not a limit. Opening the modal for the first time should not immediately send
-// POSTs to everything; selecting POST is one click away and nothing refuses it.
-func TestFlowDetectionDefaultsToGet(t *testing.T) {
+// EVERY quick-pick verb is on by default. The verb is also the selection filter, so a GET-only
+// default did not just send fewer requests, it removed every write endpoint from the corpus and made
+// a run that never asked read as a run that found nothing. Narrowing is the operator's to do.
+func TestFlowDetectionDefaultsToEveryQuickPickVerb(t *testing.T) {
 	cfg, err := ValidateFlowDetectionConfig(FlowDetectionConfig{})
 	if err != nil {
 		t.Fatalf("an empty config is the default run and must be legal: %v", err)
 	}
-	if len(cfg.Methods) != 1 || cfg.Methods[0] != "GET" {
-		t.Fatalf("the default must be GET and nothing else, got %v", cfg.Methods)
+	want := []string{"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"}
+	if len(cfg.Methods) != len(want) {
+		t.Fatalf("the default must be all seven quick-pick verbs, got %v", cfg.Methods)
+	}
+	for i, m := range want {
+		if cfg.Methods[i] != m {
+			t.Fatalf("default methods are sorted and must be %v, got %v", want, cfg.Methods)
+		}
 	}
 	if !cfg.BodiesEnabled() {
 		t.Error("send_recorded_bodies must default to true: a body-taking verb sent empty tests nothing")
@@ -368,18 +375,33 @@ func TestFlowDetectionAcceptsEveryHTTPVerb(t *testing.T) {
 	}
 }
 
-// A verb the transport cannot send is still refused, and the message says what may be used. This is
-// a typo check, not a policy: "GTE" would otherwise become a run's worth of 405s recorded as though
-// the endpoints had been tested.
-func TestFlowDetectionRefusesUnknownVerbs(t *testing.T) {
-	for _, m := range []string{"GTE", "PSOT", "TRACE", "CONNECT", "PROPFIND"} {
-		_, err := ValidateFlowDetectionConfig(FlowDetectionConfig{Methods: []string{m}})
-		if err == nil {
-			t.Errorf("%s is not a verb this scanner can send and must be refused", m)
+// There is no curated list, so an uncommon verb is selectable. PROPFIND, REPORT and LOCK are real
+// surface on a WebDAV or CalDAV deployment, and an application's own invented verb is real surface
+// on anything. A scanner that can only send seven verbs cannot test any of it.
+func TestFlowDetectionAcceptsUncuratedVerbs(t *testing.T) {
+	for _, m := range []string{"PROPFIND", "REPORT", "LOCK", "PURGE", "M-SEARCH", "GTE"} {
+		cfg, err := ValidateFlowDetectionConfig(FlowDetectionConfig{Methods: []string{m}})
+		if err != nil {
+			t.Errorf("%s must be selectable, got %v", m, err)
 			continue
 		}
-		if !strings.Contains(err.Error(), "POST") {
-			t.Errorf("%s: the error must list what may be used instead, got %q", m, err)
+		if len(cfg.Methods) != 1 || cfg.Methods[0] != m {
+			t.Errorf("%s: methods came back as %v", m, cfg.Methods)
+		}
+	}
+}
+
+// What is refused is a string that is not an HTTP method token: a shape check, not a policy. A
+// method with a space in it is a mangled config and would fail at the transport anyway.
+func TestFlowDetectionRefusesMalformedMethodTokens(t *testing.T) {
+	for _, m := range []string{"GET /x", "PO\tST", "GET;", "GET(1)", "\"GET\""} {
+		_, err := ValidateFlowDetectionConfig(FlowDetectionConfig{Methods: []string{m}})
+		if err == nil {
+			t.Errorf("%q is not a method token and must be refused", m)
+			continue
+		}
+		if !strings.Contains(err.Error(), "token") {
+			t.Errorf("%q: the error must say the token is malformed, got %q", m, err)
 		}
 	}
 }
@@ -492,7 +514,9 @@ func TestFlowDetectionDoesNotPutBodiesOnReadVerbs(t *testing.T) {
 // run must not invent a GET against a route only ever seen as a POST: GET /logout is why.
 func TestFlowDetectionOnlySelectsEndpointsMatchingTheConfiguredMethods(t *testing.T) {
 	scope := flowDetectScope("app.example.com")
-	cfg := flowDetectCfg(t, FlowDetectionConfig{})
+	// Explicitly GET-only. The DEFAULT is now every verb, so relying on it here would test nothing:
+	// the filter has to be given something to filter out.
+	cfg := flowDetectCfg(t, FlowDetectionConfig{Methods: []string{"GET"}})
 
 	plan := buildFlowDetectionPlan([]flowDetectionCandidate{
 		{URL: "https://app.example.com/orders", Method: "GET", Source: "consolidated"},
@@ -845,12 +869,12 @@ func TestFlowDetectionRunnerCarriesNoCredentialsAndNoBody(t *testing.T) {
 	}
 	body := code.String()
 
-	// Every request goes through ScanClient, which is where the verb allowlist and the no-body rule
-	// live. Constructing an http.Request here would route around both.
+	// Every request goes through ScanClient, which is where the scope boundary and the pacing budget
+	// are enforced. Constructing an http.Request here would route around both.
 	for _, forbidden := range []string{"http.NewRequest", "http.Post", "http.Get", "client.Post"} {
 		if strings.Contains(body, forbidden) {
-			t.Errorf("%s bypasses ScanClient, which is the only thing enforcing GET-only and no-body",
-				forbidden)
+			t.Errorf("%s bypasses ScanClient, which is the only thing enforcing the scope boundary "+
+				"and the rate budget", forbidden)
 		}
 	}
 

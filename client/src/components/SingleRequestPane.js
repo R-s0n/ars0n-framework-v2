@@ -404,7 +404,18 @@ const MONO_STYLE = {
 const WRAP_ON = { whiteSpace: 'pre-wrap', overflowWrap: 'break-word', wordBreak: 'normal' };
 const WRAP_OFF = { whiteSpace: 'pre', overflowWrap: 'normal', wordBreak: 'normal' };
 
-export const SingleRequestPane = ({ activeTarget, loadCaptureId, onLoadedCapture }) => {
+// A raw-bytes handover, in one place so the pane and its callers cannot disagree about its shape.
+//   raw_request  the bytes to put in the editor. Required; anything else is ignored.
+//   base_url     where to send them. Optional, but see the note on loadRawBytes: without it the
+//                framework falls back to the Host header and assumes https.
+//   label        where the bytes came from, in words, for the REQUEST header. Optional.
+const rawHandoverBytes = (payload) => (
+  payload && typeof payload.raw_request === 'string' ? payload.raw_request : ''
+);
+
+export const SingleRequestPane = ({
+  activeTarget, loadCaptureId, loadRawRequest, onLoadedCapture,
+}) => {
   const targetId = activeTarget && activeTarget.id;
 
   // Sitemap and search.
@@ -456,6 +467,12 @@ export const SingleRequestPane = ({ activeTarget, loadCaptureId, onLoadedCapture
   // button, and the operator is looking at the button.
   const [formatNote, setFormatNote] = useState('');
 
+  // Where the bytes in the editor came from, when they did not come from the corpus. Empty for
+  // everything the sitemap loaded, because for those the selected row already says it. Non-empty
+  // means the request was handed over from somewhere else -- a tool finding, today -- and it is
+  // shown next to REQUEST and again in the versions column, which cannot version it.
+  const [handoverNote, setHandoverNote] = useState('');
+
   // Versions column. versionCaptureId is the capture the column currently describes, and it is also
   // the gate on the whole feature: with nothing loaded there is no root to hang a tree off, so a
   // scratch buffer is never saved. versionsAvailable goes false only when the framework does not
@@ -478,6 +495,10 @@ export const SingleRequestPane = ({ activeTarget, loadCaptureId, onLoadedCapture
   // click or from the loadCaptureId prop. The prop effect reads it so that re-rendering with the
   // same id does not refetch, and so that a tree click in between makes the same id loadable again.
   const requestedCaptureRef = useRef(null);
+  // The same thing for the raw-bytes handover, held by IDENTITY rather than by value. Two findings
+  // can carry byte-identical requests, and re-handing the same object over on a re-render must not
+  // reload, so the object the parent passed is the token. The parent makes a new one per handover.
+  const requestedRawRef = useRef(null);
   // The parent's callback and the current dirty flag, held in refs so neither of them re-arms the
   // load effect. A changing callback identity must not be able to trigger a second fetch.
   const onLoadedRef = useRef(onLoadedCapture);
@@ -580,6 +601,7 @@ export const SingleRequestPane = ({ activeTarget, loadCaptureId, onLoadedCapture
     setHopIndex(0);
     setRedirectCapped(false);
     setFormatNote('');
+    setHandoverNote('');
     setShowEol(false);
     setRawMode(false);
     setVersions([]);
@@ -593,6 +615,7 @@ export const SingleRequestPane = ({ activeTarget, loadCaptureId, onLoadedCapture
     // picked a different scope target, and re-discovering that on every switch means one failed
     // fetch per switch.
     requestedCaptureRef.current = null;
+    requestedRawRef.current = null;
     versionsSeq.current += 1;
   }, [targetId]);
 
@@ -1008,6 +1031,7 @@ export const SingleRequestPane = ({ activeTarget, loadCaptureId, onLoadedCapture
       versionCaptureRef.current = captureId;
       setVersionNote('');
       setRenamingId(null);
+      setHandoverNote('');
       if (versionsAvailableRef.current) loadVersions(captureId, { selectOriginal: true });
 
       if (onLoadedRef.current) onLoadedRef.current(captureId);
@@ -1041,6 +1065,89 @@ export const SingleRequestPane = ({ activeTarget, loadCaptureId, onLoadedCapture
     // saveVersionIfDirty is created once and never changes identity, which is what keeps this
     // effect armed only by the id. See the note on targetIdRef.
   }, [loadCaptureId, loadCapture, saveVersionIfDirty]);
+
+  // The second way bytes get into this pane: handed straight in, with no capture behind them.
+  //
+  // A tool finding is the case this exists for. The scanner's request is not in the crawl corpus and
+  // never will be, so there is no id to look up and nothing for the sitemap query to match; the only
+  // thing that can travel is the bytes. Everything downstream of the editor is unchanged, which is
+  // the point: the same buffer, the same Replay, the same raw mode, the same byte-for-byte send.
+  //
+  // NOTHING HERE SENDS. The bytes are loaded and the operator presses Replay, or does not. A results
+  // list that fired a request because a button was clicked in it would be a scan nobody asked for.
+  const loadRawBytes = useCallback((payload) => {
+    requestedRawRef.current = payload;
+    // The capture id this pane last fetched is no longer what is on screen. Left set, a later
+    // handover of that same capture would be skipped as "already loaded" and the button that sent
+    // it would do nothing.
+    requestedCaptureRef.current = null;
+
+    const raw = rawHandoverBytes(payload);
+    const base = payload && typeof payload.base_url === 'string' ? payload.base_url : '';
+
+    // No row in the sitemap corresponds to these bytes. Leaving the previous selection highlighted
+    // would claim they came from it, and would also make clicking that row again a no-op, which is
+    // the one gesture that gets the operator back to the recorded request.
+    setSelectedId(null);
+
+    setRawRequest(raw);
+    setLoadedRequest(raw);
+    bufferRef.current = raw;
+    baselineRef.current = raw;
+    setEol(raw.includes('\r\n') ? 'CRLF' : 'LF');
+    // Carried rather than derived. With base_url empty the framework falls back to the Host header
+    // AND ASSUMES HTTPS, so a finding on an http origin would be re-sent over TLS to a different
+    // port and the answer would be about a request the tool never made. The box is on screen and
+    // editable, so the operator can see and change what this decided.
+    setBaseUrl(base);
+    baseUrlRef.current = base;
+
+    setRawResponse('');
+    setRespBytes(null);
+    setRespMs(null);
+    setRespStatus(null);
+    setRespNote('');
+    setHasReplayed(false);
+    setHops([]);
+    setHopIndex(0);
+    setRedirectCapped(false);
+    setFormatNote('');
+
+    // Versioning is OFF for these bytes, and that is not an oversight. A version tree is rooted in
+    // the request as the crawl recorded it; there is no such row here, so inventing one would put a
+    // scanner's composed request at the top of a column that promises "what the target actually
+    // sent". The column says so in words rather than silently saving nothing.
+    setVersions([]);
+    setActiveVersionId(null);
+    activeVersionRef.current = null;
+    setVersionCaptureId(null);
+    versionCaptureRef.current = null;
+    setVersionNote('');
+    setRenamingId(null);
+
+    setHandoverNote(payload && payload.label ? String(payload.label) : '');
+  }, []);
+
+  // Armed by the identity of the payload object, for the same reason the effect above is armed by
+  // the id: re-rendering with the same handover is not a second handover. The parent re-arms by
+  // passing null for one commit, which is the pattern ReplayRequestsModal documents.
+  useEffect(() => {
+    if (!loadRawRequest || rawHandoverBytes(loadRawRequest).trim() === '') return undefined;
+    if (requestedRawRef.current === loadRawRequest) return undefined;
+    let cancelled = false;
+    (async () => {
+      const result = await saveVersionIfDirty();
+      if (cancelled) return;
+      // Same fallback as the capture path. A scratch buffer cannot be saved as a version at all, so
+      // for those this confirm is the only thing standing between an edit and the bin.
+      if (result.wasDirty && !result.saved
+        && !window.confirm('The request pane has unsaved edits. Discard them and load the request that was handed over?')) {
+        return;
+      }
+      loadRawBytes(loadRawRequest);
+    })();
+    return () => { cancelled = true; };
+  }, [loadRawRequest, loadRawBytes, saveVersionIfDirty]);
 
   const selectLeaf = async (leaf) => {
     // Clicking the current selection again is a reload, which is the only way back from a load that
@@ -1584,8 +1691,14 @@ export const SingleRequestPane = ({ activeTarget, loadCaptureId, onLoadedCapture
           Open a request from the sitemap. The version it was recorded as is kept here, and every
           edit you make becomes a new version next to it rather than replacing anything.
           <div className="text-warning mt-2">
-            A request typed straight into the pane has no recorded version to descend from, so it is
-            not versioned. Load one from the sitemap to keep a history.
+            {handoverNote
+              // Named rather than lumped in with a typed request, because the operator did not type
+              // this and would otherwise be told it is unversioned with no explanation of why.
+              ? `These bytes were handed over from ${handoverNote}. They are not in the capture `
+                + 'corpus, so there is no recorded version for them to descend from and edits here '
+                + 'are not saved.'
+              : 'A request typed straight into the pane has no recorded version to descend from, so '
+                + 'it is not versioned. Load one from the sitemap to keep a history.'}
           </div>
         </div>
       );
@@ -1789,6 +1902,15 @@ export const SingleRequestPane = ({ activeTarget, loadCaptureId, onLoadedCapture
                style={{ width: '50%', minWidth: 0, minHeight: 0 }}>
             <div className="d-flex align-items-center px-2 py-1 border-bottom border-secondary">
               <span className="text-white-50" style={{ fontSize: '0.72rem' }}>REQUEST</span>
+              {/* Provenance, next to the bytes. Nothing in the sitemap is highlighted for a handed
+                  over request, so without this the pane silently claims a request nobody can trace
+                  back to a row. */}
+              {handoverNote && (
+                <span className="text-info ms-2 text-truncate" style={{ fontSize: '0.68rem', maxWidth: '260px' }}
+                  title={`Loaded from ${handoverNote}. Not sent yet.`}>
+                  from {handoverNote}
+                </span>
+              )}
               {dirty && <span className="text-warning ms-2" style={{ fontSize: '0.68rem' }}>edited</span>}
               {loadingCapture && <Spinner animation="border" size="sm" variant="danger" className="ms-2" />}
               <div className="ms-auto d-flex align-items-center">

@@ -20,6 +20,8 @@ import ToolsModal from './modals/ToolsModal.js';
 import NotesModal from './modals/NotesModal.js';
 import Ars0nFrameworkHeader from './components/ars0nFrameworkHeader.js';
 import ManageScopeTargets from './components/manageScopeTargets.js';
+import ThreatFlowLinks, { linkWriteAction } from './components/ThreatFlowLinks.js';
+import ThreatNotes from './components/ThreatNotes.js';
 import fetchAmassScans from './utils/fetchAmassScans.js';
 import {
   Container,
@@ -38,6 +40,8 @@ import {
   Alert,
   Badge,
   Accordion,
+  Form,
+  Dropdown,
 } from 'react-bootstrap';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import 'bootstrap-icons/font/bootstrap-icons.css';
@@ -249,19 +253,126 @@ const WelcomeModal = lazy(() => import('./modals/WelcomeModal.js'));
 // The label is what the button says.
 
 // How a threat model entry's test status is shown. A threat is grey until somebody has actually run
-// it, green when the attack worked, red when it was run and did not. The point of the colour is that
-// a model which is still entirely grey is one nobody has acted on, which should be obvious at a glance
-// without opening anything. Rows written before this column existed come back without it, so anything
-// unrecognised falls back to untested rather than rendering uncoloured.
+// it, green when the attack worked, red when it was run and did not, and amber when it was run and
+// could not be SETTLED. The point of the colour is that a model which is still entirely grey is one
+// nobody has acted on, which should be obvious at a glance without opening anything.
+//
+// NOT ENOUGH INFO IS NOT A REJECTION, and that distinction is the whole reason it exists. A test
+// blocked by a missing precondition, an ambiguous refusal shape, or a control arm that did not pass
+// is unresolved, not disproved. Filed as rejected it reads as settled and nobody looks again; left
+// as untested it reads as "nobody has looked", which is a lie about work that was done. It is its
+// own answer and gets its own colour.
+//
+// EVERY VALUE THE SERVER CAN STORE NEEDS AN ENTRY HERE. Rows written before this column existed come
+// back without it, so anything unrecognised falls back to untested rather than rendering uncoloured.
+// That fallback is right for a genuinely absent value and silently catastrophic for a known one: a
+// status the API accepts but this map has never heard of renders as a grey "Untested" badge, with no
+// error and nothing logged, asserting nobody looked at the row the operator just settled.
+//
 // validated carries a className instead of a plain border: a landed attack is the whole point of the
 // exercise and gets the glow treatment from index.css, which owns the animation because keyframes
-// cannot be expressed as an inline style.
+// cannot be expressed as an inline style. It is the only one that glows, and the empty string on the
+// others is load-bearing - the accordion's style branch keys on className being FALSY to decide
+// whether to set an inline border, so '' is what makes a border colour apply at all.
+//
+// `text` is the badge's Bootstrap foreground and is set only where the default would not read.
+// bg="warning" keeps white text, which is white on #ffc107 at roughly 1.6:1 - present in the DOM and
+// blank to the eye, which is the same failure as rendering the wrong status.
 const THREAT_TEST_STATUS = {
   untested: { border: '#6c757d', badge: 'secondary', label: 'Untested', className: '' },
   validated: { border: '#20c997', badge: 'success', label: 'Validated', className: 'threat-validated' },
   rejected: { border: '#dc3545', badge: 'danger', label: 'Rejected', className: '' },
+  not_enough_info: { border: '#ffc107', badge: 'warning', text: 'dark', label: 'Not Enough Info', className: '' },
 };
 const threatTestStatus = (status) => THREAT_TEST_STATUS[status] || THREAT_TEST_STATUS.untested;
+
+// The filter options, and how a threat maps onto one.
+//
+// BOTH LISTS CARRY AN "unset" OPTION and it is checked by default like the rest. Severity and
+// authenticated are each allowed to be absent - threatSeverity returns null for an unrecognised
+// value and the header only renders an authentication badge for a real boolean - so without this
+// option a row that has never been triaged would disappear the moment any box was unticked, and it
+// would disappear silently. The rows most worth seeing are frequently the ones nobody has classified.
+const THREAT_SEVERITY_FILTERS = [
+  { key: 'critical', label: 'Critical' },
+  { key: 'high', label: 'High' },
+  { key: 'moderate', label: 'Moderate' },
+  { key: 'low', label: 'Low' },
+  { key: 'informational', label: 'Informational' },
+  { key: 'unset', label: 'No severity set' },
+];
+const THREAT_AUTH_FILTERS = [
+  { key: 'yes', label: 'Authenticated' },
+  { key: 'no', label: 'Unauthenticated' },
+  { key: 'unset', label: 'Not specified' },
+];
+const threatSeverityKey = (t) =>
+  (threatSeverity(t.severity) ? String(t.severity).toLowerCase() : 'unset');
+const threatAuthKey = (t) =>
+  (typeof t.authenticated === 'boolean' ? (t.authenticated ? 'yes' : 'no') : 'unset');
+
+// Every filter checked is the default and means "show everything", so a fresh page applies no
+// filtering at all rather than an accidental subset.
+const allChecked = (options) => options.reduce((acc, o) => { acc[o.key] = true; return acc; }, {});
+
+// The three threat filters survive a refresh.
+//
+// Reading a settled model is a session that spans reloads, and rebuilding the same narrowing after
+// every one of them is the tax that makes an operator stop narrowing at all. Stored per browser
+// rather than per target, because "show me only the untested criticals" is a habit of the reader,
+// not a property of the target being read.
+const THREAT_FILTER_STORAGE_KEY = 'threatModelFilters';
+
+// Read once at module load: this only feeds initial state, and re-reading on every render would be
+// the same answer at a cost. The write-back effect is what keeps the stored copy current.
+const readStoredThreatFilters = () => {
+  try {
+    const raw = localStorage.getItem(THREAT_FILTER_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (error) {
+    // Private mode, a cleared quota, or a value hand-edited into invalid JSON. Falling back to the
+    // unfiltered default is right: the alternative is a blank section with no explanation.
+    return {};
+  }
+};
+
+// A stored map is merged over the all-on default rather than replacing it, which is the same reason
+// the filter is a map and not a list of enabled keys: a key this build has never heard of defaults
+// to VISIBLE. A map written by an older build must not silently hide a category added since.
+const storedChecks = (options, stored) => {
+  const base = allChecked(options);
+  if (!stored || typeof stored !== 'object') return base;
+  options.forEach((o) => { if (typeof stored[o.key] === 'boolean') base[o.key] = stored[o.key]; });
+  return base;
+};
+
+const STORED_THREAT_FILTERS = readStoredThreatFilters();
+
+// The rows one category will actually render, once every filter is taken into account.
+//
+// One helper rather than a filter written at each use site, because the category card reads the same
+// list THREE times: for the "N documented" count, for the is-it-empty check, and for the map. Filter
+// two of those and the count contradicts what is on screen, which is worse than not having filters.
+//
+// A rejected threat is a MEASURED result, not a mistake, so it is hidden rather than deleted and the
+// toggle defaults to off. Rejections are what stop the next person re-running a test that has already
+// been settled; they are only noise once you have read them.
+//
+// not_enough_info IS DELIBERATELY NOT HIDEABLE. The toggle hides the rows that have been ANSWERED,
+// and an unsettled test is the opposite of answered: it is the open work this section exists to
+// surface. It also could not be folded in without a second count, because the per-card "N rejected
+// hidden" number below is literally "whatever the hideRejected argument removed" - adding a fourth
+// status to this filter would relabel those rows as rejections, which is exactly how that number was
+// wrong once already and had to be corrected against measurement on the live target.
+const visibleThreats = (list, hideRejected, severityOn, authOn) =>
+  (list || []).filter((t) => {
+    if (hideRejected && t.test_status === 'rejected') return false;
+    // An absent filter map means the caller has not narrowed on that axis, which shows everything.
+    if (severityOn && severityOn[threatSeverityKey(t)] === false) return false;
+    if (authOn && authOn[threatAuthKey(t)] === false) return false;
+    return true;
+  });
 
 // Severity, as rendered in the accordion header. Explicit hex rather than Bootstrap contextual
 // colours because bg="warning" and bg="danger" are the same two colours the test-status badge and
@@ -283,6 +394,11 @@ const threatTitle = (threat) => {
   const attackName = ATTACK_NAME_BY_ID[threat.attack_id] || threat.attack_custom_name || threat.attack_name || '';
   return attackName ? `${attackName} - ${specific}` : specific;
 };
+
+// How many flows the threat-mapping picker offers. Same number the Request Flows modal fetches with,
+// so the two screens cannot disagree about which flows exist. A target with more than this gets told
+// it is looking at a subset rather than being left to conclude a flow was never recorded.
+const THREAT_FLOW_LIMIT = 200;
 
 const THREAT_SEVERITY = {
   critical:      { label: 'Critical',      bg: '#7f1d1d', fg: '#fecaca' },
@@ -307,6 +423,9 @@ const MetaDataModal = lazy(() => import('./modals/MetaDataModal.js'));
 const ConfigureMetaDataModal = lazy(() => import('./modals/ConfigureMetaDataModal.js'));
 const ROIReport = lazy(() => import('./components/ROIReport'));
 const HelpMeLearnLazy = lazy(() => import('./components/HelpMeLearn'));
+// Lazy because it ships its own markdown renderer and nobody opens the reader on page load. Nothing
+// of it, code or content, is paid for until the book icon is clicked.
+const KnowledgeBaseModal = lazy(() => import('./components/KnowledgeBaseModal.js'));
 
 const HelpMeLearn = ({ section }) => (
   <Suspense fallback={<div style={{ height: '24px' }} />}>
@@ -638,6 +757,7 @@ function App() {
 
   const [showGlobalScansModal, setShowGlobalScansModal] = useState(false);
   const [showNotesModal, setShowNotesModal] = useState(false);
+  const [showKnowledgeBaseModal, setShowKnowledgeBaseModal] = useState(false);
   const [isWildfireRunning, setIsWildfireRunning] = useState(false);
   const [, setWildfireCancelled] = useState(false);
   const [wildfireProgress, setWildfireProgress] = useState(null);
@@ -1044,6 +1164,72 @@ function App() {
   // which only measure the four supporting collections and say nothing about whether any threat has
   // actually been written.
   const [threatModelResults, setThreatModelResults] = useState({});
+  // Off by default: a rejected threat is a measured result and hiding it is the operator's choice to
+  // make, not the default view. On a settled model most rows are rejections, so this is the
+  // difference between reading the open questions and scrolling past the answered ones.
+  // Each of the three seeds from the stored copy, falling back to the unfiltered default when there
+  // is nothing stored. Only an explicit `true` turns this one on, so a corrupt or partial stored
+  // object cannot start the operator on a view that is hiding rows.
+  const [hideRejectedThreats, setHideRejectedThreats] = useState(
+    () => STORED_THREAT_FILTERS.hideRejected === true);
+  // Every option on, so the default view is unfiltered. Stored as a key->bool map rather than a list
+  // of enabled keys, because a map makes "explicitly off" distinguishable from "an option this build
+  // has never heard of", and an unknown key then defaults to visible rather than hidden.
+  const [threatSeverityFilter, setThreatSeverityFilter] = useState(
+    () => storedChecks(THREAT_SEVERITY_FILTERS, STORED_THREAT_FILTERS.severity));
+  const [threatAuthFilter, setThreatAuthFilter] = useState(
+    () => storedChecks(THREAT_AUTH_FILTERS, STORED_THREAT_FILTERS.auth));
+  // Write back on every change rather than on unmount, because the browser refresh this exists to
+  // survive never runs an unmount handler.
+  useEffect(() => {
+    try {
+      localStorage.setItem(THREAT_FILTER_STORAGE_KEY, JSON.stringify({
+        hideRejected: hideRejectedThreats,
+        severity: threatSeverityFilter,
+        auth: threatAuthFilter,
+      }));
+    } catch (error) {
+      // Storage unavailable or full. The filters still work for this page; they just will not
+      // outlive it, which is the behaviour that existed before this was persisted at all.
+    }
+  }, [hideRejectedThreats, threatSeverityFilter, threatAuthFilter]);
+  // Which request flow demonstrates which threat.
+  //
+  // BOTH LISTS ARE FETCHED ONCE FOR THE WHOLE SECTION and grouped in the client. There are 33
+  // threats across 6 categories on a real target; a fetch per threat is 33 requests to draw one
+  // page, and a flow list per threat is 33 more.
+  const [threatFlowLinks, setThreatFlowLinks] = useState([]);
+  const [threatFlowLinksError, setThreatFlowLinksError] = useState('');
+  const [threatFlowChoices, setThreatFlowChoices] = useState([]);
+  const [threatFlowChoicesTotal, setThreatFlowChoicesTotal] = useState(0);
+  const [threatFlowChoicesError, setThreatFlowChoicesError] = useState('');
+  const [threatFlowChoicesLoading, setThreatFlowChoicesLoading] = useState(false);
+  // Which threat is mid-write, and the last write failure, kept per threat so a failure reports
+  // against the row that was clicked rather than as a banner over rows that are fine.
+  const [threatFlowBusyId, setThreatFlowBusyId] = useState('');
+  const [threatFlowActionError, setThreatFlowActionError] = useState(null);
+  // Ad hoc notes on ONE threat: what the operator worked out while reading and testing it.
+  //
+  // KEYED BY THREAT ID AND FETCHED LAZILY, unlike the flow links above which come back in one request
+  // for the whole section. The list route is keyed by threat_id and there is no bulk form of it, so
+  // "load them with the threats" means one request per threat - 193 of them on the live target, to
+  // draw a block that is collapsed by default and that most threats will never have a note on. The
+  // notes block's own disclosure toggle is what triggers the read; the accordion cannot be, because
+  // it is alwaysOpen and uncontrolled and offers no per-item expand hook.
+  //
+  // LOADED IS TRACKED SEPARATELY FROM THE LIST because "not fetched yet", "fetched and empty" and
+  // "the read failed" are three different sentences and an empty array can only say one of them. A
+  // failed read that rendered as "no notes" would be a claim about the server this screen is in no
+  // position to make - the same rule the flow links follow with linksError.
+  const [threatNotesByThreat, setThreatNotesByThreat] = useState({});
+  const [threatNotesLoaded, setThreatNotesLoaded] = useState({});
+  const [threatNotesLoading, setThreatNotesLoading] = useState({});
+  const [threatNotesError, setThreatNotesError] = useState({});
+  // Which threat is mid-write and the last write failure, kept per threat for the same reason the
+  // flow links do it: a failure reports against the row that was clicked, not as a banner over rows
+  // that are fine.
+  const [threatNotesBusyId, setThreatNotesBusyId] = useState('');
+  const [threatNotesActionError, setThreatNotesActionError] = useState(null);
   const [showAuthFlowModal, setShowAuthFlowModal] = useState(false);
   const [authFlowCategory, setAuthFlowCategory] = useState('login');
   const [showClientIdentityModal, setShowClientIdentityModal] = useState(false);
@@ -5860,6 +6046,9 @@ function App() {
   const handleCloseThreatModelModal = () => {
     setShowThreatModelModal(false);
     fetchThreatModelResults();
+    // Deleting a threat cascades its flow links away in the database, so the links are re-read here
+    // too. Without this the section would still show mappings for a threat that no longer exists.
+    fetchThreatFlowLinks();
   };
   const handleOpenPossibleAttacksModal = (category) => {
     setPossibleAttacksCategory(category && category.key ? category.key : category);
@@ -5895,6 +6084,11 @@ function App() {
   // of them can own: the flow view is closing at the moment it is set and the repeater is not mounted
   // yet. Null means the repeater was opened straight from its own button and should start empty.
   const [repeaterCaptureId, setRepeaterCaptureId] = useState(null);
+  // The second handover into the repeater, for bytes that have no capture id because they are not in
+  // the crawl corpus: a tool finding's request. Same reason it lives up here as the id above, and the
+  // two are mutually exclusive by construction - every handler below sets one and clears the other,
+  // so the repeater is never handed two different requests in one commit.
+  const [repeaterRawRequest, setRepeaterRawRequest] = useState(null);
 
   // The four numbers above those five buttons. Null until the first read lands, which the card
   // renders as n/a rather than as four zeroes: a card that says 0 before it has asked is a card that
@@ -6053,6 +6247,7 @@ function App() {
   // nothing about it.
   const handleOpenReplayRequestsModal = () => {
     setRepeaterCaptureId(null);
+    setRepeaterRawRequest(null);
     setShowReplayRequestsModal(true);
   };
   const handleOpenRequestFlowsModal = () => setShowRequestFlowsModal(true);
@@ -6068,7 +6263,50 @@ function App() {
   const handleOpenCaptureInRepeater = (captureId) => {
     if (!captureId) return;
     setShowRequestFlowsModal(false);
+    setRepeaterRawRequest(null);
     setRepeaterCaptureId(String(captureId));
+    setShowReplayRequestsModal(true);
+  };
+
+  // The third handover, and the only one that carries bytes instead of an id.
+  //
+  // A tool finding's request is not in the crawl corpus. The scanner either recorded bytes the crawl
+  // never saw or the framework composed them from the attack vector, and in both cases there is no
+  // capture row to point at and never will be. So the bytes themselves travel, and the repeater grew
+  // a second entry point to receive them.
+  //
+  // Same one-commit rule as the two handovers above, for the same reason: the results modal closes,
+  // the payload is recorded and the repeater opens together, so ReplayRequestsModal mounts with show
+  // and initialRawRequest already set. Setting the payload after the open is a commit where the
+  // repeater is on screen with an empty editor.
+  //
+  // A NEW OBJECT EVERY TIME. The intent is that re-sending the same finding is a second handover
+  // rather than a prop that happens not to have changed.
+  //
+  // MEASURED CORRECTION: the repeater does NOT currently arm on this object's identity. It memoises
+  // the incoming payload on its VALUES, so a fresh object with identical bytes collapses to the
+  // cached one and the re-arm never fires. An earlier version of this comment claimed the identity
+  // was what made a repeat press work; that was false and is corrected here rather than quietly
+  // deleted, because it was the reason nobody looked.
+  //
+  // It costs nothing today: the repeater is fullscreen, so closing it unmounts the pane and clears
+  // the pending handover, and every press is therefore a first one. The fresh object is kept because
+  // it is free and because it is half of the eventual fix. The other half is a nonce - a counter
+  // bumped per press and carried in the payload - which is what should be added if the results modal
+  // and the repeater ever become open-at-once. Identity keying in the repeater is NOT the fix: it
+  // was tried and it re-broke the rule that switching scope target drops the handover.
+  //
+  // It does not send anything. The repeater loads it and waits.
+  const handleOpenRawRequestInRepeater = (payload) => {
+    const bytes = payload && typeof payload.raw_request === 'string' ? payload.raw_request : '';
+    if (bytes.trim() === '') return;
+    setShowVectorResultsModal(false);
+    setRepeaterCaptureId(null);
+    setRepeaterRawRequest({
+      raw_request: bytes,
+      base_url: payload.base_url ? String(payload.base_url) : '',
+      label: payload.label ? String(payload.label) : '',
+    });
     setShowReplayRequestsModal(true);
   };
   // The second handover, and the bridge from a detected flow to a branching one. RequestFlowsModal
@@ -6310,9 +6548,11 @@ function App() {
       setThreatModelResults({});
     }
   };
-  // Flips one threat between untested, validated and rejected. This goes to its own route rather than
-  // the normal PUT, because that one replaces every column and demands category and url: marking a
-  // threat tested is a one-field change and should not risk rewriting prose the click never read.
+  // Flips one threat between untested, validated, rejected and not_enough_info. This goes to its own
+  // route rather than the normal PUT, because that one replaces every column and demands category and
+  // url: marking a threat tested is a one-field change and should not risk rewriting prose the click
+  // never read. The function itself is value-agnostic - it sends whatever the button passed - so the
+  // set of legal statuses lives in THREAT_TEST_STATUS and in the server's own validator, not here.
   const handleSetThreatTestStatus = async (threatId, testStatus) => {
     if (!threatId) return;
     try {
@@ -6338,10 +6578,317 @@ function App() {
     }
   };
 
+  // Read one threat's notes, and only that threat's.
+  //
+  // WRITES ONLY THAT THREAT'S SLOT in every map, so two threats opened at once cannot overwrite each
+  // other's list, error or spinner.
+  //
+  // A FAILURE DOES NOT MARK THE SLOT LOADED. The notes block falls through to "No notes on this
+  // threat yet" when it is loaded and the list is empty, and a failed read reaching that branch would
+  // tell the operator this threat has no notes when what actually happened is that nobody knows. It
+  // stays unloaded with the reason recorded, which also means re-opening the block retries.
+  const fetchThreatNotes = async (threatId) => {
+    const key = String(threatId || '');
+    if (!key) return null;
+    setThreatNotesLoading((prev) => ({ ...prev, [key]: true }));
+    try {
+      // /api/ and not /threat-notes/: nginx is what strips the prefix on the way to the API.
+      const res = await fetch(`/api/threat-notes/${key}`);
+      if (!res.ok) throw new Error(`threat notes request failed: ${res.status}`);
+      const data = await res.json();
+      const rows = Array.isArray(data && data.notes) ? data.notes : [];
+      setThreatNotesByThreat((prev) => ({ ...prev, [key]: rows }));
+      setThreatNotesError((prev) => ({ ...prev, [key]: '' }));
+      setThreatNotesLoaded((prev) => ({ ...prev, [key]: true }));
+      return rows;
+    } catch (error) {
+      console.error('Error fetching threat notes:', error);
+      setThreatNotesByThreat((prev) => ({ ...prev, [key]: [] }));
+      setThreatNotesError((prev) => ({ ...prev, [key]: error.message || 'request failed' }));
+      setThreatNotesLoaded((prev) => ({ ...prev, [key]: false }));
+      return null;
+    } finally {
+      setThreatNotesLoading((prev) => ({ ...prev, [key]: false }));
+    }
+  };
+
+  // One writer behind all three note mutations, because all three end the same way.
+  //
+  // ON SUCCESS THAT THREAT'S NOTES ARE RE-READ, not patched in place. The list is ordered by
+  // updated_at and every write moves the row that was touched, so a local patch would show an order
+  // the server does not hold; and the PUT is preserve-on-omit, so what came back from a partial edit
+  // is the only thing that says what is actually stored.
+  //
+  // NOTHING HERE REFETCHES THE THREAT MODEL, ever. fetchThreatModelResults replaces every threat
+  // object, which collapses every accordion item the operator had open - the same reason
+  // handleSetThreatTestStatus patches one row instead of refetching. Being dumped out of the threat
+  // you were mid-way through annotating is a worse outcome than the save failing.
+  //
+  // Returns true when the server accepted it, so the editor knows whether it may throw the draft
+  // away. It must not clear on a failure: that would destroy the paragraph the operator just typed
+  // because a request came back 500.
+  const runThreatNoteWrite = async (threatId, failureText, send) => {
+    const key = String(threatId || '');
+    if (!key) return false;
+    setThreatNotesBusyId(key);
+    setThreatNotesActionError(null);
+    try {
+      const res = await send();
+      // THE BODY IS READ AS TEXT, AND ONLY ON FAILURE. The threat-note handlers refuse through Go's
+      // http.Error, which writes text/plain, so res.json() rejects on every refusal and the sentence
+      // that says what to do about it - "No threat with that id exists.", "title is required and
+      // cannot be only whitespace." - was being thrown away and replaced by the bare status code.
+      // The rest of this file already reads response.text() for exactly this reason. JSON is still
+      // parsed when a handler does send some, so a {message} body never reaches the operator as raw
+      // braces. Reading only on failure also means a DELETE that answers 204 with no body at all is
+      // never parsed, and a body can only be consumed once.
+      if (!res.ok) {
+        const raw = (await res.text().catch(() => '')).trim();
+        let message = raw;
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object') {
+            message = parsed.message || parsed.error || raw;
+          }
+        } catch (notJSON) {
+          // The normal case here: raw is already the server's sentence.
+        }
+        throw new Error(message || `request failed: ${res.status}`);
+      }
+      await fetchThreatNotes(key);
+      return true;
+    } catch (error) {
+      console.error('Error writing threat note:', error);
+      // Which action failed, because "could not delete that note" over a save the operator just
+      // clicked sends them looking for the wrong problem.
+      setThreatNotesActionError({ threat_id: key, message: `${failureText}: ${error.message}` });
+      return false;
+    } finally {
+      setThreatNotesBusyId('');
+    }
+  };
+
+  const createThreatNote = (threatId, title, content) => runThreatNoteWrite(
+    threatId,
+    'Could not add that note',
+    () => fetch('/api/threat-notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threat_id: threatId, title, content }),
+    }),
+  );
+
+  // `fields` carries ONLY what the editor changed. The server's PUT is COALESCE-guarded, so an
+  // omitted key is preserved rather than blanked - which is what makes it safe to send a title on its
+  // own. An explicit empty content is still an honoured blanking, so the two cases stay distinct.
+  const updateThreatNote = (threatId, noteId, fields) => runThreatNoteWrite(
+    threatId,
+    'Could not save that note',
+    () => fetch(`/api/threat-notes/${noteId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields || {}),
+    }),
+  );
+
+  const deleteThreatNote = (threatId, noteId) => runThreatNoteWrite(
+    threatId,
+    'Could not delete that note',
+    () => fetch(`/api/threat-notes/${noteId}`, { method: 'DELETE' }),
+  );
+
+  // Every flow->threat mapping on the target, in ONE request for the whole section.
+  //
+  // A FAILED READ EMPTIES THE LIST AND RECORDS WHY. Keeping the previous links on screen after a
+  // failed re-read is the one outcome that must not happen: the point of re-reading is that the
+  // screen agrees with the server, and stale rows would silently claim mappings that may no longer
+  // exist. The error travels down to the threats so they say "unknown" rather than "none".
+  //
+  // RETURNS THE ROWS, or null when the read failed. Rendering only needs the state, but a WRITE needs
+  // the answer itself: the create endpoint is an upsert that overwrites the note, so before writing
+  // one this has to establish what is actually stored. null and [] are kept apart on purpose - "no
+  // mappings" and "could not find out" license completely different next moves.
+  const fetchThreatFlowLinks = async (targetId) => {
+    const id = targetId || (activeTarget && activeTarget.id);
+    if (!id) {
+      setThreatFlowLinks([]);
+      setThreatFlowLinksError('');
+      return [];
+    }
+    try {
+      const res = await fetch(`/api/flow-threat-links/${id}`);
+      if (!res.ok) throw new Error(`flow-threat links request failed: ${res.status}`);
+      const data = await res.json();
+      const rows = Array.isArray(data && data.links) ? data.links : [];
+      setThreatFlowLinks(rows);
+      setThreatFlowLinksError('');
+      return rows;
+    } catch (error) {
+      console.error('Error fetching flow-threat links:', error);
+      setThreatFlowLinks([]);
+      setThreatFlowLinksError(error.message || 'request failed');
+      return null;
+    }
+  };
+
+  // The flows a link can point at, fetched once for the whole section.
+  //
+  // WHY THE FLOW LIST IS FETCHED AT ALL when the links endpoint carries flow_name: because a name is
+  // not an identification. GetFlowThreatLinks now fills flow_name for both kinds, but on this target
+  // 46 of the 49 flows are unnamed and every one of them resolves to the same placeholder,
+  // "(Automated Flow Detected)" - and measured against the running API on 2026-09-09 a link to a
+  // BUILT flow still came back with no flow_name at all, that handler change being newer than the
+  // deployed binary. The flow list is the only place the request line, host, size and start time
+  // live, and those are what make one flow recognisable from another.
+  const fetchThreatFlowChoices = async (targetId) => {
+    const id = targetId || (activeTarget && activeTarget.id);
+    if (!id) {
+      setThreatFlowChoices([]);
+      setThreatFlowChoicesTotal(0);
+      setThreatFlowChoicesError('');
+      return;
+    }
+    setThreatFlowChoicesLoading(true);
+    try {
+      const res = await fetch(`/api/replay-request/${id}/flows?limit=${THREAT_FLOW_LIMIT}`);
+      if (!res.ok) throw new Error(`flow list request failed: ${res.status}`);
+      const data = await res.json();
+      const rows = Array.isArray(data && data.flows) ? data.flows : [];
+      setThreatFlowChoices(rows);
+      // The server's own total when it sends one, so the picker can admit it is showing a subset.
+      setThreatFlowChoicesTotal(
+        Number.isFinite(Number(data && data.total)) ? Number(data.total) : rows.length
+      );
+      setThreatFlowChoicesError('');
+    } catch (error) {
+      console.error('Error fetching flows for threat mapping:', error);
+      setThreatFlowChoices([]);
+      setThreatFlowChoicesTotal(0);
+      setThreatFlowChoicesError(error.message || 'request failed');
+    } finally {
+      setThreatFlowChoicesLoading(false);
+    }
+  };
+
+  // Create, re-note or remove one mapping. Every direction is the same POST; `remove` picks the
+  // delete, and `note` is the operator's record of WHY this flow demonstrates this threat.
+  //
+  // ON SUCCESS THE LINKS ARE RE-READ, not patched in place. The create is an upsert and the delete
+  // reports rows affected, so a re-read is the only thing that proves what is actually stored. Only
+  // the LINKS are re-read: refetching the threat model would replace every threat object and
+  // collapse every accordion item the operator had open, which is why handleSetThreatTestStatus
+  // patches instead.
+  //
+  // THE CREATE IS AN UPSERT THAT OVERWRITES THE NOTE. SetFlowThreatLink does
+  // `ON CONFLICT (threat_id, flow_id) DO UPDATE SET note = EXCLUDED.note`, so a POST that omits the
+  // note does not leave the stored one alone - it replaces it with an empty string. Measured against
+  // the live API: a link holding "TAB-B-NOTE-worth-keeping" came back with no note at all after one
+  // note-less POST. That makes "map this flow" a destructive write against a mapping that already
+  // exists.
+  //
+  // RESOLVING THE NOTE FROM LOCAL STATE DOES NOT FIX IT, and the reason is worth keeping because the
+  // fix that does not work looks exactly like the fix that does. The picker only ever offers flows
+  // that are NOT in `links` (ThreatFlowLinks filters `freeFlows` by `linkedIds`), so the one and only
+  // way a create can land on an existing row is when local state does not know that row exists - a
+  // second tab, or a list read before the other write. In precisely that case a local lookup finds
+  // nothing and resolves to '', which is the wipe it was meant to prevent. It could never preserve a
+  // note, because it only ran when the note was not in hand.
+  //
+  // So the note is resolved from a FRESH READ instead, and an existing mapping is left ALONE: the
+  // operator asked for this flow to be mapped to this threat, it already is, and there is nothing to
+  // write. If that read fails the write is abandoned rather than guessed at - "I could not check"
+  // must not resolve to "overwrite it with nothing".
+  //
+  // A race remains between the read and the POST. It cannot be closed from here: only a server that
+  // treats an absent note as UNCHANGED (a nullable note, or a PATCH that writes just the note) can
+  // close it, and until then every client has to do this dance.
+  //
+  // Returns true when the server accepted it, so the picker knows whether to clear the choice.
+  const setThreatFlowLink = async (threatId, flowId, remove, note) => {
+    const id = activeTarget && activeTarget.id;
+    if (!id || !threatId || !flowId) return false;
+    setThreatFlowBusyId(String(threatId));
+    setThreatFlowActionError(null);
+    try {
+      const body = { threat_id: threatId, flow_id: flowId };
+      if (remove) body.remove = true;
+      else if (typeof note === 'string') body.note = note;
+      else {
+        const action = linkWriteAction(await fetchThreatFlowLinks(id), threatId, flowId);
+        if (action === 'unknown') {
+          throw new Error('the existing mappings could not be read, so a note already on this '
+            + 'mapping would have been overwritten');
+        }
+        // Already mapped. Re-sending it could only ever change the note, and nobody asked to.
+        if (action === 'skip') return true;
+        body.note = '';
+      }
+      const res = await fetch(`/api/flow-threat-links/${id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error((data && (data.message || data.error)) || `request failed: ${res.status}`);
+      }
+      await fetchThreatFlowLinks(id);
+      return true;
+    } catch (error) {
+      console.error('Error setting flow-threat link:', error);
+      // Which action failed, because "could not map that flow" over a note the operator just typed
+      // would send them looking for the wrong problem.
+      let what = 'Could not map that flow';
+      if (remove) what = 'Could not remove that mapping';
+      else if (typeof note === 'string') what = 'Could not save that note';
+      setThreatFlowActionError({
+        threat_id: String(threatId),
+        message: `${what}: ${error.message}`,
+      });
+      return false;
+    } finally {
+      setThreatFlowBusyId('');
+    }
+  };
+
+  // The links, grouped by threat once for the whole section rather than filtered inside each of the
+  // 33 accordion bodies, which would be a full scan of the list per threat on every render.
+  const threatFlowLinksByThreat = useMemo(() => {
+    const grouped = {};
+    (threatFlowLinks || []).forEach((link) => {
+      const key = String(link && link.threat_id);
+      if (!key) return;
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(link);
+    });
+    return grouped;
+  }, [threatFlowLinks]);
+
+  // Flow summaries by id, so a linked flow resolves to its name, request line, host and size in one
+  // lookup instead of a scan of 49 rows per link.
+  const threatFlowChoicesById = useMemo(() => {
+    const byId = {};
+    (threatFlowChoices || []).forEach((flow) => {
+      if (flow && flow.id) byId[String(flow.id)] = flow;
+    });
+    return byId;
+  }, [threatFlowChoices]);
+
   useEffect(() => {
     fetchThreatModelCounts();
     fetchThreatModelResults();
+    fetchThreatFlowLinks();
+    fetchThreatFlowChoices();
     fetchArchiveHostCounts();
+    // The note maps are CLEARED and deliberately not prefetched. They are keyed by threat id and the
+    // new target has entirely different threats, so anything left behind is a dead slot at best; the
+    // reason it is not refilled here is that filling it means one request per threat. Each block
+    // fetches its own notes the first time it is opened.
+    setThreatNotesByThreat({});
+    setThreatNotesLoaded({});
+    setThreatNotesLoading({});
+    setThreatNotesError({});
+    setThreatNotesActionError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTarget]);
   useEffect(() => {
@@ -6759,15 +7306,30 @@ function App() {
           }
         `}
       </style>
-      <Ars0nFrameworkHeader 
-        onSettingsClick={handleOpenSettingsModal} 
-        onToolsClick={handleOpenToolsModal}
-        onExportClick={handleOpenExportModal}
-        onImportClick={handleOpenImportModal}
-        onGlobalScansClick={() => setShowGlobalScansModal(true)}
-        onNotesClick={() => setShowNotesModal(true)}
-        isGlobalScanRunning={isWildfireRunning || isSlowburnRunning}
-      />
+      {/* The book joins the icon cluster at the top right, and it is rendered HERE rather than inside
+          ars0nFrameworkHeader.js because that file belongs to another workstream and editing it would
+          have collided. The wrapper reserves room at the right edge of the header row and the button
+          sits in it, so the result is the same single row of glyphs the user already knows. If the
+          button ever moves into the header component proper, delete this wrapper and pass a prop. */}
+      <div className="kb-header-wrap">
+        <Ars0nFrameworkHeader
+          onSettingsClick={handleOpenSettingsModal}
+          onToolsClick={handleOpenToolsModal}
+          onExportClick={handleOpenExportModal}
+          onImportClick={handleOpenImportModal}
+          onGlobalScansClick={() => setShowGlobalScansModal(true)}
+          onNotesClick={() => setShowNotesModal(true)}
+          isGlobalScanRunning={isWildfireRunning || isSlowburnRunning}
+        />
+        <Button
+          variant="link"
+          className="text-white p-1 kb-header-btn"
+          onClick={() => setShowKnowledgeBaseModal(true)}
+          title="Knowledge Base"
+        >
+          <i className="bi bi-book" style={{ fontSize: '1.5rem' }}></i>
+        </Button>
+      </div>
 
       <ToastContainer 
         position="bottom-center"
@@ -10464,7 +11026,108 @@ function App() {
                   </Col>
                 </Row>
 
-                <h4 className="text-secondary mb-3 fs-5 mt-4">Threat Model Results</h4>
+                {/* The toggle sits on the header row, across from the section label, so it reads as
+                    belonging to the whole section rather than to the first category card under it. */}
+                <div className="d-flex justify-content-between align-items-center mb-3 mt-4" style={{ gap: '0.75rem' }}>
+                  <div className="d-flex align-items-baseline flex-wrap" style={{ gap: '0.5rem' }}>
+                    <h4 className="text-secondary fs-5 mb-0">Threat Model Results</h4>
+                    {/* How much of the model has a flow behind it. Counted through visibleThreats,
+                        the same helper every other read of these lists goes through, so a narrowed
+                        filter moves this number with the per-category counts instead of contradicting
+                        them. Silent while the links are unreadable: a zero there would assert nothing
+                        is mapped, which is a claim about the server this client cannot make. */}
+                    {!threatFlowLinksError && (() => {
+                      const shown = Object.values(threatModelResults || {})
+                        .flatMap((list) => visibleThreats(list, hideRejectedThreats, threatSeverityFilter, threatAuthFilter));
+                      if (shown.length === 0) return null;
+                      const mapped = shown.filter((t) => (threatFlowLinksByThreat[String(t.id)] || []).length > 0).length;
+                      return (
+                        <span
+                          className="text-white-50"
+                          style={{ fontSize: '0.78rem' }}
+                          title="A threat is demonstrated when a recorded or built request flow is mapped onto it."
+                        >
+                          {mapped} of {shown.length} shown have a flow mapped
+                        </span>
+                      );
+                    })()}
+                  </div>
+                  <div className="d-flex align-items-center flex-wrap justify-content-end" style={{ gap: '0.75rem' }}>
+                  {/* Both dropdowns are the same shape: a checkbox per option, all ticked by default,
+                      and autoClose="outside" so several can be unticked without the menu shutting
+                      after each click. The button label counts what is ON, so a narrowed filter is
+                      visible without opening it - a filter you cannot see is how a card comes to look
+                      empty for no apparent reason. */}
+                  {[
+                    { id: 'threat-severity-filter', title: 'Severity', options: THREAT_SEVERITY_FILTERS,
+                      value: threatSeverityFilter, set: setThreatSeverityFilter },
+                    { id: 'threat-auth-filter', title: 'Auth', options: THREAT_AUTH_FILTERS,
+                      value: threatAuthFilter, set: setThreatAuthFilter },
+                  ].map((f) => {
+                    // Grey when everything is on, red when anything is filtered out. The state worth
+                    // signalling is binary - "you are looking at a subset" - so the button says that
+                    // and nothing else; the boxes themselves say which options are off.
+                    const narrowed = f.options.some((o) => f.value[o.key] === false);
+                    return (
+                      <Dropdown key={f.id} autoClose="outside">
+                        <Dropdown.Toggle
+                          size="sm"
+                          variant={narrowed ? 'outline-danger' : 'outline-secondary'}
+                          id={f.id}
+                          style={{ fontSize: '0.8rem' }}
+                        >
+                          {f.title}
+                        </Dropdown.Toggle>
+                        <Dropdown.Menu variant="dark" style={{ minWidth: '13rem' }}>
+                          {f.options.map((o) => (
+                            <div key={o.key} className="px-3 py-1">
+                              <Form.Check
+                                type="checkbox"
+                                id={`${f.id}-${o.key}`}
+                                label={o.label}
+                                style={{ fontSize: '0.85rem' }}
+                                checked={f.value[o.key] !== false}
+                                onChange={(e) => f.set((prev) => ({ ...prev, [o.key]: e.target.checked }))}
+                              />
+                            </div>
+                          ))}
+                          <Dropdown.Divider />
+                          <div className="px-3 pb-1">
+                            <Button
+                              variant="link"
+                              size="sm"
+                              className="p-0 text-info"
+                              style={{ fontSize: '0.78rem' }}
+                              onClick={() => f.set(allChecked(f.options))}
+                            >
+                              Select all
+                            </Button>
+                          </div>
+                        </Dropdown.Menu>
+                      </Dropdown>
+                    );
+                  })}
+                  <Form.Check
+                    type="switch"
+                    id="hide-rejected-threats"
+                    className="text-white-50"
+                    style={{ fontSize: '0.85rem' }}
+                    label={(() => {
+                      // The count is on the label so the switch says what it will actually do before
+                      // it is touched. Reading every category here rather than per card, because the
+                      // toggle is section-wide and a per-card number would not answer "how much of
+                      // this section is settled".
+                      const rejected = Object.values(threatModelResults || {})
+                        .reduce((n, list) => n + (list || []).filter((t) => t.test_status === 'rejected').length, 0);
+                      return rejected > 0
+                        ? `Hide rejected (${rejected})`
+                        : 'Hide rejected';
+                    })()}
+                    checked={hideRejectedThreats}
+                    onChange={(e) => setHideRejectedThreats(e.target.checked)}
+                  />
+                  </div>
+                </div>
                 <HelpMeLearn section="urlThreatModelResults" />
                 {[
                   { key: 'spoofing', label: '(S)poofing', desc: 'Impersonation of users, systems, or data' },
@@ -10481,11 +11144,39 @@ function App() {
                           <div className="d-flex justify-content-between align-items-start mb-1">
                             <Card.Title className="text-danger mb-0">
                               {cat.label}
-                              {(threatModelResults[cat.key] || []).length > 0 && (
-                                <span className="text-white-50 ms-2" style={{ fontSize: '0.8rem', fontWeight: 400 }}>
-                                  {(threatModelResults[cat.key] || []).length} documented
-                                </span>
-                              )}
+                              {/* Naming what is hidden, so a shrunken count cannot be mistaken for
+                                  threats having disappeared from the model - and attributing each
+                                  hidden row to the filter that ACTUALLY hid it.
+
+                                  MEASURED CORRECTION. This used to print `total - visible` under the
+                                  label "rejected hidden", which is only true when the rejected toggle
+                                  is the only narrowed filter. On the live target, with "Hide rejected"
+                                  on and the Low severity box unticked, the Denial of Service card read
+                                  "1 rejected hidden" and Repudiation read "2 rejected hidden" - both
+                                  categories contain zero rejected threats. The number is now the rows
+                                  the rejected toggle alone removes, and everything else is counted
+                                  separately rather than mislabelled. */}
+                              {(() => {
+                                const all = threatModelResults[cat.key] || [];
+                                const shown = visibleThreats(all, hideRejectedThreats, threatSeverityFilter, threatAuthFilter);
+                                if (shown.length === 0) return null;
+                                // Rows passing severity and auth, rejections included. The gap between
+                                // this and `shown` is exactly what the rejected toggle took away; the
+                                // gap between this and `all` is what the other two filters took.
+                                const passOthers = visibleThreats(all, false, threatSeverityFilter, threatAuthFilter);
+                                const parts = [`${shown.length} documented`];
+                                if (passOthers.length > shown.length) {
+                                  parts.push(`${passOthers.length - shown.length} rejected hidden`);
+                                }
+                                if (all.length > passOthers.length) {
+                                  parts.push(`${all.length - passOthers.length} hidden by filters`);
+                                }
+                                return (
+                                  <span className="text-white-50 ms-2" style={{ fontSize: '0.8rem', fontWeight: 400 }}>
+                                    {parts.join(', ')}
+                                  </span>
+                                );
+                              })()}
                             </Card.Title>
                             <Button
                               variant="outline-danger"
@@ -10498,15 +11189,43 @@ function App() {
                           <Card.Text className="text-white-50 small fst-italic mb-3">
                             {cat.desc}
                           </Card.Text>
-                          {(threatModelResults[cat.key] || []).length === 0 ? (
+                          {visibleThreats(threatModelResults[cat.key], hideRejectedThreats, threatSeverityFilter, threatAuthFilter).length === 0 ? (
                             <div className="text-center text-white-50 py-4">
-                              There are currently no Threat Model results for this section.
+                              {/* A category emptied BY THE FILTER must not claim there are no results:
+                                  that sentence would be false, and it is the reading that makes an
+                                  operator think the model lost data. */}
+                              {(() => {
+                                const all = (threatModelResults[cat.key] || []);
+                                if (all.length === 0) {
+                                  return 'There are currently no Threat Model results for this section.';
+                                }
+                                // Name the filter that is ACTUALLY responsible. Blaming the rejected
+                                // toggle when a severity box did the hiding sends the operator to the
+                                // wrong control, and they conclude the toggle is broken.
+                                const causes = [];
+                                if (hideRejectedThreats && all.some((t) => t.test_status === 'rejected')) {
+                                  causes.push('"Hide rejected"');
+                                }
+                                if (all.some((t) => threatSeverityFilter[threatSeverityKey(t)] === false)) {
+                                  causes.push('the Severity filter');
+                                }
+                                if (all.some((t) => threatAuthFilter[threatAuthKey(t)] === false)) {
+                                  causes.push('the Auth filter');
+                                }
+                                const n = `${all.length} result${all.length === 1 ? '' : 's'}`;
+                                return causes.length
+                                  ? `All ${n} in this section are hidden by ${causes.join(' and ')}. Change that to read them.`
+                                  : `All ${n} in this section are hidden by the current filters.`;
+                              })()}
                             </div>
                           ) : (
                             <Accordion data-bs-theme="dark" alwaysOpen>
-                              {(threatModelResults[cat.key] || []).map((threat, threatIndex) => (
+                              {visibleThreats(threatModelResults[cat.key], hideRejectedThreats, threatSeverityFilter, threatAuthFilter).map((threat, threatIndex) => (
                                 <Accordion.Item
-                                  eventKey={String(threatIndex)}
+                                  // Keyed on the threat's own id rather than its position. The list is
+                                  // now filterable, so an index-based eventKey would move an OPEN panel
+                                  // onto a different threat the moment "Hide rejected" is toggled.
+                                  eventKey={String(threat.id || threatIndex)}
                                   key={threat.id || threatIndex}
                                   className={threatTestStatus(threat.test_status).className}
                                   style={{
@@ -10576,6 +11295,11 @@ function App() {
                                       </div>
                                       <Badge
                                         bg={threatTestStatus(threat.test_status).badge}
+                                        // Only the amber state carries one, and it has to: Bootstrap
+                                        // leaves a .bg-warning badge white, which is white on #ffc107
+                                        // and unreadable. Undefined everywhere else, which is the
+                                        // default white the other three already rely on.
+                                        text={threatTestStatus(threat.test_status).text}
                                         className="flex-shrink-0 d-flex align-items-center gap-1"
                                         style={threat.test_status === 'validated'
                                           ? {
@@ -10699,7 +11423,60 @@ function App() {
                                         ))}
                                       </div>
                                     )}
-                                    <div className="d-flex align-items-center gap-2 mt-3 pt-3 border-top border-secondary">
+                                    {/* Which recorded or built sequence demonstrates this threat.
+                                        In the BODY and not the header: the header already carries
+                                        severity, auth and test status, and this is a control the
+                                        operator uses while reading the threat rather than while
+                                        scanning the list. */}
+                                    <ThreatFlowLinks
+                                      threat={threat}
+                                      links={threatFlowLinksByThreat[String(threat.id)] || []}
+                                      flows={threatFlowChoices}
+                                      flowsById={threatFlowChoicesById}
+                                      flowsTotal={threatFlowChoicesTotal}
+                                      flowsLoading={threatFlowChoicesLoading}
+                                      flowsError={threatFlowChoicesError}
+                                      linksError={threatFlowLinksError}
+                                      actionError={threatFlowActionError
+                                        && threatFlowActionError.threat_id === String(threat.id)
+                                        ? threatFlowActionError.message
+                                        : ''}
+                                      busy={threatFlowBusyId === String(threat.id)}
+                                      onLink={(threatId, flowId) => setThreatFlowLink(threatId, flowId, false)}
+                                      onUnlink={(threatId, flowId) => setThreatFlowLink(threatId, flowId, true)}
+                                      onSetNote={(threatId, flowId, note) =>
+                                        setThreatFlowLink(threatId, flowId, false, note)}
+                                    />
+                                    {/* The operator's own notes on this threat, after the evidence
+                                        and before the verdict. Collapsed and unfetched until opened:
+                                        the list route is per threat, so anything eager here is one
+                                        request per threat on a 193-threat target. */}
+                                    <ThreatNotes
+                                      threat={threat}
+                                      notes={threatNotesByThreat[String(threat.id)] || []}
+                                      loaded={threatNotesLoaded[String(threat.id)] === true}
+                                      loading={threatNotesLoading[String(threat.id)] === true}
+                                      error={threatNotesError[String(threat.id)] || ''}
+                                      actionError={threatNotesActionError
+                                        && threatNotesActionError.threat_id === String(threat.id)
+                                        ? threatNotesActionError.message
+                                        : ''}
+                                      busy={threatNotesBusyId === String(threat.id)}
+                                      onOpen={fetchThreatNotes}
+                                      onCreate={createThreatNote}
+                                      onUpdate={updateThreatNote}
+                                      onDelete={deleteThreatNote}
+                                    />
+                                    {/* THE VERDICT ROW STAYS LAST. It is the control clicked most and
+                                        it has to be findable at the bottom of the body without
+                                        reading past anything; that is why the notes block above is
+                                        collapsed by default.
+
+                                        flex-wrap because there are now three verdict buttons plus
+                                        Clear on one row, and "Not Enough Info" is the widest label
+                                        of the set. Un-wrapped, a narrow card pushes Clear off the
+                                        end rather than shrinking anything. */}
+                                    <div className="d-flex align-items-center flex-wrap gap-2 mt-3 pt-3 border-top border-secondary">
                                       <span className="text-white-50" style={{ fontSize: '0.72rem', letterSpacing: '0.04em' }}>
                                         TESTED?
                                       </span>
@@ -10716,6 +11493,19 @@ function App() {
                                         onClick={() => handleSetThreatTestStatus(threat.id, 'rejected')}
                                       >
                                         Reject
+                                      </Button>
+                                      {/* Labelled with the status rather than an imperative, because
+                                          Validate and Reject are things you concluded and this one is
+                                          not: there is no verb for "I ran it and still do not know".
+                                          It matches the badge word for word so the click and its
+                                          result are recognisably the same thing. */}
+                                      <Button
+                                        variant={threat.test_status === 'not_enough_info' ? 'warning' : 'outline-warning'}
+                                        size="sm"
+                                        onClick={() => handleSetThreatTestStatus(threat.id, 'not_enough_info')}
+                                        title="The test was attempted and could not be settled: a missing precondition, an ambiguous refusal, or a control arm that did not pass. This is not a rejection."
+                                      >
+                                        Not Enough Info
                                       </Button>
                                       {threat.test_status && threat.test_status !== 'untested' && (
                                         <Button
@@ -11434,26 +12224,36 @@ function App() {
         activeTarget={activeTarget}
       />
 
+      {/* Same reason as the flow list above: this is where BUILT flows are created, renamed and
+          deleted, so the threat-mapping picker is re-read on close rather than left a version
+          behind. */}
       <RequestFlowBuilderModal
         show={showRequestFlowBuilderModal}
-        handleClose={() => setShowRequestFlowBuilderModal(false)}
+        handleClose={() => { setShowRequestFlowBuilderModal(false); fetchThreatFlowChoices(); }}
         activeTarget={activeTarget}
         initialFlowId={builderInitialFlowId}
       />
 
-      {/* initialCaptureId is the receiving end of the handover. Not cleared on close: the modal
-          clears its own pending id when it hides, so clearing it here as well would be a second
-          state change racing the first, and the next open from a button clears it anyway. */}
+      {/* initialCaptureId and initialRawRequest are the receiving end of the handover: an id for a
+          request that is in the crawl corpus, bytes for one that is not. Neither is cleared on
+          close: the modal clears its own pending handover when it hides, so clearing it here as
+          well would be a second state change racing the first, and the next open from a button
+          clears both anyway. */}
       <ReplayRequestsModal
         show={showReplayRequestsModal}
         handleClose={() => setShowReplayRequestsModal(false)}
         activeTarget={activeTarget}
         initialCaptureId={repeaterCaptureId}
+        initialRawRequest={repeaterRawRequest}
       />
 
+      {/* The flow list is re-read on close because this modal is where flows are NAMED, built and
+          deleted. Without it the threat-mapping picker would keep offering a flow that no longer
+          exists, and a flow the operator just named would still be listed under the server's
+          placeholder until the page was reloaded. */}
       <RequestFlowsModal
         show={showRequestFlowsModal}
-        handleClose={() => setShowRequestFlowsModal(false)}
+        handleClose={() => { setShowRequestFlowsModal(false); fetchThreatFlowChoices(); }}
         activeTarget={activeTarget}
         onOpenInRepeater={handleOpenCaptureInRepeater}
         onEditAsFlow={handleEditDetectedFlowAsFlow}
@@ -11526,6 +12326,9 @@ function App() {
         activeTarget={activeTarget}
         tool={vectorTool}
         category={vectorTool ? VECTOR_TOOL_CATEGORY.get(vectorTool.key) : undefined}
+        // Findings carry the request the scanner sent. This is the way from one to the repeater
+        // with those bytes in the editor, and nothing sent until the operator presses Replay.
+        onSendToRepeater={handleOpenRawRequestInRepeater}
       />
 
       <ExploreAttackSurfaceModal
@@ -11587,6 +12390,19 @@ function App() {
         scopeTargets={scopeTargets}
         activeTarget={activeTarget}
       />
+
+      {/* Target independent: the knowledge base is the same corpus whatever is selected, which is why
+          it hangs off the header rather than a workflow card. */}
+      {/* Mounted only once opened. Rendering a lazy component with show={false}, which is what the
+          other modals here do, still pulls its chunk on page load and so buys nothing. */}
+      {showKnowledgeBaseModal && (
+        <Suspense fallback={<div />}>
+          <KnowledgeBaseModal
+            show={showKnowledgeBaseModal}
+            onHide={() => setShowKnowledgeBaseModal(false)}
+          />
+        </Suspense>
+      )}
     </Container>
   );
 }

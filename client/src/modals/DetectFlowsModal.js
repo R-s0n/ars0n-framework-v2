@@ -12,13 +12,18 @@ import { Modal, Button, Form, InputGroup, Spinner, ProgressBar, Table, Alert } f
 //   SCOPE. A host marked in_scope=false is never contacted, on the original endpoint and again on
 //   every redirect destination. That boundary belongs to the bug bounty programme.
 //
-// The verb is the operator's. All seven are sendable and any combination is legal.
+// The verb is the operator's. Any syntactically valid method token is sendable and any combination
+// is legal.
 
 const MONO = 'Menlo, Consolas, "Courier New", monospace';
 
 // What the UI opens with, matching DefaultFlowDetectionConfig() in flowDetectionActive.go.
+//
+// EVERY quick-pick verb is on by default, not just GET. The verb an endpoint was observed answering
+// is also the selection filter, so a GET-only default silently narrowed every run to a third of the
+// corpus and made the writes look untested when they had simply never been asked for.
 const DEFAULT_CONFIG = {
-  methods: ['GET'],
+  methods: ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'],
   rps: 1,
   max_requests: 250,
   follow_redirects: true,
@@ -36,17 +41,23 @@ const HARD_MAX_REQUESTS = 5000;
 const HARD_MAX_REDIRECTS = 10;
 const MAX_TIMEOUT_S = 60;
 
-// The verb list. Every one of these mirrors scanSendableMethods in server/utils/scanHTTP.go, which
-// is what the transport puts on the wire. Any combination is legal; GET is only the default.
+// The quick picks, not the whole vocabulary. The transport sends any syntactically valid method
+// token, so these seven are here because they are the ones typed most often; anything else goes in
+// through the box next to them. Any combination is legal and all seven start selected.
 const METHODS = [
   { name: 'GET', note: 'Request the endpoint.' },
   { name: 'HEAD', note: 'Headers only, no response body.' },
   { name: 'OPTIONS', note: 'Ask the endpoint which verbs it allows.' },
-  { name: 'POST', note: 'Sends the recorded body when the corpus has one.', body: true },
-  { name: 'PUT', note: 'Sends the recorded body when the corpus has one.', body: true },
-  { name: 'PATCH', note: 'Sends the recorded body when the corpus has one.', body: true },
-  { name: 'DELETE', note: 'Sends the recorded body when the corpus has one.', body: true },
+  { name: 'POST', note: 'Sends the recorded body when the corpus has one.' },
+  { name: 'PUT', note: 'Sends the recorded body when the corpus has one.' },
+  { name: 'PATCH', note: 'Sends the recorded body when the corpus has one.' },
+  { name: 'DELETE', note: 'Sends the recorded body when the corpus has one.' },
 ];
+
+// RFC 9110 method = token = 1*tchar. The SHAPE is what gets validated, never the spelling: PROPFIND,
+// LOCK, REPORT and an application's own verb are all legal here, and a curated list of seven would
+// only mean the framework could not test the endpoints that answer them.
+const METHOD_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 const LIVE_STATUSES = ['pending', 'running', 'cancelling'];
 const TERMINAL_STATUSES = ['completed', 'cancelled', 'aborted', 'error'];
@@ -150,9 +161,10 @@ function configKey(cfg) {
   });
 }
 
-// Verbs that carry a request body, which is what decides whether the body toggle and the body
-// counts are worth showing at all.
-const BODY_TAKING = ['POST', 'PUT', 'PATCH', 'DELETE'];
+// The three verbs a recorded body is never replayed with, which is what decides whether the body
+// toggle is worth showing at all. Stated as the exception rather than as a list of the verbs that
+// DO carry one, so a method this file has never heard of gets the control instead of losing it.
+const NO_RECORDED_BODY = ['GET', 'HEAD', 'OPTIONS'];
 
 // The wire body is the config as typed. There is no acknowledgement field and nothing derived: the
 // server reads exactly the keys this screen shows, so what the operator set is what is sent.
@@ -188,6 +200,9 @@ export const DetectFlowsModal = ({ show, handleClose, activeTarget }) => {
   // re-trigger their effects) on every keystroke in a number box.
   const configRef = useRef(config);
   configRef.current = config;
+
+  const [customMethod, setCustomMethod] = useState('');
+  const [customMethodError, setCustomMethodError] = useState('');
 
   const [plan, setPlan] = useState(null);
   const [planKey, setPlanKey] = useState('');
@@ -331,6 +346,8 @@ export const DetectFlowsModal = ({ show, handleClose, activeTarget }) => {
   useEffect(() => {
     if (!show || !targetId) return;
     setConfig(DEFAULT_CONFIG);
+    setCustomMethod('');
+    setCustomMethodError('');
     setPlan(null);
     setPlanKey('');
     setPlanError('');
@@ -419,12 +436,31 @@ export const DetectFlowsModal = ({ show, handleClose, activeTarget }) => {
   const toggleMethod = (name) => {
     setConfig((prev) => {
       const has = prev.methods.includes(name);
-      // Never leave the set empty. The server normalises an empty list back to GET, and a checkbox
-      // row showing nothing ticked next to a plan full of GETs is a control that lies.
+      // Never leave the set empty. The server reads an empty list as "unspecified" and falls back to
+      // the full default set, so an empty row would mean the exact opposite of what it shows: nothing
+      // ticked next to a plan sending every verb. The last tick stays.
       const next = has ? prev.methods.filter((m) => m !== name) : [...prev.methods, name];
       if (!next.length) return prev;
       return { ...prev, methods: next };
     });
+    setStartError('');
+  };
+
+  // The SHAPE is checked, never the spelling. A rejection here means the characters cannot go on a
+  // request line at all, not that this file has never heard of the verb.
+  const addCustomMethod = () => {
+    const raw = customMethod.trim();
+    if (!raw) return;
+    const name = raw.toUpperCase();
+    if (!METHOD_TOKEN.test(name)) {
+      setCustomMethodError(`"${raw}" is not a valid HTTP method token. No spaces, no quotes, no separators.`);
+      return;
+    }
+    setConfig((prev) => (prev.methods.includes(name)
+      ? prev
+      : { ...prev, methods: [...prev.methods, name] }));
+    setCustomMethod('');
+    setCustomMethodError('');
     setStartError('');
   };
 
@@ -596,7 +632,17 @@ export const DetectFlowsModal = ({ show, handleClose, activeTarget }) => {
   }, [plan]);
 
   const bodyTakingSelected = useMemo(
-    () => (config.methods || []).some((m) => BODY_TAKING.includes(String(m).toUpperCase())),
+    () => (config.methods || []).some((m) => !NO_RECORDED_BODY.includes(String(m).toUpperCase())),
+    [config.methods]
+  );
+
+  // Whatever the operator picked that is not one of the quick picks, so a custom verb is visible and
+  // removable instead of living only in the config object.
+  const extraMethods = useMemo(
+    () => (config.methods || [])
+      .map((m) => String(m).toUpperCase())
+      .filter((m) => !METHODS.some((q) => q.name === m))
+      .sort(),
     [config.methods]
   );
 
@@ -622,19 +668,64 @@ export const DetectFlowsModal = ({ show, handleClose, activeTarget }) => {
           />
         ))}
       </div>
+
+      {extraMethods.length > 0 && (
+        <div className="d-flex flex-wrap gap-2 mt-2">
+          {extraMethods.map((m) => (
+            <Button
+              key={m}
+              size="sm"
+              variant="outline-info"
+              className="py-0 px-2"
+              style={{ fontFamily: MONO, fontSize: '0.7rem' }}
+              disabled={isLive}
+              onClick={() => toggleMethod(m)}
+              title="Remove this verb from the run."
+            >
+              {m}<i className="bi bi-x ms-1" />
+            </Button>
+          ))}
+        </div>
+      )}
+
+      <div className="d-flex align-items-center gap-2 mt-2" style={{ maxWidth: '22rem' }}>
+        <Form.Control
+          size="sm"
+          className="bg-dark text-white border-secondary"
+          style={{ fontFamily: MONO, fontSize: '0.72rem' }}
+          placeholder="PROPFIND, REPORT, your own verb"
+          value={customMethod}
+          disabled={isLive}
+          onChange={(e) => { setCustomMethod(e.target.value); setCustomMethodError(''); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addCustomMethod(); } }}
+        />
+        <Button
+          size="sm"
+          variant="outline-light"
+          style={{ fontSize: '0.72rem' }}
+          disabled={isLive || !customMethod.trim()}
+          onClick={addCustomMethod}
+        >
+          Add
+        </Button>
+      </div>
+      {customMethodError && (
+        <div className="text-danger mt-1" style={{ fontSize: '0.68rem' }}>{customMethodError}</div>
+      )}
+
       {bodyTakingSelected && (
         <Form.Check
           type="checkbox"
           id="detect-send-bodies"
           className="text-white mt-2"
           style={{ fontSize: '0.72rem' }}
-          label={<span>Send the recorded request body with POST, PUT, PATCH and DELETE</span>}
+          label={<span>Send the recorded request body when the corpus has one</span>}
           checked={config.send_recorded_bodies !== false}
           disabled={isLive}
           onChange={() => setConfig((prev) => ({
             ...prev, send_recorded_bodies: prev.send_recorded_bodies === false,
           }))}
-          title="Off sends these verbs with an empty body, which most endpoints answer 400 or 415."
+          title="Off sends an empty body, which most endpoints answer 400 or 415."
         />
       )}
     </Field>

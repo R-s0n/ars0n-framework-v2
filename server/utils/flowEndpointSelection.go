@@ -203,7 +203,25 @@ func ClearFlowEndpointDeselections(scopeTargetID string) (int64, error) {
 // (a map[int]bool, written whole on every run), so the array carries no order and the last element is
 // not the most recent observation. Reporting one as "last status" would be a number that looks like a
 // fact and is not, which is the same class of defect as a count that counts something else.
+//
+// BOTH SOURCES ARE READ, and the crawl one is not optional decoration. loadFlowDetectionCandidates
+// sources endpoints from the crawl as well as from consolidation, so reading statuses from
+// consolidation alone left every crawl-discovered row with an empty status list. Empty is documented
+// on FlowEndpointRow as "nobody has requested it yet", which would have been a plain untruth about an
+// endpoint the operator's own browser had just hit two hundred times and recorded the answer to.
 func loadFlowEndpointStatuses(scopeTargetID string) (map[string][]int, error) {
+	merged := map[string]map[int]bool{}
+	observe := func(key string, codes ...int) {
+		if merged[key] == nil {
+			merged[key] = map[int]bool{}
+		}
+		for _, c := range codes {
+			if c > 0 {
+				merged[key][c] = true
+			}
+		}
+	}
+
 	rows, err := dbPool.Query(context.Background(), `
 		SELECT COALESCE(url,''), COALESCE(NULLIF(method,''),'GET'), COALESCE(status_codes,'[]'::jsonb)
 		  FROM consolidated_url_endpoints
@@ -211,9 +229,6 @@ func loadFlowEndpointStatuses(scopeTargetID string) (map[string][]int, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	merged := map[string]map[int]bool{}
 	for rows.Next() {
 		var rawURL, method string
 		var raw []byte
@@ -228,16 +243,38 @@ func loadFlowEndpointStatuses(scopeTargetID string) (map[string][]int, error) {
 		if len(raw) > 0 {
 			_ = json.Unmarshal(raw, &codes)
 		}
-		if merged[key] == nil {
-			merged[key] = map[int]bool{}
-		}
-		for _, c := range codes {
-			if c > 0 {
-				merged[key][c] = true
-			}
-		}
+		observe(key, codes...)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// status_code 0 is the crawl's marker for "no response was observed", which happens when the
+	// request failed or was only seen by the network observer. It is filtered out rather than reported,
+	// because a 0 on a status list reads as a status.
+	crows, err := dbPool.Query(context.Background(), `
+		SELECT DISTINCT COALESCE(url,''), COALESCE(NULLIF(method,''),'GET'), status_code
+		  FROM manual_crawl_captures
+		 WHERE scope_target_id = $1 AND COALESCE(url,'') <> '' AND url LIKE 'http%'
+		   AND COALESCE(status_code,0) > 0`, scopeTargetID)
+	if err != nil {
+		return nil, err
+	}
+	defer crows.Close()
+	for crows.Next() {
+		var rawURL, method string
+		var code int
+		if err := crows.Scan(&rawURL, &method, &code); err != nil {
+			continue
+		}
+		key, ok := FlowEndpointKey(rawURL, method)
+		if !ok {
+			continue
+		}
+		observe(key, code)
+	}
+	if err := crows.Err(); err != nil {
 		return nil, err
 	}
 
@@ -284,7 +321,10 @@ type FlowEndpointRow struct {
 	Path        string `json:"path"`
 	// URL is the exact string detection would put on the wire for this row, query string stripped.
 	URL string `json:"url"`
-	// Sources is every table this endpoint was found in: consolidated, attack_vector, or both.
+	// Sources is every table this endpoint was found in, sorted: manual_crawl, consolidated,
+	// attack_vector, or any combination. Worth reading rather than ignoring: an endpoint carrying only
+	// manual_crawl is one the operator's browser reached that consolidation has not caught up with yet,
+	// which is the normal state immediately after a recording and before a consolidate run.
 	Sources []string `json:"sources"`
 	// ObservedStatusCodes is every status the crawl recorded for this endpoint, sorted and
 	// deduplicated. Empty means nobody has requested it yet, which is not the same as 0.
@@ -332,7 +372,7 @@ type FlowEndpointFilter struct {
 	Query string // substring over method, host, path and URL
 	// State is one of: "", selected, deselected, excluded, out_of_scope, sendable.
 	State  string
-	Source string // "", consolidated, attack_vector
+	Source string // "", manual_crawl, consolidated, attack_vector
 	Limit  int
 	Offset int
 }

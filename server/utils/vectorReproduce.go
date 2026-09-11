@@ -464,12 +464,31 @@ func SplitReconstructedRequest(raw string) (string, bool) {
 	if !strings.HasPrefix(strings.TrimLeft(raw, " \t\r\n"), reconstructedRequestBanner) {
 		return raw, false
 	}
-	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
-	for i, line := range lines {
-		if i == 0 || strings.HasPrefix(line, "#") {
+	// SLICES THE ORIGINAL rather than rejoining normalised lines, so the request comes back BYTE FOR
+	// BYTE as stored.
+	//
+	// The previous version did strings.Split(strings.ReplaceAll(raw, "\r\n", "\n")) and rejoined with
+	// "\n", which silently converted a CRLF-framed request to LF. That is invisible almost everywhere
+	// and fatal in the one place this function feeds that cares: a request re-sent with raw_mode on,
+	// where a deliberate framing disagreement IS the payload. Rewriting CRLF turns a smuggling probe
+	// into an ordinary POST and the operator concludes the target is not vulnerable having never sent
+	// the test. Composed requests are built from a crawl capture, which is normally CRLF.
+	offset := 0
+	for line := 0; offset < len(raw); line++ {
+		end := strings.IndexByte(raw[offset:], '\n')
+		if end < 0 {
+			// A banner with no body after it.
+			return "", true
+		}
+		next := offset + end + 1
+		// The banner is the first line plus any run of comment lines under it. Compare against the
+		// line WITHOUT its terminator so a \r\n line is recognised the same as a \n one.
+		text := strings.TrimSuffix(raw[offset:offset+end], "\r")
+		if line == 0 || strings.HasPrefix(text, "#") {
+			offset = next
 			continue
 		}
-		return strings.Join(lines[i:], "\n"), true
+		return raw[offset:], true
 	}
 	return "", true
 }

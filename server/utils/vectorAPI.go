@@ -47,9 +47,10 @@ func GetVectorScanStatus(w http.ResponseWriter, r *http.Request) {
 
 	settings := loadVectorSettings(ctx, scopeTargetID, toolKey)
 	if vectors, err := loadRowsFor(ctx, tool, scopeTargetID); err == nil {
-		report := BuildVectorEligibility(tool, vectors, settings,
+		report := BuildVectorEligibilityFor(tool, vectors, settings,
 			loadFoundVectorIDs(ctx, scopeTargetID, findingCategoryFor(tool)),
-			loadVectorSectionSettings(ctx, scopeTargetID, tool.Category))
+			loadVectorSectionSettings(ctx, scopeTargetID, tool.Category),
+			LoadVectorDeselections(ctx, scopeTargetID, tool.Key))
 		report.Vectors = nil
 		out["eligibility"] = report
 	}
@@ -83,59 +84,79 @@ func GetVectorScanStatus(w http.ResponseWriter, r *http.Request) {
 // Findings AND skipped vectors, in one response, because they answer the same question. A results
 // screen that lists only findings invites "nothing found" to be read as "nothing there", when for
 // domdig and xssFuzz most of the table was never sent at all.
-func GetVectorResults(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	vars := mux.Vars(r)
-	scopeTargetID, toolKey := vars["scope_target_id"], vars["tool"]
-	ctx := context.Background()
+// GetVectorResults returns one tool's results, and REFUSES a tool that does not belong to the
+// category in the path.
+//
+// A closure over the category because the category is only in the route PREFIX and never reaches
+// mux.Vars, which is why the check was missing rather than wrong. Measured: /api/misc/{target}/mantra/
+// results returned mantra's findings in full even though mantra is a sensitive-leak tool, so every
+// wrong-category call silently succeeded. That is the shape that lets an agent believe it read the
+// misc section when it read a different one, and it makes a genuinely empty section indistinguishable
+// from a mistyped one.
+func GetVectorResults(category string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		vars := mux.Vars(r)
+		scopeTargetID, toolKey := vars["scope_target_id"], vars["tool"]
+		ctx := context.Background()
 
-	// The scan row is read alongside its id because scan-level verdicts live on it and nothing was
-	// reading them. vector_scans.error carries the session-loss message that marks the tail of a run
-	// UNTESTED, and until now it reached no caller at all: the modal only ever asked for findings and
-	// the skipped list, so a run that stopped halfway looked exactly like a run that finished clean.
-	var scan struct {
-		ID, Status, ScanError           string
-		Total, Eligible, Done, Findings int
-		CreatedAt                       time.Time
-		CompletedAt                     *time.Time
-	}
-	if err := dbPool.QueryRow(ctx, `
+		if tool, ok := VectorToolByKey(toolKey); !ok {
+			writeJSONError(w, http.StatusNotFound, "unknown_tool", "No scanner called "+toolKey+".")
+			return
+		} else if category != "" && tool.Category != category {
+			writeJSONError(w, http.StatusNotFound, "wrong_category",
+				toolKey+" is a "+tool.Category+" tool, not a "+category+" one. Ask for it under /"+
+					tool.Category+"/ or the results you get back will not be the section you think.")
+			return
+		}
+
+		// The scan row is read alongside its id because scan-level verdicts live on it and nothing was
+		// reading them. vector_scans.error carries the session-loss message that marks the tail of a run
+		// UNTESTED, and until now it reached no caller at all: the modal only ever asked for findings and
+		// the skipped list, so a run that stopped halfway looked exactly like a run that finished clean.
+		var scan struct {
+			ID, Status, ScanError           string
+			Total, Eligible, Done, Findings int
+			CreatedAt                       time.Time
+			CompletedAt                     *time.Time
+		}
+		if err := dbPool.QueryRow(ctx, `
 		SELECT id::text, status, COALESCE(error,''), total_vectors, eligible_vectors,
 		       completed_vectors, finding_count, created_at, completed_at
 		FROM vector_scans WHERE scope_target_id = $1 AND tool = $2
 		ORDER BY created_at DESC LIMIT 1`, scopeTargetID, toolKey).Scan(
-		&scan.ID, &scan.Status, &scan.ScanError, &scan.Total, &scan.Eligible,
-		&scan.Done, &scan.Findings, &scan.CreatedAt, &scan.CompletedAt); err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"findings": []any{}, "skipped": []any{}, "untested": []any{}, "scan": nil,
-		})
-		return
-	}
-	scanID := scan.ID
+			&scan.ID, &scan.Status, &scan.ScanError, &scan.Total, &scan.Eligible,
+			&scan.Done, &scan.Findings, &scan.CreatedAt, &scan.CompletedAt); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"findings": []any{}, "skipped": []any{}, "untested": []any{}, "scan": nil,
+			})
+			return
+		}
+		scanID := scan.ID
 
-	findings := []map[string]any{}
-	// The positive control is not a finding about the target and must never be listed as one.
-	//
-	// Every run first fires the tool at the oracle container, a service this framework runs and knows
-	// is vulnerable, to prove the tool works before believing its zero. Those hits were being written
-	// into vector_findings with no marker of any kind, so they arrived in the operator's findings list
-	// looking exactly like a finding on their target, complete with reproduction steps pointing at
-	// http://oracle:8000.
-	//
-	// MEASURED on the Juice Shop corpus: 11 of 61 stored findings were the oracle. sqlmap's list was
-	// 3 oracle and 0 target, and SQLiDetector's was 2 and 0, so BOTH tools' entire finding lists were
-	// the control. "sqlmap: 3 findings" read as three SQL injections on the target and was three
-	// injections in the framework's own test fixture.
-	//
-	// Split on READ rather than filtered on write, because the rows already exist in every database
-	// this has ever run against, and because the control outcome is worth reporting: a run whose
-	// canary did NOT fire proves nothing, and that is the single most useful thing this block knows.
-	canaryFindings := []map[string]any{}
-	// findingTarget remembers which target each finding belongs to, so the tool's own stored output
-	// can be attached below. It is keyed by finding id because the identity itself is one of three
-	// columns depending on whether the row is an attack vector, a bypass target or a leak target.
-	findingTarget := map[string]string{}
-	rows, err := dbPool.Query(ctx, `
+		findings := []map[string]any{}
+		// The positive control is not a finding about the target and must never be listed as one.
+		//
+		// Every run first fires the tool at the oracle container, a service this framework runs and knows
+		// is vulnerable, to prove the tool works before believing its zero. Those hits were being written
+		// into vector_findings with no marker of any kind, so they arrived in the operator's findings list
+		// looking exactly like a finding on their target, complete with reproduction steps pointing at
+		// http://oracle:8000.
+		//
+		// MEASURED on the Juice Shop corpus: 11 of 61 stored findings were the oracle. sqlmap's list was
+		// 3 oracle and 0 target, and SQLiDetector's was 2 and 0, so BOTH tools' entire finding lists were
+		// the control. "sqlmap: 3 findings" read as three SQL injections on the target and was three
+		// injections in the framework's own test fixture.
+		//
+		// Split on READ rather than filtered on write, because the rows already exist in every database
+		// this has ever run against, and because the control outcome is worth reporting: a run whose
+		// canary did NOT fire proves nothing, and that is the single most useful thing this block knows.
+		canaryFindings := []map[string]any{}
+		// findingTarget remembers which target each finding belongs to, so the tool's own stored output
+		// can be attached below. It is keyed by finding id because the identity itself is one of three
+		// columns depending on whether the row is an attack vector, a bypass target or a leak target.
+		findingTarget := map[string]string{}
+		rows, err := dbPool.Query(ctx, `
 		SELECT f.id::text, COALESCE(f.vector_id::text,''), f.tool, f.kind, f.severity, f.confidence,
 		       f.insertion_point, f.param, f.payload, f.method, f.url, f.evidence,
 		       f.detection_method, f.inject_type, f.raw_request, f.raw_response, f.triage,
@@ -147,107 +168,107 @@ func GetVectorResults(w http.ResponseWriter, r *http.Request) {
 		WHERE f.scan_id = $1
 		ORDER BY CASE f.kind WHEN 'V' THEN 0 WHEN 'A' THEN 1 WHEN 'R' THEN 2 ELSE 3 END,
 		         f.insertion_point, f.param`, scanID)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var f struct {
-				ID, VectorID, Tool, Kind, Severity, Confidence   string
-				InsertionPoint, Param, Payload, Method, URL      string
-				Evidence, DetectionMethod, InjectType            string
-				RawRequest, RawResponse, Triage, Domain, VecPath string
-				VecRawRequest, VecEvidenceURL                    string
-				BypassTargetID, LeakTargetID                     string
-			}
-			if rows.Scan(&f.ID, &f.VectorID, &f.Tool, &f.Kind, &f.Severity, &f.Confidence,
-				&f.InsertionPoint, &f.Param, &f.Payload, &f.Method, &f.URL, &f.Evidence,
-				&f.DetectionMethod, &f.InjectType, &f.RawRequest, &f.RawResponse, &f.Triage,
-				&f.Domain, &f.VecPath, &f.VecRawRequest, &f.VecEvidenceURL,
-				&f.BypassTargetID, &f.LeakTargetID) != nil {
-				continue
-			}
-			findingTarget[f.ID] = firstNonEmpty(f.VectorID, f.BypassTargetID, f.LeakTargetID)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var f struct {
+					ID, VectorID, Tool, Kind, Severity, Confidence   string
+					InsertionPoint, Param, Payload, Method, URL      string
+					Evidence, DetectionMethod, InjectType            string
+					RawRequest, RawResponse, Triage, Domain, VecPath string
+					VecRawRequest, VecEvidenceURL                    string
+					BypassTargetID, LeakTargetID                     string
+				}
+				if rows.Scan(&f.ID, &f.VectorID, &f.Tool, &f.Kind, &f.Severity, &f.Confidence,
+					&f.InsertionPoint, &f.Param, &f.Payload, &f.Method, &f.URL, &f.Evidence,
+					&f.DetectionMethod, &f.InjectType, &f.RawRequest, &f.RawResponse, &f.Triage,
+					&f.Domain, &f.VecPath, &f.VecRawRequest, &f.VecEvidenceURL,
+					&f.BypassTargetID, &f.LeakTargetID) != nil {
+					continue
+				}
+				findingTarget[f.ID] = firstNonEmpty(f.VectorID, f.BypassTargetID, f.LeakTargetID)
 
-			repro := BuildFindingReproduction(FindingForRepro{
-				Tool: f.Tool, Kind: f.Kind, Method: f.Method, InsertionPoint: f.InsertionPoint,
-				Param: f.Param, Payload: f.Payload, URL: f.URL, Evidence: f.Evidence,
-				RawRequest:        f.RawRequest,
-				VectorRawRequest:  f.VecRawRequest,
-				VectorEvidenceURL: f.VecEvidenceURL,
-			})
-			requestOrigin := FindingRequestOrigin(f.RawRequest)
-			responseOrigin := FindingResponseOrigin(f.RawResponse)
-			// Rows stored BEFORE the runner started composing requests have an empty column and can
-			// still be given one here, so the note describes what the operator can actually see
-			// rather than only what is in the column. The column itself is reported unchanged: it
-			// says what was stored, and rewriting that would be the same lie in the other direction.
-			shown := requestOrigin
-			if shown == RequestNone && repro.RequestOrigin == RequestReconstructed {
-				shown = RequestReconstructed
-			}
+				repro := BuildFindingReproduction(FindingForRepro{
+					Tool: f.Tool, Kind: f.Kind, Method: f.Method, InsertionPoint: f.InsertionPoint,
+					Param: f.Param, Payload: f.Payload, URL: f.URL, Evidence: f.Evidence,
+					RawRequest:        f.RawRequest,
+					VectorRawRequest:  f.VecRawRequest,
+					VectorEvidenceURL: f.VecEvidenceURL,
+				})
+				requestOrigin := FindingRequestOrigin(f.RawRequest)
+				responseOrigin := FindingResponseOrigin(f.RawResponse)
+				// Rows stored BEFORE the runner started composing requests have an empty column and can
+				// still be given one here, so the note describes what the operator can actually see
+				// rather than only what is in the column. The column itself is reported unchanged: it
+				// says what was stored, and rewriting that would be the same lie in the other direction.
+				shown := requestOrigin
+				if shown == RequestNone && repro.RequestOrigin == RequestReconstructed {
+					shown = RequestReconstructed
+				}
 
-			row := map[string]any{
-				"id": f.ID, "vector_id": f.VectorID, "tool": f.Tool, "kind": f.Kind,
-				"kind_label": vectorKindLabel(f.Tool, f.Kind), "severity": f.Severity,
-				"confidence": f.Confidence, "insertion_point": f.InsertionPoint,
-				"param": f.Param, "payload": f.Payload, "method": f.Method, "url": f.URL,
-				"evidence": f.Evidence, "detection_method": f.DetectionMethod,
-				"inject_type": f.InjectType, "raw_request": f.RawRequest,
-				"raw_response": f.RawResponse, "triage": f.Triage,
-				"domain": f.Domain, "vector_path": f.VecPath,
-				// WHICH KIND OF EVIDENCE THIS IS, said in the data rather than left to be guessed
-				// from the tool's name. raw_request is returned exactly as stored, banner and all,
-				// so a consumer that never reads these two fields still cannot mistake a composed
-				// request for a captured one.
-				"raw_request_origin":  requestOrigin,
-				"raw_response_origin": responseOrigin,
-				"evidence_note":       findingEvidenceNote(f.Tool, shown, responseOrigin),
-				// Everything an operator needs to check this WITHOUT the framework, and the
-				// hard-coded reference explaining what the tool did and did not prove. A finding
-				// nobody can reproduce is a finding nobody should act on.
-				"reproduction": repro,
-				"explain":      ExplainFinding(f.Tool, f.Kind),
+				row := map[string]any{
+					"id": f.ID, "vector_id": f.VectorID, "tool": f.Tool, "kind": f.Kind,
+					"kind_label": vectorKindLabel(f.Tool, f.Kind), "severity": f.Severity,
+					"confidence": f.Confidence, "insertion_point": f.InsertionPoint,
+					"param": f.Param, "payload": f.Payload, "method": f.Method, "url": f.URL,
+					"evidence": f.Evidence, "detection_method": f.DetectionMethod,
+					"inject_type": f.InjectType, "raw_request": f.RawRequest,
+					"raw_response": f.RawResponse, "triage": f.Triage,
+					"domain": f.Domain, "vector_path": f.VecPath,
+					// WHICH KIND OF EVIDENCE THIS IS, said in the data rather than left to be guessed
+					// from the tool's name. raw_request is returned exactly as stored, banner and all,
+					// so a consumer that never reads these two fields still cannot mistake a composed
+					// request for a captured one.
+					"raw_request_origin":  requestOrigin,
+					"raw_response_origin": responseOrigin,
+					"evidence_note":       findingEvidenceNote(f.Tool, shown, responseOrigin),
+					// Everything an operator needs to check this WITHOUT the framework, and the
+					// hard-coded reference explaining what the tool did and did not prove. A finding
+					// nobody can reproduce is a finding nobody should act on.
+					"reproduction": repro,
+					"explain":      ExplainFinding(f.Tool, f.Kind),
+				}
+				// The split. A canary hit is the control working, not a finding on the target.
+				if findingIsCanary(f.URL) {
+					row["is_canary"] = true
+					canaryFindings = append(canaryFindings, row)
+					continue
+				}
+				findings = append(findings, row)
 			}
-			// The split. A canary hit is the control working, not a finding on the target.
-			if findingIsCanary(f.URL) {
-				row["is_canary"] = true
-				canaryFindings = append(canaryFindings, row)
-				continue
-			}
-			findings = append(findings, row)
 		}
-	}
 
-	skipped := []map[string]any{}
-	skipRows, err := dbPool.Query(ctx, `
+		skipped := []map[string]any{}
+		skipRows, err := dbPool.Query(ctx, `
 		SELECT COALESCE(sv.vector_id::text,''), sv.reason, COALESCE(v.insertion_point,''),
 		       COALESCE(v.method,''), COALESCE(v.domain,''), COALESCE(v.path,'')
 		FROM vector_scan_vectors sv
 		LEFT JOIN attack_vectors v ON v.id = sv.vector_id
 		WHERE sv.scan_id = $1 AND sv.status = 'skipped'
 		ORDER BY v.insertion_point, v.domain, v.path`, scanID)
-	if err == nil {
-		defer skipRows.Close()
-		for skipRows.Next() {
-			var s struct{ VectorID, Reason, Point, Method, Domain, Path string }
-			if skipRows.Scan(&s.VectorID, &s.Reason, &s.Point, &s.Method, &s.Domain, &s.Path) != nil {
-				continue
+		if err == nil {
+			defer skipRows.Close()
+			for skipRows.Next() {
+				var s struct{ VectorID, Reason, Point, Method, Domain, Path string }
+				if skipRows.Scan(&s.VectorID, &s.Reason, &s.Point, &s.Method, &s.Domain, &s.Path) != nil {
+					continue
+				}
+				skipped = append(skipped, map[string]any{
+					"vector_id": s.VectorID, "reason": s.Reason, "insertion_point": s.Point,
+					"method": s.Method, "domain": s.Domain, "path": s.Path,
+				})
 			}
-			skipped = append(skipped, map[string]any{
-				"vector_id": s.VectorID, "reason": s.Reason, "insertion_point": s.Point,
-				"method": s.Method, "domain": s.Domain, "path": s.Path,
-			})
 		}
-	}
 
-	// UNTESTED is deliberately a THIRD list rather than more rows in skipped[].
-	//
-	// The two mean different things and folding them would destroy the distinction the skipped list
-	// exists to make. A skipped vector was never eligible: the tool cannot reach that insertion point
-	// and the operator can stop thinking about it. An untested vector WAS eligible, was going to be
-	// tested, and then the run stopped. The first is a bounded gap, the second is an unknown, and an
-	// unknown is the one that has to be re-run before any verdict on this tool means anything.
-	untested := []map[string]any{}
-	untestedRows, err := dbPool.Query(ctx, `
+		// UNTESTED is deliberately a THIRD list rather than more rows in skipped[].
+		//
+		// The two mean different things and folding them would destroy the distinction the skipped list
+		// exists to make. A skipped vector was never eligible: the tool cannot reach that insertion point
+		// and the operator can stop thinking about it. An untested vector WAS eligible, was going to be
+		// tested, and then the run stopped. The first is a bounded gap, the second is an unknown, and an
+		// unknown is the one that has to be re-run before any verdict on this tool means anything.
+		untested := []map[string]any{}
+		untestedRows, err := dbPool.Query(ctx, `
 		SELECT COALESCE(sv.vector_id::text,''), sv.reason, COALESCE(v.insertion_point,''),
 		       COALESCE(v.method,''), COALESCE(v.domain,''), COALESCE(v.path,''),
 		       COALESCE(sv.target_url,'')
@@ -255,97 +276,98 @@ func GetVectorResults(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN attack_vectors v ON v.id = sv.vector_id
 		WHERE sv.scan_id = $1 AND sv.status = 'error'
 		ORDER BY v.insertion_point, v.domain, v.path`, scanID)
-	if err == nil {
-		defer untestedRows.Close()
-		for untestedRows.Next() {
-			var u struct{ VectorID, Reason, Point, Method, Domain, Path, TargetURL string }
-			if untestedRows.Scan(&u.VectorID, &u.Reason, &u.Point, &u.Method, &u.Domain,
-				&u.Path, &u.TargetURL) != nil {
-				continue
+		if err == nil {
+			defer untestedRows.Close()
+			for untestedRows.Next() {
+				var u struct{ VectorID, Reason, Point, Method, Domain, Path, TargetURL string }
+				if untestedRows.Scan(&u.VectorID, &u.Reason, &u.Point, &u.Method, &u.Domain,
+					&u.Path, &u.TargetURL) != nil {
+					continue
+				}
+				untested = append(untested, map[string]any{
+					"vector_id": u.VectorID, "reason": u.Reason, "insertion_point": u.Point,
+					"method": u.Method, "domain": u.Domain, "path": u.Path,
+					"target_url": u.TargetURL,
+				})
 			}
-			untested = append(untested, map[string]any{
-				"vector_id": u.VectorID, "reason": u.Reason, "insertion_point": u.Point,
-				"method": u.Method, "domain": u.Domain, "path": u.Path,
-				"target_url": u.TargetURL,
-			})
 		}
-	}
 
-	// Trace SUMMARIES only. The command, the exit, the duration and the size are what let an operator
-	// spot the broken run at a glance: a 40 second scan of 53 vectors is visible here as 53 rows that
-	// each took 0.7 seconds and exited 2. The output itself is fetched per row, on demand.
-	traces := []map[string]any{}
-	tracesByTarget := map[string][]string{}
-	traceRows, err := dbPool.Query(ctx, `
+		// Trace SUMMARIES only. The command, the exit, the duration and the size are what let an operator
+		// spot the broken run at a glance: a 40 second scan of 53 vectors is visible here as 53 rows that
+		// each took 0.7 seconds and exited 2. The output itself is fetched per row, on demand.
+		traces := []map[string]any{}
+		tracesByTarget := map[string][]string{}
+		traceRows, err := dbPool.Query(ctx, `
 		SELECT id::text, vector_id, target_url, run_label, attempt, command,
 		       stdout_bytes, stdout_truncated, exit_detail, timed_out, duration_ms
 		FROM vector_scan_traces WHERE scan_id = $1 ORDER BY created_at`, scanID)
-	if err == nil {
-		defer traceRows.Close()
-		for traceRows.Next() {
-			var t struct {
-				ID, VectorID, TargetURL, RunLabel, Command, ExitDetail string
-				Attempt, Bytes                                         int
-				Truncated, TimedOut                                    bool
-				DurationMS                                             int64
-			}
-			if traceRows.Scan(&t.ID, &t.VectorID, &t.TargetURL, &t.RunLabel, &t.Attempt, &t.Command,
-				&t.Bytes, &t.Truncated, &t.ExitDetail, &t.TimedOut, &t.DurationMS) != nil {
-				continue
-			}
-			traces = append(traces, map[string]any{
-				"id": t.ID, "vector_id": t.VectorID, "target_url": t.TargetURL,
-				"run_label": t.RunLabel, "attempt": t.Attempt, "command": t.Command,
-				"stdout_bytes": t.Bytes, "stdout_truncated": t.Truncated,
-				"exit_detail": t.ExitDetail, "timed_out": t.TimedOut,
-				"duration_ms": t.DurationMS,
-			})
-			if t.VectorID != "" {
-				tracesByTarget[t.VectorID] = append(tracesByTarget[t.VectorID], t.ID)
+		if err == nil {
+			defer traceRows.Close()
+			for traceRows.Next() {
+				var t struct {
+					ID, VectorID, TargetURL, RunLabel, Command, ExitDetail string
+					Attempt, Bytes                                         int
+					Truncated, TimedOut                                    bool
+					DurationMS                                             int64
+				}
+				if traceRows.Scan(&t.ID, &t.VectorID, &t.TargetURL, &t.RunLabel, &t.Attempt, &t.Command,
+					&t.Bytes, &t.Truncated, &t.ExitDetail, &t.TimedOut, &t.DurationMS) != nil {
+					continue
+				}
+				traces = append(traces, map[string]any{
+					"id": t.ID, "vector_id": t.VectorID, "target_url": t.TargetURL,
+					"run_label": t.RunLabel, "attempt": t.Attempt, "command": t.Command,
+					"stdout_bytes": t.Bytes, "stdout_truncated": t.Truncated,
+					"exit_detail": t.ExitDetail, "timed_out": t.TimedOut,
+					"duration_ms": t.DurationMS,
+				})
+				if t.VectorID != "" {
+					tracesByTarget[t.VectorID] = append(tracesByTarget[t.VectorID], t.ID)
+				}
 			}
 		}
-	}
 
-	// The finding gets the id of the run that produced it.
-	//
-	// This is the answer to the half of the problem no reconstruction can solve. A response cannot be
-	// composed, so where a tool recorded none the nearest thing to the bytes is what the tool itself
-	// printed, and that is already stored verbatim per run. Without this link the operator has a
-	// findings list and a separate traces list and no way to say which row belongs to which, which on
-	// a sixty vector scan is not a link anyone follows.
-	for _, row := range append(append([]map[string]any{}, findings...), canaryFindings...) {
-		id, _ := row["id"].(string)
-		if ids := tracesByTarget[findingTarget[id]]; len(ids) > 0 {
-			row["trace_ids"] = ids
+		// The finding gets the id of the run that produced it.
+		//
+		// This is the answer to the half of the problem no reconstruction can solve. A response cannot be
+		// composed, so where a tool recorded none the nearest thing to the bytes is what the tool itself
+		// printed, and that is already stored verbatim per run. Without this link the operator has a
+		// findings list and a separate traces list and no way to say which row belongs to which, which on
+		// a sixty vector scan is not a link anyone follows.
+		for _, row := range append(append([]map[string]any{}, findings...), canaryFindings...) {
+			id, _ := row["id"].(string)
+			if ids := tracesByTarget[findingTarget[id]]; len(ids) > 0 {
+				row["trace_ids"] = ids
+			}
 		}
-	}
 
-	scanOut := map[string]any{
-		"id": scan.ID, "status": scan.Status, "error": scan.ScanError,
-		"total_vectors": scan.Total, "eligible_vectors": scan.Eligible,
-		"completed_vectors": scan.Done, "finding_count": scan.Findings,
-		"created_at": scan.CreatedAt, "untested_count": len(untested),
-		// A run that produced no findings is only a clean result if it actually finished the work it
-		// said it would. This is the one field a caller can check to tell those two apart, and it is
-		// computed here rather than in each client so they cannot disagree about it.
-		"verdict": vectorScanVerdict(scan.Status, scan.ScanError, len(untested)),
-	}
-	if scan.CompletedAt != nil {
-		scanOut["completed_at"] = *scan.CompletedAt
-	}
-	// finding_count on the scan row counts the control too, because that is what the runner
-	// incremented as it went. Report the number that answers "what did this find on MY target"
-	// alongside it rather than silently redefining a stored column.
-	scanOut["target_finding_count"] = len(findings)
-	scanOut["canary_finding_count"] = len(canaryFindings)
+		scanOut := map[string]any{
+			"id": scan.ID, "status": scan.Status, "error": scan.ScanError,
+			"total_vectors": scan.Total, "eligible_vectors": scan.Eligible,
+			"completed_vectors": scan.Done, "finding_count": scan.Findings,
+			"created_at": scan.CreatedAt, "untested_count": len(untested),
+			// A run that produced no findings is only a clean result if it actually finished the work it
+			// said it would. This is the one field a caller can check to tell those two apart, and it is
+			// computed here rather than in each client so they cannot disagree about it.
+			"verdict": vectorScanVerdict(scan.Status, scan.ScanError, len(untested)),
+		}
+		if scan.CompletedAt != nil {
+			scanOut["completed_at"] = *scan.CompletedAt
+		}
+		// finding_count on the scan row counts the control too, because that is what the runner
+		// incremented as it went. Report the number that answers "what did this find on MY target"
+		// alongside it rather than silently redefining a stored column.
+		scanOut["target_finding_count"] = len(findings)
+		scanOut["canary_finding_count"] = len(canaryFindings)
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"scan_id": scanID, "findings": findings, "skipped": skipped,
-		"untested": untested, "scan": scanOut, "traces": traces,
-		// Separate key, never merged into findings. The control belongs in the operator's view as
-		// evidence that the tool works, and nowhere near the list of things wrong with their target.
-		"canary": canaryOutcome(toolKey, canaryFindings, scan.ScanError),
-	})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"scan_id": scanID, "findings": findings, "skipped": skipped,
+			"untested": untested, "scan": scanOut, "traces": traces,
+			// Separate key, never merged into findings. The control belongs in the operator's view as
+			// evidence that the tool works, and nowhere near the list of things wrong with their target.
+			"canary": canaryOutcome(toolKey, canaryFindings, scan.ScanError),
+		})
+	}
 }
 
 // CancelVectorScan answers POST /{category}/{scope_target_id}/{tool}/cancel.
