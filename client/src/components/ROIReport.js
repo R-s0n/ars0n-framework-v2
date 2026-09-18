@@ -236,16 +236,16 @@ export const calculateROIScore = (targetURL) => {
   const statusCode = targetURL.status_code;
   if (statusCode >= 200 && statusCode < 300) {
     score += 15;
-    breakdown.push({ label: `HTTP ${statusCode} — fully accessible application`, points: 15, category: 'status' });
+    breakdown.push({ label: `HTTP ${statusCode} - fully accessible application`, points: 15, category: 'status' });
   } else if (statusCode === 301 || statusCode === 302 || statusCode === 307 || statusCode === 308) {
     score += 5;
-    breakdown.push({ label: `HTTP ${statusCode} — redirect (open redirect potential)`, points: 5, category: 'status' });
+    breakdown.push({ label: `HTTP ${statusCode} - redirect (open redirect potential)`, points: 5, category: 'status' });
   } else if (statusCode === 401 || statusCode === 403) {
     score += 10;
-    breakdown.push({ label: `HTTP ${statusCode} — auth-gated (bypass potential)`, points: 10, category: 'status' });
+    breakdown.push({ label: `HTTP ${statusCode} - auth-gated (bypass potential)`, points: 10, category: 'status' });
   } else if (statusCode >= 500 && statusCode < 600) {
     score += 5;
-    breakdown.push({ label: `HTTP ${statusCode} — server error (info disclosure potential)`, points: 5, category: 'status' });
+    breakdown.push({ label: `HTTP ${statusCode} - server error (info disclosure potential)`, points: 5, category: 'status' });
   }
 
   const headers = parseHeaders(targetURL.http_response_headers);
@@ -401,7 +401,7 @@ export const calculateROIScore = (targetURL) => {
       const cspLower = csp.toLowerCase();
       if (cspLower.includes("'unsafe-inline'") || cspLower.includes("'unsafe-eval'")) {
         score += 15;
-        breakdown.push({ label: `Weak CSP (${cspLower.includes("'unsafe-inline'") ? "unsafe-inline" : ""}${cspLower.includes("'unsafe-inline'") && cspLower.includes("'unsafe-eval'") ? " + " : ""}${cspLower.includes("'unsafe-eval'") ? "unsafe-eval" : ""}) — XSS despite CSP`, points: 15, category: 'cors' });
+        breakdown.push({ label: `Weak CSP (${cspLower.includes("'unsafe-inline'") ? "unsafe-inline" : ""}${cspLower.includes("'unsafe-inline'") && cspLower.includes("'unsafe-eval'") ? " + " : ""}${cspLower.includes("'unsafe-eval'") ? "unsafe-eval" : ""}) - XSS despite CSP`, points: 15, category: 'cors' });
       }
     }
 
@@ -546,7 +546,7 @@ export const calculateROIScore = (targetURL) => {
   );
   if (suspiciousCNAME) {
     score += 40;
-    breakdown.push({ label: `CNAME to third-party service — subdomain takeover risk (${suspiciousCNAME})`, points: 40, category: 'dns' });
+    breakdown.push({ label: `CNAME to third-party service - subdomain takeover risk (${suspiciousCNAME})`, points: 40, category: 'dns' });
   }
 
   const titleLowerForSSO = (targetURL.title || '').toLowerCase();
@@ -584,7 +584,7 @@ export const calculateROIScore = (targetURL) => {
     if (!hasCrawlData && !hasFuzzData && !hasRealAppContent) {
       const penalty = Math.min(score, 40);
       score -= penalty;
-      breakdown.push({ label: `SSO/IdP login wall detected (${ssoDetected}) — no testable attack surface behind auth gate`, points: -penalty, category: 'ssowall' });
+      breakdown.push({ label: `SSO/IdP login wall detected (${ssoDetected}) - no testable attack surface behind auth gate`, points: -penalty, category: 'ssowall' });
     }
   }
 
@@ -812,7 +812,7 @@ const TargetSection = memo(({ targetURL, roiScore, breakdown, onDelete, onAddAsS
                           <tr>
                             <td colSpan={3} className="text-white-50 text-center py-2">
                               <i className="bi bi-info-circle me-1"></i>
-                              No signals detected — run more scan steps for a meaningful score
+                              No signals detected - run more scan steps for a meaningful score
                             </td>
                           </tr>
                         )}
@@ -1013,7 +1013,7 @@ const TargetSection = memo(({ targetURL, roiScore, breakdown, onDelete, onAddAsS
             <Card.Body className="p-3">
               <h5 className="text-danger mb-2">Response Preview</h5>
               <pre className="bg-dark text-white p-2 border border-danger rounded" style={{ maxHeight: '150px', overflowY: 'auto', fontSize: '0.85rem' }}>
-                {truncatedResponse || <span className="text-white-50">No response data — run Technology Detection step to capture response</span>}
+                {truncatedResponse || <span className="text-white-50">No response data - run Technology Detection step to capture response</span>}
               </pre>
             </Card.Body>
           </Card>
@@ -1145,7 +1145,7 @@ const ROIReport = memo(({ show, onHide, targetURLs = [], setTargetURLs, fetchSco
   // G1.12: score + sort without freezing the main thread. calculateROIScore runs ~40 regexes per
   // target; doing all of them synchronously (the old useMemo) blocked the UI for seconds at 10k.
   // Instead we score in small chunks and yield to the browser between chunks, so the modal and its
-  // spinner stay responsive. Cancelable — a close or a target/data change abandons an in-flight
+  // spinner stay responsive. Cancelable - a close or a target/data change abandons an in-flight
   // pass. (A web worker / server-side scoring would take it fully off-thread; deferred to avoid a
   // risky scoring-logic extraction. The latter also unblocks G1.3's DB roi_score.)
   const [sortedTargets, setSortedTargets] = useState([]);
@@ -1201,7 +1201,7 @@ const ROIReport = memo(({ show, onHide, targetURLs = [], setTargetURLs, fetchSco
         {currentTarget && (
           <div>
             <Badge bg={getPriorityLevel(currentTarget._score).variant} className="ms-2">
-              Score: {currentTarget._score} — {getPriorityLevel(currentTarget._score).label} Priority
+              Score: {currentTarget._score} - {getPriorityLevel(currentTarget._score).label} Priority
             </Badge>
           </div>
         )}

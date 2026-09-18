@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 
 /**
- * useTargetURLs — react-query hook for a scope target's target-urls list (G1.7).
+ * useTargetURLs - react-query hook for a scope target's target-urls list (G1.7).
  *
  * One hook for every heavy target-urls read (ROI / Metadata / Screenshots / config). Benefits
  * over the old imperative fetches:
@@ -13,9 +13,9 @@ import { useQuery } from '@tanstack/react-query';
  * `projection` selects the server-side payload shape (see GetTargetURLsForScopeTarget). It is
  * part of the query key, so different shapes are cached independently:
  *   - 'full'          every column incl. screenshot + http_response (legacy default)
- *   - 'lean'          ?lean=true — ids/url/status/tech/roi + has_screenshot, no blobs
- *   - 'no-screenshot' ?screenshot=false — everything except the base64 screenshot (ROI report)
- *   - 'meta'          ?screenshot=false&response=false — drops screenshot + raw body (Metadata)
+ *   - 'lean'          ?lean=true - ids/url/status/tech/roi + has_screenshot, no blobs
+ *   - 'no-screenshot' ?screenshot=false - everything except the base64 screenshot (ROI report)
+ *   - 'meta'          ?screenshot=false&response=false - drops screenshot + raw body (Metadata)
  */
 
 const PROJECTION_QUERY = {

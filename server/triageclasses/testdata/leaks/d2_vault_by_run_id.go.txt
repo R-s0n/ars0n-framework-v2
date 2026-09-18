@@ -1,0 +1,15 @@
+// Leak (d), second half: REACH A VAULT WITH NOTHING BUT A RUN ID.
+//
+// PerturbedVaultFor was exported and took a run id, and every classifier already has a run id:
+// ctx.Route.Obs().RunID. So a foreign response was readable with no Perturbed in hand at all,
+// which is worse than leak (d) proper because it needs nothing stolen.
+//
+// The by-run-id lookup is unexported now. The runner reaches a vault by minting into it or by
+// holding one it opened, and neither of those is nameable from here.
+package leakfixture
+
+import "ars0n-framework-v2-server/utils/triage"
+
+func leakVaultByRunID(ctx triage.ClassifyCtx) *triage.PerturbedVault {
+	return triage.PerturbedVaultFor(ctx.Route.Obs().RunID)
+}

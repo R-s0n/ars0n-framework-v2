@@ -2395,7 +2395,7 @@ export const RequestFlowsModal = ({
         {versions.map((v) => (
           <option key={v.id} value={v.id}>
             {v.is_original ? 'Original (as captured)' : v.label || 'edited'}
-            {v.summary ? ` — ${v.summary}` : ''}
+            {v.summary ? ` - ${v.summary}` : ''}
           </option>
         ))}
       </Form.Select>

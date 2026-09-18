@@ -332,6 +332,40 @@ class TestVerdict(unittest.TestCase):
         self.assertEqual(size_row["bundle"], enc_row["bundle"],
                          "a wire-size filter is meaningless without the encoding it was measured under")
 
+    def test_soft_404_filter_uses_the_decoded_size_not_the_wire_size(self):
+        """ffuf's -fs compares the body it ended up with, and Go gunzips transparently.
+
+        This shipped recommending median_wire_size. On a gzip + chunked target that field was 0,
+        so the advice was `filterSize: "0"` against a 15197-byte soft-404: a filter matching
+        nothing, which leaves every word in the wordlist reading as a hit.
+        """
+        ctx = self._Ctx({
+            "notfound_fingerprint": {
+                "verdict": "soft_404", "filterable": True, "note": "n",
+                "fingerprint": {"status": 200, "median_decoded_size": 15197,
+                                "median_wire_size": 0},
+            },
+        })
+        recs = verdict.build_recommendations(ctx, verdict.derive_rate(ctx))
+        size_row = next(r for r in recs["by_tool"]["ffuf"] if r["field"] == "filterSize")
+        self.assertEqual(size_row["value"], "15197")
+        self.assertNotEqual(size_row["value"], "0",
+                            "a zero-byte filter matches nothing and silently disables the filter")
+
+    def test_unmeasurable_soft_404_size_suppresses_rather_than_guessing(self):
+        ctx = self._Ctx({
+            "notfound_fingerprint": {
+                "verdict": "soft_404", "filterable": True, "note": "n",
+                "fingerprint": {"status": 200, "median_decoded_size": 0, "median_wire_size": 0},
+            },
+        })
+        recs = verdict.build_recommendations(ctx, verdict.derive_rate(ctx))
+        fields = [r["field"] for r in recs["by_tool"].get("ffuf", [])]
+        self.assertNotIn("filterSize", fields,
+                         "an unmeasurable size must not become a filter that fires on nothing")
+        self.assertTrue(any(s["field"] == "filterSize" for s in recs["suppressed"]),
+                        "and the suppression must be reported, not silent")
+
     def test_legacy_map_is_a_strict_subset(self):
         ctx = self._Ctx({
             "load_ramp": {"verdict": "rate_limited", "safe_sustained_rps": 4.0},

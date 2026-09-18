@@ -144,7 +144,7 @@ func init() {
 			Groups: wcvsGroups, Options: wcvsOptions, OwnedFlags: wcvsOwned,
 			// Every vector sits on a URL, and a URL is what a cache scan takes, so nothing is skipped
 			// for being the wrong insertion point. What varies is how many DISTINCT scans result.
-			InsertionPoints: VectorInsertionPoints,
+			InsertionPoints: VectorHTTPInsertionPoints,
 			UsesReportFile:  true,
 			DedupeKey:       cacheURLKey,
 			Compose:         ComposeWCVS,
@@ -164,7 +164,7 @@ func init() {
 			Key: "cacheboom", Name: "CacheBoom", Category: "cache",
 			Binary: "python", Container: "ars0n-framework-v2-cacheboom-1",
 			Groups: cacheBoomGroups, Options: cacheBoomOptions, OwnedFlags: cacheBoomOwned,
-			InsertionPoints: VectorInsertionPoints,
+			InsertionPoints: VectorHTTPInsertionPoints,
 			DedupeKey:       cacheURLKey,
 			// -m is required and takes one mode, so covering deception and poisoning means two runs.
 			Runs:    []string{"cd", "cp"},

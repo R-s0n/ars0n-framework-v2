@@ -16,15 +16,15 @@ export const lessons = {
 
   urlManualCrawlingMethodology: {
     title: "Manual Crawling: Where It Fits in the Methodology",
-    overview: "Manual crawling is the first step of testing a single application. Before you point any automated tool at a target, you use the app by hand — through an intercepting proxy — to understand what it does and to capture the real traffic that everything else will build on.",
+    overview: "Manual crawling is the first step of testing a single application. Before you point any automated tool at a target, you use the app by hand - through an intercepting proxy - to understand what it does and to capture the real traffic that everything else will build on.",
     sections: [
       {
         title: "From Recon to a Single Application",
         icon: "fa-map-signs",
         content: [
-          "Bug bounty hunting moves from broad to narrow. The Company and Wildcard workflows discover an organization's domains, subdomains, and live web servers — potentially thousands of them. The URL workflow zooms all the way in to one application you've decided is worth deep testing.",
+          "Bug bounty hunting moves from broad to narrow. The Company and Wildcard workflows discover an organization's domains, subdomains, and live web servers - potentially thousands of them. The URL workflow zooms all the way in to one application you've decided is worth deep testing.",
           "At this zoom level, breadth-first automation is no longer enough. A scanner can tell you a page exists; it cannot tell you that this page transfers money, that this parameter controls which user's data you see, or that this three-step checkout can be short-circuited. Understanding those things requires a human using the app.",
-          "Manual crawling is therefore the on-ramp to the entire URL phase. Everything after it — endpoint discovery, brute forcing, parameter enumeration, threat modeling — is far more effective when it's seeded by, and interpreted against, the understanding you build while crawling by hand."
+          "Manual crawling is therefore the on-ramp to the entire URL phase. Everything after it - endpoint discovery, brute forcing, parameter enumeration, threat modeling - is far more effective when it's seeded by, and interpreted against, the understanding you build while crawling by hand."
         ],
         keyPoints: [
           "Recon finds targets; manual crawling is where you start understanding one deeply",
@@ -37,9 +37,9 @@ export const lessons = {
         title: "Why Humans Find the Best Bugs",
         icon: "fa-user-secret",
         content: [
-          "The highest-paying vulnerabilities — broken access control, IDOR, business-logic flaws, authentication bypasses — are about meaning, not syntax. They depend on understanding who is allowed to do what, and what the application assumes about its users. Automated tools have no concept of 'allowed' or 'assumes'.",
+          "The highest-paying vulnerabilities - broken access control, IDOR, business-logic flaws, authentication bypasses - are about meaning, not syntax. They depend on understanding who is allowed to do what, and what the application assumes about its users. Automated tools have no concept of 'allowed' or 'assumes'.",
           "When you crawl manually, you naturally start to build a threat model in your head: 'this ID probably maps to my account… what if I use a different one?' That instinct, applied deliberately, is the core of manual hunting. The crawl is where you gather the raw facts that instinct works on.",
-          "This is also why experienced hunters resist the urge to immediately run every tool. The tools are most valuable once you know what you're looking at — otherwise you drown in low-value output and miss the one request that actually matters."
+          "This is also why experienced hunters resist the urge to immediately run every tool. The tools are most valuable once you know what you're looking at - otherwise you drown in low-value output and miss the one request that actually matters."
         ],
         keyPoints: [
           "Access-control and logic bugs require human understanding of intent",
@@ -54,7 +54,7 @@ export const lessons = {
       "Exercise every role you can obtain (anonymous, user, admin) and compare what each can reach",
       "Use the app like a real, curious user: sign up, change settings, upload, search, buy in test mode",
       "Keep a running notes file of interesting endpoints, IDs, and 'that felt weird' moments",
-      "Stay in scope — only crawl the exact targets the program authorizes",
+      "Stay in scope - only crawl the exact targets the program authorizes",
       "Capture your authenticated session so later automated scans run as a logged-in user"
     ],
     furtherReading: [
@@ -79,7 +79,7 @@ export const lessons = {
         title: "What a Proxy Is and How to Set It Up",
         icon: "fa-plug",
         content: [
-          "A proxy is software (Caido and Burp Suite are the two most popular) that your browser sends its traffic through. Instead of the browser talking directly to the website, it talks to the proxy on your own machine — typically 127.0.0.1 on a port like 8080 — and the proxy forwards it on while logging everything.",
+          "A proxy is software (Caido and Burp Suite are the two most popular) that your browser sends its traffic through. Instead of the browser talking directly to the website, it talks to the proxy on your own machine - typically 127.0.0.1 on a port like 8080 - and the proxy forwards it on while logging everything.",
           "To capture HTTPS traffic, the proxy generates its own Certificate Authority (CA). You install that CA certificate in your browser once, which tells the browser to trust the proxy so it can decrypt, display, and log the otherwise-encrypted traffic. This is a one-time setup step.",
           "The cleanest setup is a dedicated browser profile (or a switcher like FoxyProxy) pointed at the proxy, so your normal browsing isn't captured and only your testing traffic flows through the tool."
         ],
@@ -98,8 +98,8 @@ export const lessons = {
         title: "Driving the Proxy: History, Sitemap, and Replay",
         icon: "fa-clone",
         content: [
-          "As you browse, every request appears in the proxy's HTTP history and is organized into a sitemap/tree by host and path. This becomes your searchable record of the entire application — you can filter it, sort it, and return to any request later.",
-          "The most-used feature is Replay (Caido) / Repeater (Burp): select any captured request, send it there, and you can edit any part of it — parameters, headers, cookies, method, body — then resend it instantly and watch how the response changes. This is where most manual testing actually happens.",
+          "As you browse, every request appears in the proxy's HTTP history and is organized into a sitemap/tree by host and path. This becomes your searchable record of the entire application - you can filter it, sort it, and return to any request later.",
+          "The most-used feature is Replay (Caido) / Repeater (Burp): select any captured request, send it there, and you can edit any part of it - parameters, headers, cookies, method, body - then resend it instantly and watch how the response changes. This is where most manual testing actually happens.",
           "Intercept mode lets you pause a request in-flight and modify it before it reaches the server, which is useful for changing values the UI won't let you change. Match-and-replace rules and automatic session handling help keep long testing sessions efficient."
         ],
         keyPoints: [
@@ -111,28 +111,28 @@ export const lessons = {
       }
     ],
     practicalTips: [
-      "Learn Replay/Repeater first — it is where most manual testing happens",
+      "Learn Replay/Repeater first - it is where most manual testing happens",
       "Filter proxy history to the target host so you are not distracted by third-party noise",
-      "Grab your session cookie / Bearer token from a request — you will reuse it for authenticated scans",
+      "Grab your session cookie / Bearer token from a request - you will reuse it for authenticated scans",
       "Turn intercept OFF while just browsing (it is easy to forget and think the app is broken)",
-      "Caido is lightweight and modern; Burp Suite has a larger extension ecosystem — either is fine to start"
+      "Caido is lightweight and modern; Burp Suite has a larger extension ecosystem - either is fine to start"
     ],
     furtherReading: [
       { title: "Caido Documentation", url: "https://docs.caido.io/", description: "Modern, lightweight intercepting proxy" },
-      { title: "PortSwigger Web Security Academy", url: "https://portswigger.net/web-security", description: "Free, hands-on labs — the best way to learn proxy-driven testing" },
+      { title: "PortSwigger Web Security Academy", url: "https://portswigger.net/web-security", description: "Free, hands-on labs - the best way to learn proxy-driven testing" },
       { title: "Burp Suite Documentation", url: "https://portswigger.net/burp/documentation", description: "Reference for the industry-standard proxy" }
     ]
   },
 
   urlManualCrawlingMapping: {
     title: "What to Map and Document While Crawling",
-    overview: "A manual crawl is only valuable if you capture what you learn. This lesson covers the specific things to look for — features, roles, objects, and mechanisms — and how documenting them turns an aimless click-through into a targeted testing plan.",
+    overview: "A manual crawl is only valuable if you capture what you learn. This lesson covers the specific things to look for - features, roles, objects, and mechanisms - and how documenting them turns an aimless click-through into a targeted testing plan.",
     sections: [
       {
         title: "Map Features, Roles, and Trust Boundaries",
         icon: "fa-users",
         content: [
-          "Start by listing what the application lets people do, and who is allowed to do each thing. Anonymous visitors, registered users, and administrators usually have different powers. Every place the app decides 'you're allowed to see or do this and you're not' is a trust boundary — and trust boundaries are where access-control bugs live.",
+          "Start by listing what the application lets people do, and who is allowed to do each thing. Anonymous visitors, registered users, and administrators usually have different powers. Every place the app decides 'you're allowed to see or do this and you're not' is a trust boundary - and trust boundaries are where access-control bugs live.",
           "If you can obtain more than one account, this becomes very powerful: log in as User A in one browser and User B in another, then compare. Anything User A can reach that should be private to User B is a candidate for a broken-access-control or IDOR finding.",
           "Note administrative or privileged features even if you can't access them yet. Knowing an /admin panel or a 'delete any user' API exists tells you what a successful privilege-escalation attack would target."
         ],
@@ -147,9 +147,9 @@ export const lessons = {
         title: "Catalog Objects and Identifiers (IDOR Fuel)",
         icon: "fa-fingerprint",
         content: [
-          "Applications constantly reference objects by identifiers: user IDs, order numbers, invoice IDs, document UUIDs, account numbers. Anywhere you see one of these — in a URL, a query string, a JSON body, or a header — write it down along with what it refers to.",
+          "Applications constantly reference objects by identifiers: user IDs, order numbers, invoice IDs, document UUIDs, account numbers. Anywhere you see one of these - in a URL, a query string, a JSON body, or a header - write it down along with what it refers to.",
           "These identifiers are the raw material for Insecure Direct Object Reference (IDOR) testing: the classic bug where changing /invoice/1001 to /invoice/1002 shows you someone else's invoice because the server checks that you're logged in but not that the object belongs to you.",
-          "Note the format of each identifier too. Sequential integers are trivially guessable; UUIDs are not — but UUIDs still matter if they leak somewhere else in the app. The pattern of identifiers guides how you'll test them later."
+          "Note the format of each identifier too. Sequential integers are trivially guessable; UUIDs are not - but UUIDs still matter if they leak somewhere else in the app. The pattern of identifiers guides how you'll test them later."
         ],
         keyPoints: [
           "Record every ID/number the app exposes and what it refers to",
@@ -181,12 +181,12 @@ export const lessons = {
     practicalTips: [
       "Keep a simple notes file: Endpoints, Parameters, Object IDs, Roles, and 'Weird' observations",
       "For every ID you see, ask 'whose is this, and what if I change it?'",
-      "Register two accounts when allowed — cross-user testing is where IDOR falls out",
+      "Register two accounts when allowed - cross-user testing is where IDOR falls out",
       "Flag any request whose response contains more than the page displays (over-fetching equals data exposure)",
-      "Note tech-stack hints (headers, cookies, error pages) — they guide which payloads to try later"
+      "Note tech-stack hints (headers, cookies, error pages) - they guide which payloads to try later"
     ],
     furtherReading: [
-      { title: "OWASP - Broken Access Control", url: "https://owasp.org/Top10/A01_2021-Broken_Access_Control/", description: "The #1 web vulnerability class — found by understanding roles and objects" },
+      { title: "OWASP - Broken Access Control", url: "https://owasp.org/Top10/A01_2021-Broken_Access_Control/", description: "The #1 web vulnerability class - found by understanding roles and objects" },
       { title: "PortSwigger - Access control vulnerabilities", url: "https://portswigger.net/web-security/access-control", description: "Free labs on IDOR and access-control testing" },
       { title: "OWASP WSTG - Testing for IDOR", url: "https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/04-Testing_for_Insecure_Direct_Object_References/", description: "Methodology for finding object-reference bugs" }
     ]
@@ -194,15 +194,15 @@ export const lessons = {
 
   urlDiscoveryMethodology: {
     title: "URL & Endpoint Discovery: Expanding the Attack Surface",
-    overview: "After manually exploring the app, endpoint discovery uses automated tools to find every URL, API route, and resource the application exposes — including the ones that aren't linked anywhere. A vulnerability you never find an endpoint for is a vulnerability you'll never test.",
+    overview: "After manually exploring the app, endpoint discovery uses automated tools to find every URL, API route, and resource the application exposes - including the ones that aren't linked anywhere. A vulnerability you never find an endpoint for is a vulnerability you'll never test.",
     sections: [
       {
         title: "Why the Visible App Is Only the Tip of the Iceberg",
         icon: "fa-water",
         content: [
           "Most of a modern web application is invisible to a casual click-through. Single-page apps load their real functionality from JavaScript. APIs expose dozens of routes the UI only uses a few of. Older versions of the site left behind endpoints that were quietly de-linked but never deleted. And features gated behind conditions (a certain account type, a feature flag) never appear for you at all.",
-          "Attackers — and successful bug bounty hunters — deliberately go after this hidden surface, because it's where the weak spots concentrate. A forgotten /api/v1/ route from two years ago rarely gets the same security review as today's front page. An admin endpoint that isn't linked is still reachable if you know its path.",
-          "Endpoint discovery is how you make the invisible visible. By combining crawling, archive mining, and JavaScript analysis, you turn 'the ten pages I saw' into 'the two hundred URLs this app actually exposes' — and each new endpoint is a fresh chance to find a bug."
+          "Attackers - and successful bug bounty hunters - deliberately go after this hidden surface, because it's where the weak spots concentrate. A forgotten /api/v1/ route from two years ago rarely gets the same security review as today's front page. An admin endpoint that isn't linked is still reachable if you know its path.",
+          "Endpoint discovery is how you make the invisible visible. By combining crawling, archive mining, and JavaScript analysis, you turn 'the ten pages I saw' into 'the two hundred URLs this app actually exposes' - and each new endpoint is a fresh chance to find a bug."
         ],
         keyPoints: [
           "SPAs and APIs hide most of their surface from a casual browse",
@@ -215,8 +215,8 @@ export const lessons = {
         title: "Active Crawling vs. Passive Discovery",
         icon: "fa-code-branch",
         content: [
-          "There are two fundamentally different ways to find endpoints, and you want both. Active crawling means a tool actually visits the application, downloads pages, and follows the links and JavaScript it finds — building a map of the app as it exists right now.",
-          "Passive discovery means a tool asks someone else what URLs they've already seen. Services like the Internet Archive's Wayback Machine and Common Crawl have been recording URLs across the web for years. Querying them for your target's domain returns historical URLs the live app may no longer link to — a goldmine of deprecated and forgotten endpoints.",
+          "There are two fundamentally different ways to find endpoints, and you want both. Active crawling means a tool actually visits the application, downloads pages, and follows the links and JavaScript it finds - building a map of the app as it exists right now.",
+          "Passive discovery means a tool asks someone else what URLs they've already seen. Services like the Internet Archive's Wayback Machine and Common Crawl have been recording URLs across the web for years. Querying them for your target's domain returns historical URLs the live app may no longer link to - a goldmine of deprecated and forgotten endpoints.",
           "The two approaches find different things and rarely overlap completely. Active crawling captures the current app including JavaScript-driven routes; passive discovery captures history and breadth. Running both, then merging the results, gives the most complete picture of the attack surface."
         ],
         keyPoints: [
@@ -228,10 +228,10 @@ export const lessons = {
       }
     ],
     practicalTips: [
-      "Always run both active crawlers and passive archive tools — they find different endpoints",
+      "Always run both active crawlers and passive archive tools - they find different endpoints",
       "Feed your authenticated session to the crawlers so they reach logged-in functionality",
       "Pay special attention to old, versioned API routes (/api/v1) surfaced by archive tools",
-      "Treat every discovered endpoint as a lead, not a finding — testing comes later",
+      "Treat every discovered endpoint as a lead, not a finding - testing comes later",
       "Re-run discovery periodically; apps change and new endpoints appear"
     ],
     furtherReading: [
@@ -242,7 +242,7 @@ export const lessons = {
 
   urlDiscoveryTools: {
     title: "The Endpoint Discovery Toolkit: Katana, GoSpider, Waybackurls, GAU, LinkFinder",
-    overview: "Each discovery tool finds endpoints a different way. Understanding what each one does — and why you run all of them — is the difference between a shallow endpoint list and a complete one.",
+    overview: "Each discovery tool finds endpoints a different way. Understanding what each one does - and why you run all of them - is the difference between a shallow endpoint list and a complete one.",
     sections: [
       {
         title: "Active Crawlers: Katana and GoSpider",
@@ -250,12 +250,12 @@ export const lessons = {
         content: [
           "Katana (from ProjectDiscovery) is a fast, modern crawler. It fetches pages, parses both HTML and JavaScript for links, and can optionally drive a headless browser to render the page and catch links that only appear after JavaScript runs. It's the workhorse for mapping a single-page application's live structure.",
           "GoSpider is a complementary active crawler. It extracts URLs from page links, HTML forms, robots.txt, sitemap.xml, and inline JavaScript, and can pull in archive data too. Running it alongside Katana is worthwhile because crawlers differ in how they parse pages and follow links, so each catches endpoints the other misses.",
-          "Both crawlers benefit hugely from an authenticated session. If you provide a valid cookie or token, they can crawl the logged-in application — where most of the interesting, sensitive functionality (and most of the bugs) live."
+          "Both crawlers benefit hugely from an authenticated session. If you provide a valid cookie or token, they can crawl the logged-in application - where most of the interesting, sensitive functionality (and most of the bugs) live."
         ],
         keyPoints: [
           "Katana: fast crawler, parses HTML + JS, optional headless rendering",
           "GoSpider: pulls URLs from links, forms, robots.txt, sitemaps, and JS",
-          "Run both — different crawlers catch different endpoints",
+          "Run both - different crawlers catch different endpoints",
           "Give crawlers a session so they reach authenticated functionality"
         ],
         examples: [
@@ -267,14 +267,14 @@ export const lessons = {
         title: "Passive Archive Tools: Waybackurls and GAU",
         icon: "fa-clock-rotate-left",
         content: [
-          "Waybackurls queries the Wayback Machine for every URL it has ever archived for a domain and prints them out. It requires no interaction with the target at all — the URLs come from a third-party archive — making it fast, stealthy, and great for finding history.",
+          "Waybackurls queries the Wayback Machine for every URL it has ever archived for a domain and prints them out. It requires no interaction with the target at all - the URLs come from a third-party archive - making it fast, stealthy, and great for finding history.",
           "GAU (GetAllUrls) does the same idea but pulls from multiple sources at once: the Wayback Machine, Common Crawl, URLScan, and others. Because it aggregates several archives, it typically returns a broader set of historical URLs than any single source.",
-          "The value of these tools is recovering the past. Endpoints that were removed from the UI, old API versions, debug pages that shipped once, and parameters that used to exist all show up here. Old endpoints are frequently the least maintained and least protected — prime bug bounty territory."
+          "The value of these tools is recovering the past. Endpoints that were removed from the UI, old API versions, debug pages that shipped once, and parameters that used to exist all show up here. Old endpoints are frequently the least maintained and least protected - prime bug bounty territory."
         ],
         keyPoints: [
           "Waybackurls: URLs from the Internet Archive for the domain",
           "GAU: aggregates Wayback + Common Crawl + URLScan and more",
-          "Both are passive — no requests to the target are required",
+          "Both are passive - no requests to the target are required",
           "They excel at finding deprecated and forgotten endpoints"
         ],
         examples: [
@@ -286,7 +286,7 @@ export const lessons = {
         title: "JavaScript Analysis: LinkFinder",
         icon: "fa-file-code",
         content: [
-          "Modern applications define most of their API surface in JavaScript — the frontend code knows every endpoint it can call. LinkFinder parses JavaScript files and extracts the endpoints, API paths, and routes referenced inside them using pattern matching.",
+          "Modern applications define most of their API surface in JavaScript - the frontend code knows every endpoint it can call. LinkFinder parses JavaScript files and extracts the endpoints, API paths, and routes referenced inside them using pattern matching.",
           "This finds things no crawler can reach by clicking: API routes that are only called under specific conditions, admin endpoints referenced in code but never shown to your account, and internal paths a developer hardcoded. In a single-page app, LinkFinder is often the single most productive discovery tool.",
           "Because it works on the JavaScript you've already downloaded, LinkFinder pairs naturally with the crawlers: the crawlers find and fetch the JS files, and LinkFinder mines them for the hidden API surface those files describe."
         ],
@@ -303,7 +303,7 @@ export const lessons = {
       "Katana with headless mode catches JS-rendered links static crawlers miss",
       "GAU with the subdomains option can surface endpoints across the whole target",
       "Grep LinkFinder output for /api, /admin, /internal, and version numbers",
-      "De-duplicate before you review — raw output is mostly noise"
+      "De-duplicate before you review - raw output is mostly noise"
     ],
     furtherReading: [
       { title: "Katana (ProjectDiscovery)", url: "https://github.com/projectdiscovery/katana", description: "Fast crawler with JS parsing and headless mode" },
@@ -322,7 +322,7 @@ export const lessons = {
         content: [
           "Five tools each dumping thousands of URLs produces enormous, overlapping output. The same endpoint appears many times with different query values; static assets (.js, .css, .png, fonts) flood the list; and out-of-scope third-party URLs sneak in. Raw, this is unusable.",
           "Consolidation deduplicates and normalizes: it collapses identical paths, strips or normalizes query strings so /search?q=a and /search?q=b become one endpoint, drops static-asset noise, and keeps you inside scope. The framework's endpoint consolidation step does this and stores a clean, unique list against your target.",
-          "The goal is to turn '50,000 raw lines' into 'a few hundred distinct endpoints a human can actually review.' The quality of the endpoint list directly determines the quality of everything downstream — you can only test what's on the list."
+          "The goal is to turn '50,000 raw lines' into 'a few hundred distinct endpoints a human can actually review.' The quality of the endpoint list directly determines the quality of everything downstream - you can only test what's on the list."
         ],
         keyPoints: [
           "Raw output is enormous, duplicated, and full of static-asset noise",
@@ -336,22 +336,22 @@ export const lessons = {
         icon: "fa-magnifying-glass",
         content: [
           "Once consolidated, scan the list for high-value patterns. API routes (/api/, /graphql, /rest/, /v1/, /v2/) are where data and logic live. Admin and internal paths (/admin, /internal, /debug, /actuator) suggest privileged functionality. Anything with parameters is a candidate for injection and IDOR testing.",
-          "Look for file-handling endpoints (upload, download, export, import, /files/), authentication routes (login, reset, oauth, token), and old versioned APIs — a v1 sitting next to a current v3 often means v1 is unmaintained. Unusual file extensions and paths that look internal or temporary (backup, test, tmp, .bak) are worth a closer look.",
+          "Look for file-handling endpoints (upload, download, export, import, /files/), authentication routes (login, reset, oauth, token), and old versioned APIs - a v1 sitting next to a current v3 often means v1 is unmaintained. Unusual file extensions and paths that look internal or temporary (backup, test, tmp, .bak) are worth a closer look.",
           "You're triaging, not testing. The output of this phase is a prioritized worklist: the endpoints most likely to yield bugs, ordered so that when you move into brute forcing, parameter enumeration, and manual testing, you start with the highest-value targets."
         ],
         keyPoints: [
           "Prioritize API routes, admin/internal paths, and anything with parameters",
           "Old versioned APIs (v1 next to v3) are often under-maintained",
           "File-handling and auth endpoints are high-value mechanisms",
-          "Produce a prioritized worklist — you're triaging, not yet testing"
+          "Produce a prioritized worklist - you're triaging, not yet testing"
         ]
       }
     ],
     practicalTips: [
-      "Deduplicate and normalize before reviewing — never eyeball raw tool output",
+      "Deduplicate and normalize before reviewing - never eyeball raw tool output",
       "Grep the consolidated list for: api, graphql, admin, internal, upload, v1, token",
       "Keep static assets out of your worklist, but skim JS file paths as LinkFinder input",
-      "Sort endpoints by 'has parameters' — parameterized routes are the richest targets",
+      "Sort endpoints by 'has parameters' - parameterized routes are the richest targets",
       "Cross-reference discovered endpoints with your manual-crawl notes to spot the important ones"
     ],
     furtherReading: [
@@ -362,14 +362,14 @@ export const lessons = {
 
   urlBruteForcingMethodology: {
     title: "Endpoint Brute Forcing: Finding the Unlinked",
-    overview: "Brute forcing (content discovery) finds endpoints that no link, archive, or JavaScript file references — by guessing common paths and filenames against the server. It's how you uncover admin panels, backups, and forgotten routes that the app never advertises.",
+    overview: "Brute forcing (content discovery) finds endpoints that no link, archive, or JavaScript file references - by guessing common paths and filenames against the server. It's how you uncover admin panels, backups, and forgotten routes that the app never advertises.",
     sections: [
       {
         title: "Guessing What Isn't Linked",
         icon: "fa-key",
         content: [
-          "Every discovery technique so far relies on the endpoint being referenced somewhere — a link, an archived URL, a mention in JavaScript. Brute forcing needs none of that. It takes a wordlist of paths and filenames that commonly exist on web servers and asks the server directly whether each one is there.",
-          "This is powerful because the most security-relevant resources are frequently the least linked. Nobody puts a link to /admin, /backup.zip, /.env, /config.php.bak, or /api/internal/debug on the homepage — but those files and paths exist on real servers all the time, and they're exactly what an attacker wants.",
+          "Every discovery technique so far relies on the endpoint being referenced somewhere - a link, an archived URL, a mention in JavaScript. Brute forcing needs none of that. It takes a wordlist of paths and filenames that commonly exist on web servers and asks the server directly whether each one is there.",
+          "This is powerful because the most security-relevant resources are frequently the least linked. Nobody puts a link to /admin, /backup.zip, /.env, /config.php.bak, or /api/internal/debug on the homepage - but those files and paths exist on real servers all the time, and they're exactly what an attacker wants.",
           "A single good hit here can be an entire finding: an exposed database backup, a readable .git directory that leaks source code, an admin panel with default credentials, or a debug endpoint that dumps environment variables. Content discovery routinely finds the highest-impact issues on a target."
         ],
         keyPoints: [
@@ -383,12 +383,12 @@ export const lessons = {
         title: "The Responsibility of Active Testing",
         icon: "fa-scale-balanced",
         content: [
-          "Unlike passive discovery, brute forcing sends a large volume of real requests to the target — potentially thousands or tens of thousands. That has consequences: it can trip WAFs and rate limiters, generate alerts, and, if done carelessly, degrade the service. This is the phase where being a responsible hunter matters most.",
-          "Bug bounty programs set rules for a reason. Respect scope (only fuzz what's authorized), respect rate limits, and prefer precision over brute force — a 5,000-word targeted list is both more effective and more respectful than a 4-million-word everything-list. If the target starts blocking you, that's a signal to slow down or stop, not to escalate.",
+          "Unlike passive discovery, brute forcing sends a large volume of real requests to the target - potentially thousands or tens of thousands. That has consequences: it can trip WAFs and rate limiters, generate alerts, and, if done carelessly, degrade the service. This is the phase where being a responsible hunter matters most.",
+          "Bug bounty programs set rules for a reason. Respect scope (only fuzz what's authorized), respect rate limits, and prefer precision over brute force - a 5,000-word targeted list is both more effective and more respectful than a 4-million-word everything-list. If the target starts blocking you, that's a signal to slow down or stop, not to escalate.",
           "This is also why WAF Probe runs first: knowing the target's defenses before you fuzz lets you tune your request rate to stay under the radar, get clean results, and avoid getting your IP banned mid-engagement."
         ],
         keyPoints: [
-          "Brute forcing is active and high-volume — it has real impact",
+          "Brute forcing is active and high-volume - it has real impact",
           "Respect scope and rate limits; prefer targeted wordlists over huge ones",
           "Getting blocked is a signal to slow down, not to push harder",
           "Probe defenses first (WAF Probe) so you fuzz safely and effectively"
@@ -397,9 +397,9 @@ export const lessons = {
     ],
     practicalTips: [
       "Run WAF Probe before FFUF so your fuzzing is tuned to the target's defenses",
-      "Prefer a targeted wordlist over a giant generic one — more signal, fewer requests",
+      "Prefer a targeted wordlist over a giant generic one - more signal, fewer requests",
       "Treat /.git, /.env, backups, and admin paths as top-priority guesses",
-      "Watch for 401/403 hits — 'exists but forbidden' is still a lead worth chasing",
+      "Watch for 401/403 hits - 'exists but forbidden' is still a lead worth chasing",
       "If you're getting blocked wholesale, stop and re-tune rather than pushing harder"
     ],
     furtherReading: [
@@ -410,21 +410,21 @@ export const lessons = {
 
   urlBruteForcingTools: {
     title: "WAF Probe + FFUF: Probe First, Fuzz Smart",
-    overview: "FFUF is a fast, powerful web fuzzer — but aggressive fuzzing against a defended target gets you blocked. WAF Probe profiles the target's defenses first and hands FFUF a safe, tuned configuration. This lesson explains how they work together.",
+    overview: "FFUF is a fast, powerful web fuzzer - but aggressive fuzzing against a defended target gets you blocked. WAF Probe profiles the target's defenses first and hands FFUF a safe, tuned configuration. This lesson explains how they work together.",
     sections: [
       {
         title: "FFUF: The Fuzzer",
         icon: "fa-bolt",
         content: [
-          "FFUF (Fuzz Faster U Fool) replaces a FUZZ keyword in a URL with each line of a wordlist and fires the requests concurrently. Point it at https://target/FUZZ with a content-discovery wordlist and it will tell you which paths return interesting responses — extremely quickly.",
+          "FFUF (Fuzz Faster U Fool) replaces a FUZZ keyword in a URL with each line of a wordlist and fires the requests concurrently. Point it at https://target/FUZZ with a content-discovery wordlist and it will tell you which paths return interesting responses - extremely quickly.",
           "Its power is in its filtering. FFUF can match or filter responses by status code, response size, word count, line count, or regex. The single most important skill is calibrating filters against the 'baseline': many apps return a 200-OK soft-404 page for anything that doesn't exist, so you filter that page's size or word count to make the real hits visible.",
-          "FFUF also controls request rate, delay, threads, headers, and cookies — everything you need to fuzz as an authenticated user, at a safe speed, against a specific target. But choosing those values blind is guesswork, which is where WAF Probe comes in."
+          "FFUF also controls request rate, delay, threads, headers, and cookies - everything you need to fuzz as an authenticated user, at a safe speed, against a specific target. But choosing those values blind is guesswork, which is where WAF Probe comes in."
         ],
         keyPoints: [
           "FFUF swaps FUZZ in a URL for each wordlist entry and fires fast",
           "Matchers/filters (status, size, words, regex) separate hits from noise",
           "Calibrating against the soft-404 baseline is the key skill",
-          "It controls rate, delay, threads, headers — but the values must be chosen well"
+          "It controls rate, delay, threads, headers - but the values must be chosen well"
         ],
         examples: [
           { code: "ffuf -u https://target/FUZZ -w common.txt -mc 200,301,403", description: "Basic content discovery, match interesting status codes" },
@@ -435,9 +435,9 @@ export const lessons = {
         title: "WAF Probe: Recon for Your Fuzzing",
         icon: "fa-shield-halved",
         content: [
-          "Before fuzzing, WAF Probe sends a small set of carefully chosen requests to answer three questions: Is there a WAF, and which vendor? How does the target rate-limit — at what request rate does it start blocking? And what does a blocked or baseline response look like (status and size)?",
+          "Before fuzzing, WAF Probe sends a small set of carefully chosen requests to answer three questions: Is there a WAF, and which vendor? How does the target rate-limit - at what request rate does it start blocking? And what does a blocked or baseline response look like (status and size)?",
           "From those answers it produces a recommended FFUF configuration: a safe request rate and delay (so you stay under the rate limit), a sensible thread count, response filters for the WAF's block page (so blocked responses don't pollute your results), and header tweaks if the default user-agent is being blocked. One click applies all of it to the FFUF config.",
-          "The logic is simple but important: if a WAF returns 403 to everything, unfiltered FFUF shows thousands of useless 403s and you learn nothing; if you fuzz faster than the rate limiter allows, you get throttled and your results are incomplete — or your IP is banned. Probing first turns fuzzing from a gamble into a tuned operation."
+          "The logic is simple but important: if a WAF returns 403 to everything, unfiltered FFUF shows thousands of useless 403s and you learn nothing; if you fuzz faster than the rate limiter allows, you get throttled and your results are incomplete - or your IP is banned. Probing first turns fuzzing from a gamble into a tuned operation."
         ],
         keyPoints: [
           "WAF Probe detects the WAF vendor, the rate limit, and the block signature",
@@ -469,8 +469,8 @@ export const lessons = {
         title: "Choosing the Right Wordlist",
         icon: "fa-list",
         content: [
-          "The wordlist determines what you can find — you'll never discover a path that isn't in your list. Start with a solid general content-discovery list (SecLists' common.txt, or the raft-* lists), which cover the paths and files that exist on the widest range of servers.",
-          "Then specialize based on what you know about the target. If it runs PHP, fuzz with .php extensions; if it's a Java app, look for /actuator and .jsp; if you found an /api, switch to API-focused wordlists. A smaller list tuned to the tech stack finds more real hits per request than a giant generic list — and it's gentler on the target.",
+          "The wordlist determines what you can find - you'll never discover a path that isn't in your list. Start with a solid general content-discovery list (SecLists' common.txt, or the raft-* lists), which cover the paths and files that exist on the widest range of servers.",
+          "Then specialize based on what you know about the target. If it runs PHP, fuzz with .php extensions; if it's a Java app, look for /actuator and .jsp; if you found an /api, switch to API-focused wordlists. A smaller list tuned to the tech stack finds more real hits per request than a giant generic list - and it's gentler on the target.",
           "Extensions matter as much as paths. The same wordlist run with -e .bak,.old,.zip,.sql,.txt can turn up backup and config files that the base list would miss entirely. Backups and source archives are among the highest-impact content-discovery finds."
         ],
         keyPoints: [
@@ -485,13 +485,13 @@ export const lessons = {
         icon: "fa-sliders",
         content: [
           "The number-one reason content discovery produces garbage is an uncalibrated baseline. Many apps return '200 OK' with a friendly 'page not found' template for anything that doesn't exist. If you don't filter that, every word in your list looks like a hit. Determine the soft-404's response size (or word count) and filter it, so only genuinely different responses show up.",
-          "Read hits by status and size together. 200 with an unusual size is a strong hit. 301/302 redirects often reveal directory structure (and where they redirect to matters). 401/403 means the path exists but is protected — still valuable, because protected endpoints are sometimes bypassable and always confirm the resource is real. 500 errors can indicate something is breaking in an interesting way.",
+          "Read hits by status and size together. 200 with an unusual size is a strong hit. 301/302 redirects often reveal directory structure (and where they redirect to matters). 401/403 means the path exists but is protected - still valuable, because protected endpoints are sometimes bypassable and always confirm the resource is real. 500 errors can indicate something is breaking in an interesting way.",
           "Every interesting hit is a new endpoint, not a finished finding. Feed it back into your process: browse it in the proxy, run parameter enumeration against it, and test it manually. Content discovery's job is to hand your later testing steps a richer, more complete set of targets."
         ],
         keyPoints: [
           "Calibrate against the soft-404 baseline or everything looks like a hit",
           "Read status + size together: 200/redirect/403/500 each tell you something",
-          "403/401 hits are still leads — they confirm a protected resource exists",
+          "403/401 hits are still leads - they confirm a protected resource exists",
           "Each hit becomes an input to manual testing and parameter enumeration"
         ],
         examples: [
@@ -501,10 +501,10 @@ export const lessons = {
       }
     ],
     practicalTips: [
-      "Use SecLists — common.txt to start, raft-* and api wordlists to specialize",
+      "Use SecLists - common.txt to start, raft-* and api wordlists to specialize",
       "Always calibrate the baseline (-ac) or filter the soft-404 size manually",
       "Add -e with backup/config extensions to catch high-impact files",
-      "Chase 403/401 hits — 'exists but forbidden' is often bypassable",
+      "Chase 403/401 hits - 'exists but forbidden' is often bypassable",
       "Feed every hit back into manual testing and parameter enumeration"
     ],
     furtherReading: [
@@ -515,13 +515,13 @@ export const lessons = {
 
   urlTargetEndpointsMethodology: {
     title: "The Endpoint Inventory: Your Single Source of Truth",
-    overview: "The Target URL Endpoints inventory consolidates everything discovery and brute forcing found into one deduplicated, reviewable list. It's the hub of the URL workflow — the place where scattered tool output becomes an actionable testing plan.",
+    overview: "The Target URL Endpoints inventory consolidates everything discovery and brute forcing found into one deduplicated, reviewable list. It's the hub of the URL workflow - the place where scattered tool output becomes an actionable testing plan.",
     sections: [
       {
         title: "Why Consolidation Is the Point",
         icon: "fa-layer-group",
         content: [
-          "By this stage, several tools have each produced their own pile of results: Katana's crawl, GoSpider's crawl, the Wayback/GAU archives, LinkFinder's JavaScript endpoints, and FFUF's brute-force hits. Left scattered, this is noise — you can't reason about an application from five separate, overlapping, duplicate-filled output files.",
+          "By this stage, several tools have each produced their own pile of results: Katana's crawl, GoSpider's crawl, the Wayback/GAU archives, LinkFinder's JavaScript endpoints, and FFUF's brute-force hits. Left scattered, this is noise - you can't reason about an application from five separate, overlapping, duplicate-filled output files.",
           "The inventory merges all of that into one clean list of distinct endpoints. Deduplication and normalization mean each real endpoint appears once, so the count you see is the actual attack surface, not inflated by repeats. This is the difference between 'I ran some tools' and 'I understand this application's surface.'",
           "Consolidation also preserves context: where an endpoint came from, what methods it takes, whether it has parameters. That metadata is what makes the list usable for prioritization rather than just a wall of URLs."
         ],
@@ -536,7 +536,7 @@ export const lessons = {
         title: "The Hub Between Discovery and Hunting",
         icon: "fa-diagram-project",
         content: [
-          "Everything upstream in the URL workflow — manual crawling, discovery, brute forcing — exists to populate this inventory. Everything downstream — parameter enumeration, manual testing, threat modeling, reporting — draws its targets out of it. The inventory is the pivot point where reconnaissance turns into hunting.",
+          "Everything upstream in the URL workflow - manual crawling, discovery, brute forcing - exists to populate this inventory. Everything downstream - parameter enumeration, manual testing, threat modeling, reporting - draws its targets out of it. The inventory is the pivot point where reconnaissance turns into hunting.",
           "Because it's the single source of truth, it's also where you track coverage. On a real application you can't deeply test every endpoint, so you work through the inventory deliberately, marking what you've examined and what you've found. That discipline is what separates thorough hunters from ones who poke a few pages and move on.",
           "Treat the inventory as a living document for the engagement. As you discover new endpoints (a hit leads to a new area, a JS file reveals a new API), they go in here; as you test, your notes accumulate here. It's the map you keep coming back to."
         ],
@@ -544,12 +544,12 @@ export const lessons = {
           "Upstream phases populate the inventory; downstream phases consume it",
           "It's where reconnaissance becomes actual vulnerability hunting",
           "Use it to track testing coverage across a large attack surface",
-          "Keep it living — add new endpoints and notes as the engagement evolves"
+          "Keep it living - add new endpoints and notes as the engagement evolves"
         ]
       }
     ],
     practicalTips: [
-      "Always consolidate before testing — never work from raw, separate tool outputs",
+      "Always consolidate before testing - never work from raw, separate tool outputs",
       "Trust the deduplicated count as your real attack-surface size",
       "Keep the inventory open as your worklist while you hunt",
       "Mark endpoints as you test them so nothing important is skipped",
@@ -584,7 +584,7 @@ export const lessons = {
         title: "Read the Properties That Predict Bugs",
         icon: "fa-tags",
         content: [
-          "Beyond the path, each endpoint has properties that tell you how to test it. HTTP method matters a lot: GET usually reads, while POST/PUT/PATCH/DELETE change state — state-changing endpoints carry more risk (CSRF, unauthorized actions) and deserve more attention. Whether an endpoint takes parameters determines whether injection and IDOR testing even apply.",
+          "Beyond the path, each endpoint has properties that tell you how to test it. HTTP method matters a lot: GET usually reads, while POST/PUT/PATCH/DELETE change state - state-changing endpoints carry more risk (CSRF, unauthorized actions) and deserve more attention. Whether an endpoint takes parameters determines whether injection and IDOR testing even apply.",
           "Watch for specific input shapes. An endpoint that references an object ID (/order/1234, ?user_id=…) is an IDOR candidate. One that takes a URL or hostname (?url=, ?redirect=, ?next=) invites SSRF and open-redirect testing. One that takes a filename or path (?file=, ?path=) invites path traversal. One whose response echoes your input invites XSS.",
           "Finally, note the response behavior: what status codes an endpoint returns, whether it returns more data than the UI shows (data exposure), and whether its behavior changes with authentication. These properties, read across the whole inventory, let you plan targeted testing instead of poking blindly."
         ],
@@ -597,11 +597,11 @@ export const lessons = {
       }
     ],
     practicalTips: [
-      "Group endpoints by function before you start testing — it reveals the risk map",
+      "Group endpoints by function before you start testing - it reveals the risk map",
       "Flag every endpoint with an object ID as an IDOR candidate",
       "Flag url=/redirect=/next= params for SSRF and open-redirect testing",
       "Flag file=/path= params for path traversal",
-      "Note state-changing (POST/PUT/DELETE) endpoints — they carry more risk than reads"
+      "Note state-changing (POST/PUT/DELETE) endpoints - they carry more risk than reads"
     ],
     furtherReading: [
       { title: "OWASP API Security Top 10", url: "https://owasp.org/API-Security/editions/2023/en/0x11-t10/", description: "The most common API endpoint vulnerabilities" },
@@ -618,7 +618,7 @@ export const lessons = {
         icon: "fa-ranking-star",
         content: [
           "Two questions rank any endpoint. First, impact: if something went wrong here, how bad would it be? An endpoint that moves money, exposes personal data, controls authentication, or performs admin actions is high-impact. A static marketing page is not. Start where a bug would matter most.",
-          "Second, likelihood: how probable is a bug here? Endpoints with parameters, write methods, object IDs, file handling, complex business logic, or clear trust boundaries are more likely to be vulnerable than a parameterless static route. The best targets score high on both — high impact and high likelihood.",
+          "Second, likelihood: how probable is a bug here? Endpoints with parameters, write methods, object IDs, file handling, complex business logic, or clear trust boundaries are more likely to be vulnerable than a parameterless static route. The best targets score high on both - high impact and high likelihood.",
           "This impact-times-likelihood ranking is how professionals allocate limited time. It's better to deeply test the ten endpoints most likely to yield serious bugs than to shallowly poke all three hundred. Depth on the right targets beats breadth on everything."
         ],
         keyPoints: [
@@ -646,10 +646,10 @@ export const lessons = {
     ],
     practicalTips: [
       "Rank endpoints by impact x likelihood and test the top of the list first",
-      "Money, PII, auth, and admin endpoints are high-impact — start there",
+      "Money, PII, auth, and admin endpoints are high-impact - start there",
       "Parameterized, state-changing, ID-bearing endpoints are high-likelihood",
       "Pull priorities straight from your manual-crawl notes and threat model",
-      "Depth beats breadth — deeply test the right 10 before poking all 300"
+      "Depth beats breadth - deeply test the right 10 before poking all 300"
     ],
     furtherReading: [
       { title: "PortSwigger Web Security Academy", url: "https://portswigger.net/web-security", description: "Structuring your testing so time goes to the right targets" },
@@ -665,7 +665,7 @@ export const lessons = {
         title: "Why Applications Have Hidden Parameters",
         icon: "fa-eye-slash",
         content: [
-          "Backends routinely accept more parameters than their forms and links expose. Frameworks bind request parameters to variables automatically; features get built, then hidden behind a flag rather than removed; debugging and internal parameters ship to production; and old parameters linger long after the UI that used them is gone. The server still reads all of them — it just doesn't tell you they exist.",
+          "Backends routinely accept more parameters than their forms and links expose. Frameworks bind request parameters to variables automatically; features get built, then hidden behind a flag rather than removed; debugging and internal parameters ship to production; and old parameters linger long after the UI that used them is gone. The server still reads all of them - it just doesn't tell you they exist.",
           "From a defender's point of view, an unadvertised parameter feels safe: 'nobody knows it's there.' That assumption is exactly the weakness. Security by obscurity fails the moment a hunter enumerates the parameter, and because it was assumed hidden, it's frequently missing the validation and authorization checks the visible inputs have.",
           "Common high-value hidden parameters include debug/test flags that enable verbose output, admin/role parameters that change privilege, id parameters that select which record you see, and url/redirect parameters that aren't validated. Each is a well-known path to a serious finding."
         ],
@@ -682,7 +682,7 @@ export const lessons = {
         content: [
           "Every parameter an endpoint accepts is another input you can manipulate, and every input is a potential injection point or logic lever. Discovering that a single endpoint quietly accepts three extra parameters effectively multiplies the things you can test there.",
           "This is why parameter enumeration comes after endpoint discovery: first you find the doors (endpoints), then you find all the keyholes on each door (parameters). An endpoint you dismissed as boring can become interesting the moment you discover it accepts a hidden url or admin parameter.",
-          "Parameter enumeration turns a flat endpoint into a rich testing target. The output isn't a vulnerability yet — it's a set of new inputs, each of which you'll test against the vulnerability class its name and behavior suggest."
+          "Parameter enumeration turns a flat endpoint into a rich testing target. The output isn't a vulnerability yet - it's a set of new inputs, each of which you'll test against the vulnerability class its name and behavior suggest."
         ],
         keyPoints: [
           "Each parameter is another manipulable input and potential bug",
@@ -694,7 +694,7 @@ export const lessons = {
     ],
     practicalTips: [
       "Run parameter enumeration against your highest-value endpoints, not everything",
-      "Watch for debug/test/admin/role parameters — they're often pure logic bugs",
+      "Watch for debug/test/admin/role parameters - they're often pure logic bugs",
       "Any hidden id/user/account parameter is an immediate IDOR candidate",
       "Feed the endpoint's known parameters in as context to improve accuracy",
       "Treat every discovered parameter as a lead to test, then test it deliberately"
@@ -713,9 +713,9 @@ export const lessons = {
         title: "The Core Idea: Guess, Send, Diff",
         icon: "fa-wave-square",
         content: [
-          "Every parameter-discovery tool works the same way at heart. It takes a wordlist of likely parameter names, sends them to the endpoint (in the query string, the body, or headers), and compares each response to a baseline. If a candidate parameter changes the response — its length, status code, reflected content, or timing — the tool concludes the backend is actually processing that parameter and reports it.",
+          "Every parameter-discovery tool works the same way at heart. It takes a wordlist of likely parameter names, sends them to the endpoint (in the query string, the body, or headers), and compares each response to a baseline. If a candidate parameter changes the response - its length, status code, reflected content, or timing - the tool concludes the backend is actually processing that parameter and reports it.",
           "The challenge is noise. Many applications return slightly different responses every time (timestamps, CSRF tokens, tracking IDs), which can look like a parameter having an effect when it doesn't. The quality of a tool is largely in how well it establishes a stable baseline and filters out this natural variation to avoid false positives.",
-          "To keep things fast, tools send parameters in chunks (many at once) and only isolate individual names when a chunk shows an effect — the same trick that lets Arjun test tens of thousands of candidates in a handful of requests."
+          "To keep things fast, tools send parameters in chunks (many at once) and only isolate individual names when a chunk shows an effect - the same trick that lets Arjun test tens of thousands of candidates in a handful of requests."
         ],
         keyPoints: [
           "Send candidate parameter names, compare responses to a baseline",
@@ -729,13 +729,13 @@ export const lessons = {
         icon: "fa-toolbox",
         content: [
           "Arjun (Python) is the fast, reliable default. It's smart about baselines and chunked diffing, supports GET/POST/JSON/XML, and is accurate enough to trust for most targets. If you run one parameter tool, run Arjun.",
-          "x8 (Rust) is the high-precision option. It does careful response comparison, can inject into query, body, or headers, and verifies findings before reporting them — which makes it strong against endpoints whose responses wobble on their own. Use it when you want to cut false positives or test injection points beyond the query string.",
+          "x8 (Rust) is the high-precision option. It does careful response comparison, can inject into query, body, or headers, and verifies findings before reporting them - which makes it strong against endpoints whose responses wobble on their own. Use it when you want to cut false positives or test injection points beyond the query string.",
           "A third tool, parameth, was removed after a live run: it compares every response to a single baseline taken at the start, which holds on a static page but not on a JSON API, where ordinary variation and any throttling make every candidate look like a hit. It reported 94,888 parameters on a corpus where Arjun found 2 and x8 found 0. The lesson generalises: a detector that fires on most of the wordlist has measured its own baseline, not the target."
         ],
         keyPoints: [
           "Arjun: fast, accurate default; GET/POST/JSON/XML",
           "x8: high-precision, verifies findings, injects into query/body/headers",
-          "Run more than one — different tools catch different parameters"
+          "Run more than one - different tools catch different parameters"
         ],
         examples: [
           { code: "arjun -u https://target/api/user -m GET", description: "Discover hidden parameters on an endpoint" },
@@ -765,9 +765,9 @@ export const lessons = {
         title: "Match the Parameter to the Attack",
         icon: "fa-bullseye",
         content: [
-          "The name and apparent purpose of a parameter tell you what to test it for. A parameter that names an object — id, user_id, account, order, doc — is an IDOR candidate: supply another user's value and see if the app returns their data. A parameter taking a URL or hostname — url, redirect, next, callback, dest, webhook — invites SSRF (make the server request an internal address) and open redirect.",
-          "A parameter taking a file name or path — file, path, template, include, page — invites path traversal and local file inclusion (../../etc/passwd). A parameter that reflects into the response invites XSS. A parameter feeding a search or filter invites SQL or NoSQL injection. A parameter accepting structured data invites XXE or deserialization issues.",
-          "The advantage you have here is that these parameters were hidden — so they've likely had far less security review than the visible inputs. The same payload that a well-tested search box shrugs off may work on a forgotten hidden parameter that reaches the same backend."
+          "The name and apparent purpose of a parameter tell you what to test it for. A parameter that names an object - id, user_id, account, order, doc - is an IDOR candidate: supply another user's value and see if the app returns their data. A parameter taking a URL or hostname - url, redirect, next, callback, dest, webhook - invites SSRF (make the server request an internal address) and open redirect.",
+          "A parameter taking a file name or path - file, path, template, include, page - invites path traversal and local file inclusion (../../etc/passwd). A parameter that reflects into the response invites XSS. A parameter feeding a search or filter invites SQL or NoSQL injection. A parameter accepting structured data invites XXE or deserialization issues.",
+          "The advantage you have here is that these parameters were hidden - so they've likely had far less security review than the visible inputs. The same payload that a well-tested search box shrugs off may work on a forgotten hidden parameter that reaches the same backend."
         ],
         keyPoints: [
           "id/user/account/order params -> IDOR (try other users' values)",
@@ -784,14 +784,14 @@ export const lessons = {
         title: "Magic Parameters: Logic Bugs Hiding in Plain Sight",
         icon: "fa-wand-magic-sparkles",
         content: [
-          "Some of the highest-impact hidden parameters aren't injection points at all — they're switches. Parameters named debug, test, admin, is_admin, role, preview, internal, or beta frequently change the application's behavior when set to true, 1, or a role name: they enable verbose errors, reveal hidden data, or grant privileged views.",
-          "These 'magic parameters' are pure business-logic and access-control bugs. Finding a working debug=true that dumps stack traces and configuration, or an admin=1 that unlocks an administrative response, is often worth more than a reflected XSS — and it takes nothing more than trying the obvious values on the parameter you discovered.",
+          "Some of the highest-impact hidden parameters aren't injection points at all - they're switches. Parameters named debug, test, admin, is_admin, role, preview, internal, or beta frequently change the application's behavior when set to true, 1, or a role name: they enable verbose errors, reveal hidden data, or grant privileged views.",
+          "These 'magic parameters' are pure business-logic and access-control bugs. Finding a working debug=true that dumps stack traces and configuration, or an admin=1 that unlocks an administrative response, is often worth more than a reflected XSS - and it takes nothing more than trying the obvious values on the parameter you discovered.",
           "So for every behavior-suggesting parameter you find, test the obvious enabling values (true, 1, yes, admin, the app's role names) and watch for any change in what the app returns or lets you do. This is where parameter enumeration most directly turns into serious findings."
         ],
         keyPoints: [
           "debug/test/admin/role/preview params can unlock hidden behavior",
           "Try enabling values: true, 1, yes, role names",
-          "These are access-control / logic bugs — often high impact",
+          "These are access-control / logic bugs - often high impact",
           "A working debug or admin flag can outrank a typical injection bug"
         ]
       }
@@ -800,7 +800,7 @@ export const lessons = {
       "For every parameter, ask 'what does this name suggest it does?' and test that class",
       "Always try other users' values on any id-like parameter (IDOR)",
       "Try true/1/admin on debug/test/admin/role-style parameters",
-      "Hidden params often skip validation the visible inputs have — retry payloads there",
+      "Hidden params often skip validation the visible inputs have - retry payloads there",
       "Confirm and reproduce in your proxy before writing it up"
     ],
     furtherReading: [
@@ -3893,14 +3893,14 @@ export const lessons = {
         content: [
           "Passive OSINT aggregates subdomains from multiple free, public reconnaissance sources in a single pass, unioning their results so a subdomain indexed by any one source is captured. It fills the role the classic Sublist3r tool once played, but without the fragile search-engine scraping that modern bot-detection and CAPTCHAs have rendered unreliable.",
           "The tool queries free, key-less data sources that each observe the internet differently: RapidDNS and HackerTarget expose large passive-DNS datasets of previously observed hostname-to-IP mappings, URLScan.io indexes hostnames seen while scanning submitted URLs, and AlienVault OTX contributes passive-DNS records from its threat-intelligence community.",
-          "Because each source is queried independently and best-effort, a single source being rate-limited or temporarily unavailable does not fail the scan — the remaining sources still contribute, and the union is deduplicated and validated so every result is a genuine subdomain of the target.",
+          "Because each source is queried independently and best-effort, a single source being rate-limited or temporarily unavailable does not fail the scan - the remaining sources still contribute, and the union is deduplicated and validated so every result is a genuine subdomain of the target.",
           "This passive approach never sends traffic to the target's own infrastructure; it only reads what third parties have already recorded, making it a quiet, low-risk first step that surfaces forgotten development, staging, and legacy hosts other observers have catalogued over time."
         ],
         keyPoints: [
           "Unions several free, no-API-key passive sources in one pass",
           "Passive DNS (RapidDNS, HackerTarget, OTX) plus URL indexing (URLScan.io)",
           "Best-effort per source: one failing source doesn't fail the scan",
-          "Sends no traffic to the target — reads only third-party records"
+          "Sends no traffic to the target - reads only third-party records"
         ],
         examples: [
           {

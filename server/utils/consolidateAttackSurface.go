@@ -3433,7 +3433,7 @@ func fetchAssetRelationships(assetID string) ([]AssetRelationship, error) {
 }
 
 // fetchAssetRelationshipsBatch fetches relationships for many assets in a single query, avoiding
-// the N+1 of calling fetchAssetRelationships once per asset (G1.13 — was 1 + N queries, i.e.
+// the N+1 of calling fetchAssetRelationships once per asset (G1.13 - was 1 + N queries, i.e.
 // 10k+1 at scale). It returns a map keyed by asset ID; each relationship is attached to BOTH its
 // parent and child asset, mirroring the per-asset query (which matched rows where the asset is
 // parent OR child).

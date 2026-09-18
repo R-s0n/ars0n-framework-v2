@@ -1,9 +1,15 @@
 package utils
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // A control that cannot fail is not a control. These are the four outcomes it has to tell apart.
@@ -360,7 +366,7 @@ func TestCanaryMatchIsHostNotSubstring(t *testing.T) {
 // A control that is only mentioned when it fails trains people to read silence as success, which is
 // the same reasoning error as reading "0 findings" as "0 vulnerabilities". So it reports either way.
 func TestCanaryOutcomeIsReportedWhetherOrNotItFired(t *testing.T) {
-	fired := canaryOutcome("dalfox", []map[string]any{{"id": "x"}}, "")
+	fired := canaryOutcome("dalfox", []map[string]any{{"id": "x"}}, "", false)
 	if fired["fired"] != true || fired["hit_count"] != 1 {
 		t.Errorf("a control that fired is not reported as fired: %#v", fired)
 	}
@@ -368,7 +374,7 @@ func TestCanaryOutcomeIsReportedWhetherOrNotItFired(t *testing.T) {
 		t.Errorf("the passing message does not say these are not target findings: %q", fired["meaning"])
 	}
 
-	silent := canaryOutcome("domdig", nil, "")
+	silent := canaryOutcome("domdig", nil, "", false)
 	if silent["fired"] != false || silent["hit_count"] != 0 {
 		t.Errorf("a control that did not fire is not reported as such: %#v", silent)
 	}
@@ -376,8 +382,326 @@ func TestCanaryOutcomeIsReportedWhetherOrNotItFired(t *testing.T) {
 		t.Errorf("a silent control must say the zero is unproven, got %q", silent["meaning"])
 	}
 
-	unverified := canaryOutcome("ghauri", nil, "UNVERIFIED: the canary did not fire")
+	unverified := canaryOutcome("ghauri", nil, "UNVERIFIED: the canary did not fire", false)
 	if !strings.Contains(unverified["meaning"].(string), "can be trusted") {
 		t.Errorf("an unverified run must say so plainly, got %q", unverified["meaning"])
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// REUSING A PASSING CONTROL.
+//
+// A reused control is only defensible if the things that could make yesterday's pass a lie actually
+// invalidate it. Every one of those is tested here by making the change and asserting a MISS, which
+// is the only direction of this feature that can hurt anyone: a false miss costs 49 to 129 seconds,
+// a false hit certifies a blind scanner.
+
+// fakeOracle stands in for the canary oracle. It answers with the marker header that distinguishes a
+// real handler from the index fallthrough, which is what canaryServesSpec checks for.
+func fakeOracle(t *testing.T, marker bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if marker {
+			w.Header().Set("X-Ars0n-Oracle", "sqli")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// canaryTestbed wires a tool, a live fake oracle, a stubbed container fingerprint and a stopped
+// clock, and clears the process-wide evidence so tests cannot leak into one another.
+func canaryTestbed(t *testing.T, marker bool) (VectorTool, CanarySpec, *string, *time.Time,
+	*httptest.Server) {
+	t.Helper()
+	tool, ok := VectorToolByKey("sqlmap")
+	if !ok {
+		t.Skip("sqlmap is not registered")
+	}
+	spec := vectorCanaries["sqlmap"]
+
+	srv := fakeOracle(t, marker)
+	t.Setenv("ARS0N_CANARY_HOST", strings.TrimPrefix(srv.URL, "http://"))
+
+	state := "container-abc|image-1|2026-09-18T10:00:00Z|true"
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+
+	prevState, prevNow := canaryContainerState, canaryNow
+	canaryContainerState = func(context.Context, string) (string, bool) {
+		if state == "" {
+			return "", false
+		}
+		return state, true
+	}
+	canaryNow = func() time.Time { return now }
+
+	canaryEvidenceMu.Lock()
+	canaryEvidenceByTool = map[string]canaryPass{}
+	canaryProbation = map[string]bool{}
+	canaryEvidenceMu.Unlock()
+
+	t.Cleanup(func() {
+		canaryContainerState, canaryNow = prevState, prevNow
+		canaryEvidenceMu.Lock()
+		canaryEvidenceByTool = map[string]canaryPass{}
+		canaryProbation = map[string]bool{}
+		canaryEvidenceMu.Unlock()
+	})
+	return tool, spec, &state, &now, srv
+}
+
+// The baseline both directions are measured against: a fresh pass, nothing changed, reused.
+func TestAFreshPassIsReusedWhenNothingHasChanged(t *testing.T) {
+	tool, spec, _, now, _ := canaryTestbed(t, true)
+	settings := map[string]any{"level": 2}
+	section := map[string]any{"listeningWebhookURL": ""}
+
+	if _, reused := canaryReusablePass(context.Background(), tool, spec, settings, section); reused {
+		t.Fatal("nothing has been proven yet, so the very first control of a campaign must be run for " +
+			"real; a cache that answers before it has been filled is not a cache")
+	}
+
+	recordCanaryPass(context.Background(), tool, spec, settings, section)
+	*now = now.Add(9 * time.Minute)
+
+	outcome, reused := canaryReusablePass(context.Background(), tool, spec, settings, section)
+	if !reused {
+		t.Fatal("an unchanged tool, settings, container and oracle nine minutes later is the whole " +
+			"case this exists for")
+	}
+	if !outcome.Ran || !outcome.Passed || !outcome.Reused {
+		t.Errorf("a reused pass must still read as a control that ran and passed, and must say it was " +
+			"reused; got " + fmt.Sprintf("%#v", outcome))
+	}
+	if outcome.Age != 9*time.Minute {
+		t.Errorf("the age of the evidence is what makes the weaker claim readable, got %v", outcome.Age)
+	}
+}
+
+// THE INVALIDATIONS. Each one records a pass, changes exactly one thing, and requires a miss.
+func TestEveryChangeThatCouldMakeThePassALieInvalidatesIt(t *testing.T) {
+	settings := map[string]any{"level": 2, "risk": 1}
+	section := map[string]any{"listeningWebhookURL": ""}
+
+	for name, tc := range map[string]struct {
+		change      func(t *testing.T, state *string, now *time.Time, srv *httptest.Server)
+		askSettings map[string]any
+		askSection  map[string]any
+		why         string
+	}{
+		"a tool setting changed": {
+			askSettings: map[string]any{"level": 5, "risk": 1},
+			why: "the pass was taken under --level 2; it says nothing about what the tool does at " +
+				"--level 5, and a setting the tool silently rejects is the defect class this control " +
+				"was built for",
+		},
+		"a section setting changed": {
+			askSection: map[string]any{"listeningWebhookURL": "https://hook.example/x"},
+			why: "section settings reach the composer, so a change to one can change the command line " +
+				"that was proven to work",
+		},
+		"the container was restarted": {
+			change: func(t *testing.T, state *string, _ *time.Time, _ *httptest.Server) {
+				*state = "container-abc|image-1|2026-09-18T11:59:00Z|true"
+			},
+			why: "a restart is a different process with a different filesystem state, and it is the " +
+				"invalidation an operator triggers without ever thinking about the canary",
+		},
+		"the image was rebuilt": {
+			change: func(t *testing.T, state *string, _ *time.Time, _ *httptest.Server) {
+				*state = "container-def|image-2|2026-09-18T11:59:00Z|true"
+			},
+			why: "a new image is a new tool version, and a tool version change is exactly what the " +
+				"ghauri --delay defect was",
+		},
+		"the container is not running": {
+			change: func(t *testing.T, state *string, _ *time.Time, _ *httptest.Server) {
+				*state = ""
+			},
+			why: "a container that is not running cannot be the thing that passed ten minutes ago in " +
+				"any sense worth acting on, and docker inspect failing means we do not know what is " +
+				"there at all",
+		},
+		"the pass has expired": {
+			change: func(t *testing.T, _ *string, now *time.Time, _ *httptest.Server) {
+				*now = now.Add(canaryEvidenceTTL)
+			},
+			why: "the TTL is the only guard against a slow degradation that none of the explicit " +
+				"invalidations can see, so it has to bite exactly at the boundary",
+		},
+		"the pass has been spent": {
+			change: func(t *testing.T, _ *string, _ *time.Time, _ *httptest.Server) {},
+			why: "the use cap is what stops a fast tool getting hundreds of scans out of one control " +
+				"inside the TTL",
+		},
+		"the oracle is down": {
+			change: func(t *testing.T, _ *string, _ *time.Time, srv *httptest.Server) {
+				srv.Close()
+			},
+			why: "reuse is a claim about a test rig, and a rig nobody can see is not one to make " +
+				"claims about",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tool, spec, state, now, srv := canaryTestbed(t, true)
+			recordCanaryPass(context.Background(), tool, spec, settings, section)
+
+			if name == "the pass has been spent" {
+				for i := 0; i < canaryEvidenceMaxUses; i++ {
+					if _, ok := canaryReusablePass(context.Background(), tool, spec, settings,
+						section); !ok {
+						t.Fatalf("use %d of %d was refused; the cap must not bite early or the "+
+							"saving disappears", i+1, canaryEvidenceMaxUses)
+					}
+				}
+			}
+			if tc.change != nil {
+				tc.change(t, state, now, srv)
+			}
+			askSettings, askSection := settings, section
+			if tc.askSettings != nil {
+				askSettings = tc.askSettings
+			}
+			if tc.askSection != nil {
+				askSection = tc.askSection
+			}
+
+			if _, reused := canaryReusablePass(context.Background(), tool, spec, askSettings,
+				askSection); reused {
+				t.Errorf("the stored pass was reused after %s. %s", name, tc.why)
+			}
+		})
+	}
+}
+
+// A STALE ORACLE IS NOT A LIVE ONE. Measured once already: an oracle image that served no /ssti
+// answered 200 there out of its index handler, and the control ran against a page with no template
+// in it. /health was fine throughout. A reused pass must not inherit that, so the reuse check asks
+// for the control's own path and requires the marker header a real handler sets.
+func TestAnOracleServingTheIndexPageDoesNotKeepAPassAlive(t *testing.T) {
+	tool, spec, _, _, _ := canaryTestbed(t, false)
+	settings := map[string]any{"level": 2}
+
+	recordCanaryPass(context.Background(), tool, spec, settings, nil)
+	if _, reused := canaryReusablePass(context.Background(), tool, spec, settings, nil); reused {
+		t.Error("the oracle answered 200 without the X-Ars0n-Oracle marker, which is what a stale " +
+			"image's index fallthrough looks like, and the pass was reused anyway")
+	}
+}
+
+// A FAILURE ENDS THE REUSE IMMEDIATELY, AND ONE PASS DOES NOT RESTART IT.
+//
+// The failure drops the evidence whatever key it was taken under: the pass said the tool works and
+// the failure says nobody knows what the tool is doing. The probation is the second half: a single
+// pass after a failure could be the flap rather than the fix, and caching a flap is how a cache ends
+// up certifying a broken tool for the next half hour.
+func TestAFailedControlEndsReuseAndTheNextPassIsNotBelievedOnItsOwn(t *testing.T) {
+	tool, spec, _, now, _ := canaryTestbed(t, true)
+	settings := map[string]any{"level": 2}
+
+	recordCanaryPass(context.Background(), tool, spec, settings, nil)
+	recordCanaryFailure(tool.Key)
+
+	if _, reused := canaryReusablePass(context.Background(), tool, spec, settings, nil); reused {
+		t.Fatal("a control that has just FAILED left a usable pass behind; that is the cache " +
+			"certifying a tool we have direct evidence is not working")
+	}
+
+	// First pass after the failure: run for real, believed for this scan, not stored.
+	recordCanaryPass(context.Background(), tool, spec, settings, nil)
+	if _, reused := canaryReusablePass(context.Background(), tool, spec, settings, nil); reused {
+		t.Error("one pass after a failure is not enough to resume reuse; it could be the flap " +
+			"rather than the fix")
+	}
+
+	// Second consecutive pass: the tool has proven itself twice, reuse resumes.
+	recordCanaryPass(context.Background(), tool, spec, settings, nil)
+	*now = now.Add(time.Minute)
+	if _, reused := canaryReusablePass(context.Background(), tool, spec, settings, nil); !reused {
+		t.Error("after two consecutive passes the probation must end, or a tool that failed once " +
+			"pays the full control cost for the rest of the campaign")
+	}
+}
+
+// Two scans of the same tool at once must not both spend the last use, or the cap is advisory.
+func TestConcurrentScansCannotOverspendOnePass(t *testing.T) {
+	tool, spec, _, _, _ := canaryTestbed(t, true)
+	settings := map[string]any{"level": 2}
+	recordCanaryPass(context.Background(), tool, spec, settings, nil)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	hits := 0
+	for i := 0; i < canaryEvidenceMaxUses*3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, reused := canaryReusablePass(context.Background(), tool, spec, settings, nil); reused {
+				mu.Lock()
+				hits++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if hits > canaryEvidenceMaxUses {
+		t.Errorf("one pass was reused %d times against a cap of %d; the cap has to hold under the "+
+			"concurrency the runner actually has", hits, canaryEvidenceMaxUses)
+	}
+}
+
+// The stored scan has to say which claim it is making. A clean result backed by a control from
+// twenty minutes ago is a different thing to read than one backed by a control from this run, and
+// the operator is the one who decides whether that matters.
+func TestTheRecordSaysWhetherTheControlWasFreshOrReused(t *testing.T) {
+	fresh := canaryPassReason("sqlmap", CanaryOutcome{Ran: true, Passed: true})
+	if !strings.Contains(fresh, "PASSED") || strings.Contains(strings.ToUpper(fresh), "REUSED") {
+		t.Errorf("a fresh control must not read as a reused one: %q", fresh)
+	}
+
+	reused := canaryPassReason("ghauri", CanaryOutcome{Ran: true, Passed: true, Reused: true,
+		Age: 21 * time.Minute})
+	for _, want := range []string{"PASSED", "REUSED", "21m", "ghauri"} {
+		if !strings.Contains(reused, want) {
+			t.Errorf("the reused-control record must contain %q so the weaker claim is legible; "+
+				"got %q", want, reused)
+		}
+	}
+	if canaryReusedStatus == "findings" || canaryReusedStatus == "error" {
+		t.Error("a reused control produced no findings and is not an error; sharing either status " +
+			"puts it in a list the results modal means something else by")
+	}
+}
+
+// A REUSED PASS MUST NOT RENDER AS "NO CONTROL HIT".
+//
+// canaryOutcome derived everything from len(hits), and a reused pass runs no tool so it stores no
+// findings. Wired without this, a control that PASSED produced the operator-facing warning "No
+// control hit was recorded ... a zero against the target is unproven either way", which is the
+// fastest way to teach someone to ignore the one warning that matters.
+//
+// It must also stay DISTINGUISHABLE from a fresh pass. "Verified" and "verified by a result from
+// twenty minutes ago" are different claims and the reader is entitled to know which one they have.
+func TestAReusedControlReadsAsPassedAndSaysItWasReused(t *testing.T) {
+	reused := canaryOutcome("sqlmap", nil, "", true)
+	if reused["fired"] != true {
+		t.Errorf("a reused pass is not reported as fired: %#v", reused)
+	}
+	if reused["reused"] != true {
+		t.Errorf("a reused pass does not say so: %#v", reused)
+	}
+	meaning := reused["meaning"].(string)
+	if strings.Contains(meaning, "unproven") || strings.Contains(meaning, "No control hit") {
+		t.Errorf("a passing control renders as a warning: %q", meaning)
+	}
+	if !strings.Contains(meaning, "REUSED") {
+		t.Errorf("a reused pass is indistinguishable from a fresh one: %q", meaning)
+	}
+
+	// And a fresh pass must not claim reuse.
+	fresh := canaryOutcome("sqlmap", []map[string]any{{"id": "x"}}, "", false)
+	if fresh["reused"] != false || strings.Contains(fresh["meaning"].(string), "REUSED") {
+		t.Errorf("a fresh pass claims to be reused: %#v", fresh)
 	}
 }

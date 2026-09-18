@@ -227,8 +227,11 @@ var methodologySteps = map[string]MethodologyStep{
 			"spots. It is the last cheap moment to notice that a whole class of input was never " +
 			"captured.",
 		DoFirst: []string{
-			"Check the count at EACH of the five insertion points. A zero means every tool will report " +
-				"nothing wrong with that insertion point, because nothing was ever sent there.",
+			"Check the count at EACH insertion point. A zero at one of the five that are SENT, query, " +
+				"body, header, cookie or path, means every tool will report nothing wrong there because " +
+				"nothing was ever sent. A zero at the sixth, the fragment, is usually the truth: a " +
+				"fragment never leaves the browser, so only domdig reaches one and only where a hash " +
+				"was actually observed.",
 			"Compare the list against the application's features from memory. Anything missing is a " +
 				"hole you can still close by crawling it or adding the vector by hand.",
 			"Look for a response cookie whose value echoes a request parameter: that is the same " +
@@ -363,10 +366,14 @@ func GetAttackVectorModel(w http.ResponseWriter, r *http.Request) {
 		},
 		"insertion_points": map[string]any{
 			"points": VectorInsertionPoints,
-			"note": "Query and body get tested constantly and hardened accordingly. Header, cookie " +
-				"and path are the ones that get skipped, which is exactly why input arriving there " +
-				"is often unfiltered. A point with zero vectors will be reported clean by every tool " +
-				"in every section, because nothing was ever sent there.",
+			"note": "Six points, and they are not alike. Query and body get tested constantly and " +
+				"hardened accordingly. Header, cookie and path are the ones that get skipped, which is " +
+				"exactly why input arriving there is often unfiltered. A zero at any of those five will " +
+				"be reported clean by every tool in every section, because nothing was ever sent " +
+				"there. The sixth, the fragment, is different in kind: it never reaches the server, so " +
+				"no HTTP tool can test one and no crawler can discover one. domdig is the only tool " +
+				"that reaches it, and a zero on an application using history routing rather than hash " +
+				"routing is the correct count rather than a gap.",
 		},
 		"ffuf_purposes": FuzzFlowPurposes,
 		"working_principle": map[string]string{
@@ -390,16 +397,21 @@ func GetToolGuidance(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	tool := r.URL.Query().Get("tool")
 	kind := r.URL.Query().Get("kind")
+	// Optional, and the reason it exists is that severity is execution AND delivery: without a point
+	// this endpoint answers for an unknown one, which is the answer the results modal used to give
+	// for a cookie vector while the MCP layer called the same row not_enough_info.
+	point := r.URL.Query().Get("insertion_point")
 
 	if tool != "" {
-		explanation := ExplainFinding(tool, kind)
+		explanation := ExplainFindingForVector(tool, kind, point)
 		if explanation.Title == "" {
 			writeJSONError(w, http.StatusNotFound, "no_guidance",
 				"No hard-coded guidance for tool "+tool+". That is a known gap rather than a "+
 					"statement that the tool is simple: guidance exists for some tools and not others.")
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"tool": tool, "kind": kind, "guidance": explanation})
+		json.NewEncoder(w).Encode(map[string]any{"tool": tool, "kind": kind,
+			"insertion_point": point, "guidance": explanation})
 		return
 	}
 

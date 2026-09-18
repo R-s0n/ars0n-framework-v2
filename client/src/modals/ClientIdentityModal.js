@@ -227,7 +227,7 @@ const ClientIdentityModal = ({ show, handleClose, activeTarget }) => {
   return (
     <Modal data-bs-theme="dark" show={show} onHide={handleClose} size="xl" dialogClassName="modal-90w">
       <Modal.Header closeButton>
-        <Modal.Title className="text-danger">Client Identity — IDOR &amp; Access-Control Targets</Modal.Title>
+        <Modal.Title className="text-danger">Client Identity - IDOR &amp; Access-Control Targets</Modal.Title>
       </Modal.Header>
       <Modal.Body className="text-white" style={{ minHeight: '72vh' }}>
         {!activeTarget ? (
@@ -360,7 +360,7 @@ const ClientIdentityModal = ({ show, handleClose, activeTarget }) => {
               {artifacts.length === 0 ? (
                 <div className="text-white-50 small fst-italic">
                   No base64 / JWT data found in this request. When a request contains a JWT or base64 value
-                  (e.g. an Authorization header or token), its decoded contents appear here — highlight a
+                  (e.g. an Authorization header or token), its decoded contents appear here - highlight a
                   claim and click <strong>Add selection</strong>.
                 </div>
               ) : (

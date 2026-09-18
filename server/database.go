@@ -825,6 +825,42 @@ func createTables() {
 		// catalogue is curated knowledge, and letting per-target findings append to it would turn a
 		// reference work into a scratchpad.
 		`ALTER TABLE threat_model ADD COLUMN IF NOT EXISTS attack_custom_name TEXT NOT NULL DEFAULT '';`,
+		// A short human-quotable identifier per threat: S001, T001, R001, I001, D001, E001, numbered
+		// per STRIDE category within ONE scope target. It exists so an operator can say "validate
+		// S023" to an AI instead of pasting a uuid.
+		//
+		// NULLABLE ON PURPOSE, unlike every other column added above. `NOT NULL DEFAULT ''` would give
+		// all existing rows the same empty string and the unique index below would then fail with a
+		// duplicate key, which is not an "already exists" error and so would call log.Fatalf and stop
+		// the API from booting. NULLs are distinct in a unique index, which is what lets the column
+		// exist before the backfill has filled it.
+		`ALTER TABLE threat_model ADD COLUMN IF NOT EXISTS threat_code TEXT;`,
+		// Backfill, and it runs on EVERY boot, so the guard is what makes it safe. Re-running this
+		// unguarded would renumber rows and invalidate codes an operator has already written down.
+		// ELSE 'X' because category is free text here: the API validates the attack/category pairing
+		// but never the category itself, and attack_custom_name bypasses even that. Without the ELSE
+		// such a row takes NULL, stays unbackfilled, and is retried forever.
+		`WITH numbered AS (
+		    SELECT id,
+		           CASE category
+		               WHEN 'spoofing' THEN 'S'
+		               WHEN 'tampering' THEN 'T'
+		               WHEN 'repudiation' THEN 'R'
+		               WHEN 'information_disclosure' THEN 'I'
+		               WHEN 'denial_of_service' THEN 'D'
+		               WHEN 'elevation_of_privilege' THEN 'E'
+		               ELSE 'X'
+		           END || LPAD(ROW_NUMBER() OVER (PARTITION BY scope_target_id, category
+		                                          ORDER BY created_at, id)::text, 3, '0') AS code
+		      FROM threat_model
+		     WHERE COALESCE(threat_code, '') = ''
+		)
+		UPDATE threat_model t SET threat_code = n.code FROM numbered n WHERE t.id = n.id;`,
+		// CREATE UNIQUE INDEX IF NOT EXISTS rather than ADD CONSTRAINT, because ADD CONSTRAINT is not
+		// idempotent and this runs on every start. The index is also what catches the create-path race:
+		// two concurrent inserts can read the same MAX, and the loser gets a 23505 the handler retries.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_threat_model_scope_code
+		    ON threat_model (scope_target_id, threat_code);`,
 		`DO $$ BEGIN
 		    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'threat_model_severity_check') THEN
 		        ALTER TABLE threat_model ADD CONSTRAINT threat_model_severity_check
@@ -1856,7 +1892,7 @@ func createTables() {
 		`CREATE INDEX IF NOT EXISTS target_urls_url_idx ON target_urls (url);`,
 		`CREATE INDEX IF NOT EXISTS target_urls_scope_target_id_idx ON target_urls (scope_target_id);`,
 		// Composite index backing GetTargetURLsForScopeTarget's WHERE + ORDER BY roi_score DESC,
-		// created_at DESC (+ LIMIT/OFFSET pagination) — audit §1.1/G1.1.
+		// created_at DESC (+ LIMIT/OFFSET pagination) - audit §1.1/G1.1.
 		`CREATE INDEX IF NOT EXISTS target_urls_scope_roi_idx ON target_urls (scope_target_id, roi_score DESC, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_discovered_live_ips_scan_id ON discovered_live_ips(scan_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_live_web_servers_scan_id ON live_web_servers(scan_id);`,
@@ -2250,6 +2286,136 @@ func createTables() {
 		// says "this header carries a JWT" is a different proposition from one that says "this header
 		// exists", and the operator sorts by it.
 		`ALTER TABLE attack_vectors ADD COLUMN IF NOT EXISTS signals TEXT[] NOT NULL DEFAULT '{}';`,
+		// The client-side route or anchor, without its leading hash, for insertion_point 'fragment'
+		// and empty for every other point. A separate column rather than part of path, because path
+		// is read by a dozen callers that build a URL out of it and a path carrying a hash would put
+		// their query string on the wrong side of it.
+		//
+		// There is deliberately no CHECK constraint on insertion_point, here or before this change.
+		// The enum lives in attackVectorInsertionPoints in Go, where a new point can be added with
+		// its explanation next to it; a database constraint would have added a second place to
+		// change and nothing to the safety, since nothing but the consolidator writes this column.
+		`ALTER TABLE attack_vectors ADD COLUMN IF NOT EXISTS fragment TEXT NOT NULL DEFAULT '';`,
+
+		// THE HEADLINE REFLECTION VERDICT FOR A VECTOR, denormalised out of vector_reflection_probes
+		// below so the UI can filter two hundred rows and the MCP layer can answer "every vector with
+		// the XSS label" without a join and a per-row ordering.
+		//
+		// The value is the most interesting status across the vector's parameters, and which status
+		// wins is decided by MostInterestingReflectionStatus in Go, never by an ORDER BY here. One
+		// definition of the ranking, read by the Go code, the API and the client, because a second
+		// copy in SQL is a place for the operator's filter and the operator's list to disagree about
+		// what a row is.
+		//
+		// '' means never probed and ranks with not_probed. It is deliberately NOT 'not_reflected':
+		// every existing row on every target would otherwise have started life claiming a clean
+		// measurement that nobody made.
+		`ALTER TABLE attack_vectors ADD COLUMN IF NOT EXISTS reflection_status TEXT NOT NULL DEFAULT '';`,
+		`CREATE INDEX IF NOT EXISTS idx_attack_vectors_reflection ON attack_vectors(scope_target_id, reflection_status)
+		    WHERE deleted_at IS NULL;`,
+
+		// DOES THE PAYLOAD COME BACK, one row per (vector, input), holding the CURRENT answer.
+		//
+		// Current answer rather than a log: the unique key is upserted, so an operator who fixes a
+		// credential and re-probes sees what the input does now. What it used to do is in the run
+		// rows, which is where history belongs.
+		//
+		// status carries seven values and four of them mean "we do not know": needs_browser, blocked,
+		// error and not_probed. They are separate from not_reflected because collapsing any of them
+		// into it produces the silent clean this codebase keeps meeting. The probe payload contains
+		// <, which is exactly the byte a WAF drops, so without `blocked` a well defended target would
+		// read as "nothing reflects anywhere" - the most confident possible way of being wrong.
+		//
+		// survived is which of < > " ' came back unencoded, and it is the half of the grade that
+		// says whether a reflection can be turned into markup. content_type is the other half:
+		// /api/v1/echo on the live estate reflects a payload completely raw into a body pinned to
+		// application/json that could not be moved off it (Accept, format=, callback=, jsonp= and a
+		// .html suffix were all refused), so raw reflection ALONE is not a finding.
+		//
+		// FOUR COLUMNS BEYOND THE FIXED CONTRACT, each earning its place: detail says WHICH encoding
+		// or WHICH rejection, without which "reflected_encoded" cannot be told from "reflected then
+		// truncated" and those have different next moves; auth_applied records whether the credential
+		// actually went on the wire, because 170 of 215 vectors here were captured with one and an
+		// anonymous probe of an auth-only route is a false negative wearing a coverage badge;
+		// probe_url is the request to paste into a terminal to reproduce the row; canary is the token
+		// to grep a saved response for.
+		`CREATE TABLE IF NOT EXISTS vector_reflection_probes (
+		    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		    scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+		    vector_id UUID NOT NULL REFERENCES attack_vectors(id) ON DELETE CASCADE,
+		    parameter TEXT NOT NULL DEFAULT '',
+		    insertion_point TEXT NOT NULL DEFAULT '',
+		    status TEXT NOT NULL DEFAULT 'not_probed',
+		    survived TEXT[] NOT NULL DEFAULT '{}',
+		    content_type TEXT NOT NULL DEFAULT '',
+		    http_status INT NOT NULL DEFAULT 0,
+		    evidence TEXT NOT NULL DEFAULT '',
+		    detail TEXT NOT NULL DEFAULT '',
+		    probe_url TEXT NOT NULL DEFAULT '',
+		    canary TEXT NOT NULL DEFAULT '',
+		    auth_applied BOOLEAN NOT NULL DEFAULT FALSE,
+		    probed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		    UNIQUE (vector_id, parameter)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_vector_reflection_probes_target
+		    ON vector_reflection_probes(scope_target_id, status);`,
+
+		// One press of the probe button. Progress and cooperative cancellation, the same shape
+		// vector_scans uses and for the same reason: there was no way to stop a vector scan at all
+		// until that column existed, and killing the api left rows on 'running' forever with nothing
+		// ever writing a terminal status, which then poisons every "is something running" check.
+		//
+		// total_probes is INPUTS, not vectors: one request per query parameter, one per path vector,
+		// none for a fragment. Measured on the live table on 2026-09-17, the 70 query vectors carry
+		// 199 parameters between them, so a run is 199 + 68 = 267 requests against 138 vectors.
+		// Counting vectors would make the progress bar lie by a factor of two.
+		//
+		// skipped_points records how many vectors this probe could not answer for and why. header,
+		// cookie and body vectors get no probe row at all, and without a number saying so the results
+		// table reads as the whole attack surface when it is a part of it.
+		`CREATE TABLE IF NOT EXISTS vector_reflection_runs (
+		    id UUID PRIMARY KEY,
+		    scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+		    status TEXT NOT NULL DEFAULT 'running',
+		    total_probes INT NOT NULL DEFAULT 0,
+		    completed_probes INT NOT NULL DEFAULT 0,
+		    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+		    skipped_points JSONB NOT NULL DEFAULT '{}',
+		    error TEXT,
+		    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		    completed_at TIMESTAMPTZ
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_vector_reflection_runs_target
+		    ON vector_reflection_runs(scope_target_id, created_at DESC);`,
+
+		// DEAD COLUMN, KEPT ON PURPOSE. It recorded whether a run was opted in to sending POST and
+		// PATCH body probes. Nothing writes it and nothing reads it any more: Investigate never sends
+		// a verb that changes data, and a body field is answered by the PASSIVE pass instead, which
+		// sends nothing at all. The column stays rather than being dropped so the rows of runs that
+		// did carry the option keep saying so.
+		`ALTER TABLE vector_reflection_runs
+		    ADD COLUMN IF NOT EXISTS include_mutating_body BOOLEAN NOT NULL DEFAULT FALSE;`,
+
+		// Which phase a run is in, and what the passive phase found.
+		//
+		// Investigate is two passes: PASSIVE reads the request/response pairs already stored by the
+		// crawl and sends nothing, then ACTIVE sends one canary per input. Without a phase column the
+		// card can only show the active counter, so a run spends its first seconds looking stalled at
+		// 0 of N while the passive pass is doing real work.
+		`ALTER TABLE vector_reflection_runs
+		    ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE vector_reflection_runs
+		    ADD COLUMN IF NOT EXISTS passive_reflections INT NOT NULL DEFAULT 0;`,
+
+		// Which pass produced the verdict on a probe row: 'active' (a canary was sent) or 'passive'
+		// (a value the crawl already sent was found in the response the crawl already stored).
+		//
+		// It is on the row because the two answer different questions. An active row knows what the
+		// application does with < > " '; a passive row knows only that the input is echoed, because
+		// the crawl never sent a dangerous character. Reading a passive row as though a canary had
+		// been sent is exactly the over-claim the status vocabulary exists to prevent.
+		`ALTER TABLE vector_reflection_probes
+		    ADD COLUMN IF NOT EXISTS evidence_source TEXT NOT NULL DEFAULT 'active';`,
 
 		// The vector-testing sections (XSS, SQL injection, and the ten planned after them) share these
 		// four tables rather than owning four each. category is the discriminator.
@@ -2324,6 +2490,73 @@ func createTables() {
 		    created_at TIMESTAMP DEFAULT NOW()
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_vector_scan_traces_scan ON vector_scan_traces(scan_id, created_at);`,
+
+		// A PRUNED TRACE IS NOT A MISSING RUN, and until this column existed there was no way to tell
+		// the two apart. Retention used to DELETE the row, so a run whose output had aged out and a run
+		// that never happened both showed up as no row at all. A vector with zero traces was
+		// investigated as a fail-open for most of an afternoon on 2026-09-17 before the retention
+		// policy was found. Pruning now blanks stdout and sets this flag; the row, its command, its
+		// exit status, its duration and its original stdout_bytes all survive.
+		`ALTER TABLE vector_scan_traces ADD COLUMN IF NOT EXISTS stdout_pruned BOOLEAN NOT NULL DEFAULT FALSE;`,
+		`ALTER TABLE vector_scan_traces ADD COLUMN IF NOT EXISTS pruned_at TIMESTAMP;`,
+		// The prune pass reads every trace of one tool on one target newest first. Without this it is
+		// a sequential scan of the whole table on every completed scan.
+		`CREATE INDEX IF NOT EXISTS idx_vector_scan_traces_pruning
+			ON vector_scan_traces(scan_id, created_at DESC);`,
+
+		// WAS THIS SCAN RATE LIMITED. One row per control request, before and after every vector.
+		//
+		// MEASURED 2026-09-17: a live estate answers its authenticated API with X-Ratelimit-Limit: 200,
+		// X-Ratelimit-Remaining and X-Ratelimit-Reset over roughly a 60 second window, which is 3.33
+		// req/s sustained, while the campaign ran at a hardcoded 5. GET /api/v1/accounts was returning
+		// 429 while the unauthenticated /version returned 200. A 429 body reflects nothing, so those
+		// scans produced byte identical output to clean ones, and of the 140 vectors recorded clean not
+		// one can now be shown to have been taken while the target was answering.
+		//
+		// Written for EVERY vector, including the ones whose window was fine. An observation that only
+		// exists when something went wrong cannot tell "the target was healthy" from "nobody looked",
+		// and that second case is exactly what the whole campaign is now stuck in.
+		//
+		// Every numeric column defaults to -1 rather than 0 because 0 remaining is a real, and very
+		// different, measurement from "the target did not say".
+		`CREATE TABLE IF NOT EXISTS vector_rate_observations (
+		    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		    scan_id UUID NOT NULL REFERENCES vector_scans(id) ON DELETE CASCADE,
+		    vector_id TEXT NOT NULL DEFAULT '',
+		    host TEXT NOT NULL DEFAULT '',
+		    target_url TEXT NOT NULL DEFAULT '',
+		    phase TEXT NOT NULL DEFAULT '',
+		    status INT NOT NULL DEFAULT 0,
+		    observed_headers BOOLEAN NOT NULL DEFAULT FALSE,
+		    header_family TEXT NOT NULL DEFAULT '',
+		    limit_value INT NOT NULL DEFAULT -1,
+		    remaining_value INT NOT NULL DEFAULT -1,
+		    reset_seconds INT NOT NULL DEFAULT -1,
+		    retry_after_seconds INT NOT NULL DEFAULT -1,
+		    window_seconds INT NOT NULL DEFAULT -1,
+		    recommended_rps DOUBLE PRECISION NOT NULL DEFAULT 0,
+		    verdict TEXT NOT NULL DEFAULT '',
+		    detail TEXT NOT NULL DEFAULT '',
+		    created_at TIMESTAMP DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_vector_rate_observations_scan
+			ON vector_rate_observations(scan_id, created_at);`,
+		// The question is asked per vector ("was THIS clean verdict taken while the target was
+		// refusing us"), so the vector is the second key.
+		`CREATE INDEX IF NOT EXISTS idx_vector_rate_observations_vector
+			ON vector_rate_observations(vector_id, created_at DESC);`,
+
+		// The rate this target's own headers justify, in its own column rather than in error.
+		//
+		// error is claimed by whichever guard noticed first (a failed positive control, a lost
+		// session, a cancellation) and it is right that it is: those say the run does not count. The
+		// measured rate is not a failure, it is the number the operator should set before the next
+		// run, and folding it into error would mean it disappears exactly when a run went wrong.
+		//
+		// REPORTED, NOT APPLIED. waf_probe_apply_journal and probe_tool_tuning were removed from this
+		// schema because automated apply failed silently: a translated value that did not fit the
+		// tool's field decoded to zero and the journal still recorded success. Same rule here.
+		`ALTER TABLE vector_scans ADD COLUMN IF NOT EXISTS rate_advice TEXT;`,
 
 		// COOPERATIVE CANCELLATION, the same shape fuzz_runs and metadata_scans already use.
 		//
@@ -3369,6 +3602,13 @@ func createTables() {
 				CHECK (user_agent_mode IS NULL OR user_agent_mode IN ('replace','append'))
 		);`,
 	}
+
+	// The triage layer's five tables, defined in utils/triageSchema.go next to the store that is
+	// their only writer, and applied here so they are created with the same fail-fast handling as
+	// vector_scans and vector_findings rather than lazily from a handler. Kept out of this file
+	// because several agents work on this feature at once and a 400-line DDL block here is a merge
+	// conflict waiting to happen.
+	queries = append(queries, utils.TriageSchema...)
 
 	for _, query := range queries {
 		_, err := dbPool.Exec(context.Background(), query)

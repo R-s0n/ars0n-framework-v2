@@ -6,7 +6,7 @@ import ImportAuthFlowModal from './ImportAuthFlowModal';
 const CATEGORY_LABELS = { register: 'Register', login: 'Login', mfa_otp: 'MFA/OTP', reset: 'Reset' };
 
 const AUTH_TYPES = [
-  { value: '', label: '— none —' },
+  { value: '', label: '(none)' },
   { value: 'password', label: 'Username / Password' },
   { value: 'basic', label: 'HTTP Basic / Digest' },
   { value: 'magic_link', label: 'Magic Link' },
@@ -370,7 +370,7 @@ const AuthFlowModal = ({ show, handleClose, category, activeTarget, onFlowsChang
                         <>
                           <div className="d-flex justify-content-between align-items-center mb-1">
                             <span className="text-white-50 small text-uppercase">
-                              Step {selectedStep.step_order} — Request
+                              Step {selectedStep.step_order} - Request
                             </span>
                             <span className="d-flex gap-2">
                               <Button size="sm" variant="outline-secondary" onClick={saveStep} disabled={busy}>Save</Button>
@@ -390,7 +390,7 @@ const AuthFlowModal = ({ show, handleClose, category, activeTarget, onFlowsChang
                           </div>
                           <pre className="bg-black text-white p-2 rounded"
                             style={{ fontSize: '0.72rem', maxHeight: '260px', overflowY: 'auto', whiteSpace: 'pre-wrap' }}>
-                            {buildRawResponse(selectedStep) || '(no response captured yet — click Replay)'}
+                            {buildRawResponse(selectedStep) || '(no response captured yet - click Replay)'}
                           </pre>
                         </>
                       ) : (
@@ -408,7 +408,7 @@ const AuthFlowModal = ({ show, handleClose, category, activeTarget, onFlowsChang
                         <Button size="sm" variant="danger" onClick={addStep} disabled={busy || !addStepRaw.trim()}>
                           {busy ? <Spinner size="sm" animation="border" /> : 'Add & Send'}
                         </Button>
-                        <span className="text-white-50 small ms-2">Paste a raw HTTP request — the app sends it and records the response.</span>
+                        <span className="text-white-50 small ms-2">Paste a raw HTTP request - the app sends it and records the response.</span>
                       </div>
                     </Col>
                   </Row>

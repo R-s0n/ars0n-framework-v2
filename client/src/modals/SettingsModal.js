@@ -839,7 +839,7 @@ function SettingsModal({ show, handleClose, initialTab = 'rate-limits', onApiKey
                             <li>
                               <strong>Passive OSINT:</strong> Passive subdomain enumeration
                               <br/>
-                              <span className="fst-italic">Unions free public sources (RapidDNS, URLScan.io, OTX, HackerTarget) — no API keys</span>
+                              <span className="fst-italic">Unions free public sources (RapidDNS, URLScan.io, OTX, HackerTarget) - no API keys</span>
                             </li>
                             <li>
                               <strong>Subdomainizer:</strong> Parses JavaScript files locally after downloading

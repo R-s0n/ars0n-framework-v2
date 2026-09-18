@@ -5,9 +5,9 @@ Safety is enforced centrally rather than remembered per test. Every request pass
 of the budget, the deadline, or the abort rules.
 
 The three ceilings are independent and any one of them ends the run:
-  requests  — how much traffic we are willing to send
-  wall clock — the binding constraint in practice, and the one the backend timeout is derived from
-  trips     — how many deliberate blocks we are willing to spend, because block reputation is a
+  requests  - how much traffic we are willing to send
+  wall clock - the binding constraint in practice, and the one the backend timeout is derived from
+  trips     - how many deliberate blocks we are willing to spend, because block reputation is a
               per-egress-IP, cross-target, multi-day cost rather than a per-run one
 """
 

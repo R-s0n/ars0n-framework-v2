@@ -3,8 +3,8 @@ const { apiGet, apiPost, apiPut, apiDelete } = require('../api');
 
 // Settings tools give an MCP client parity with the web UI's Settings modal: read + modify Rate
 // Limits, Custom HTTP, Burp, recon API keys, and AI provider keys. These proxy the same Go
-// endpoints the UI uses. The MCP Server section (mcp_server_config) is intentionally read-only —
-// you can't safely reconfigure the MCP server through itself — so it's returned by get_settings
+// endpoints the UI uses. The MCP Server section (mcp_server_config) is intentionally read-only,
+// you can't safely reconfigure the MCP server through itself - so it's returned by get_settings
 // but there is no tool to modify it.
 
 const RATE_LIMIT_KEYS = [
@@ -95,8 +95,8 @@ const setApiKeySchema = z.object({
   tool_name: z.string().describe('Tool the key is for (e.g. "SecurityTrails", "Shodan", "GitHub", "Censys")'),
   api_key_name: z.string().describe('A label for this key (unique per tool)'),
   api_key: z.string().describe('The API key value'),
-  app_id: z.string().optional().describe('App ID — only for providers like Censys that use ID/secret pairs'),
-  app_secret: z.string().optional().describe('App Secret — only for providers like Censys'),
+  app_id: z.string().optional().describe('App ID - only for providers like Censys that use ID/secret pairs'),
+  app_secret: z.string().optional().describe('App Secret - only for providers like Censys'),
 });
 
 async function setApiKey(params) {

@@ -219,7 +219,7 @@ func TestUnknownSettingIsReportedNotDropped(t *testing.T) {
 // stops that, so it is asserted against the real insertion point list rather than a copy.
 func TestOnlyDalfoxClaimsEveryInsertionPoint(t *testing.T) {
 	dalfox, _ := VectorToolByKey("dalfox")
-	for _, point := range VectorInsertionPoints {
+	for _, point := range VectorHTTPInsertionPoints {
 		if !VectorToolCanReach(dalfox, point) {
 			t.Errorf("dalfox was verified to reach %s but the registry says otherwise", point)
 		}
@@ -693,5 +693,375 @@ func TestTheOptInSkipReasonSaysItWasAChoice(t *testing.T) {
 			t.Errorf("the opt-in reason does not mention %q, so it does not tell the operator what "+
 				"happened or how to change it: %q", want, reason)
 		}
+	}
+}
+
+// A BROWSER-DRIVEN TOOL MUST NOT BE POINTED AT A JSON API.
+//
+// domdig navigates a real Chromium and refuses a document it cannot parse as a page. Run against a
+// JSON endpoint it prints one "[!] Content type is not text/html" per payload and exits 0 having
+// tested nothing, which every record the framework keeps reads as a clean scan. Measured directly
+// against the live container on 2026-09-17:
+//
+//	$ node /app/domdig.js -J -q -E Authorization=... https://app.../api/v1/echo?message=rs0n
+//	[!] Content type is not text/html      (x5, then a TargetCloseError retry, repeating)
+//	exit 0
+//
+// On that estate 28 of 30 query vectors were JSON API endpoints, so an authenticated domdig pass
+// would have spent hours proving nothing about 28 of them and filed them as scanned.
+//
+// THE UNKNOWN CASE IS THE ONE TO GET RIGHT. An empty content type means no crawl recorded one, not
+// that the endpoint is not HTML, and skipping on unknown would silently drop every vector the crawls
+// never reached. Wasting a scan on a JSON endpoint costs time; skipping a real HTML one costs a
+// finding, so unknown stays eligible.
+func TestDomdigRefusesAKnownNonHTMLEndpoint(t *testing.T) {
+	cases := []struct {
+		name         string
+		contentType  string
+		wantEligible bool
+	}{
+		{"json is refused", "application/json; charset=UTF-8", false},
+		{"plain json is refused", "application/json", false},
+		{"css is refused", "text/css", false},
+		{"javascript is refused", "application/javascript", false},
+		{"html is scanned", "text/html", true},
+		{"html with a charset is scanned", "text/html; charset=utf-8", true},
+		{"xhtml is scanned", "application/xhtml+xml", true},
+		{"UNKNOWN IS SCANNED, and this is the important one", "", true},
+		{"whitespace is unknown, not a type", "   ", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, why := domdigVectorEligible(VectorInput{
+				InsertionPoint: "query", Parameters: []string{"q"},
+				ResponseContentType: tc.contentType,
+			})
+			if ok != tc.wantEligible {
+				t.Fatalf("eligible = %v, want %v (content type %q)", ok, tc.wantEligible, tc.contentType)
+			}
+			if !ok && why == "" {
+				t.Error("refused with no reason, so the operator sees a vector vanish and no cause")
+			}
+			if ok && why != "" {
+				t.Errorf("eligible but carrying a reason %q", why)
+			}
+		})
+	}
+
+	// The registry has to actually use it, or the function above is a comment.
+	tool, found := VectorToolByKey("domdig")
+	if !found {
+		t.Fatal("domdig is not in the registry")
+	}
+	if tool.VectorEligible == nil {
+		t.Fatal("domdig declares no VectorEligible, so every JSON endpoint is eligible again")
+	}
+	if ok, _ := tool.VectorEligible(VectorInput{ResponseContentType: "application/json"}); ok {
+		t.Error("the registry's hook admits a JSON endpoint")
+	}
+}
+
+// HALF OF EVERY DOMDIG RUN ON RECORD WAS UNTESTED AND FILED AS SOMETHING ELSE.
+//
+// domdigIncomplete was run over all 42 domdig traces stored in the live database on 2026-09-17:
+//
+//	traces=42  incomplete_fired=21  quiet=21  had_findings=5  false_positives=0
+//
+// The 21 it fires on are exactly the 17 whose output is "[!] 404" repeated and the 4 whose output is
+// "[!] Content type is not text/html" repeated. Neither shape was reported as untested before: the
+// content-type shape can exit 0, which this runner reads as a clean scan, and the 404 shape exits 1,
+// which reads as a tool error rather than as "this vector has no result".
+//
+// It fired on none of the 5 runs that found something, which is the property that matters. A crawl
+// of a real page can meet a non-HTML sub-resource or a dead link and still do its job.
+func TestDomdigIncompleteCatchesARunThatNeverLoadedAPage(t *testing.T) {
+	const refusal = "[!] Content type is not text/html\n"
+	const notFound = "[!] 404\n"
+	// prettifyJson opens the array at column zero, so this is the shape domdig really prints.
+	// It was a compact one-liner here, which no domdig run produces and which the report
+	// locator cannot find: the case passed only because the disarm was a substring match on
+	// the message text rather than on a report that parsed.
+	const found = "[\n  {\n    \"type\": \"domxss\",\n    \"confirmed\": true,\n" +
+		"    \"message\": \"DOM XSS found\"\n  }\n]\n"
+
+	// Verbatim from trace 5a1d0c16-8b30-4980-9021-8ec61d0c5693, trimmed to the shape that matters:
+	// an unhandled rejection, a cross-origin SecurityError, and the banner Node prints only when
+	// it is about to die. No 404 and no content-type refusal anywhere in it.
+	const nodeCrash = "node:internal/process/promises:391\n" +
+		"    triggerUncaughtException(err, true /* fromPromise */);\n" +
+		"DOMException: SecurityError: Failed to read a named property 'toString' from 'Location'\n" +
+		"\nNode.js v20.20.2\n"
+
+	cases := []struct {
+		name      string
+		stdout    string
+		report    string
+		wantFires bool
+	}{
+		{"a JSON endpoint refused every time", strings.Repeat(refusal, 20), "", true},
+		{"refused even once, with nothing found", refusal, "", true},
+		{"a dead route, 404 on every payload", strings.Repeat(notFound, 20), "", true},
+		{"one or two 404s are a dead link, not a dead target", notFound + notFound, "", false},
+		{"a clean scan of a real page says nothing at all", "[]\n", "[]", false},
+
+		// The 10 traces neither branch above recognised. They crashed on a live page with no 404
+		// and no refusal to explain it, so they came back zero findings and were filed as clean.
+		{"a node crash on a live page is not a clean scan", nodeCrash, "", true},
+		{"a crash after the refusals is still untested", strings.Repeat(refusal, 5) + nodeCrash, "", true},
+
+		// The property that keeps this honest. Findings outrank every refusal marker, because a real
+		// crawl meets non-HTML sub-resources and dead links all the time.
+		{"findings in the report outrank the refusals", strings.Repeat(refusal, 20), found, false},
+		{"findings on stdout outrank the refusals", strings.Repeat(refusal, 9) + found, "", false},
+		{"findings outrank a wall of 404s", strings.Repeat(notFound, 30) + found, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			why := domdigIncomplete(tc.stdout, tc.report)
+			if (why != "") != tc.wantFires {
+				t.Fatalf("fired = %v, want %v (reason %q)", why != "", tc.wantFires, why)
+			}
+			if tc.wantFires && !strings.Contains(why, "nothing was tested") {
+				t.Errorf("the reason does not say the vector is untested: %q", why)
+			}
+		})
+	}
+
+	// And the registry has to call it, or none of the above runs in a real scan.
+	tool, found2 := VectorToolByKey("domdig")
+	if !found2 || tool.Incomplete == nil {
+		t.Fatal("domdig declares no Incomplete hook, so a refused run is a clean result again")
+	}
+	if tool.Incomplete(strings.Repeat(refusal, 5), "") == "" {
+		t.Error("the registry's hook does not catch a content-type refusal")
+	}
+}
+
+// A SETTING THAT REMOVES THE ONLY MECHANISM THE VECTOR NEEDS MUST REFUSE, NOT SCAN.
+//
+// domdig's -m is a csv, so the Blinding map cannot express it: that map asks whether a setting is
+// engaged, and `modes` is engaged whatever its value. With `modes: domscan` the run crawls the DOM
+// injecting into form fields and never touches the query string or the hash, which is the whole of
+// what a query or fragment vector is. It then exits 0 having found nothing and is filed clean.
+//
+// This is the dalfox userAgent defect again, which cost an earlier run 53 vectors and 48,859
+// requests for zero findings. Refusing to compose is what the dalfox path branch already does for
+// its own version, and it is the only answer that does not end in a false clean.
+func TestDomdigRefusesToScanWithoutFuzzMode(t *testing.T) {
+	v := VectorInput{
+		Method: "GET", Scheme: "https", Domain: "app.example.com", Path: "/search",
+		InsertionPoint: "query", Parameters: []string{"q"},
+	}
+	cases := []struct {
+		name       string
+		settings   map[string]any
+		wantRefuse bool
+	}{
+		{"unset means all modes, so it scans", map[string]any{}, false},
+		{"explicitly all modes", map[string]any{"modes": "domscan,fuzz"}, false},
+		{"fuzz alone is enough", map[string]any{"modes": "fuzz"}, false},
+		{"spacing and case do not matter", map[string]any{"modes": " DomScan , Fuzz "}, false},
+		{"empty string is not a restriction", map[string]any{"modes": "  "}, false},
+		{"domscan alone removes URL fuzzing", map[string]any{"modes": "domscan"}, true},
+		{"a typo that drops fuzz still refuses", map[string]any{"modes": "domscan,fuzzz"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args, warnings := ComposeDomdig(v, tc.settings, "")
+			if tc.wantRefuse {
+				if args != nil {
+					t.Fatalf("composed %v instead of refusing: the query parameter is never fuzzed "+
+						"and the vector would be filed clean", args)
+				}
+				if len(warnings) == 0 || !strings.Contains(strings.Join(warnings, " "), "NOT scanned") {
+					t.Errorf("refused without telling the operator the vector was not scanned: %v", warnings)
+				}
+				return
+			}
+			if args == nil {
+				t.Fatalf("refused to compose when fuzz mode is available: %v", warnings)
+			}
+			if !strings.Contains(strings.Join(args, " "), "app.example.com") {
+				t.Errorf("composed argv does not carry the target: %v", args)
+			}
+		})
+	}
+}
+
+// HALF THE CORPUS WAS BEING SCANNED AT A RESOURCE THAT DOES NOT EXIST.
+//
+// A consolidated endpoint stores an identifier as a template, and the substitution replaced it with
+// the canary unconditionally. MEASURED on a live engagement: 112 of 218 vectors carry a templated
+// segment, so /api/v1/paper_accounts/{uuid}/trade_account/margin went on the wire as
+// /api/v1/paper_accounts/rs0n/trade_account/margin. There is no account called rs0n. Every tool
+// pointed at one of those measured a 401, a 403 or a not-found page and recorded a clean scan of an
+// endpoint it never reached. It affects dalfox and the reflection probe today and would have
+// affected sqlmap and ghauri identically.
+//
+// The real value was in hand the whole time: 97 of those 112 carry a concrete id in their own
+// evidence_url, the request the crawl actually observed.
+func TestATemplatedPathUsesTheObservedIdentifier(t *testing.T) {
+	const real = "56b2ddf8-276a-4341-9ff6-76078889e661"
+	cases := []struct {
+		name     string
+		base     string
+		evidence string
+		want     string
+	}{
+		{
+			name:     "the observed id replaces the template",
+			base:     "https://h.example.com/api/v1/paper_accounts/{uuid}/trade_account/margin",
+			evidence: "https://h.example.com/api/v1/paper_accounts/" + real + "/trade_account/margin",
+			want:     "https://h.example.com/api/v1/paper_accounts/" + real + "/trade_account/margin",
+		},
+		{
+			name:     "two templates each take their own position",
+			base:     "https://h.example.com/a/{id}/b/{sub}/c",
+			evidence: "https://h.example.com/a/111/b/222/c",
+			want:     "https://h.example.com/a/111/b/222/c",
+		},
+		{
+			name:     "a query string survives the substitution",
+			base:     "https://h.example.com/api/{uuid}/orders?status=open",
+			evidence: "https://h.example.com/api/" + real + "/orders",
+			want:     "https://h.example.com/api/" + real + "/orders?status=open",
+		},
+		// THE ARITY GUARD. Different segment counts are different routes, and lining them up by
+		// index would take a value from the wrong position and build a URL nothing ever served.
+		{
+			name:     "a different route shape is refused, canary fallback",
+			base:     "https://h.example.com/a/{id}/b",
+			evidence: "https://h.example.com/a/x/y/b",
+			want:     "https://h.example.com/a/" + VectorCanary + "/b",
+		},
+		{
+			name:     "no evidence url at all keeps the old behaviour",
+			base:     "https://h.example.com/api/{uuid}/orders",
+			evidence: "",
+			want:     "https://h.example.com/api/" + VectorCanary + "/orders",
+		},
+		{
+			name:     "an evidence url that is ALSO templated is not a sighting",
+			base:     "https://h.example.com/api/{uuid}/orders",
+			evidence: "https://h.example.com/api/{uuid}/orders",
+			want:     "https://h.example.com/api/" + VectorCanary + "/orders",
+		},
+		{
+			name:     "an untemplated path is returned untouched",
+			base:     "https://h.example.com/api/v1/echo?message=x",
+			evidence: "https://h.example.com/api/v1/echo?message=x",
+			want:     "https://h.example.com/api/v1/echo?message=x",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := vectorConcreteTemplatedURLFrom(tc.base, tc.evidence); got != tc.want {
+				t.Errorf("got  %s\nwant %s", got, tc.want)
+			}
+		})
+	}
+
+	// And the two real callers must pass the evidence through, or the fix is inert.
+	v := VectorInput{
+		Method: "GET", Scheme: "https", Domain: "h.example.com",
+		Path: "/api/v1/paper_accounts/{uuid}/orders", InsertionPoint: "path",
+		EvidenceURL: "https://h.example.com/api/v1/paper_accounts/" + real + "/orders",
+	}
+	if got := dalfoxTargetURL(v); strings.Contains(got, "{") || strings.Contains(got, "/"+VectorCanary+"/") {
+		t.Errorf("dalfox is still aimed at a fabricated identifier: %s", got)
+	}
+}
+
+// A WARNING LINE STARTS WITH "[" AND WAS EATING THE WHOLE REPORT.
+//
+// domdig prefixes every warning with a literal "[!] " and -q does not silence them, so 21 of the
+// 42 stored traces begin "[!] 404" or "[!] Content type is not text/html". The parser used to
+// take the first "[" in stdout as the start of the JSON report, which in those runs is the
+// bracket of a warning: json.Unmarshal fails and every finding is dropped without a word.
+func TestParseDomdigJSONFindsTheReportBehindTheWarnings(t *testing.T) {
+	const report = "[\n  {\n    \"type\": \"domxss\",\n    \"payload\": \"<iMg src=a>\",\n" +
+		"    \"element\": \"GET/q\",\n    \"confirmed\": true,\n" +
+		"    \"url\": \"http://oracle:8000/xss?q=x\",\n" +
+		"    \"message\": \"DOM XSS found\"\n  }\n]\n"
+
+	cases := []struct {
+		name   string
+		stdout string
+		want   int
+	}{
+		{"a clean run, report only", report, 1},
+		{"one dead link then a real finding", "[!] 404\n" + report, 1},
+		{"a wall of refusals then a real finding", strings.Repeat("[!] Content type is not text/html\n", 20) + report, 1},
+		{"a retry warning then a real finding", "[!] Unexpected error, retrying...Error: x\n" + report, 1},
+		{"an empty report behind a warning is still empty", "[!] 404\n[]\n", 0},
+		{"warnings with no report at all", strings.Repeat("[!] 404\n", 5), 0},
+
+		// THE SAME DEFECT AT THE OTHER END OF THE STREAM. Searching backwards for the report
+		// line fixed the leading warning; json.Unmarshal over everything from there onwards
+		// still needed the report to be the LAST thing on stdout, so one line printed during
+		// teardown threw the whole report away. A Decoder stops at the close of the array.
+		{"a teardown warning after the report", report + "[!] Unexpected error, retrying...\n", 1},
+		{"a node banner after the report", report + "\nNode.js v20.20.2\n", 1},
+		{"an empty report followed by noise is still empty", "[]\n[!] browser closed\n", 0},
+
+		// AND THE SAME ORDERING THE OTHER WAY ROUND. Taking the LAST "[" or "[]" line fixed the
+		// leading warning, and then anything printed after the report whose trimmed line is
+		// exactly "[]" outranked the report itself: the decode succeeded on that empty array and
+		// the real findings were thrown away without a word.
+		{"a stray empty array after a real report", report + "[]\n", 1},
+		{"a stray empty array after the report and a warning",
+			report + "[!] browser closed\n[]\n", 1},
+		{"two stray empty arrays after a real report", report + "[]\n[]\n", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseDomdigJSON(tc.stdout, "", vectorRow{ID: "v1", InsertionPoint: "query", Method: "GET"})
+			if len(got) != tc.want {
+				t.Fatalf("parsed %d findings, want %d", len(got), tc.want)
+			}
+		})
+	}
+}
+
+// A REPORT THE PARSER CANNOT READ MUST NEVER BE A CLEAN SCAN.
+//
+// parseDomdigJSON returns no findings when the decode fails, which on its own is
+// indistinguishable from a run that found nothing: zero findings, exit 0, coverage goes up.
+// domdigIncomplete is the only thing that can tell the two apart, and it used to be disarmed by
+// the literal text "DOM XSS found" appearing anywhere in stdout, so the one case where the
+// parser had definitely dropped findings was the case most likely to be waved through.
+func TestDomdigUnreadableReportIsNeverClean(t *testing.T) {
+	// The report line is there, so a report was printed; the array never closes, so nothing in
+	// it can be read. The marker the old disarm looked for is present on purpose.
+	const truncated = "[\n  {\n    \"type\": \"domxss\",\n    \"message\": \"DOM XSS found\"\n"
+
+	if got := parseDomdigJSON(truncated, "", vectorRow{ID: "v1"}); len(got) != 0 {
+		t.Fatalf("parsed %d findings out of an unreadable report", len(got))
+	}
+	why := domdigIncomplete(truncated, "")
+	if why == "" {
+		t.Fatal("an unreadable report reported clean, so the dropped findings are invisible")
+	}
+	if !strings.Contains(why, "nothing was tested") {
+		t.Errorf("the reason does not say the vector is untested: %q", why)
+	}
+
+	// And the other direction: a report that reads, with findings in it, is never incomplete
+	// however many refusals came before it.
+	const readable = "[\n  {\n    \"type\": \"domxss\",\n    \"confirmed\": true\n  }\n]\n"
+	noisy := strings.Repeat("[!] Content type is not text/html\n", 20) + readable
+	if why := domdigIncomplete(noisy, ""); why != "" {
+		t.Errorf("a run that really found something was called untested: %q", why)
+	}
+	if got := parseDomdigJSON(noisy, "", vectorRow{ID: "v1"}); len(got) != 1 {
+		t.Errorf("parsed %d findings behind the refusals, want 1", len(got))
+	}
+
+	// And an unreadable report that is FOLLOWED by a stray empty array is still unreadable. The
+	// empty one decodes perfectly well, so without ranking it below the failure it would answer
+	// for the report that was truncated and the vector would go clean.
+	stray := truncated + "[]\n"
+	if why := domdigIncomplete(stray, ""); why == "" {
+		t.Error("a truncated report was waved through by a stray empty array printed after it")
 	}
 }

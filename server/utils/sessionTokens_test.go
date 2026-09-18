@@ -1,8 +1,12 @@
 package utils
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
+	"time"
 )
 
 // These cover the two things that made a working session read as a dead one on a real target
@@ -172,5 +176,126 @@ func TestTokenRoleDefaultsToCredentialAndRejectsAnythingElse(t *testing.T) {
 	}
 	if _, err := normalizeTokenRole("routing"); err == nil {
 		t.Fatal("an unknown role must be refused, not stored and silently ignored")
+	}
+}
+
+// A REFRESHED TOKEN MUST NOT INHERIT THE DEAD TOKEN'S EXPIRY.
+//
+// MEASURED 2026-09-17. A bearer was refreshed through PUT /session-tokens/{id} with token_value and
+// nothing else. The row stored the new JWT byte for byte, and expires_at still read 2026-09-16, 33
+// hours in the past, while the new token's own exp claim was 887 seconds in the future.
+//
+// ApplySessionTokens filters on `expires_at > NOW()`, so the framework silently dropped the live
+// credential it had just been handed and scanned anonymously. That reads as a login wall on every
+// endpoint: 129 of 143 probes in one reflection run came back 401 from a credential the operator had
+// already refreshed.
+//
+// The cause is precedence, not parsing. DeriveSessionTokenExpiry returns any non-nil explicit value
+// untouched, and the handler passed it the MERGED field, which still held the previous expiry
+// whenever the payload omitted one. The derivation never ran.
+func TestARefreshedTokenTakesItsOwnExpiry(t *testing.T) {
+	future := time.Now().Add(15 * time.Minute)
+	past := time.Now().Add(-33 * time.Hour)
+	fresh := makeTestJWT(t, future)
+	operatorChoice := time.Now().Add(72 * time.Hour)
+
+	cases := []struct {
+		name         string
+		valueChanged bool
+		payloadExp   *time.Time
+		mergedExp    *time.Time
+		want         string // "derived" | "explicit" | "kept"
+	}{
+		{"a refresh with no stated expiry derives from the new token", true, nil, &past, "derived"},
+		{"an operator's stated expiry still wins", true, &operatorChoice, &operatorChoice, "explicit"},
+		{"an untouched value keeps its stored expiry", false, nil, &past, "kept"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The handler's precedence, reproduced exactly as it is written.
+			expiresAt := tc.mergedExp
+			if tc.valueChanged && tc.payloadExp == nil {
+				expiresAt = nil
+			}
+			got := DeriveSessionTokenExpiry(fresh, expiresAt)
+			if got == nil {
+				t.Fatalf("no expiry at all: the row would read as never expiring")
+			}
+			switch tc.want {
+			case "derived":
+				if got.Before(time.Now()) {
+					t.Fatalf("a freshly refreshed token still reads as expired (%s). "+
+						"ApplySessionTokens drops it and every scan runs anonymously.", got)
+				}
+				if got.Sub(future).Abs() > 2*time.Second {
+					t.Errorf("expiry = %s, want the new token's own exp %s", got, future)
+				}
+			case "explicit":
+				if got.Sub(operatorChoice).Abs() > time.Second {
+					t.Errorf("expiry = %s, want the operator's stated %s", got, operatorChoice)
+				}
+			case "kept":
+				if got.Sub(past).Abs() > time.Second {
+					t.Errorf("expiry = %s, want the stored %s left alone", got, past)
+				}
+			}
+		})
+	}
+}
+
+// makeTestJWT builds an unsigned JWT carrying only an exp claim. Nothing here verifies signatures;
+// the expiry derivation reads the payload segment, so that is all the fixture needs to be.
+func makeTestJWT(t *testing.T, exp time.Time) string {
+	t.Helper()
+	enc := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshalling the fixture: %v", err)
+		}
+		return base64.RawURLEncoding.EncodeToString(b)
+	}
+	return enc(map[string]string{"alg": "none", "typ": "JWT"}) + "." +
+		enc(map[string]int64{"exp": exp.Unix()}) + ".sig"
+}
+
+// THE SESSION VALIDATOR MUST NOT PROBE A HOST THE PROGRAMME EXCLUDES.
+//
+// Its client was built with no scope on a comment claiming "the only URL this ever requests is the
+// scope target's own base URL, which it builds itself". It does not build it: authFlowProbeURL and
+// authRequiredProbeURL read a URL out of the CORPUS with no host filter.
+//
+// MEASURED on the engaged target: 5 distinct auth-required hosts, and ORDER BY url LIMIT 1 selects
+// api-wallet-alpacax.staging-v2.tradetalk.us, which that programme lists as OUT OF SCOPE. Two
+// requests per validation, and once the reflection probe began calling SessionStillHonoured every
+// 50 probes a single 1911-probe run could put 76 unscoped requests on an excluded host.
+//
+// This asserts the BOUNDARY, not the URL picker. Fixing the picker would be a second place to be
+// wrong; the client refusing an out-of-scope host is what makes every future caller safe, which is
+// the same argument ScanClient.Do's own header makes about this having leaked twice already.
+// The wiring is what actually matters and it is asserted from the source, because building a real
+// validation here would need a database and a live target. A scoped client is one line and the
+// defect was its absence.
+func TestTheSessionValidatorBuildsAScopedClient(t *testing.T) {
+	src, err := os.ReadFile("sessionTokens.go")
+	if err != nil {
+		t.Fatalf("reading sessionTokens.go: %v", err)
+	}
+	body := string(src)
+	start := strings.Index(body, "func runSessionTokenValidation(")
+	if start < 0 {
+		t.Fatal("runSessionTokenValidation is gone")
+	}
+	rest := body[start:]
+	if end := strings.Index(rest[1:], "\nfunc "); end > 0 {
+		rest = rest[:end]
+	}
+	if !strings.Contains(rest, "NewScanClient(") {
+		t.Fatal("no client is built here any more; re-point this test")
+	}
+	if !strings.Contains(rest, "WithScope(") {
+		t.Error("the session validator builds an UNSCOPED client. Its probe URL comes from the " +
+			"corpus with no host filter, so it can and did send requests to a host the programme " +
+			"excludes. Every caller inherits this, and SessionStillHonoured is now called from the " +
+			"reflection probe loop as well as the vector runner.")
 	}
 }

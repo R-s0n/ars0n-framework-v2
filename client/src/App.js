@@ -212,6 +212,13 @@ import { FFUFConfigModal } from './modals/FFUFConfigModal';
 import FFUFSettingsModal from './modals/FFUFSettingsModal';
 import AddAttackVectorModal from './modals/AddAttackVectorModal';
 import AttackVectorsModal from './modals/AttackVectorsModal';
+import AttackVectorConfigureModal from './modals/AttackVectorConfigureModal';
+import PointersModal from './modals/PointersModal';
+// Pointers shows what the triage pass FOUND. This one shows what it did not answer, which on the
+// measured run is 676 of 800 verdict rows. normalizeTriageStatus and triageCardLine live in the
+// modal because the card line and the modal must say the same thing about the same run, and two
+// spellings of "not knowing is not clean" is two answers to the same question.
+import TriageRunModal, { normalizeTriageStatus, triageCardLine } from './modals/TriageRunModal';
 import FlowConfigureModal from './modals/FlowConfigureModal';
 import DetectFlowsModal from './modals/DetectFlowsModal';
 import RequestFlowBuilderModal from './modals/RequestFlowBuilderModal';
@@ -311,6 +318,23 @@ const threatSeverityKey = (t) =>
 const threatAuthKey = (t) =>
   (typeof t.authenticated === 'boolean' ? (t.authenticated ? 'yes' : 'no') : 'unset');
 
+// Test status, the axis that used to be a one-way "Hide rejected" switch.
+//
+// THE LABELS ARE READ OUT OF THREAT_TEST_STATUS rather than restated here, so renaming a status in
+// one place renames it on the badge, in the accordion and in this menu together. The ORDER is
+// deliberate and is not the order the statuses are defined in: validated first because it is what a
+// reader is usually hunting, the two unsettled states next because they are the open work, and
+// rejected last because it is the box most often unticked and the one that should be easiest to find.
+const THREAT_STATUS_FILTERS = ['validated', 'not_enough_info', 'untested', 'rejected']
+  .map((key) => ({ key, label: THREAT_TEST_STATUS[key].label }));
+
+// An unrecognised or absent status collapses to 'untested' HERE BECAUSE IT ALREADY DOES ON SCREEN:
+// threatTestStatus falls back to untested, so such a row is badged "Untested", and a filter that
+// disagreed with the badge would leave a row labelled Untested visible after Untested was unticked.
+// This is the one place the "an unknown key stays visible" rule loses, and it loses on purpose:
+// matching what the operator can see beats matching what the data literally says.
+const threatStatusKey = (t) => (THREAT_TEST_STATUS[t.test_status] ? t.test_status : 'untested');
+
 // Every filter checked is the default and means "show everything", so a fresh page applies no
 // filtering at all rather than an accidental subset.
 const allChecked = (options) => options.reduce((acc, o) => { acc[o.key] = true; return acc; }, {});
@@ -355,19 +379,23 @@ const STORED_THREAT_FILTERS = readStoredThreatFilters();
 // list THREE times: for the "N documented" count, for the is-it-empty check, and for the map. Filter
 // two of those and the count contradicts what is on screen, which is worse than not having filters.
 //
-// A rejected threat is a MEASURED result, not a mistake, so it is hidden rather than deleted and the
-// toggle defaults to off. Rejections are what stop the next person re-running a test that has already
-// been settled; they are only noise once you have read them.
+// A rejected threat is a MEASURED result, not a mistake, so it is filtered rather than deleted and
+// every status box starts ticked. Rejections are what stop the next person re-running a test that has
+// already been settled; they are only noise once you have read them.
 //
-// not_enough_info IS DELIBERATELY NOT HIDEABLE. The toggle hides the rows that have been ANSWERED,
-// and an unsettled test is the opposite of answered: it is the open work this section exists to
-// surface. It also could not be folded in without a second count, because the per-card "N rejected
-// hidden" number below is literally "whatever the hideRejected argument removed" - adding a fourth
-// status to this filter would relabel those rows as rejections, which is exactly how that number was
-// wrong once already and had to be corrected against measurement on the live target.
-const visibleThreats = (list, hideRejected, severityOn, authOn) =>
+// THIS WAS A ONE-WAY "Hide rejected" SWITCH AND IS NOW A FOUR-OPTION FILTER. The switch could express
+// exactly one question, "hide the settled rows", and the questions operators actually ask are
+// narrower: show me only the open work (untested plus not_enough_info), or only what landed
+// (validated). Neither was reachable before, and not_enough_info in particular was deliberately
+// unhideable, which meant the amber rows could not be isolated either.
+//
+// THE COUNT LESSON FROM THE SWITCH SURVIVES THE CHANGE and is why the per-card counts below are split
+// by which filter did the hiding. That number once read "1 rejected hidden" on a category holding
+// zero rejected threats, because it was really `total - visible` printed under a label that named one
+// filter. Attribute every hidden row to the filter that ACTUALLY hid it, or print no number at all.
+const visibleThreats = (list, statusOn, severityOn, authOn) =>
   (list || []).filter((t) => {
-    if (hideRejected && t.test_status === 'rejected') return false;
+    if (statusOn && statusOn[threatStatusKey(t)] === false) return false;
     // An absent filter map means the caller has not narrowed on that axis, which shows everything.
     if (severityOn && severityOn[threatSeverityKey(t)] === false) return false;
     if (authOn && authOn[threatAuthKey(t)] === false) return false;
@@ -414,6 +442,77 @@ const VECTOR_TOOL_CATEGORY = new Map(
     .filter((section) => WIRED_CATEGORIES.includes(section.key))
     .flatMap((section) => section.tools.map((tool) => [tool.key, section.key])),
 );
+
+// The insertion points the card shows even when the coverage endpoint does not name them, in the
+// order they are displayed. The server is still the authority on COUNTS; this list only decides
+// which columns exist, so a point the API has not learned about yet reads a truthful zero instead
+// of vanishing. `fragment` is the case that needs it: an API build predating the fragment column
+// cannot hold a single fragment vector, so zero is the correct figure there either way.
+const VECTOR_INSERTION_POINTS = ['query', 'body', 'header', 'cookie', 'path', 'fragment'];
+
+// `fragment` is displayed as "Hash Fragment" because "fragment" alone reads as a fragment of
+// anything. The rest are title-cased from the raw value rather than listed, so a point added on the
+// server side gets a sensible label without a matching client change, which is the failure the
+// coverage card already guards against for counts.
+const VECTOR_INSERTION_POINT_LABELS = { fragment: 'Hash' };
+const insertionPointLabel = (point) => {
+  const raw = String(point || '').trim();
+  if (!raw) return '';
+  if (VECTOR_INSERTION_POINT_LABELS[raw]) return VECTOR_INSERTION_POINT_LABELS[raw];
+  return raw
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+};
+
+// The reflection metric row, in the order it is read: what to test first, then what came back
+// harmless, then the four separate reasons the framework does not know.
+//
+// GET /attack-vectors/{id}/reflection-probe/status, in the words this card reads it in.
+//
+// The translation is here rather than spread through the render, because the server's shape and the
+// card's shape are genuinely different things and each is right for its side: the server answers
+// with status_counts, grade_counts and the latest run, and the card asks "how many of each" and "is
+// it moving". Two names for one number is how they drifted the first time.
+//
+// A target that has never been probed has NO run object, and that is not an error: the counts are
+// still returned, so the card can say 148 not probed before the button has ever been pressed. The
+// distinction it must never lose is "never asked" against "asked and found nothing", which is the
+// whole reason the not_probed column exists.
+const normalizeReflectionStatus = (data) => {
+  const d = data || {};
+  const run = d.run || null;
+  return {
+    grades: d.grade_counts || {},
+    // The same grades BY INSERTION POINT, which is what lets the Consolidate card mark WHERE a live
+    // candidate is. A global "3 high" says the target has something worth chasing and not where to
+    // go next.
+    grades_by_point: d.grade_counts_by_point || {},
+    by_status: d.status_counts || {},
+    // Vectors this probe structurally cannot answer for, by insertion point. It is empty on a
+    // current api build, because cookie, header and body are probed now too. It is kept because
+    // the server still computes it from the planner's own list: if that list ever shrinks again,
+    // the gap comes back as a number rather than as a table of negatives nobody measured.
+    //
+    // A vector the probe DECLINED to send is not in here. It has a row, reading is_credential or
+    // probe_refused, which is a stronger statement than a gap.
+    unprobed_points: d.unprobed_points || {},
+    running: !!run && run.status === 'running',
+    cancelling: !!run && !!run.cancel_requested,
+    // Which of the two passes is going: 'passive' reads stored exchanges and sends nothing,
+    // 'active' sends the canaries. Empty once the run is over.
+    phase: run ? (run.phase || '') : '',
+    // How many inputs the passive pass found echoed with no request sent.
+    passive_reflections: run ? (run.passive_reflections ?? 0) : 0,
+    progress: run ? { done: run.completed_probes ?? 0, total: run.total_probes ?? 0 } : null,
+    // A run that failed carries its reason. Surfaced rather than logged: the counts beside it are
+    // then a partial measurement, and a partial measurement read as a complete one is a false clean.
+    run_error: run && run.error ? String(run.error) : null,
+    run_status: run ? run.status : null,
+    run_id: run ? run.run_id : null,
+  };
+};
 
 const LaunchPadModal = lazy(() => import('./modals/LaunchPadModal.js'));
 const ConfigUploadModal = lazy(() => import('./modals/ConfigUploadModal.js'));
@@ -918,7 +1017,7 @@ function App() {
 
   // G1.9: cancel every scheduled scan poll when the active target changes (or on unmount). React
   // runs all effect cleanups before any setups in a commit, so this fires before the monitor
-  // effects below restart polling for the new target — the previous target's recursive
+  // effects below restart polling for the new target - the previous target's recursive
   // setTimeout chains (now routed through the cancelable pollTimeout) stop instead of leaking and
   // racing. This bounds the live-timer count regardless of how many times the user switches.
   useEffect(() => {
@@ -1164,14 +1263,22 @@ function App() {
   // which only measure the four supporting collections and say nothing about whether any threat has
   // actually been written.
   const [threatModelResults, setThreatModelResults] = useState({});
-  // Off by default: a rejected threat is a measured result and hiding it is the operator's choice to
-  // make, not the default view. On a settled model most rows are rejections, so this is the
-  // difference between reading the open questions and scrolling past the answered ones.
-  // Each of the three seeds from the stored copy, falling back to the unfiltered default when there
-  // is nothing stored. Only an explicit `true` turns this one on, so a corrupt or partial stored
-  // object cannot start the operator on a view that is hiding rows.
-  const [hideRejectedThreats, setHideRejectedThreats] = useState(
-    () => STORED_THREAT_FILTERS.hideRejected === true);
+  // All four statuses on by default, so a fresh page applies no filtering at all. Each of the three
+  // filters seeds from the stored copy and falls back to the unfiltered default when nothing is
+  // stored, so a corrupt or partial stored object cannot start the operator on a view that hides rows.
+  //
+  // MIGRATION FROM THE OLD SWITCH. Builds before this one stored `hideRejected: true` when the
+  // operator had chosen to hide rejections. Honouring it is the difference between returning to the
+  // view you left and returning to one that has quietly re-added every settled row, so a stored true
+  // with no stored status map seeds exactly one box off. Once the status map is written this branch
+  // never fires again.
+  const [threatStatusFilter, setThreatStatusFilter] = useState(() => {
+    const base = storedChecks(THREAT_STATUS_FILTERS, STORED_THREAT_FILTERS.status);
+    if (!STORED_THREAT_FILTERS.status && STORED_THREAT_FILTERS.hideRejected === true) {
+      return { ...base, rejected: false };
+    }
+    return base;
+  });
   // Every option on, so the default view is unfiltered. Stored as a key->bool map rather than a list
   // of enabled keys, because a map makes "explicitly off" distinguishable from "an option this build
   // has never heard of", and an unknown key then defaults to visible rather than hidden.
@@ -1179,12 +1286,37 @@ function App() {
     () => storedChecks(THREAT_SEVERITY_FILTERS, STORED_THREAT_FILTERS.severity));
   const [threatAuthFilter, setThreatAuthFilter] = useState(
     () => storedChecks(THREAT_AUTH_FILTERS, STORED_THREAT_FILTERS.auth));
+  // The glow on a validated threat is deliberate signal, not decoration, so it defaults ON. It is
+  // also motion on a page an operator may sit in front of for an hour, which is why it can be turned
+  // off without giving up the green outline that carries the same meaning.
+  //
+  // Seeded with `!== false` rather than truthiness: an absent key must mean ON. Plain truthiness
+  // would make a first load, where nothing is stored, come up with the animation off.
+  const [threatShowAnimation, setThreatShowAnimation] = useState(
+    () => STORED_THREAT_FILTERS.showAnimation !== false);
+  // How many threats carry each status, across every category. The old switch put this on its label
+  // ("Hide rejected (101)") and that was the best thing about it: a filter whose effect is invisible
+  // until you use it gets used blind. Counted over the unfiltered model on purpose, so the number
+  // answers "how much of this section is settled" rather than "how much of my current view is".
+  const threatStatusCounts = useMemo(() => {
+    const counts = {};
+    Object.values(threatModelResults || {}).forEach((list) => {
+      (list || []).forEach((t) => {
+        const k = threatStatusKey(t);
+        counts[k] = (counts[k] || 0) + 1;
+      });
+    });
+    return counts;
+  }, [threatModelResults]);
   // Write back on every change rather than on unmount, because the browser refresh this exists to
   // survive never runs an unmount handler.
   useEffect(() => {
     try {
       localStorage.setItem(THREAT_FILTER_STORAGE_KEY, JSON.stringify({
-        hideRejected: hideRejectedThreats,
+        // `hideRejected` is deliberately no longer written. It is still READ once, by the
+        // migration above, and a build that kept writing it would fight its own migration.
+        status: threatStatusFilter,
+        showAnimation: threatShowAnimation,
         severity: threatSeverityFilter,
         auth: threatAuthFilter,
       }));
@@ -1192,7 +1324,7 @@ function App() {
       // Storage unavailable or full. The filters still work for this page; they just will not
       // outlive it, which is the behaviour that existed before this was persisted at all.
     }
-  }, [hideRejectedThreats, threatSeverityFilter, threatAuthFilter]);
+  }, [threatStatusFilter, threatSeverityFilter, threatAuthFilter, threatShowAnimation]);
   // Which request flow demonstrates which threat.
   //
   // BOTH LISTS ARE FETCHED ONCE FOR THE WHOLE SECTION and grouped in the client. There are 33
@@ -3017,7 +3149,7 @@ function App() {
             // Wait for completion
             const result = await waitForSlowburnScanCompletion(matchedTarget.id);
             if (result === 'limit_skipped') {
-              addSlowburnLog(setSlowburnProgress, `${domain} — limit reached, skipping to next target`, 'info');
+              addSlowburnLog(setSlowburnProgress, `${domain} - limit reached, skipping to next target`, 'info');
             } else {
               addSlowburnLog(setSlowburnProgress, `${domain} finished: ${result}`, result === 'completed' ? 'success' : 'info');
             }
@@ -3055,7 +3187,7 @@ function App() {
               }
             }
 
-            addSlowburnLog(setSlowburnProgress, `${domain} results — ${subdomains} subdomains, ${webServers} live servers, ${nucleiTotal} nuclei findings`, 'success');
+            addSlowburnLog(setSlowburnProgress, `${domain} results - ${subdomains} subdomains, ${webServers} live servers, ${nucleiTotal} nuclei findings`, 'success');
 
             targetsScanned++;
             const targetEntry = { program: handle, target: domain, subdomains, webServers, nucleiTotal };
@@ -4140,7 +4272,7 @@ function App() {
     }
   }, [activeTarget]);
 
-  // G1.8: removed a duplicate Metabigor company monitor effect here — it was identical to the
+  // G1.8: removed a duplicate Metabigor company monitor effect here - it was identical to the
   // one in the main monitor cluster above and doubled Metabigor polling on every target switch.
 
   const handleCloseScreenshotResultsModal = () => setShowScreenshotResultsModal(false);
@@ -4257,13 +4389,13 @@ function App() {
   }, [activeTarget]);
 
   const handleOpenMetaDataModal = () => {
-    // G1.7: target-urls are loaded by metaDataQuery (projection 'meta' — no screenshot/body),
+    // G1.7: target-urls are loaded by metaDataQuery (projection 'meta' - no screenshot/body),
     // enabled on open. Cancel-on-switch + caching are handled by react-query.
     setShowMetaDataModal(true);
   };
 
   const handleOpenROIReport = () => {
-    // G1.7: target-urls are loaded by roiReportQuery (projection 'no-screenshot' — keeps the
+    // G1.7: target-urls are loaded by roiReportQuery (projection 'no-screenshot' - keeps the
     // HTTP body for client-side scoring, drops base64 screenshots), enabled on open.
     setShowROIReport(true);
   };
@@ -6063,8 +6195,26 @@ function App() {
   // nothing was ever sent there.
   const [attackVectorCoverage, setAttackVectorCoverage] = useState(null);
   const [isConsolidatingAttackVectors, setIsConsolidatingAttackVectors] = useState(false);
+  // The reflection probe. A SEPARATE STEP from consolidation, deliberately: consolidation sends no
+  // HTTP requests at all and stays that way, so the operator decides when this target starts
+  // receiving canaries. Same shape as Consolidate -> Validate -> Investigate -> Manage on the
+  // endpoint workflow.
+  const [attackVectorReflection, setAttackVectorReflection] = useState(null);
+  // Why the reflection row is not on screen, when it is not. Null means there is nothing to say.
+  // An unreadable probe status is NEWS: it leaves every vector's reflection unknown, and an unknown
+  // that renders as an absent row is indistinguishable from a target where nothing reflects.
+  const [attackVectorReflectionError, setAttackVectorReflectionError] = useState(null);
+  const [isProbingReflection, setIsProbingReflection] = useState(false);
   const [showAddAttackVectorModal, setShowAddAttackVectorModal] = useState(false);
   const [showAttackVectorsModal, setShowAttackVectorsModal] = useState(false);
+  const [showAttackVectorConfigureModal, setShowAttackVectorConfigureModal] = useState(false);
+  const [showPointersModal, setShowPointersModal] = useState(false);
+  // The third pass of Investigate. The two reflection passes report through
+  // attackVectorReflection above; this is the classifier pass that runs after them, and until now
+  // it ran, wrote its coverage and its verdicts, and told the operator nothing at all.
+  const [triageRunStatus, setTriageRunStatus] = useState(null);
+  const [triageRunError, setTriageRunError] = useState(null);
+  const [showTriageRunModal, setShowTriageRunModal] = useState(false);
   // Starting Point, not Consolidate: the repeater used to be a button on the attack vectors card and
   // its flag was declared here with the rest of them. It is its own row at the top of the workflow
   // now, because replaying a captured request is where a URL target's testing starts.
@@ -6141,6 +6291,240 @@ function App() {
   }, [activeTarget]);
 
   useEffect(() => { loadAttackVectorCounts(); }, [loadAttackVectorCounts]);
+
+  // Whether the LAST answer said a run was in flight. A poll that sees running go from true to
+  // false is the only moment a background run has to announce itself; without this the card would
+  // quietly stop moving and the operator would have to guess it had finished.
+  const probeWasRunning = useRef(false);
+
+  // The probe's own summary, fetched separately from the coverage counts because it changes on its
+  // own schedule: a run in progress repolls this and nothing else.
+  //
+  // THE FAILURE IS SHOWN, NOT SWALLOWED. This read used to call a route that was never registered
+  // and catch the 404 into silence, which drew the card with no reflection row at all: identical on
+  // screen to a target where nothing reflects. A probe surface that fails invisibly is the exact
+  // defect the probe exists to prevent, so a read that does not land says so in the card.
+  const loadAttackVectorReflection = useCallback(async () => {
+    // Cleared rather than left standing: an error belongs to the target it was read for, and a
+    // warning about a target the operator has moved away from is worse than no warning.
+    if (!activeTarget) { setAttackVectorReflection(null); setAttackVectorReflectionError(null); return; }
+    try {
+      const res = await fetch(`/api/attack-vectors/${activeTarget.id}/reflection-probe/status`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setAttackVectorReflection(null);
+        setAttackVectorReflectionError(body.message
+          || `The reflection status endpoint answered ${res.status}. The counts below are unknown, not zero.`);
+        setIsProbingReflection(false);
+        probeWasRunning.current = false;
+        return;
+      }
+      const data = normalizeReflectionStatus(await res.json());
+      setAttackVectorReflection(data);
+      // A run that ended in error reports it here rather than only in a log the operator never
+      // opens: a probe that died a third of the way through leaves the rest not_probed, and a
+      // not_probed row is an unknown that must not be read as clean.
+      setAttackVectorReflectionError(data.run_error || null);
+      if (probeWasRunning.current && !data.running) {
+        notify('Reflection probe complete',
+          `${data.grades.xss_candidate_high ?? 0} raw into HTML, `
+          + `${data.grades.xss_candidate_chain ?? 0} needing a chain, `
+          + `${data.grades.xss_candidate_low ?? 0} raw into another type.`);
+      }
+      probeWasRunning.current = data.running;
+      // The server is the authority on whether a run is still going, not the click that started
+      // it. Reloading the page during a probe would otherwise leave the button enabled and let
+      // an operator start a second run against the same target.
+      setIsProbingReflection(data.running);
+    } catch (err) {
+      setAttackVectorReflection(null);
+      setAttackVectorReflectionError(`The reflection status could not be read: ${err.message}`);
+      setIsProbingReflection(false);
+      probeWasRunning.current = false;
+    }
+  }, [activeTarget, notify]);
+
+  useEffect(() => { loadAttackVectorReflection(); }, [loadAttackVectorReflection]);
+
+  // Polled only while a run is in flight, and KEYED on that flag so the interval is created when a
+  // run starts rather than on whatever the flag happened to be when the effect first ran.
+  useEffect(() => {
+    if (!activeTarget || !isProbingReflection) return undefined;
+    const timer = setInterval(() => { loadAttackVectorReflection(); }, 3000);
+    return () => clearInterval(timer);
+  }, [activeTarget, isProbingReflection, loadAttackVectorReflection]);
+
+  // NO OPTIONS AND NO CONFIRM. There used to be a second button that opted the run in to sending
+  // POST and PATCH body probes, with a confirm dialog in front of it, because probing a body field
+  // meant writing to the estate. Both are gone: the PASSIVE pass reads a body field out of the
+  // request and response the crawl already stored, so Investigate never sends a verb that changes
+  // data and there is nothing left to consent to.
+  const handleProbeReflection = async () => {
+    if (!activeTarget) return;
+    setIsProbingReflection(true);
+    setAttackVectorReflectionError(null);
+    try {
+      const res = await fetch(`/api/attack-vectors/${activeTarget.id}/reflection-probe`,
+        { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // The server's own sentence, not a replacement for it: it says whether there is nothing to
+        // probe, or a run already going and which one, and both are the answer the operator needs.
+        const why = data.message || `The reflection probe could not be started (${res.status}).`;
+        notify('Reflection probe failed', why, 'warning');
+        setAttackVectorReflectionError(why);
+        setIsProbingReflection(false);
+        return;
+      }
+      // The start is ALWAYS asynchronous: the handler inserts the run and returns {run_id, status},
+      // and the probing happens in a goroutine. So there is no "finished inside the request" case
+      // to handle, and the completion notice belongs to the poll, which is the only thing that sees
+      // the run stop. probeWasRunning is set here so the first poll after a fast run still fires it.
+      probeWasRunning.current = true;
+      // Investigate chains the triage classifiers onto the reflection passes, so a triage run is
+      // now expected. Recorded here rather than inferred from the reflection status, because the
+      // window in which the chain can fail is exactly the window after the reflection poll stops.
+      // Five minutes: the server starts the triage run as soon as the reflection run leaves
+      // 'running', so anything slower than that is the chain not happening.
+      triageExpectedUntil.current = Date.now() + 5 * 60 * 1000;
+      setTriageAwaiting(true);
+      await loadAttackVectorReflection();
+      await loadTriageRunStatus();
+    } catch (err) {
+      notify('Reflection probe failed', err.message, 'warning');
+      setAttackVectorReflectionError(err.message);
+      setIsProbingReflection(false);
+    }
+  };
+
+  // Stopping a run mid-flight. COOPERATIVE on the server: the flag is read before each request, so
+  // the verdicts already written survive and the inputs never reached stay not_probed rather than
+  // being left to read as clean. Offered because the alternative, once an operator has started a
+  // canary run against a live target, is closing the tab and hoping.
+  const handleCancelReflectionProbe = async () => {
+    if (!activeTarget) return;
+    try {
+      const res = await fetch(`/api/attack-vectors/${activeTarget.id}/reflection-probe/cancel`,
+        { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        notify('Cancel failed', data.message || 'No reflection probe is running for this target.',
+          'warning');
+      }
+      await loadAttackVectorReflection();
+    } catch (err) {
+      notify('Cancel failed', err.message, 'warning');
+    }
+  };
+
+  // ---------------------------------------------------------------------------------------------
+  // THE THIRD PASS OF INVESTIGATE.
+  //
+  // Investigate runs passive reflection, then active reflection, then the triage classifiers. The
+  // first two report through attackVectorReflection above. The third wrote 800 verdict rows, a
+  // coverage denominator and a renders_as_clean flag on the measured run and surfaced NONE of it:
+  // four server routes existed and nothing in this client called any of them. The operator pressed
+  // Investigate, a triage pass ran, and they saw nothing about it.
+  //
+  // WHY IT POLLS SEPARATELY FROM THE REFLECTION STATUS. The triage run is CHAINED behind the
+  // reflection run on the server, so it starts after the reflection poll has already stopped. If
+  // this read were folded into loadAttackVectorReflection the classifier pass would run entirely
+  // inside the window where nothing is polling, and a long silent run is indistinguishable from a
+  // hung one.
+  // ---------------------------------------------------------------------------------------------
+  const triageWasRunning = useRef(false);
+  // When Investigate chained a triage pass that has not appeared yet. Bounded, because a chain
+  // that never arrives must say so rather than spin: the server gives up on the reflection run
+  // after 90 minutes and does NOT start the triage pass, which leaves this target with no
+  // classifier coverage at all. That is the single most important thing this card can report.
+  const triageExpectedUntil = useRef(0);
+  const [triageAwaiting, setTriageAwaiting] = useState(false);
+
+  const loadTriageRunStatus = useCallback(async () => {
+    if (!activeTarget) { setTriageRunStatus(null); setTriageRunError(null); return; }
+    try {
+      const res = await fetch(`/api/triage/${activeTarget.id}/run/status`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setTriageRunStatus(null);
+        setTriageRunError(body.message
+          || `The triage status endpoint answered ${res.status}. How much of this target the `
+            + 'classifiers measured is unknown, which is not the same as clean.');
+        return;
+      }
+      const data = normalizeTriageStatus(await res.json());
+      setTriageRunStatus(data);
+      setTriageRunError(null);
+      if (data.running) {
+        setTriageAwaiting(false);
+        triageExpectedUntil.current = 0;
+      } else if (triageExpectedUntil.current && Date.now() > triageExpectedUntil.current) {
+        triageExpectedUntil.current = 0;
+        setTriageAwaiting(false);
+        setTriageRunError('Investigate finished its reflection passes and no triage run started '
+          + 'behind them. No classifier has asked this target anything on this run, which is a gap '
+          + 'in coverage and not a clean result.');
+      }
+      if (triageWasRunning.current && !data.running) {
+        const c = data.coverage || {};
+        notify('Triage classifiers complete',
+          `${Number(c.Positive || 0)} verdict rows fired, ${Number(c.Unknown || 0)} of `
+          + `${Number(c.VerdictRows || 0)} are not known. Open the triage coverage to see what was `
+          + 'not answered and why.');
+      }
+      triageWasRunning.current = data.running;
+    } catch (err) {
+      setTriageRunStatus(null);
+      setTriageRunError(`The triage status could not be read: ${err.message}. How much of this `
+        + 'target the classifiers measured is unknown, which is not the same as clean.');
+    }
+  }, [activeTarget, notify]);
+
+  useEffect(() => { loadTriageRunStatus(); }, [loadTriageRunStatus]);
+
+  const triageRunning = !!(triageRunStatus && triageRunStatus.running);
+  useEffect(() => {
+    if (!activeTarget) return undefined;
+    // Polled through the whole of Investigate: while the reflection passes are still going, while
+    // the chained triage run has not appeared yet, and while it is running.
+    if (!isProbingReflection && !triageAwaiting && !triageRunning) return undefined;
+    const timer = setInterval(() => { loadTriageRunStatus(); }, 3000);
+    return () => clearInterval(timer);
+  }, [activeTarget, isProbingReflection, triageAwaiting, triageRunning, loadTriageRunStatus]);
+
+  // ONE LINE ON THE CARD, in the same strip the reflection progress already uses. Never absent: a
+  // target whose classifiers have never run says exactly that, because never having asked is the
+  // largest gap in coverage there is and it has no row anywhere else to represent it.
+  //
+  // While Investigate is still on its reflection passes the PREVIOUS triage run is what the status
+  // endpoint returns, and printing its counts there would report an old run's coverage as this
+  // one's. So the chained-but-not-started case gets its own sentence.
+  const triageLine = (triageAwaiting && !triageRunning)
+    ? {
+      running: true,
+      unknown: true,
+      text: 'Investigate is on its reflection passes. The classifier pass has not started yet, so '
+        + 'nothing has been measured for this run.',
+    }
+    : triageCardLine(triageRunStatus);
+
+  // Cooperative on the server, same as the reflection cancel: every pair the run has not reached
+  // is written as UNTESTED with a reason when the loop unwinds. A killed process would leave those
+  // rows absent instead, and an absence reads as coverage nobody has.
+  const handleCancelTriageRun = async () => {
+    if (!activeTarget) return;
+    try {
+      const res = await fetch(`/api/triage/${activeTarget.id}/run/cancel`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        notify('Cancel failed', data.message || 'No triage run is running for this target.',
+          'warning');
+      }
+      await loadTriageRunStatus();
+    } catch (err) {
+      notify('Cancel failed', err.message, 'warning');
+    }
+  };
 
   const handleConsolidateAttackVectors = async () => {
     if (!activeTarget) return;
@@ -6234,6 +6618,8 @@ function App() {
 
   const handleAddAttackVectorManually = () => setShowAddAttackVectorModal(true);
   const handleOpenUniqueAttackVectorsModal = () => setShowAttackVectorsModal(true);
+  const handleOpenAttackVectorConfigureModal = () => setShowAttackVectorConfigureModal(true);
+  const handleOpenPointersModal = () => setShowPointersModal(true);
   const handleOpenFlowConfigureModal = () => setShowFlowConfigureModal(true);
   const handleOpenDetectFlowsModal = () => setShowDetectFlowsModal(true);
   // Same rule as the repeater below: opened from its own button there is no handover, so the id left
@@ -6384,7 +6770,7 @@ function App() {
     setShowDiscretionaryAccessModal(false); fetchAuthzCounts();
   };
   const handleHeaderCookieAction = (action) => {
-    // Placeholder — Header/Cookie Enumeration (fuzzing, investigate, results) will be built here soon.
+    // Placeholder - Header/Cookie Enumeration (fuzzing, investigate, results) will be built here soon.
     console.log('[Header/Cookie Enumeration] action:', action);
   };
   // Per-category count of documented auth flows for the active target, shown on the Authentication card.
@@ -7598,7 +7984,7 @@ function App() {
         <Modal.Header closeButton className="bg-dark border-secondary">
           <Modal.Title className="d-flex align-items-center gap-2">
             <i className="bi bi-exclamation-triangle-fill" style={{ color: '#ff9800' }} />
-            <span className="text-white">CTL Scan — API Issue</span>
+            <span className="text-white">CTL Scan - API Issue</span>
           </Modal.Title>
         </Modal.Header>
         <Modal.Body className="bg-dark text-white">
@@ -7621,9 +8007,9 @@ function App() {
             This typically happens when:
           </p>
           <ul>
-            <li><strong>Rate limiting (429)</strong> — Too many requests have been made to crt.sh in a short period.</li>
-            <li><strong>Server overload (503)</strong> — The crt.sh service is temporarily overwhelmed by traffic.</li>
-            <li><strong>Timeout</strong> — The API took too long to respond for a large domain.</li>
+            <li><strong>Rate limiting (429)</strong> - Too many requests have been made to crt.sh in a short period.</li>
+            <li><strong>Server overload (503)</strong> - The crt.sh service is temporarily overwhelmed by traffic.</li>
+            <li><strong>Timeout</strong> - The API took too long to respond for a large domain.</li>
           </ul>
           <p className="mb-0">
             This is not a bug in the framework. Simply <strong>wait a few minutes and try the scan again</strong>.
@@ -8046,7 +8432,7 @@ function App() {
                               <i
                                 className="bi bi-exclamation-triangle-fill"
                                 style={{ color: '#ff9800', cursor: 'pointer', fontSize: '1.1rem' }}
-                                title="API error — click for details"
+                                title="API error - click for details"
                                 onClick={(e) => { e.stopPropagation(); tool.onApiError(); }}
                               />
                             )}
@@ -8965,7 +9351,7 @@ function App() {
                               <i
                                 className="bi bi-exclamation-triangle-fill"
                                 style={{ color: '#ff9800', cursor: 'pointer', fontSize: '1.1rem' }}
-                                title="API error — click for details"
+                                title="API error - click for details"
                                 onClick={(e) => { e.stopPropagation(); tool.onApiError(); }}
                               />
                             )}
@@ -10836,12 +11222,15 @@ function App() {
                           actually processes: a verb, a host, a path, the parameters in play, and the
                           single place a payload goes. Consolidate folds everything the crawls, the
                           archives, Arjun, x8 and FFUF found into one list of unique vectors to test.
+                          Investigate then sends a canary through each one and records what came
+                          back, so the scanners can be aimed at the vectors that already put your
+                          input into a response.
                         </Card.Text>
                         {/* Metrics and buttons in one bottom-pinned block so the label row sits the
                             same distance above the buttons as it does on every other card. */}
                         <div className="mt-auto">
-                          {/* TOTAL first, then coverage BY INSERTION POINT. The five points sum to
-                              the total, so showing the total alongside them says how much work there
+                          {/* TOTAL first, then coverage BY INSERTION POINT. The points sum to the
+                              total, so showing the total alongside them says how much work there
                               is AND what it covers. A point at zero is greyed rather than explained:
                               it is the reason every tool below will report nothing wrong with that
                               insertion point. */}
@@ -10855,23 +11244,158 @@ function App() {
                                 <div className={`fw-bold fs-4 ${attackVectorCounts.total > 0 ? 'text-danger' : 'text-secondary'}`}>
                                   {attackVectorCounts.total ?? 0}
                                 </div>
-                                <div className="text-muted small card-metric-label">Total Vectors</div>
+                                <div className="text-muted small card-metric-label">Total</div>
                               </Col>
-                              {(attackVectorCoverage.points || []).map((point) => {
+                              {/* The server's points first, in its order, then any canonical point
+                                  it did not name. Taking the union rather than the server list
+                                  alone is what puts Hash Fragment on the card against an API build
+                                  that predates the fragment column: that build cannot store a
+                                  fragment vector, so its zero is accurate, and the column stops
+                                  appearing and disappearing across a rebuild. */}
+                              {Array.from(new Set([
+                                ...(attackVectorCoverage.points || []),
+                                ...VECTOR_INSERTION_POINTS,
+                              ])).map((point) => {
                                 const n = (attackVectorCoverage.by_insertion_point || {})[point] ?? 0;
+                                // A reflection on this insertion point makes the number GLOW rather
+                                // than merely be red. Red already means "this point has vectors", so
+                                // a second red says nothing new; the glow is the second channel, and
+                                // it is the one that changes what the operator does next.
+                                //
+                                // ONE GLOW FOR ALL THREE GRADES. high, chain and low used to be two
+                                // colours here, red and amber. The grades still mean three different
+                                // things and the place they say so is the row, in words, next to the
+                                // evidence. Two shades of glow on a number is a distinction nobody
+                                // reads at a glance, and it made the card look broken.
+                                const candidates = ((attackVectorReflection || {}).grades_by_point
+                                  || {})[point] || {};
+                                const high = candidates.xss_candidate_high ?? 0;
+                                const chain = candidates.xss_candidate_chain ?? 0;
+                                const low = candidates.xss_candidate_low ?? 0;
+                                const reflecting = high + chain + low;
                                 return (
                                   <Col key={point}>
-                                    <div className={`fw-bold fs-4 ${n > 0 ? 'text-danger' : 'text-secondary'}`}>
+                                    <div
+                                      className={`fw-bold fs-4 ${n > 0 ? 'text-danger' : 'text-secondary'}`
+                                        + (reflecting > 0 ? ' card-metric-candidate' : '')}
+                                      title={reflecting > 0
+                                        ? `${reflecting} vector(s) here reflect a payload back unencoded. Open the results for the grade.`
+                                        : undefined}>
                                       {n}
                                     </div>
-                                    <div className="text-muted small card-metric-label">{point}</div>
+                                    <div className="text-muted small card-metric-label">
+                                      {insertionPointLabel(point)}
+                                    </div>
                                   </Col>
                                 );
                               })}
                             </Row>
                           )}
+                          {/* WHAT A CANARY DID WHEN IT WENT THROUGH EACH VECTOR.
+                              Its own row under the coverage counts, because it answers a different
+                              question: coverage says how much there is to test, this says which of
+                              it is worth testing first.
+
+                              Drawn only once the endpoint has answered. A row of zeroes on a target
+                              nobody has probed would say "nothing reflects", and the truth is that
+                              nothing was asked. */}
+                          {/* AND WHEN IT COULD NOT BE READ, THAT IS WHAT THE ROW SAYS.
+                              Never an empty space: an absent reflection row and a row of zeroes
+                              both read as "nothing reflects here", and the difference between a
+                              measurement and a failed read is the one this card exists to keep. */}
+                          {attackVectorReflectionError && (
+                            <Alert variant="dark"
+                              className="border border-warning text-white-50 py-2 small mb-3">
+                              {attackVectorReflectionError}
+                            </Alert>
+                          )}
+                          {attackVectorReflection && (
+                            <>
+                              {/* Progress while it runs, and the reason the numbers are not moving
+                                  when it is not. The denominator is the probe's own, not the vector
+                                  total: a vector with five parameters is five requests. */}
+                              {isProbingReflection && (
+                                <div className="text-white-50 small text-center mb-3">
+                                  <Spinner animation="border" size="sm" className="me-2" />
+                                  {/* Two phases, so the line says which. The passive pass reads
+                                      thousands of stored bodies before the active counter starts
+                                      moving, and without a word for it the card sits at "0 of 143"
+                                      looking stalled while real work is happening. */}
+                                  {attackVectorReflection.cancelling
+                                    ? 'cancelling'
+                                    : attackVectorReflection.phase === 'passive'
+                                      ? 'reading stored responses'
+                                      : 'probing'}
+                                  {!attackVectorReflection.cancelling
+                                    && attackVectorReflection.phase !== 'passive'
+                                    && attackVectorReflection.progress
+                                    ? ` ${attackVectorReflection.progress.done ?? 0} of ${attackVectorReflection.progress.total ?? 0}`
+                                    : ''}
+                                  {/* The only way to stop a canary run that is already reaching a
+                                      live target. Cooperative on the server: what has been probed
+                                      stays probed and what has not stays not_probed. */}
+                                  {!attackVectorReflection.cancelling && (
+                                    <Button variant="link"
+                                      className="p-0 ms-2 text-danger small align-baseline"
+                                      onClick={handleCancelReflectionProbe}>
+                                      cancel
+                                    </Button>
+                                  )}
+                                </div>
+                              )}
+                            </>
+                          )}
+                          {/* THE THIRD PASS, IN ONE LINE, WITH ITS OWN WAY IN.
+                              Not a seventh button. The row below is already six wide and wraps to
+                              three rows at phone width; a seventh would wrap to four with one
+                              orphan, and the operator has twice said this UI gets overbuilt. It
+                              belongs here instead for a better reason than space: this is the
+                              strip that already reports what Investigate is doing, the line
+                              carries the headline number itself, and a link is the honest weight
+                              for "read the coverage of the run you just started".
+
+                              The line is NEVER ABSENT. A target whose classifiers have never run
+                              says so, because that is the largest gap in coverage a target can
+                              have and nothing else on this card would mention it. */}
+                          {triageRunError && (
+                            <Alert variant="dark"
+                              className="border border-warning text-white-50 py-2 small mb-3">
+                              {triageRunError}
+                            </Alert>
+                          )}
+                          {triageLine && (
+                            <div className="small text-center mb-3"
+                              style={{ color: triageLine.unknown ? '#fd7e14' : 'rgba(255,255,255,0.55)' }}>
+                              {triageLine.running && (
+                                <Spinner animation="border" size="sm" className="me-2" />
+                              )}
+                              {triageLine.text}
+                              <Button variant="link"
+                                className="p-0 ms-2 text-danger small align-baseline"
+                                data-triage-open="1"
+                                onClick={() => setShowTriageRunModal(true)}
+                                disabled={!activeTarget}>
+                                triage coverage
+                              </Button>
+                              {triageRunning && !(triageRunStatus && triageRunStatus.cancelling) && (
+                                <Button variant="link"
+                                  className="p-0 ms-2 text-danger small align-baseline"
+                                  onClick={handleCancelTriageRun}>
+                                  cancel
+                                </Button>
+                              )}
+                            </div>
+                          )}
                           <Row className="g-2">
-                            <Col>
+                            <Col xs={6} md={4} xxl>
+                              {/* Which endpoints Investigate covers, and how it probes them. */}
+                              <Button variant="outline-danger" className="w-100"
+                                onClick={handleOpenAttackVectorConfigureModal}
+                                disabled={!activeTarget}>
+                                Configure
+                              </Button>
+                            </Col>
+                            <Col xs={6} md={4} xxl>
                               <Button variant="outline-danger" className="w-100"
                                 onClick={handleConsolidateAttackVectors}
                                 disabled={!activeTarget || isConsolidatingAttackVectors}>
@@ -10882,16 +11406,43 @@ function App() {
                                 </div>
                               </Button>
                             </Col>
-                            <Col>
+                            <Col xs={6} md={4} xxl>
+                              {/* NEXT TO CONSOLIDATE, NOT INSIDE IT. Consolidation sends zero HTTP
+                                  requests and that is worth keeping: rebuilding the vector list is
+                                  a safe, repeatable act, and this one puts a canary into every
+                                  query parameter, path segment, cookie and header on the list.
+                                  Pressing it is a decision about the target, so it is its own
+                                  button. */}
+                              <Button variant="outline-danger" className="w-100"
+                                onClick={handleProbeReflection}
+                                disabled={!activeTarget || isProbingReflection
+                                  || isConsolidatingAttackVectors}
+                                title="Two passes. First it reads the requests and responses the crawl already stored and records every input whose value comes back, sending nothing. Then it sends one canary per input and records what survived. Nothing that changes data is sent at any setting: POST, PATCH, PUT and DELETE are never put on the wire.">
+                                <div className="btn-content">
+                                  {isProbingReflection
+                                    ? <Spinner animation="border" size="sm" />
+                                    : 'Investigate'}
+                                </div>
+                              </Button>
+                            </Col>
+                            <Col xs={6} md={4} xxl>
                               <Button variant="outline-danger" className="w-100"
                                 onClick={handleAddAttackVectorManually} disabled={!activeTarget}>
                                 Add Manually
                               </Button>
                             </Col>
-                            <Col>
+                            <Col xs={6} md={4} xxl>
                               <Button variant="outline-danger" className="w-100"
                                 onClick={handleOpenUniqueAttackVectorsModal} disabled={!activeTarget}>
                                 Unique Attack Vectors
+                              </Button>
+                            </Col>
+                            <Col xs={6} md={4} xxl>
+                              {/* Not findings. The vectors the evidence says are worth testing
+                                  deeply, and which tool to point at each one. */}
+                              <Button variant="outline-danger" className="w-100"
+                                onClick={handleOpenPointersModal} disabled={!activeTarget}>
+                                Pointers
                               </Button>
                             </Col>
                           </Row>
@@ -11038,7 +11589,7 @@ function App() {
                         is mapped, which is a claim about the server this client cannot make. */}
                     {!threatFlowLinksError && (() => {
                       const shown = Object.values(threatModelResults || {})
-                        .flatMap((list) => visibleThreats(list, hideRejectedThreats, threatSeverityFilter, threatAuthFilter));
+                        .flatMap((list) => visibleThreats(list, threatStatusFilter, threatSeverityFilter, threatAuthFilter));
                       if (shown.length === 0) return null;
                       const mapped = shown.filter((t) => (threatFlowLinksByThreat[String(t.id)] || []).length > 0).length;
                       return (
@@ -11053,16 +11604,23 @@ function App() {
                     })()}
                   </div>
                   <div className="d-flex align-items-center flex-wrap justify-content-end" style={{ gap: '0.75rem' }}>
-                  {/* Both dropdowns are the same shape: a checkbox per option, all ticked by default,
-                      and autoClose="outside" so several can be unticked without the menu shutting
-                      after each click. The button label counts what is ON, so a narrowed filter is
-                      visible without opening it - a filter you cannot see is how a card comes to look
-                      empty for no apparent reason. */}
+                  {/* All three dropdowns are the same shape: a checkbox per option, all ticked by
+                      default, and autoClose="outside" so several can be unticked without the menu
+                      shutting after each click. The toggle button turns red when anything is off, so a
+                      narrowed filter is visible without opening it - a filter you cannot see is how a
+                      card comes to look empty for no apparent reason.
+
+                      STATUS SITS LAST, where the "Hide rejected" switch it replaces used to sit, so
+                      the control an operator reaches for by muscle memory is in the same place. It is
+                      the only one carrying per-option counts, because it is the only one that
+                      replaced a control which already showed them. */}
                   {[
                     { id: 'threat-severity-filter', title: 'Severity', options: THREAT_SEVERITY_FILTERS,
                       value: threatSeverityFilter, set: setThreatSeverityFilter },
                     { id: 'threat-auth-filter', title: 'Auth', options: THREAT_AUTH_FILTERS,
                       value: threatAuthFilter, set: setThreatAuthFilter },
+                    { id: 'threat-status-filter', title: 'Status', options: THREAT_STATUS_FILTERS,
+                      value: threatStatusFilter, set: setThreatStatusFilter, counts: threatStatusCounts },
                   ].map((f) => {
                     // Grey when everything is on, red when anything is filtered out. The state worth
                     // signalling is binary - "you are looking at a subset" - so the button says that
@@ -11084,7 +11642,12 @@ function App() {
                               <Form.Check
                                 type="checkbox"
                                 id={`${f.id}-${o.key}`}
-                                label={o.label}
+                                // Counted across the WHOLE model rather than per card, because the
+                                // filter is section-wide and the question it answers is "how much of
+                                // this section is settled". A zero is printed rather than hidden:
+                                // "Rejected (0)" is information, while a bare "Rejected" leaves the
+                                // operator wondering whether the box does anything at all.
+                                label={f.counts ? `${o.label} (${f.counts[o.key] || 0})` : o.label}
                                 style={{ fontSize: '0.85rem' }}
                                 checked={f.value[o.key] !== false}
                                 onChange={(e) => f.set((prev) => ({ ...prev, [o.key]: e.target.checked }))}
@@ -11107,24 +11670,19 @@ function App() {
                       </Dropdown>
                     );
                   })}
+                  {/* Not a fourth entry in the dropdown array above: those all share a
+                      {id,title,options,value,set} shape and this has no options to tick. It sits
+                      beside them because it belongs to the same "how am I looking at this list"
+                      group, even though it filters nothing. */}
                   <Form.Check
                     type="switch"
-                    id="hide-rejected-threats"
+                    id="threat-show-animation"
                     className="text-white-50"
                     style={{ fontSize: '0.85rem' }}
-                    label={(() => {
-                      // The count is on the label so the switch says what it will actually do before
-                      // it is touched. Reading every category here rather than per card, because the
-                      // toggle is section-wide and a per-card number would not answer "how much of
-                      // this section is settled".
-                      const rejected = Object.values(threatModelResults || {})
-                        .reduce((n, list) => n + (list || []).filter((t) => t.test_status === 'rejected').length, 0);
-                      return rejected > 0
-                        ? `Hide rejected (${rejected})`
-                        : 'Hide rejected';
-                    })()}
-                    checked={hideRejectedThreats}
-                    onChange={(e) => setHideRejectedThreats(e.target.checked)}
+                    label="Show Animation"
+                    title="Validated threats glow. Turn this off to keep the green outline without the motion."
+                    checked={threatShowAnimation}
+                    onChange={(e) => setThreatShowAnimation(e.target.checked)}
                   />
                   </div>
                 </div>
@@ -11148,28 +11706,30 @@ function App() {
                                   threats having disappeared from the model - and attributing each
                                   hidden row to the filter that ACTUALLY hid it.
 
-                                  MEASURED CORRECTION. This used to print `total - visible` under the
-                                  label "rejected hidden", which is only true when the rejected toggle
-                                  is the only narrowed filter. On the live target, with "Hide rejected"
-                                  on and the Low severity box unticked, the Denial of Service card read
-                                  "1 rejected hidden" and Repudiation read "2 rejected hidden" - both
-                                  categories contain zero rejected threats. The number is now the rows
-                                  the rejected toggle alone removes, and everything else is counted
-                                  separately rather than mislabelled. */}
+                                  MEASURED CORRECTION, AND IT IS WHY THE SPLIT EXISTS. This used to
+                                  print `total - visible` under the label "rejected hidden", which is
+                                  only true when the rejected toggle is the only narrowed filter. On
+                                  the live target, with "Hide rejected" on and the Low severity box
+                                  unticked, the Denial of Service card read "1 rejected hidden" and
+                                  Repudiation read "2 rejected hidden", and both categories hold zero
+                                  rejected threats. Now that status is a four-option filter the label
+                                  says "hidden by status" rather than naming one value, which is the
+                                  same fix generalised: the number counts what the STATUS filter
+                                  removed and nothing else. */}
                               {(() => {
                                 const all = threatModelResults[cat.key] || [];
-                                const shown = visibleThreats(all, hideRejectedThreats, threatSeverityFilter, threatAuthFilter);
+                                const shown = visibleThreats(all, threatStatusFilter, threatSeverityFilter, threatAuthFilter);
                                 if (shown.length === 0) return null;
-                                // Rows passing severity and auth, rejections included. The gap between
-                                // this and `shown` is exactly what the rejected toggle took away; the
-                                // gap between this and `all` is what the other two filters took.
-                                const passOthers = visibleThreats(all, false, threatSeverityFilter, threatAuthFilter);
+                                // Rows passing severity and auth with the status axis switched OFF.
+                                // The gap between this and `shown` is exactly what the status filter
+                                // removed; the gap between this and `all` is what the other two took.
+                                const passOthers = visibleThreats(all, null, threatSeverityFilter, threatAuthFilter);
                                 const parts = [`${shown.length} documented`];
                                 if (passOthers.length > shown.length) {
-                                  parts.push(`${passOthers.length - shown.length} rejected hidden`);
+                                  parts.push(`${passOthers.length - shown.length} hidden by status`);
                                 }
                                 if (all.length > passOthers.length) {
-                                  parts.push(`${all.length - passOthers.length} hidden by filters`);
+                                  parts.push(`${all.length - passOthers.length} hidden by severity or auth`);
                                 }
                                 return (
                                   <span className="text-white-50 ms-2" style={{ fontSize: '0.8rem', fontWeight: 400 }}>
@@ -11189,7 +11749,7 @@ function App() {
                           <Card.Text className="text-white-50 small fst-italic mb-3">
                             {cat.desc}
                           </Card.Text>
-                          {visibleThreats(threatModelResults[cat.key], hideRejectedThreats, threatSeverityFilter, threatAuthFilter).length === 0 ? (
+                          {visibleThreats(threatModelResults[cat.key], threatStatusFilter, threatSeverityFilter, threatAuthFilter).length === 0 ? (
                             <div className="text-center text-white-50 py-4">
                               {/* A category emptied BY THE FILTER must not claim there are no results:
                                   that sentence would be false, and it is the reading that makes an
@@ -11199,12 +11759,12 @@ function App() {
                                 if (all.length === 0) {
                                   return 'There are currently no Threat Model results for this section.';
                                 }
-                                // Name the filter that is ACTUALLY responsible. Blaming the rejected
-                                // toggle when a severity box did the hiding sends the operator to the
-                                // wrong control, and they conclude the toggle is broken.
+                                // Name the filter that is ACTUALLY responsible. Blaming the status
+                                // filter when a severity box did the hiding sends the operator to the
+                                // wrong control, and they conclude that control is broken.
                                 const causes = [];
-                                if (hideRejectedThreats && all.some((t) => t.test_status === 'rejected')) {
-                                  causes.push('"Hide rejected"');
+                                if (all.some((t) => threatStatusFilter[threatStatusKey(t)] === false)) {
+                                  causes.push('the Status filter');
                                 }
                                 if (all.some((t) => threatSeverityFilter[threatSeverityKey(t)] === false)) {
                                   causes.push('the Severity filter');
@@ -11220,14 +11780,23 @@ function App() {
                             </div>
                           ) : (
                             <Accordion data-bs-theme="dark" alwaysOpen>
-                              {visibleThreats(threatModelResults[cat.key], hideRejectedThreats, threatSeverityFilter, threatAuthFilter).map((threat, threatIndex) => (
+                              {visibleThreats(threatModelResults[cat.key], threatStatusFilter, threatSeverityFilter, threatAuthFilter).map((threat, threatIndex) => (
                                 <Accordion.Item
                                   // Keyed on the threat's own id rather than its position. The list is
                                   // now filterable, so an index-based eventKey would move an OPEN panel
-                                  // onto a different threat the moment "Hide rejected" is toggled.
+                                  // onto a different threat the moment a Status box is unticked.
                                   eventKey={String(threat.id || threatIndex)}
                                   key={threat.id || threatIndex}
-                                  className={threatTestStatus(threat.test_status).className}
+                                  // COMPOSED, never emptied. Two other places branch on this class
+                                  // being truthy: an inline 1px border for the quiet states, and the
+                                  // threat-body-panel wrapper. Clearing it to stop the glow would
+                                  // silently thin the border and drop the panel behind the prose.
+                                  className={[
+                                    threatTestStatus(threat.test_status).className,
+                                    threatTestStatus(threat.test_status).className && !threatShowAnimation
+                                      ? 'threat-static'
+                                      : '',
+                                  ].filter(Boolean).join(' ')}
                                   style={{
                                     // The glowing state owns its own border in CSS, so only the two
                                     // quiet states set one here.
@@ -11244,8 +11813,33 @@ function App() {
                                             mechanism, so this strip lays out horizontally while the column
                                             around it keeps stacking. It wraps rather than squeezing the
                                             badges when the header is narrow. */}
-                                        {(threatSeverity(threat.severity) || typeof threat.authenticated === 'boolean') && (
+                                        {/* threat_code widens this guard: it is present on every row, so
+                                            without it the strip would still be hidden on threats that have
+                                            neither a severity nor a decided authenticated, which is most of
+                                            the backfilled ones, and the code is exactly what those rows need
+                                            most to be referrable. */}
+                                        {(threat.threat_code || threatSeverity(threat.severity) || typeof threat.authenticated === 'boolean') && (
                                           <div className="d-flex flex-wrap align-items-center mb-1" style={{ gap: '0.25rem' }}>
+                                            {/* First in the strip and monospaced, because it is an
+                                                identifier to be read back out loud or typed into a
+                                                prompt, not a label to be skimmed. */}
+                                            {threat.threat_code && (
+                                              <span
+                                                title={'Reference this threat by its code, for example: "validate ' + threat.threat_code + '"'}
+                                                style={{
+                                                  backgroundColor: '#3a3f44',
+                                                  color: '#e9ecef',
+                                                  fontSize: '0.68rem',
+                                                  fontWeight: 700,
+                                                  letterSpacing: '0.08em',
+                                                  padding: '0.15rem 0.5rem',
+                                                  borderRadius: '0.25rem',
+                                                  fontFamily: 'var(--bs-font-monospace, monospace)',
+                                                }}
+                                              >
+                                                {threat.threat_code}
+                                              </span>
+                                            )}
                                             {threatSeverity(threat.severity) && (
                                               <span
                                                 style={{
@@ -11312,7 +11906,12 @@ function App() {
                                               fontWeight: 600,
                                               fontSize: '0.8rem',
                                               padding: '0.4em 0.7em',
-                                              boxShadow: '0 0 12px rgba(32,201,151,0.95)',
+                                              // Gated on the toggle as well as the status: this
+                                              // halo is inline, so no CSS class can reach it and it
+                                              // would otherwise keep glowing with animation off.
+                                              boxShadow: threatShowAnimation
+                                                ? '0 0 12px rgba(32,201,151,0.95)'
+                                                : 'none',
                                             }
                                           : undefined}
                                       >
@@ -12207,6 +12806,27 @@ function App() {
         handleClose={() => setShowAttackVectorsModal(false)}
         activeTarget={activeTarget}
         onChanged={loadAttackVectorCounts}
+      />
+
+      <AttackVectorConfigureModal
+        show={showAttackVectorConfigureModal}
+        handleClose={() => setShowAttackVectorConfigureModal(false)}
+        activeTarget={activeTarget}
+      />
+
+      <PointersModal
+        show={showPointersModal}
+        handleClose={() => setShowPointersModal(false)}
+        activeTarget={activeTarget}
+      />
+
+      {/* The other half of Pointers: what the classifiers did NOT answer, and the named reason for
+          each one. It refreshes the card's line on close, because a re-run started from inside it
+          is a run the card must not keep describing in the past tense. */}
+      <TriageRunModal
+        show={showTriageRunModal}
+        handleClose={() => { setShowTriageRunModal(false); loadTriageRunStatus(); }}
+        activeTarget={activeTarget}
       />
 
       {/* The five Request Flow Replay modals. One tabbed modal until now; separate modals because

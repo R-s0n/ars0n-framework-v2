@@ -504,7 +504,7 @@ async function getScopeStats(params) {
   for (const table of scanTables) {
     try {
       // NOTE: execution_time is stored as a Go duration STRING (e.g. "26m40.5s"), not a number,
-      // so SQL AVG(execution_time) throws "function avg(text) does not exist" — which was silently
+      // so SQL AVG(execution_time) throws "function avg(text) does not exist" - which was silently
       // swallowed and left stats.tools empty. We report counts + last_run instead.
       const res = await query(`
         SELECT

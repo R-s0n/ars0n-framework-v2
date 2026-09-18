@@ -247,7 +247,7 @@ func TestOnlySqlmapAndGhauriClaimEveryInsertionPoint(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s is not registered", key)
 		}
-		for _, point := range VectorInsertionPoints {
+		for _, point := range VectorHTTPInsertionPoints {
 			if !VectorToolCanReach(tool, point) {
 				t.Errorf("%s was measured to reach %s but the registry says otherwise", key, point)
 			}

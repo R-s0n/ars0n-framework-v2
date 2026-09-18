@@ -59,7 +59,7 @@ const TESTIMONIALS = [
     source: 'Workshop Attendee, February 2026',
   },
   {
-    text: "9 hours with rs0n that completely transformed my approach to bug hunting and built a rock-solid mental methodology. 5 intensive sessions that rewired how I think about security. The Manual Hunting Strategies session was the heaviest of all — it bridged recon to hands-on testing with AI/LLM injection techniques. Absolute game-changer. Thank you for the knowledge, the patience, and the roadmap. This changed how I'll hunt forever.",
+    text: "9 hours with rs0n that completely transformed my approach to bug hunting and built a rock-solid mental methodology. 5 intensive sessions that rewired how I think about security. The Manual Hunting Strategies session was the heaviest of all - it bridged recon to hands-on testing with AI/LLM injection techniques. Absolute game-changer. Thank you for the knowledge, the patience, and the roadmap. This changed how I'll hunt forever.",
     source: 'Workshop Attendee, February 2026',
   },
   {
@@ -289,7 +289,7 @@ function LaunchPadModal({ show, handleClose }) {
             </Carousel>
             <div className="text-center mt-2">
               <span className="text-white-50" style={{ fontSize: '0.75rem' }}>
-                {activeIndex + 1} / {SLIDES.length} — Click image to expand, use arrows to browse
+                {activeIndex + 1} / {SLIDES.length} - Click image to expand, use arrows to browse
               </span>
             </div>
           </div>
@@ -397,7 +397,7 @@ function LaunchPadModal({ show, handleClose }) {
               transform: 'translateX(-50%)',
             }}>
               <span className="text-white-50" style={{ fontSize: '0.8rem' }}>
-                {SLIDES.findIndex(s => s.image === expandedImage) + 1} / {SLIDES.length} — Arrow keys to navigate, Esc to close
+                {SLIDES.findIndex(s => s.image === expandedImage) + 1} / {SLIDES.length} - Arrow keys to navigate, Esc to close
               </span>
             </div>
           </div>
@@ -479,7 +479,7 @@ function LaunchPadModal({ show, handleClose }) {
                   "{t.text}"
                 </p>
                 <span className="text-white-50" style={{ fontSize: '0.75rem' }}>
-                  — {t.source}
+                  - {t.source}
                 </span>
               </div>
             ))}
@@ -491,7 +491,7 @@ function LaunchPadModal({ show, handleClose }) {
             }}>
               <p className="text-white-50 mb-0" style={{ fontSize: '0.8rem' }}>
                 The first Bug Bounty Launch Pad sold out with 50 attendees. Expect generous
-                ticket giveaways leading up to May — join the Ars0n Security Discord to stay
+                ticket giveaways leading up to May - join the Ars0n Security Discord to stay
                 in the loop!
               </p>
             </div>

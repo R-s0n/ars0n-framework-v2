@@ -119,14 +119,18 @@ func GetVectorResults(category string) http.HandlerFunc {
 			Total, Eligible, Done, Findings int
 			CreatedAt                       time.Time
 			CompletedAt                     *time.Time
+			// RateAdvice is the rate this target's own headers justified, reported rather than
+			// applied. Read from its own column rather than from error for the reason the schema
+			// comment gives: error belongs to whichever guard said the run does not count.
+			RateAdvice string
 		}
 		if err := dbPool.QueryRow(ctx, `
 		SELECT id::text, status, COALESCE(error,''), total_vectors, eligible_vectors,
-		       completed_vectors, finding_count, created_at, completed_at
+		       completed_vectors, finding_count, created_at, completed_at, COALESCE(rate_advice,'')
 		FROM vector_scans WHERE scope_target_id = $1 AND tool = $2
 		ORDER BY created_at DESC LIMIT 1`, scopeTargetID, toolKey).Scan(
 			&scan.ID, &scan.Status, &scan.ScanError, &scan.Total, &scan.Eligible,
-			&scan.Done, &scan.Findings, &scan.CreatedAt, &scan.CompletedAt); err != nil {
+			&scan.Done, &scan.Findings, &scan.CreatedAt, &scan.CompletedAt, &scan.RateAdvice); err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"findings": []any{}, "skipped": []any{}, "untested": []any{}, "scan": nil,
 			})
@@ -152,6 +156,14 @@ func GetVectorResults(category string) http.HandlerFunc {
 		// this has ever run against, and because the control outcome is worth reporting: a run whose
 		// canary did NOT fire proves nothing, and that is the single most useful thing this block knows.
 		canaryFindings := []map[string]any{}
+		// Whether THIS scan's control was reused rather than re-run. Read from the verdict row the
+		// runner writes, because a reused pass stores no findings and the panel would otherwise
+		// report a passing control as "no control hit".
+		canaryWasReused := false
+		_ = dbPool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM vector_scan_vectors
+			                WHERE scan_id = $1 AND status = $2)`,
+			scanID, canaryReusedStatus).Scan(&canaryWasReused)
 		// findingTarget remembers which target each finding belongs to, so the tool's own stored output
 		// can be attached below. It is keyed by finding id because the identity itself is one of three
 		// columns depending on whether the row is an attack vector, a bypass target or a leak target.
@@ -226,7 +238,7 @@ func GetVectorResults(category string) http.HandlerFunc {
 					// hard-coded reference explaining what the tool did and did not prove. A finding
 					// nobody can reproduce is a finding nobody should act on.
 					"reproduction": repro,
-					"explain":      ExplainFinding(f.Tool, f.Kind),
+					"explain":      ExplainFindingForVector(f.Tool, f.Kind, f.InsertionPoint),
 				}
 				// The split. A canary hit is the control working, not a finding on the target.
 				if findingIsCanary(f.URL) {
@@ -297,9 +309,14 @@ func GetVectorResults(category string) http.HandlerFunc {
 		// each took 0.7 seconds and exited 2. The output itself is fetched per row, on demand.
 		traces := []map[string]any{}
 		tracesByTarget := map[string][]string{}
+		prunedTraces := 0
+		// stdout_pruned travels with every row. An empty traces list now means the runs never happened,
+		// because a run whose output aged out still has its row: that distinction cost most of an
+		// afternoon on 2026-09-17, when a vector with no traces was investigated as a fail-open before
+		// the retention policy was found.
 		traceRows, err := dbPool.Query(ctx, `
 		SELECT id::text, vector_id, target_url, run_label, attempt, command,
-		       stdout_bytes, stdout_truncated, exit_detail, timed_out, duration_ms
+		       stdout_bytes, stdout_truncated, exit_detail, timed_out, duration_ms, stdout_pruned
 		FROM vector_scan_traces WHERE scan_id = $1 ORDER BY created_at`, scanID)
 		if err == nil {
 			defer traceRows.Close()
@@ -307,23 +324,60 @@ func GetVectorResults(category string) http.HandlerFunc {
 				var t struct {
 					ID, VectorID, TargetURL, RunLabel, Command, ExitDetail string
 					Attempt, Bytes                                         int
-					Truncated, TimedOut                                    bool
+					Truncated, TimedOut, Pruned                            bool
 					DurationMS                                             int64
 				}
 				if traceRows.Scan(&t.ID, &t.VectorID, &t.TargetURL, &t.RunLabel, &t.Attempt, &t.Command,
-					&t.Bytes, &t.Truncated, &t.ExitDetail, &t.TimedOut, &t.DurationMS) != nil {
+					&t.Bytes, &t.Truncated, &t.ExitDetail, &t.TimedOut, &t.DurationMS, &t.Pruned) != nil {
 					continue
+				}
+				if t.Pruned {
+					prunedTraces++
 				}
 				traces = append(traces, map[string]any{
 					"id": t.ID, "vector_id": t.VectorID, "target_url": t.TargetURL,
 					"run_label": t.RunLabel, "attempt": t.Attempt, "command": t.Command,
 					"stdout_bytes": t.Bytes, "stdout_truncated": t.Truncated,
 					"exit_detail": t.ExitDetail, "timed_out": t.TimedOut,
-					"duration_ms": t.DurationMS,
+					"duration_ms": t.DurationMS, "stdout_pruned": t.Pruned,
 				})
 				if t.VectorID != "" {
 					tracesByTarget[t.VectorID] = append(tracesByTarget[t.VectorID], t.ID)
 				}
+			}
+		}
+
+		// WAS THIS SCAN RATE LIMITED. Answerable from the database for the first time, so it is
+		// answered here rather than left as a table only somebody with psql could reach. Reported per
+		// phase and per vector, including the observations that were fine: a record that only exists
+		// when something went wrong cannot tell a healthy target from an unwatched one.
+		rateObservations := []map[string]any{}
+		rateRows, rateErr := dbPool.Query(ctx, `
+		SELECT vector_id, host, phase, status, observed_headers, header_family, limit_value,
+		       remaining_value, reset_seconds, retry_after_seconds, window_seconds, recommended_rps,
+		       verdict, detail
+		FROM vector_rate_observations WHERE scan_id = $1 ORDER BY created_at`, scanID)
+		if rateErr == nil {
+			defer rateRows.Close()
+			for rateRows.Next() {
+				var o struct {
+					VectorID, Host, Phase, Family, Verdict, Detail      string
+					Status, Limit, Remaining, Reset, RetryAfter, Window int
+					Observed                                            bool
+					RecommendedRPS                                      float64
+				}
+				if rateRows.Scan(&o.VectorID, &o.Host, &o.Phase, &o.Status, &o.Observed, &o.Family,
+					&o.Limit, &o.Remaining, &o.Reset, &o.RetryAfter, &o.Window, &o.RecommendedRPS,
+					&o.Verdict, &o.Detail) != nil {
+					continue
+				}
+				rateObservations = append(rateObservations, map[string]any{
+					"vector_id": o.VectorID, "host": o.Host, "phase": o.Phase, "status": o.Status,
+					"observed_headers": o.Observed, "header_family": o.Family,
+					"limit": o.Limit, "remaining": o.Remaining, "reset_seconds": o.Reset,
+					"retry_after_seconds": o.RetryAfter, "window_seconds": o.Window,
+					"recommended_rps": o.RecommendedRPS, "verdict": o.Verdict, "detail": o.Detail,
+				})
 			}
 		}
 
@@ -359,13 +413,18 @@ func GetVectorResults(category string) http.HandlerFunc {
 		// alongside it rather than silently redefining a stored column.
 		scanOut["target_finding_count"] = len(findings)
 		scanOut["canary_finding_count"] = len(canaryFindings)
+		// Reported, never applied. The operator sets the tool's rate limit; see the schema comment on
+		// rate_advice for why an automated apply is not on offer here.
+		scanOut["rate_advice"] = scan.RateAdvice
+		scanOut["pruned_trace_count"] = prunedTraces
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"scan_id": scanID, "findings": findings, "skipped": skipped,
 			"untested": untested, "scan": scanOut, "traces": traces,
+			"rate_observations": rateObservations,
 			// Separate key, never merged into findings. The control belongs in the operator's view as
 			// evidence that the tool works, and nowhere near the list of things wrong with their target.
-			"canary": canaryOutcome(toolKey, canaryFindings, scan.ScanError),
+			"canary": canaryOutcome(toolKey, canaryFindings, scan.ScanError, canaryWasReused),
 		})
 	}
 }
@@ -412,23 +471,27 @@ func GetVectorTrace(w http.ResponseWriter, r *http.Request) {
 	var t struct {
 		ID, VectorID, TargetURL, RunLabel, Command, Stdout, ExitDetail string
 		Attempt, Bytes                                                 int
-		Truncated, TimedOut                                            bool
+		Truncated, TimedOut, Pruned                                    bool
 		DurationMS                                                     int64
 	}
 	if err := dbPool.QueryRow(context.Background(), `
 		SELECT id::text, vector_id, target_url, run_label, attempt, command, stdout,
-		       stdout_bytes, stdout_truncated, exit_detail, timed_out, duration_ms
+		       stdout_bytes, stdout_truncated, exit_detail, timed_out, duration_ms, stdout_pruned
 		FROM vector_scan_traces WHERE id = $1`, traceID).Scan(
 		&t.ID, &t.VectorID, &t.TargetURL, &t.RunLabel, &t.Attempt, &t.Command, &t.Stdout,
-		&t.Bytes, &t.Truncated, &t.ExitDetail, &t.TimedOut, &t.DurationMS); err != nil {
+		&t.Bytes, &t.Truncated, &t.ExitDetail, &t.TimedOut, &t.DurationMS, &t.Pruned); err != nil {
 		writeJSONError(w, http.StatusNotFound, "unknown_trace", "No stored run with id "+traceID+".")
 		return
 	}
+	// stdout_pruned is what tells the reader that the text they are looking at is the framework's
+	// note rather than something the tool printed. Without it a pruned row reads as a run that
+	// produced that sentence, which is a worse lie than the empty row it replaced.
 	json.NewEncoder(w).Encode(map[string]any{
 		"id": t.ID, "vector_id": t.VectorID, "target_url": t.TargetURL,
 		"run_label": t.RunLabel, "attempt": t.Attempt, "command": t.Command,
 		"stdout": t.Stdout, "stdout_bytes": t.Bytes, "stdout_truncated": t.Truncated,
 		"exit_detail": t.ExitDetail, "timed_out": t.TimedOut, "duration_ms": t.DurationMS,
+		"stdout_pruned": t.Pruned,
 	})
 }
 
@@ -532,16 +595,27 @@ func hostWithoutPort(hostPort string) string {
 // Reported even when it passed. A control that is only mentioned when it fails trains people to
 // assume silence means success, which is the same reasoning error as reading "0 findings" as "0
 // vulnerabilities".
-func canaryOutcome(tool string, hits []map[string]any, scanError string) map[string]any {
+func canaryOutcome(tool string, hits []map[string]any, scanError string, reused bool) map[string]any {
 	out := map[string]any{
 		"tool":       tool,
 		"host":       canaryHost(),
 		"hit_count":  len(hits),
-		"fired":      len(hits) > 0,
+		"fired":      len(hits) > 0 || reused,
+		"reused":     reused,
 		"findings":   hits,
 		"is_control": true,
 	}
 	switch {
+	// A REUSED PASS STORES NO FINDINGS, because it ran no tool. Without this branch the panel
+	// derives everything from len(hits) and shows the "no control hit ... unproven either way"
+	// warning for a control that PASSED, which is the fastest way to teach an operator to ignore
+	// the one warning that matters. It is still distinguished from a fresh pass: an operator
+	// reading a clean result deserves to know whether the proof was taken now or carried over.
+	case reused:
+		out["meaning"] = "The positive control passed recently for " + tool + " with these exact " +
+			"settings, containers and oracle, and that pass was REUSED rather than re-run. The tool " +
+			"works, so a zero against the target is a real negative. Any change to the settings, " +
+			"either container, or the oracle forces a fresh control."
 	case len(hits) > 0:
 		out["meaning"] = "The positive control fired: " + tool + " found the vulnerability the " +
 			"framework planted in its own oracle. The tool works, so a zero against the target is a " +

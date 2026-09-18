@@ -352,7 +352,7 @@ func GraphQLCandidateEndpoints(w http.ResponseWriter, r *http.Request) {
 	// (http://auth0.com/oauth/grant-type/password-realm) end up here. They are all third party, so
 	// ordering the operator's own hosts first sinks them without inventing a junk filter that would
 	// eventually hide something real.
-	scopeHost := bypassScopeHost(r.Context(), scopeTargetID)
+	judge := loadBypassScopeJudge(scopeTargetID)
 
 	bySource := map[string]map[string]bool{}
 	for rows.Next() {
@@ -383,7 +383,7 @@ func GraphQLCandidateEndpoints(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(names)
 		out = append(out, candidate{URL: rawURL, Sources: names, Likely: looksLikeGraphQL(rawURL),
-			InScope: bypassHostInScope(rawURL, scopeHost)})
+			InScope: judge.InScope(rawURL)})
 	}
 
 	// The operator's own hosts first, then the ones that look like GraphQL, then alphabetically.
@@ -565,7 +565,7 @@ func DeniedEndpoints(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	scopeHost := bypassScopeHost(r.Context(), scopeTargetID)
+	judge := loadBypassScopeJudge(scopeTargetID)
 
 	type denied struct {
 		URL        string   `json:"url"`
@@ -583,7 +583,7 @@ func DeniedEndpoints(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		d.InScope = bypassHostInScope(d.URL, scopeHost)
+		d.InScope = judge.InScope(d.URL)
 		// 401 and 403 are an access control decision on a resource that exists. The others are
 		// offered, but they are not what this section is for.
 		d.Primary = d.StatusCode == 401 || d.StatusCode == 403 || d.StatusCode == 407
@@ -624,10 +624,13 @@ func DeniedEndpoints(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"denied":     out,
-		"count":      len(out),
-		"by_status":  summary,
-		"truncated":  truncated,
-		"scope_host": scopeHost,
+		"denied":    out,
+		"count":     len(out),
+		"by_status": summary,
+		"truncated": truncated,
+		// The boundary that produced every in_scope badge above, in the same words the flow
+		// runner's dry run uses. It replaces a bare "scope_host", which described a comparison
+		// this handler no longer makes and no caller ever read.
+		"scope_boundary": judge.Describe(),
 	})
 }

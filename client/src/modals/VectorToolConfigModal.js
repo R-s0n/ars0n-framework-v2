@@ -1,6 +1,10 @@
 import { Modal, Button, Form, Spinner, Alert, Nav, Badge } from 'react-bootstrap';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import GraphQLEndpointHelper, { appendEndpoints } from './GraphQLEndpointHelper';
+import {
+  reflectionBadge, vectorReflectionStatus, byReflectionInterest, isReflecting,
+  gradeCounts, REFLECTION_FILTERS, matchesReflectionFilter, GRADE_WHY,
+} from '../data/reflectionGrades';
 
 // One XSS tool's settings, for one target.
 //
@@ -17,11 +21,43 @@ const ACCENT = '#dc3545';
 
 const POINT_LABEL = {
   query: 'query', body: 'body', header: 'header', cookie: 'cookie', path: 'path',
+  // Never sent, so only a browser-driven tool can reach it. domdig is the only one here that can.
+  fragment: 'fragment',
 };
 
 // The vector list is a tab like any settings group, but it is not a settings group, so it needs a key
 // the server can never send. The server's groups are human labels like "Scan modes".
 const VECTORS_TAB = '__vectors__';
+
+// What the reflection probe found for one vector, as a word and a colour in that order.
+//
+// Drawn from the shared vocabulary in data/reflectionGrades.js rather than from a local map, so the
+// vector list, this selection screen and the card on the workflow page cannot end up calling the
+// same status two different things. The title is always the full explanation: an operator hovering
+// "Blocked" has to be able to learn that blocked means UNKNOWN rather than clean without leaving
+// the screen they are making the selection on.
+const ReflectionBadge = ({ vector, size }) => {
+  const b = reflectionBadge(vector);
+  return (
+    <span
+      title={b.why}
+      style={{
+        display: 'inline-block',
+        flexShrink: 0,
+        fontSize: size === 'sm' ? '0.6rem' : '0.68rem',
+        lineHeight: 1.4,
+        padding: '0 0.4em',
+        borderRadius: '0.25rem',
+        border: `1px solid ${b.border}`,
+        background: b.background,
+        color: b.color,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {b.label}
+    </span>
+  );
+};
 
 // Which of this target's attack vectors THIS tool is aimed at.
 //
@@ -40,6 +76,11 @@ export const VectorSelector = ({ category, targetId, tool, toolName, scanUnit, o
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [collapsed, setCollapsed] = useState({});
+  // Reflection filter and sort. Both default to off, so the list an operator has learned the shape
+  // of does not rearrange itself the first time a probe runs; the controls say what they will do
+  // and the counts beside them say whether pressing one is worth it.
+  const [reflectionFilter, setReflectionFilter] = useState('');
+  const [reflectionFirst, setReflectionFirst] = useState(false);
 
   // Held in a ref rather than named in load's dependency array. The parent passes this to keep the
   // eligibility panel on the settings tabs in step with a selection change, and a callback that is a
@@ -102,10 +143,57 @@ export const VectorSelector = ({ category, targetId, tool, toolName, scanUnit, o
   const setGroup = (group, enabled) =>
     post({ vector_ids: group.items.map((v) => v.vector_id), enabled });
 
+  const allVectors = useMemo(() => (data && data.vectors) || [], [data]);
+
+  // How many of THIS TOOL'S vectors the probe found reflecting, and how many it could not answer
+  // for. Counted over the tool's own list rather than read from a target-wide figure: a tool that
+  // only sources query vectors must not be told there are 12 candidates when 9 of them are body.
+  const reflection = useMemo(() => {
+    const counts = gradeCounts(allVectors);
+    const probed = allVectors.filter((v) => vectorReflectionStatus(v) !== 'not_probed').length;
+    const blocked = allVectors.filter((v) => vectorReflectionStatus(v) === 'blocked').length;
+    const reflectingIds = allVectors.filter(isReflecting).map((v) => v.vector_id);
+    return { counts, probed, blocked, reflectingIds };
+  }, [allVectors]);
+
+  // Deselect everything, then select the reflecting ids, as two requests with ONE reload at the
+  // end. Running it through post() twice would reload between them and repaint the whole list as
+  // empty for a moment, which reads as the action having wiped the selection.
+  const selectOnlyReflecting = async () => {
+    if (!reflection.reflectingIds.length) return;
+    setBusy(true);
+    setError('');
+    try {
+      const url = `/api/${category}/${targetId}/${tool}/selection`;
+      const send = (body) => fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const off = await send({ all: true, enabled: false });
+      if (!off.ok) {
+        setError('Could not clear the selection');
+        return;
+      }
+      const on = await send({ vector_ids: reflection.reflectingIds, enabled: true });
+      if (!on.ok) {
+        // Said plainly, because the target state after a failure here is EVERYTHING DESELECTED,
+        // which would otherwise look like a scan configured to send nothing.
+        setError('Cleared the selection but could not select the reflecting vectors. Nothing is selected right now.');
+        return;
+      }
+      await load();
+    } catch (err) {
+      setError('Could not apply the reflecting selection: ' + err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const groups = useMemo(() => {
     const order = [];
     const byPoint = new Map();
-    ((data && data.vectors) || []).forEach((v) => {
+    allVectors.forEach((v) => {
       const point = v.insertion_point || 'unknown';
       if (!byPoint.has(point)) {
         byPoint.set(point, []);
@@ -113,16 +201,31 @@ export const VectorSelector = ({ category, targetId, tool, toolName, scanUnit, o
       }
       byPoint.get(point).push(v);
     });
-    return order.map((point) => {
+    const built = order.map((point) => {
       const items = byPoint.get(point);
+      // `shown` is what gets rendered; `items` stays the WHOLE group so the header keeps reporting
+      // the real selected and eligible counts. A filter that also changed those numbers would let
+      // an operator read "3 of 3 selected" on a group of ninety.
+      let shown = items.filter((v) => matchesReflectionFilter(v, reflectionFilter));
+      if (reflectionFirst) shown = shown.slice().sort(byReflectionInterest);
       return {
         point,
         items,
+        shown,
         selected: items.filter((v) => v.selected).length,
         eligible: items.filter((v) => v.eligible).length,
+        best: items.length ? [...items].sort(byReflectionInterest)[0] : null,
       };
     });
-  }, [data]);
+    if (!reflectionFirst) return built;
+    // Groups are ordered by their most interesting row when the sort is on, so the insertion point
+    // holding an XSS High candidate is the one at the top of the screen rather than whichever point
+    // the server happened to emit first.
+    return built.slice().sort((a, b) => {
+      if (!a.best || !b.best) return 0;
+      return byReflectionInterest(a.best, b.best);
+    });
+  }, [allVectors, reflectionFilter, reflectionFirst]);
 
   if (loading && !data) {
     return (
@@ -227,6 +330,91 @@ export const VectorSelector = ({ category, targetId, tool, toolName, scanUnit, o
           Each change here is saved as you make it, for {name} only. Every other tool keeps its own
           selection.
         </div>
+
+        {/* WHAT THE REFLECTION PROBE FOUND, on the screen where the run is aimed.
+            This is the point of the whole feature: the operator choosing what to scan sees which
+            vectors already put a canary back into a response before they spend the budget.
+
+            The unprobed case gets its own sentence rather than a row of zeroes. Zeroes here would
+            read as "nothing reflects", and the truth is that nothing has been asked. */}
+        <div className="mt-3 pt-2" style={{ borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+          {reflection.probed === 0 ? (
+            <div className="text-white-50" style={{ fontSize: '0.78rem' }}>
+              No reflection probe has run against these vectors. Every row below reads{' '}
+              <strong>Not Probed</strong>, which means unknown, not clean. Run{' '}
+              <strong>Investigate</strong> on the Consolidate Attack Vectors card to fill this
+              in, then come back and aim {name} at what answered.
+            </div>
+          ) : (
+            <div className="d-flex align-items-center gap-3 flex-wrap" style={{ fontSize: '0.8rem' }}>
+              <span style={{ color: '#dc3545', fontWeight: 600 }}>
+                {reflection.counts.xss_candidate_high} XSS High
+              </span>
+              {/* Its own count, not folded into XSS Low. The two have different next moves:
+                  low needs a content type you can move, chain needs the write primitive. */}
+              <span style={{ color: '#a98eda' }}>
+                {reflection.counts.xss_candidate_chain ?? 0} Needs a Chain
+              </span>
+              <span style={{ color: '#ffc107' }}>
+                {reflection.counts.xss_candidate_low} XSS Low
+              </span>
+              <span className="text-white-50">
+                {reflection.counts.xss_candidate_none} no candidate
+              </span>
+              {/* Blocked is pulled out of the unknown bucket because it is a fact about the TARGET,
+                  not an absence of work: something rejected the probe, so those vectors are the
+                  ones this tool is most likely to be lied to about as well. */}
+              {reflection.blocked > 0 && (
+                <span style={{ color: '#fd7e14' }} title="The target rejected the probe on these, so whether they reflect is unknown. A payload carrying an angle bracket is exactly what a WAF drops.">
+                  {reflection.blocked} blocked by the target
+                </span>
+              )}
+              <span className="text-white-50">
+                {reflection.counts.xss_unknown} unknown
+              </span>
+            </div>
+          )}
+
+          <div className="d-flex align-items-center gap-2 flex-wrap mt-2">
+            <Form.Select
+              size="sm"
+              style={{ width: 'auto' }}
+              data-bs-theme="dark"
+              value={reflectionFilter}
+              onChange={(e) => setReflectionFilter(e.target.value)}
+              aria-label="Filter the list by what the reflection probe found"
+            >
+              <option value="">Any reflection result</option>
+              {REFLECTION_FILTERS.map((f) => (
+                <option key={f.key} value={f.key}>{f.label}</option>
+              ))}
+            </Form.Select>
+            <Form.Check
+              type="switch"
+              id={`reflection-first-${tool}`}
+              className="text-white-50"
+              style={{ fontSize: '0.78rem' }}
+              label="Reflecting first"
+              checked={reflectionFirst}
+              onChange={(e) => setReflectionFirst(e.target.checked)}
+              title="Order the insertion points, and the rows inside them, by what the probe found. XSS High floats to the top."
+            />
+            {/* One click, and it says exactly how many it will end up with. Disabled with a reason
+                rather than hidden, so an operator who came here for it learns why it is not
+                available instead of hunting for a button that was never drawn. */}
+            <Button
+              size="sm"
+              variant="outline-danger"
+              disabled={busy || reflection.reflectingIds.length === 0}
+              onClick={selectOnlyReflecting}
+              title={reflection.reflectingIds.length === 0
+                ? 'No vector on this tool reflected a canary raw, so this would deselect everything.'
+                : `Deselects every vector, then selects the ${reflection.reflectingIds.length} that reflected a canary raw. ${GRADE_WHY.xss_candidate_low}`}
+            >
+              Select only reflecting ({reflection.reflectingIds.length})
+            </Button>
+          </div>
+        </div>
       </div>
 
       <div className="d-flex justify-content-between align-items-center mb-2">
@@ -253,8 +441,24 @@ export const VectorSelector = ({ category, targetId, tool, toolName, scanUnit, o
         </Alert>
       )}
 
+      {/* A filter that matched nothing says so. Without this the screen goes blank below the
+          controls and reads as a failed load rather than as a filter doing its job. */}
+      {reflectionFilter && groups.every((g) => g.shown.length === 0) && (
+        <Alert variant="dark" className="border border-secondary text-white-50 py-2 small">
+          No vector on {name} matches that reflection result.
+        </Alert>
+      )}
+
+      {/* The vector rows, fenced off from the controls above them.
+          data-testid, not a class: the checkboxes in here are the per-vector ones and the ones
+          above are settings, and a test that asked the whole screen for "every checkbox" counted
+          the Reflecting-first switch as a vector the moment it was added. What those tests are
+          about is WHICH VECTOR has a live control, so they ask this list rather than the page. */}
+      <div data-testid="vector-rows">
       {groups.map((group) => {
         const pointIsUnreachable = unreachable.includes(group.point);
+        if (reflectionFilter && group.shown.length === 0) return null;
+        const reflectingHere = group.items.filter(isReflecting).length;
         return (
           <div key={group.point} className="border border-secondary rounded mb-2">
             <div className="d-flex justify-content-between align-items-center px-2 py-1"
@@ -275,6 +479,18 @@ export const VectorSelector = ({ category, targetId, tool, toolName, scanUnit, o
                 <span className="text-white-50 small">
                   {`${group.selected} of ${group.items.length} selected, ${group.eligible} will be scanned`}
                 </span>
+                {/* Counted over the whole group, not over what the filter left visible, so the
+                    number does not shrink as the operator narrows the list. */}
+                {reflectingHere > 0 && (
+                  <span className="small" style={{ color: '#dc3545' }}>
+                    {reflectingHere} reflecting
+                  </span>
+                )}
+                {reflectionFilter && group.shown.length !== group.items.length && (
+                  <span className="text-white-50 small">
+                    showing {group.shown.length}
+                  </span>
+                )}
                 {/* Stated on the group as well as on each row, because after a Deselect all every
                     row explains itself with the deselection and the tool's own limit would vanish
                     from the screen entirely. */}
@@ -298,7 +514,7 @@ export const VectorSelector = ({ category, targetId, tool, toolName, scanUnit, o
 
             {!collapsed[group.point] && (
               <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
-                {group.items.map((v) => {
+                {group.shown.map((v) => {
                   // Ineligible for two very different reasons, and they must not look alike. The
                   // operator's own switch is theirs to undo from here, so it keeps a live checkbox.
                   // A vector the TOOL cannot reach is not undone by any checkbox on this screen, so
@@ -348,7 +564,21 @@ export const VectorSelector = ({ category, targetId, tool, toolName, scanUnit, o
                             {v.reason}
                           </div>
                         )}
+                        {/* The content type is what decides High from Low, so it is printed rather
+                            than left inside a tooltip: application/json beside a raw reflection is
+                            the whole explanation for why that row is not the one to chase. */}
+                        {v.reflection_content_type
+                          && vectorReflectionStatus(v).startsWith('reflected_') && (
+                          <div className="text-white-50" style={{ fontSize: '0.68rem' }}>
+                            answered {v.reflection_content_type}
+                          </div>
+                        )}
                       </div>
+                      {/* Ahead of the eligibility badges, because this one says whether the vector
+                          is worth sending and those say whether it will be. */}
+                      <span className="ms-2 d-flex align-items-center" style={{ flexShrink: 0 }}>
+                        <ReflectionBadge vector={v} size="sm" />
+                      </span>
                       {lockedByTool && (
                         <Badge bg="dark" className="border border-warning ms-2"
                                style={{ fontSize: '0.6rem', color: '#ffc107', flexShrink: 0 }}>
@@ -369,6 +599,7 @@ export const VectorSelector = ({ category, targetId, tool, toolName, scanUnit, o
           </div>
         );
       })}
+      </div>
 
       {data.note && (
         <div className="text-white-50 mt-3" style={{ fontSize: '0.75rem' }}>{data.note}</div>

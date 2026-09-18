@@ -178,6 +178,35 @@ func main() {
 
 	// Attack vectors: one request carrying user-controlled input the application processes.
 	r.HandleFunc("/attack-vectors/{scope_target_id}/consolidate", utils.ConsolidateAttackVectors).Methods("POST", "OPTIONS")
+	// Does the payload come back? The step ADJACENT to Consolidate, never inside it: Consolidate
+	// sends zero HTTP requests and stays that way, so the vector list can be built against a target
+	// nobody has been cleared to touch yet. Same Consolidate -> Validate shape the endpoint workflow
+	// uses. Registered here, above the bare /attack-vectors/{scope_target_id}, or the literal
+	// reflection-probe segment is swallowed by the {scope_target_id} pattern.
+	// StartInvestigateHandler and not StartReflectionProbeHandler: the button is three passes now.
+	// Passive reflection, then active reflection, then the triage classifiers, chained so the two
+	// runners never send to the same host at once. The reflection probe itself is unchanged and is
+	// still what this route starts first, so the existing status and results routes below keep
+	// describing exactly what they always described.
+	r.HandleFunc("/attack-vectors/{scope_target_id}/reflection-probe", utils.StartInvestigateHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/attack-vectors/{scope_target_id}/reflection-probe/cancel", utils.CancelReflectionProbeHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/attack-vectors/{scope_target_id}/reflection-probe/status", utils.GetReflectionProbeStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/attack-vectors/{scope_target_id}/reflection-probe/results", utils.GetReflectionProbeResults).Methods("GET", "OPTIONS")
+	// Which endpoints the Investigate run is aimed at. PER TARGET, unlike the per-tool
+	// /{category}/{id}/{tool}/selection registered below, because Investigate is the triage layer
+	// that decides where the per-tool scanners are later pointed rather than one more scanner.
+	// Same store, same sparse contract, distinguished by the tool column; see the long comment in
+	// utils/vectorSelection.go for how the two coexist. Registered above the bare
+	// /attack-vectors/{scope_target_id} for the usual reason: otherwise the literal segment is
+	// swallowed by the {scope_target_id} pattern and every call 404s.
+	r.HandleFunc("/attack-vectors/{scope_target_id}/selection", utils.GetTargetVectorSelection).Methods("GET", "OPTIONS")
+	r.HandleFunc("/attack-vectors/{scope_target_id}/selection", utils.SetTargetVectorSelection).Methods("POST", "OPTIONS")
+	// Pointers: the evidence bus. Several sources in, one ranked "spend an hour here" list out,
+	// always with the coverage that says how much was never examined. Same placement rule as the
+	// reflection routes above, and the detail route is registered first so the literal segment is
+	// not swallowed.
+	r.HandleFunc("/attack-vectors/{scope_target_id}/pointers/{pointer_id}", utils.GetAttackVectorPointerDetail).Methods("GET", "OPTIONS")
+	r.HandleFunc("/attack-vectors/{scope_target_id}/pointers", utils.GetAttackVectorPointers).Methods("GET", "OPTIONS")
 	// The methodology an experienced hunter would bring, as data. Read by the client AND by the MCP
 	// server, so an AI driving the framework gets the same ordering and the same warnings a human
 	// gets from the Help Me Learn modals instead of only a list of tool names.
@@ -205,6 +234,20 @@ func main() {
 	r.HandleFunc("/attack-vectors/item/{id}", utils.DeleteAttackVector).Methods("DELETE", "OPTIONS")
 	r.HandleFunc("/attack-vectors/{scope_target_id}", utils.GetAttackVectors).Methods("GET", "OPTIONS")
 	r.HandleFunc("/attack-vectors/{scope_target_id}", utils.CreateAttackVector).Methods("POST", "OPTIONS")
+
+	// Investigate triage settings: which attack classes run, how hard, how fast, and the operator's
+	// own payloads. One document per target, stored in vector_tool_settings like every other scanner
+	// config, and PUT as a whole because the form that writes it has just shown every field.
+	r.HandleFunc("/triage/{scope_target_id}/settings", utils.GetTriageSettings).Methods("GET", "OPTIONS")
+	r.HandleFunc("/triage/{scope_target_id}/settings", utils.SaveTriageSettings).Methods("PUT", "OPTIONS")
+	// The triage run itself. The Investigate button reaches it through the reflection-probe route
+	// above; these four are for starting it on its own after a settings change, for watching it,
+	// and for reading what it concluded. Registered longest-literal first so /run/cancel and
+	// /run/status are not swallowed by /run.
+	r.HandleFunc("/triage/{scope_target_id}/run/cancel", utils.CancelTriageRunHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/triage/{scope_target_id}/run/status", utils.GetTriageRunStatus).Methods("GET", "OPTIONS")
+	r.HandleFunc("/triage/{scope_target_id}/run/verdicts", utils.GetTriageRunVerdicts).Methods("GET", "OPTIONS")
+	r.HandleFunc("/triage/{scope_target_id}/run", utils.StartTriageRunHandler).Methods("POST", "OPTIONS")
 
 	// The vector-testing sections: XSS, SQL injection, and the ten to come. One handler set,
 	// registered once per section, so a new section is a prefix here rather than a second copy of the
@@ -572,7 +615,7 @@ func main() {
 	r.HandleFunc("/security-controls/notes/{note_id}", utils.UpdateSecurityControlNote).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/security-controls/notes/{note_id}", utils.DeleteSecurityControlNote).Methods("DELETE", "OPTIONS")
 
-	// Auth Flows — document & replay register/login/mfa_otp/reset HTTP request/response flows.
+	// Auth Flows - document & replay register/login/mfa_otp/reset HTTP request/response flows.
 	// Auth flow recording, driven by the browser extension.
 	//
 	// The literal paths are registered before the {recording_id} patterns because gorilla/mux
@@ -613,7 +656,7 @@ func main() {
 	r.HandleFunc("/auth-flows/steps/{step_id}/replay", utils.ReplayAuthFlowStep).Methods("POST", "OPTIONS")
 	r.HandleFunc("/auth-flows/{scope_target_id}/from-captures", utils.CreateAuthFlowFromCaptures).Methods("POST", "OPTIONS")
 
-	// Authorization > Client Identity — unique identifiers (IDOR targets) pulled from endpoint requests.
+	// Authorization > Client Identity - unique identifiers (IDOR targets) pulled from endpoint requests.
 	r.HandleFunc("/authz/client-identifiers/{scope_target_id}", utils.GetClientIdentifiers).Methods("GET", "OPTIONS")
 	r.HandleFunc("/authz/client-identifiers/{scope_target_id}", utils.CreateClientIdentifier).Methods("POST", "OPTIONS")
 	r.HandleFunc("/authz/client-identifiers/id/{id}", utils.DeleteClientIdentifier).Methods("DELETE", "OPTIONS")

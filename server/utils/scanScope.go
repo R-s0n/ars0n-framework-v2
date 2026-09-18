@@ -79,19 +79,44 @@ var ErrOutOfScope = fmt.Errorf("scanHTTP: host is outside the scope of this targ
 
 // LoadScanScope builds the boundary for a scope target.
 func LoadScanScope(scopeTargetID string) *ScanScope {
+	host := scopeTargetHost(scopeTargetID)
+	if host == "" {
+		// No host means no boundary can be established. Refusing everything is the safe failure:
+		// a run that measures nothing is recoverable, unauthorized traffic is not.
+		return newScanScope("", nil, nil)
+	}
+
+	crawled := InScopeCrawlHosts(scopeTargetID)
+
+	rules, err := LoadScopeRules(scopeTargetID)
+	if err != nil {
+		// A target whose rules will not compile is refused entirely rather than silently falling
+		// back to the wider legacy boundary. Falling back is the failure mode where an operator
+		// writes a deny, it fails to load, and traffic goes out anyway.
+		log.Printf("[SCOPE] target %s: rules failed to load, refusing everything: %v", scopeTargetID, err)
+		return &ScanScope{
+			domains: map[string]bool{}, extra: map[string]bool{}, refused: map[string]int{},
+			refuseAll: true,
+		}
+	}
+	return newScanScope(host, crawled, rules)
+}
+
+// newScanScope assembles the boundary from inputs already read, and is where the ORDER of assembly
+// lives. Split out from LoadScanScope so the boundary can be constructed in a test without a
+// database: anything that judges scope against a real target must be testable against the same code
+// the scanner runs, not against a re-implementation of it.
+func newScanScope(primaryHost string, crawlHosts []string, rules []ScopeRule) *ScanScope {
 	s := &ScanScope{
 		domains: map[string]bool{},
 		extra:   map[string]bool{},
 		refused: map[string]int{},
 	}
-
-	host := scopeTargetHost(scopeTargetID)
-	if host == "" {
-		// No host means no boundary can be established. Refusing everything is the safe failure:
-		// a run that measures nothing is recoverable, unauthorized traffic is not.
+	primaryHost = strings.ToLower(strings.Trim(strings.TrimSpace(primaryHost), "."))
+	if primaryHost == "" {
 		return s
 	}
-	s.primary = strings.ToLower(host)
+	s.primary = primaryHost
 	// An address target is the exact host and nothing else. RegistrableDomain now returns the
 	// address itself rather than the last two labels of it, so widening here would put "10.0.0.18"
 	// in domains and Describe() would render the boundary as "*.10.0.0.18, 10.0.0.18". Nothing is
@@ -104,27 +129,17 @@ func LoadScanScope(scopeTargetID string) *ScanScope {
 	// Only record hosts the domain rule does not already cover. Adding one that is already inside
 	// the boundary changes nothing about what is allowed but does show up twice in Describe, and
 	// that description is the operator's answer to "why was this skipped".
-	crawled := InScopeCrawlHosts(scopeTargetID)
-	for _, h := range crawled {
-		if !s.Allows(h) {
-			s.extra[h] = true
+	for _, h := range crawlHosts {
+		h = strings.ToLower(strings.Trim(strings.TrimSpace(h), "."))
+		if h == "" || s.Allows(h) {
+			continue
 		}
+		s.extra[h] = true
 	}
 
-	// Load authored rules LAST, after the legacy boundary is fully built, because Allows() above
+	// Assign authored rules LAST, after the legacy boundary is fully built, because Allows() above
 	// must still be answering with the legacy logic while that boundary is being assembled.
 	// Assigning s.rules earlier would make those calls consult a half-built ruleset.
-	rules, err := LoadScopeRules(scopeTargetID)
-	if err != nil {
-		// A target whose rules will not compile is refused entirely rather than silently falling
-		// back to the wider legacy boundary. Falling back is the failure mode where an operator
-		// writes a deny, it fails to load, and traffic goes out anyway.
-		log.Printf("[SCOPE] target %s: rules failed to load, refusing everything: %v", scopeTargetID, err)
-		return &ScanScope{
-			domains: map[string]bool{}, extra: map[string]bool{}, refused: map[string]int{},
-			refuseAll: true,
-		}
-	}
 	if len(rules) > 0 {
 		s.rules = rules
 	}
@@ -421,4 +436,42 @@ func LoadConfiguredScopeDomains() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// AllowsNarrow is Allows with exactly one difference: a host the operator named explicitly matches
+// EXACTLY and is not promoted to a wildcard over its registrable domain.
+//
+// Allows walks `extra` a second time with hostWithinDomain. That is load-bearing for its own callers,
+// because Allow("example.com") is used across the codebase to mean the domain and its subdomains, and
+// narrowing it there breaks the crawler and the detected-flow runner. But it means naming ONE host
+// admits every sibling under its registrable domain, including hosts nobody has observed, and for a
+// caller that is deciding whether to OFFER a host to a mutation tool that is the wrong default: the
+// bypass tools send on the order of a thousand deliberately malformed requests per URL.
+//
+// So this is the same boundary, minus that one promotion. Authored rules still decide on their own
+// when present, the wildcard half (`domains`) is untouched so a Wildcard scope target is unaffected,
+// and a nil receiver is refused rather than admitted, which is the opposite of Allows and is
+// deliberate: a caller that reaches here without a boundary has not opted out of scoping, it has
+// failed to establish one.
+func (s *ScanScope) AllowsNarrow(host string) bool {
+	if s == nil || s.refuseAll {
+		return false
+	}
+	if len(s.rules) > 0 {
+		auth, ok := NormalizeAuthority(host, "")
+		return DecideScope(s.rules, auth, ok, ScopeDecisionInput{}).Allowed
+	}
+	host = strings.ToLower(strings.Trim(host, "."))
+	if host == "" {
+		return false
+	}
+	if host == s.primary || s.extra[host] {
+		return true
+	}
+	for d := range s.domains {
+		if hostWithinDomain(host, d) {
+			return true
+		}
+	}
+	return false
 }

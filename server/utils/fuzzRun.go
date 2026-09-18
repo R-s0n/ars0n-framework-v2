@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/jackc/pgx/v5"
 )
 
 // Running a flow, and accumulating what it finds.
@@ -64,6 +66,13 @@ func RunFuzzFlow(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Tool        string `json:"tool"`
 		Acknowledge bool   `json:"acknowledge"`
+		// FlowID names WHICH flow to run. Without it this handler resolved the flow with
+		// ensureFuzzFlow, which returns whichever one carries is_default, so a named flow could be
+		// created, renamed and filled with steps and then never run: the run always went to the
+		// default instead, silently and with a success response. That is the same defect the
+		// FlowID field on fuzzStepRequest exists to fix on the create side, and it made named flows
+		// unusable for their entire purpose from the other end.
+		FlowID string `json:"flow_id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	tool := strings.ToLower(strings.TrimSpace(req.Tool))
@@ -83,8 +92,20 @@ func RunFuzzFlow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := context.Background()
-	flowID, err := ensureFuzzFlow(ctx, scopeTargetID)
+	// Resolved through the same helper the create path uses, which scopes the lookup by
+	// scope_target_id. That scoping is the security half: without it a caller could name any flow
+	// id in the database and run another target's steps against this target's scope rules.
+	flowID, err := fuzzFlowIDFor(ctx, scopeTargetID, req.FlowID)
 	if err != nil {
+		// A flow id that names nothing is the caller's mistake, not the server's, and answering 500
+		// would send them looking for a fault here. Only reachable when a flow id was actually sent:
+		// with an empty one the helper falls back to the default and cannot miss.
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSONError(w, http.StatusNotFound, "unknown_flow",
+				"No flow with that id belongs to this scope target. List the target's flows and "+
+					"send one of their ids as flow_id, or omit flow_id to run the default flow.")
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
@@ -161,6 +182,10 @@ func RunFuzzFlow(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"run_id": runID, "status": "running", "steps": len(runnable),
 		"estimated_requests": totalEstimate, "blocked": blocked,
+		// Echoed so the caller can see WHICH flow ran. When this silently ran the default no matter
+		// what was asked for, the response looked identical either way, which is what let the bug
+		// sit unnoticed.
+		"flow_id": flowID,
 	})
 }
 
@@ -1489,32 +1514,55 @@ func GetLatestFuzzRun(w http.ResponseWriter, r *http.Request) {
 
 	out := map[string]interface{}{}
 
-	// How big the flow is, whether or not anything is running. "9 of 12 steps enabled" is what the
-	// card shows at rest, and it is also the denominator once a run starts.
-	var enabled, total int
-	if flowID, err := ensureFuzzFlow(ctx, scopeTargetID); err == nil {
-		_ = dbPool.QueryRow(ctx, `
-			SELECT count(*) FILTER (WHERE enabled), count(*)
-			FROM fuzz_steps WHERE flow_id = $1 AND tool = 'ffuf'`, flowID).Scan(&enabled, &total)
-	}
-	out["enabled_steps"] = enabled
-	out["total_steps"] = total
-
 	var (
 		runID, status             string
+		runFlowID                 string
 		stepsDone, stepsTotal     int
 		findingsNew, stepsBlocked int
 		startedAt                 time.Time
 		errText                   *string
 	)
 	err := dbPool.QueryRow(ctx, `
-		SELECT id::text, status, COALESCE(steps_done,0), COALESCE(steps_total,0),
-		       COALESCE(findings_new,0), COALESCE(steps_blocked,0), created_at, error
+		SELECT id::text, COALESCE(flow_id::text,''), status, COALESCE(steps_done,0),
+		       COALESCE(steps_total,0), COALESCE(findings_new,0), COALESCE(steps_blocked,0),
+		       created_at, error
 		FROM fuzz_runs
 		WHERE scope_target_id = $1 AND tool = 'ffuf'
 		ORDER BY created_at DESC LIMIT 1`, scopeTargetID).
-		Scan(&runID, &status, &stepsDone, &stepsTotal, &findingsNew, &stepsBlocked,
+		Scan(&runID, &runFlowID, &status, &stepsDone, &stepsTotal, &findingsNew, &stepsBlocked,
 			&startedAt, &errText)
+
+	// How big the flow is, whether or not anything is running. "9 of 12 steps enabled" is what the
+	// card shows at rest, and it is also the denominator once a run starts.
+	//
+	// WHICH flow is counted matters now that a named flow can actually be run. This used to count
+	// the DEFAULT flow unconditionally, so a run of a named flow would have been described with a
+	// denominator belonging to a different flow: "step 3 of 6" over a flow with seven steps. The
+	// caller's explicit choice wins, then the flow the latest run actually used, then the default.
+	countFlowID := ""
+	if q := strings.TrimSpace(r.URL.Query().Get("flow_id")); q != "" {
+		if id, qerr := fuzzFlowIDFor(ctx, scopeTargetID, q); qerr == nil {
+			countFlowID = id
+		}
+	}
+	if countFlowID == "" && err == nil && runFlowID != "" {
+		countFlowID = runFlowID
+	}
+	if countFlowID == "" {
+		if id, derr := ensureFuzzFlow(ctx, scopeTargetID); derr == nil {
+			countFlowID = id
+		}
+	}
+	var enabled, total int
+	if countFlowID != "" {
+		_ = dbPool.QueryRow(ctx, `
+			SELECT count(*) FILTER (WHERE enabled), count(*)
+			FROM fuzz_steps WHERE flow_id = $1 AND tool = 'ffuf'`, countFlowID).Scan(&enabled, &total)
+	}
+	out["enabled_steps"] = enabled
+	out["total_steps"] = total
+	out["flow_id"] = countFlowID
+
 	if err != nil {
 		// Never run is a normal state, not an error. The card reads run == null as "not yet run".
 		out["run"] = nil
@@ -1526,6 +1574,9 @@ func GetLatestFuzzRun(w http.ResponseWriter, r *http.Request) {
 		"id": runID, "status": status, "steps_done": stepsDone, "steps_total": stepsTotal,
 		"findings_new": findingsNew, "steps_blocked": stepsBlocked,
 		"started_at": startedAt, "running": status == "running" || status == "pending",
+		// Which flow this run belonged to, so a card showing a run can say so rather than leaving
+		// the operator to assume it was whichever flow they happen to be looking at.
+		"flow_id": runFlowID,
 	}
 	if errText != nil && *errText != "" {
 		run["error"] = *errText

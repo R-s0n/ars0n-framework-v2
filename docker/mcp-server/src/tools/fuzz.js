@@ -416,8 +416,16 @@ async function manageFuzz(params) {
     }
 
     case 'run': {
+      // flow_id is forwarded for the same reason the steps action forwards it: without it the run
+      // went to whichever flow carries is_default, so a named flow could be built step by step and
+      // then never actually run. The response echoes flow_id, which is what makes a run that went
+      // somewhere unexpected visible instead of silent.
       const res = await apiPost(`/fuzz/${needTarget()}/run`,
-        { tool: 'ffuf', acknowledge: !!params.acknowledge });
+        {
+          tool: 'ffuf',
+          acknowledge: !!params.acknowledge,
+          ...(params.flow_id ? { flow_id: params.flow_id } : {}),
+        });
       return res;
     }
 

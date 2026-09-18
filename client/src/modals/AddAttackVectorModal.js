@@ -29,6 +29,7 @@ function AddAttackVectorModal({ show, handleClose, activeTarget, onAdded }) {
   const [url, setUrl] = useState('');
   const [insertionPoint, setInsertionPoint] = useState('');
   const [parameters, setParameters] = useState('');
+  const [fragment, setFragment] = useState('');
   const [notes, setNotes] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -53,6 +54,7 @@ function AddAttackVectorModal({ show, handleClose, activeTarget, onAdded }) {
           url,
           insertion_point: insertionPoint,
           parameters: parameters.split(',').map((p) => p.trim()).filter(Boolean),
+          fragment,
           notes,
         };
       const res = await fetch(`/api/attack-vectors/${activeTarget.id}`, {
@@ -69,6 +71,7 @@ function AddAttackVectorModal({ show, handleClose, activeTarget, onAdded }) {
       setRaw('');
       setUrl('');
       setParameters('');
+      setFragment('');
       if (onAdded) onAdded();
     } catch (err) {
       setError(err.message);
@@ -155,13 +158,33 @@ function AddAttackVectorModal({ show, handleClose, activeTarget, onAdded }) {
           </>
         )}
 
+        {/* The fragment field, shown only when the operator has asked for a fragment vector.
+            Without it the select offered `fragment` with nowhere to put one, and a URL pasted with
+            a query string had its QUERY names adopted as the fragment's: measured,
+            https://h.example.com/x?a=1 was stored as fragment="" parameters=[a] and composed
+            #a=rs0n, a hash nobody ever observed. The server refuses that now, so this field is what
+            makes the option usable rather than what makes it safe. */}
+        {mode !== 'raw' && insertionPoint === 'fragment' && (
+          <>
+            <Form.Label className="text-white small mt-3">Fragment</Form.Label>
+            <Form.Control size="sm" className="bg-dark text-white border-secondary custom-input"
+              placeholder="/billing, or access_token=...&token_type=..."
+              value={fragment} onChange={(e) => setFragment(e.target.value)} />
+            <div className="text-white-50 mt-1" style={{ fontSize: '0.72rem' }}>
+              The part after the #, as the browser holds it. Leave it empty only if the URL above
+              already carries the hash. A route with its own query, #/connect/edit?tab=x, fills the
+              parameters in for you.
+            </div>
+          </>
+        )}
+
         <div className="row g-2 mt-3">
           <div className="col-md-4">
             <Form.Label className="text-white small">Insertion point</Form.Label>
             <Form.Select size="sm" className="bg-dark text-white border-secondary"
               value={insertionPoint} onChange={(e) => setInsertionPoint(e.target.value)}>
               <option value="">{mode === 'raw' ? 'every place it carries one' : 'choose one'}</option>
-              {['query', 'body', 'header', 'cookie', 'path'].map((p) => (
+              {['query', 'body', 'header', 'cookie', 'path', 'fragment'].map((p) => (
                 <option key={p} value={p}>{p}</option>
               ))}
             </Form.Select>

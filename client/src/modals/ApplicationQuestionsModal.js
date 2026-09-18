@@ -452,7 +452,7 @@ Once identified, document the framework and check its version. Search JavaScript
   },
   'Is the app a Single Page Application?': {
     why: 'SPAs load all code upfront, often exposing routes, API endpoints, and logic in bundled JavaScript. They rely heavily on client-side routing and state management, which can lead to authorization bypass if not properly validated server-side. Source maps may expose original code.',
-    how: 'Check if navigation changes the URL without full page reloads. Look for large JavaScript bundles, client-side routing libraries (React Router, Vue Router), and single initial HTML response. Monitor network tab—SPAs make API calls rather than requesting new HTML pages.'
+    how: 'Check if navigation changes the URL without full page reloads. Look for large JavaScript bundles, client-side routing libraries (React Router, Vue Router), and single initial HTML response. Monitor network tab. SPAs make API calls rather than requesting new HTML pages.'
   },
   'Is server-side rendering used?': {
     why: 'SSR affects where business logic executes, how data is hydrated, and where vulnerabilities might exist. SSR apps may have serialization issues, expose server-side code, or have different XSS attack vectors. Understanding rendering helps identify where to look for vulnerabilities.',

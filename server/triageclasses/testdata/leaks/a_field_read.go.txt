@@ -1,0 +1,16 @@
+// Leak (a): READ THE OBSERVATION FIELD OFF A Perturbed.
+//
+// This is the original leak. The first Perturbed held the whole Observation in an unexported
+// field and guarded it with an accessor that checked the owner. An accessor check stops nothing
+// here, because the field read goes AROUND the accessor rather than through it, and inside one
+// package "unexported" is not a boundary at all.
+//
+// It is dead twice over now. There is no obs field to read, because the response lives in the
+// vault and Perturbed is a handle; and even if there were, this file is in another package.
+package leakfixture
+
+import "ars0n-framework-v2-server/utils/triage"
+
+func leakFieldRead(p triage.Perturbed) triage.Observation {
+	return p.obs
+}

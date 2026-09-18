@@ -62,7 +62,7 @@ func GetThreatModel(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT id, category, url, mechanism, target_object, steps, security_controls,
 	          impact_customer_data, impact_attacker_scope, impact_company_reputation,
 	          one_sentence, summary, severity, authenticated, attack_id, attack_custom_name,
-	          test_status, created_at, updated_at
+	          COALESCE(threat_code, ''), test_status, created_at, updated_at
 	          FROM threat_model
 	          WHERE scope_target_id = $1
 	          ORDER BY category, created_at`
@@ -94,6 +94,7 @@ func GetThreatModel(w http.ResponseWriter, r *http.Request) {
 			Authenticated           *bool     `json:"authenticated"`
 			AttackID                string    `json:"attack_id"`
 			AttackCustomName        string    `json:"attack_custom_name"`
+			ThreatCode              string    `json:"threat_code"`
 			TestStatus              string    `json:"test_status"`
 			CreatedAt               time.Time `json:"created_at"`
 			UpdatedAt               time.Time `json:"updated_at"`
@@ -103,7 +104,7 @@ func GetThreatModel(w http.ResponseWriter, r *http.Request) {
 			&threat.TargetObject, &threat.Steps, &threat.SecurityControls, &threat.ImpactCustomerData,
 			&threat.ImpactAttackerScope, &threat.ImpactCompanyReputation,
 			&threat.OneSentence, &threat.Summary, &threat.Severity, &threat.Authenticated, &threat.AttackID, &threat.AttackCustomName,
-			&threat.TestStatus, &threat.CreatedAt, &threat.UpdatedAt)
+			&threat.ThreatCode, &threat.TestStatus, &threat.CreatedAt, &threat.UpdatedAt)
 		if err != nil {
 			log.Printf("[ERROR] Failed to scan row: %v", err)
 			continue
@@ -125,6 +126,7 @@ func GetThreatModel(w http.ResponseWriter, r *http.Request) {
 			"attack_id":                 threat.AttackID,
 			"attack_custom_name":        threat.AttackCustomName,
 			"attack_name":               resolveAttackName(threat.AttackID, threat.AttackCustomName),
+			"threat_code":               threat.ThreatCode,
 			"impact_attacker_scope":     threat.ImpactAttackerScope,
 			"impact_company_reputation": threat.ImpactCompanyReputation,
 			"test_status":               threat.TestStatus,
@@ -218,6 +220,50 @@ func decodeAuthenticated(raw json.RawMessage) (supplied bool, value *bool, err e
 	return true, value, nil
 }
 
+// The STRIDE letter that opens a threat code. The fallback matters: the API never validates
+// `category` against the six keys, and a threat created with attack_custom_name bypasses the only
+// category check there is, so an unexpected category must still produce a usable code. 'X' is the
+// same fallback the SQL backfill in database.go uses, and the two must not drift.
+var threatCodePrefixes = map[string]string{
+	"spoofing":               "S",
+	"tampering":              "T",
+	"repudiation":            "R",
+	"information_disclosure": "I",
+	"denial_of_service":      "D",
+	"elevation_of_privilege": "E",
+}
+
+func threatCodePrefix(category string) string {
+	if p, ok := threatCodePrefixes[category]; ok {
+		return p
+	}
+	return "X"
+}
+
+// nextThreatCode returns the next free code for one scope target and one category, as MAX+1 over the
+// numeric tail rather than count+1. Deletes are hard here, so counting rows would re-issue a code a
+// deleted threat used to hold, and an operator's note saying "S023" would then point at a different
+// threat than it did last week.
+//
+// This is NOT race-free on its own and is not meant to be: two concurrent creates at READ COMMITTED
+// can both read the same MAX, because neither can see the other's uncommitted row and there is no row
+// yet to lock. The unique index on (scope_target_id, threat_code) is what catches that, and the
+// caller retries. Operator-driven creates are one at a time, but the MCP server can drive batch
+// creates from an AI, which is exactly the multi-writer case.
+func nextThreatCode(ctx context.Context, scopeTargetID, category string) (string, error) {
+	prefix := threatCodePrefix(category)
+	var highest int
+	err := dbPool.QueryRow(ctx, `
+		SELECT COALESCE(MAX(NULLIF(regexp_replace(threat_code, '^[A-Za-z]+', ''), ''))::int, 0)
+		FROM threat_model
+		WHERE scope_target_id = $1 AND threat_code LIKE $2 || '%'`,
+		scopeTargetID, prefix).Scan(&highest)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s%03d", prefix, highest+1), nil
+}
+
 func CreateThreatModel(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	scopeTargetID := vars["scope_target_id"]
@@ -288,15 +334,15 @@ func CreateThreatModel(w http.ResponseWriter, r *http.Request) {
 	threatID := uuid.New().String()
 	query := `INSERT INTO threat_model (id, scope_target_id, category, url, mechanism,
 	          target_object, steps, security_controls, impact_customer_data, impact_attacker_scope,
-	          impact_company_reputation, one_sentence, summary, severity, authenticated, attack_id, attack_custom_name, test_status)
+	          impact_company_reputation, one_sentence, summary, severity, authenticated, attack_id, attack_custom_name, test_status, threat_code)
 	          VALUES ($1, $2, $3, $4,
 		          COALESCE($5, ''), COALESCE($6, ''), COALESCE($7, ''), COALESCE($8, ''),
 		          COALESCE($9, ''), COALESCE($10, ''), COALESCE($11, ''),
-		          COALESCE($12, ''), COALESCE($13, ''), COALESCE($14, ''), $15, $16, $17, $18)
+		          COALESCE($12, ''), COALESCE($13, ''), COALESCE($14, ''), $15, $16, $17, $18, $19)
 	          RETURNING id, category, url, mechanism, target_object, steps, security_controls,
 	          impact_customer_data, impact_attacker_scope, impact_company_reputation,
 	          one_sentence, summary, severity, authenticated, attack_id, attack_custom_name,
-	          test_status, created_at, updated_at`
+	          COALESCE(threat_code, ''), test_status, created_at, updated_at`
 
 	var threat struct {
 		ID                      string `json:"id"`
@@ -318,22 +364,50 @@ func CreateThreatModel(w http.ResponseWriter, r *http.Request) {
 		// Resolved from the generated catalog rather than stored, so renaming an attack in
 		// attacks.js updates every threat that cites it instead of leaving stale copies behind.
 		AttackName string    `json:"attack_name"`
+		ThreatCode string    `json:"threat_code"`
 		TestStatus string    `json:"test_status"`
 		CreatedAt  time.Time `json:"created_at"`
 		UpdatedAt  time.Time `json:"updated_at"`
 	}
 
-	err := dbPool.QueryRow(context.Background(), query, threatID, scopeTargetID,
-		payload.Category, payload.URL, payload.Mechanism, payload.TargetObject,
-		payload.Steps, payload.SecurityControls, payload.ImpactCustomerData, payload.ImpactAttackerScope,
-		payload.ImpactCompanyReputation, payload.OneSentence, payload.Summary,
-		payload.Severity, authValue, attackID, attackCustom, payload.TestStatus).Scan(
-		&threat.ID, &threat.Category, &threat.URL, &threat.Mechanism,
-		&threat.TargetObject, &threat.Steps, &threat.SecurityControls, &threat.ImpactCustomerData,
-		&threat.ImpactAttackerScope, &threat.ImpactCompanyReputation,
-		&threat.OneSentence, &threat.Summary, &threat.Severity, &threat.Authenticated, &threat.AttackID, &threat.AttackCustomName,
-		&threat.TestStatus, &threat.CreatedAt, &threat.UpdatedAt,
-	)
+	// Ask for the next code, insert, and if the unique index says somebody else took that number
+	// first, ask again. See nextThreatCode for why MAX+1 cannot be made race-free on its own.
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		assignedCode, codeErr := nextThreatCode(context.Background(), scopeTargetID, payload.Category)
+		if codeErr != nil {
+			// Not fatal: a threat with no code is still a threat, and the backfill in database.go
+			// gives it one on the next API start. Refusing to record a finding because its label
+			// could not be computed would be the wrong trade.
+			log.Printf("[WARN] Could not assign a threat code, inserting without one: %v", codeErr)
+			assignedCode = ""
+		}
+		var codeArg interface{} = assignedCode
+		if assignedCode == "" {
+			// NULL rather than '', so the unique index stays happy with more than one of them and
+			// the backfill's `COALESCE(threat_code,'') = ''` guard still picks the row up.
+			codeArg = nil
+		}
+
+		err = dbPool.QueryRow(context.Background(), query, threatID, scopeTargetID,
+			payload.Category, payload.URL, payload.Mechanism, payload.TargetObject,
+			payload.Steps, payload.SecurityControls, payload.ImpactCustomerData, payload.ImpactAttackerScope,
+			payload.ImpactCompanyReputation, payload.OneSentence, payload.Summary,
+			payload.Severity, authValue, attackID, attackCustom, payload.TestStatus, codeArg).Scan(
+			&threat.ID, &threat.Category, &threat.URL, &threat.Mechanism,
+			&threat.TargetObject, &threat.Steps, &threat.SecurityControls, &threat.ImpactCustomerData,
+			&threat.ImpactAttackerScope, &threat.ImpactCompanyReputation,
+			&threat.OneSentence, &threat.Summary, &threat.Severity, &threat.Authenticated, &threat.AttackID, &threat.AttackCustomName,
+			&threat.ThreatCode, &threat.TestStatus, &threat.CreatedAt, &threat.UpdatedAt,
+		)
+		if err == nil {
+			break
+		}
+		if !strings.Contains(err.Error(), "idx_threat_model_scope_code") {
+			break
+		}
+		log.Printf("[INFO] Threat code %s was taken by a concurrent create, retrying", assignedCode)
+	}
 
 	if err != nil {
 		log.Printf("[ERROR] Failed to create threat: %v", err)
@@ -455,7 +529,7 @@ func UpdateThreatModel(w http.ResponseWriter, r *http.Request) {
 	          RETURNING id, category, url, mechanism, target_object, steps, security_controls,
 	          impact_customer_data, impact_attacker_scope, impact_company_reputation,
 	          one_sentence, summary, severity, authenticated, attack_id, attack_custom_name,
-	          test_status, created_at, updated_at`
+	          COALESCE(threat_code, ''), test_status, created_at, updated_at`
 
 	var threat struct {
 		ID                      string `json:"id"`
@@ -477,6 +551,7 @@ func UpdateThreatModel(w http.ResponseWriter, r *http.Request) {
 		// Resolved from the generated catalog rather than stored, so renaming an attack in
 		// attacks.js updates every threat that cites it instead of leaving stale copies behind.
 		AttackName string    `json:"attack_name"`
+		ThreatCode string    `json:"threat_code"`
 		TestStatus string    `json:"test_status"`
 		CreatedAt  time.Time `json:"created_at"`
 		UpdatedAt  time.Time `json:"updated_at"`
@@ -491,7 +566,7 @@ func UpdateThreatModel(w http.ResponseWriter, r *http.Request) {
 		&threat.TargetObject, &threat.Steps, &threat.SecurityControls, &threat.ImpactCustomerData,
 		&threat.ImpactAttackerScope, &threat.ImpactCompanyReputation,
 		&threat.OneSentence, &threat.Summary, &threat.Severity, &threat.Authenticated, &threat.AttackID, &threat.AttackCustomName,
-		&threat.TestStatus, &threat.CreatedAt, &threat.UpdatedAt,
+		&threat.ThreatCode, &threat.TestStatus, &threat.CreatedAt, &threat.UpdatedAt,
 	)
 
 	if err != nil {
@@ -537,7 +612,7 @@ func SetThreatModelTestStatus(w http.ResponseWriter, r *http.Request) {
 	          RETURNING id, category, url, mechanism, target_object, steps, security_controls,
 	          impact_customer_data, impact_attacker_scope, impact_company_reputation,
 	          one_sentence, summary, severity, authenticated, attack_id, attack_custom_name,
-	          test_status, created_at, updated_at`
+	          COALESCE(threat_code, ''), test_status, created_at, updated_at`
 
 	var threat struct {
 		ID                      string `json:"id"`
@@ -559,6 +634,7 @@ func SetThreatModelTestStatus(w http.ResponseWriter, r *http.Request) {
 		// Resolved from the generated catalog rather than stored, so renaming an attack in
 		// attacks.js updates every threat that cites it instead of leaving stale copies behind.
 		AttackName string    `json:"attack_name"`
+		ThreatCode string    `json:"threat_code"`
 		TestStatus string    `json:"test_status"`
 		CreatedAt  time.Time `json:"created_at"`
 		UpdatedAt  time.Time `json:"updated_at"`
@@ -569,7 +645,7 @@ func SetThreatModelTestStatus(w http.ResponseWriter, r *http.Request) {
 		&threat.TargetObject, &threat.Steps, &threat.SecurityControls, &threat.ImpactCustomerData,
 		&threat.ImpactAttackerScope, &threat.ImpactCompanyReputation,
 		&threat.OneSentence, &threat.Summary, &threat.Severity, &threat.Authenticated, &threat.AttackID, &threat.AttackCustomName,
-		&threat.TestStatus, &threat.CreatedAt, &threat.UpdatedAt,
+		&threat.ThreatCode, &threat.TestStatus, &threat.CreatedAt, &threat.UpdatedAt,
 	)
 
 	if err != nil {

@@ -316,6 +316,33 @@ body {
   }
 }
 
+/* "Show Animation" turned off. The win still has to be recognisable at a glance, so the 2px #20c997
+   border stays and does the whole job on its own; everything that moves or halos goes.
+
+   COMPOUND SELECTOR ON PURPOSE. `.threat-static` alone would tie with `.threat-validated` at (0,1,0)
+   and win only by being declared later, which is the kind of dependency that breaks the next time
+   somebody reorders this file. `.threat-validated.threat-static` is (0,2,0) and wins wherever it sits.
+
+   It also beats the prefers-reduced-motion block above, which is the right precedence: that block
+   substitutes a FROZEN HALO rather than removing the glow, and an operator who has explicitly asked
+   for no animation should get the plain outline rather than a stationary one.
+
+   The class is composed in App.js rather than replacing `threat-validated`, because two other places
+   branch on that class being present: the inline 1px border for the quiet states, and the
+   threat-body-panel wrapper behind the prose. */
+.threat-validated.threat-static {
+  animation: none;
+  box-shadow: none;
+  /* The gradient tint goes too. "Just a green outline" means the border carries the meaning; leaving
+     a green wash behind would be the same signal at lower contrast rather than a quieter card. */
+  background: transparent;
+}
+
+.threat-validated.threat-static::after {
+  animation: none;
+  display: none;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -698,5 +725,41 @@ body {
   }
   .kb-doc {
     padding: 0 1rem 3rem;
+  }
+}
+
+/* ------------------------------------------------------------------ live XSS candidate
+   An insertion point that has a reflection on it, so the operator can see where to aim without
+   opening anything.
+
+   Red already means "this point has vectors" on this card, so a second red says nothing. The glow
+   is the second channel: steady red is "51 path vectors exist", glowing red is "one of them takes a
+   payload and gives it back". Those are different facts and the second one is the only one that
+   changes what you do next.
+
+   ONE COLOUR. There used to be a second, amber channel for a reflection that renders nowhere, on
+   the theory that high, chain and low are three different pieces of news. They are, and the place
+   that news belongs is the row, where the grade is written out in words next to the evidence. On
+   the card it was two shades of glow on a number, which is a distinction nobody can read at a
+   glance and which made the screen look broken. The grades are unchanged in the data; they have
+   simply stopped driving two colours here.
+
+   text-shadow rather than a background or a border: the number stays the same size and in the same
+   place, so a row of metrics does not reflow when a probe finishes. */
+@keyframes metric-candidate-pulse {
+  0%, 100% { text-shadow: 0 0 6px rgba(220, 53, 69, 0.75), 0 0 14px rgba(220, 53, 69, 0.35); }
+  50%      { text-shadow: 0 0 10px rgba(220, 53, 69, 1),   0 0 22px rgba(220, 53, 69, 0.6); }
+}
+
+.card-metric-candidate {
+  animation: metric-candidate-pulse 1.8s ease-in-out infinite;
+}
+
+/* Reduced motion still needs the signal, it just must not move. The steady shadow is the midpoint
+   of the animation above, so a metric reads identically to a paused pulse. */
+@media (prefers-reduced-motion: reduce) {
+  .card-metric-candidate {
+    animation: none;
+    text-shadow: 0 0 8px rgba(220, 53, 69, 0.9), 0 0 18px rgba(220, 53, 69, 0.5);
   }
 }

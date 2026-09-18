@@ -160,6 +160,74 @@ func TestTheFlakyDetectorRetriesAndTheDeterministicOnesDoNot(t *testing.T) {
 	}
 }
 
+// A RUN THAT PRINTED NOTHING AT ALL IS NOT A CLEAN SCAN, and for a stdout-only tool it was the
+// last way to get one. Every guard in runVectorOnce is a text match over the tool's output, so on
+// an empty string all of them say no and the run reaches the end with zero findings and no error.
+// A domdig container that is OOM killed or SIGKILLed prints exactly this: nothing, on either
+// stream, at some exit code nobody can interpret.
+func TestAToolThatPrintedNothingIsUntestedRatherThanClean(t *testing.T) {
+	domdig, ok := VectorToolByKey("domdig")
+	if !ok {
+		t.Fatal("domdig is not registered, so the tool this guard was written for is gone")
+	}
+	if domdig.UsesReportFile {
+		t.Fatal("domdig now writes a report file, so this guard no longer covers it")
+	}
+
+	if !saidNothingAtAll(domdig, "", 0) {
+		t.Error("a killed container printed nothing and was still going to be filed clean")
+	}
+	if !saidNothingAtAll(domdig, "\n  \n\t\n", 0) {
+		t.Error("whitespace only is still nothing said")
+	}
+
+	// The three ways out, each of which means the run really did something.
+	if saidNothingAtAll(domdig, "[]\n", 0) {
+		t.Error("an empty -J report IS an answer, and must stay a clean scan")
+	}
+	if saidNothingAtAll(domdig, "", 1) {
+		t.Error("a run that produced a finding was called silent")
+	}
+	dalfox, _ := VectorToolByKey("dalfox")
+	if !dalfox.UsesReportFile {
+		t.Skip("dalfox no longer uses a report file, so it cannot stand in for the report path here")
+	}
+	if saidNothingAtAll(dalfox, "", 0) {
+		t.Error("a tool with a report file must be judged on the report, not on its stdout")
+	}
+}
+
+// The inventory this guard rests on. It covers every tool registered WITHOUT a report file, and the
+// count is pinned so that adding one is a deliberate act: a tool that genuinely prints nothing when
+// it finds nothing would be broken by the guard and needs its own registry flag instead.
+func TestSaidNothingAtAllCoversEveryStdoutOnlyTool(t *testing.T) {
+	// recollapse is listed because it is stdout-only, but its branch returns before the guard.
+	want := map[string]bool{
+		"cacheboom": true, "commix": true, "sstimap": true, "graphql-cop": true,
+		"graphw00f": true, "snallygaster": true, "mantra": true, "lfimap": true,
+		"jwt-tool": true, "pphack": true, "recollapse": true, "ssrfmap": true,
+		"ghauri": true, "domdig": true, "xssfuzz": true,
+	}
+	got := map[string]bool{}
+	for _, tool := range vectorRegistry {
+		if !tool.UsesReportFile {
+			got[tool.Key] = true
+		}
+	}
+	for key := range got {
+		if !want[key] {
+			t.Errorf("%s reports on stdout alone and is newly covered by saidNothingAtAll. Confirm "+
+				"it prints SOMETHING on a clean run, then add it here; if it is silent when it "+
+				"finds nothing, it needs a registry flag rather than a weaker guard", key)
+		}
+	}
+	for key := range want {
+		if !got[key] {
+			t.Errorf("%s no longer reports on stdout alone, so remove it from this list", key)
+		}
+	}
+}
+
 // THE EXIT CODE IS NOT THE SIGNAL. Forbidden validates its own arguments, prints a complaint and
 // exits ZERO, having written no report. Exit 0 plus no report file is indistinguishable from a clean
 // scan, which is how ginandjuice.shop was twice reported to have no 403 bypass on /admin while
@@ -420,5 +488,127 @@ func TestAResponseIsNeverComposed(t *testing.T) {
 func TestExitDescriptionSaysWhyZeroIsSuspicious(t *testing.T) {
 	if got := exitDescription(nil); !strings.Contains(got, "0") || !strings.Contains(got, "clean") {
 		t.Errorf("a zero exit next to a refusal is the surprising part and must be spelled out, got %q", got)
+	}
+}
+
+// A RUNTIME CRASH is the same defect as a refused command line, one layer down, and it was found
+// the same way: by a positive control. domdig scanned two real vectors in 3.2s and 3.5s with byte
+// identical output while the oracle vector ran 70 SECONDS and passed. Wall clock against work was
+// the tell; the framework itself recorded both real vectors CLEAN.
+//
+// refusedItsCommandLine cannot see this, because a crash carries none of the argument parser
+// phrasings, and the exit code cannot discriminate either: domdig exits 1 as its ordinary way of
+// saying nothing was found. The stack trace in stdout is the only reliable signal.
+//
+// Every fixture below is REAL captured output, copied out of vector_scan_traces.
+func TestARuntimeCrashIsNotAScanResult(t *testing.T) {
+	crashes := map[string]string{
+		// The crash that started this. node's internal fatal frame, then the exception, then the
+		// version trailer. 3.2 seconds, exit 1, recorded clean.
+		"node, rejection escaping into a cross origin frame": "node:internal/process/promises:391\n" +
+			"    triggerUncaughtException(err, true /* fromPromise */);\n" +
+			"    ^\n\n" +
+			"DOMException: SecurityError: Failed to read a named property 'document' from 'Window': " +
+			"Blocked a frame with origin \"https://m.stripe.network\" from accessing a cross-origin frame.\n" +
+			"    at #evaluate (/app/node_modules/puppeteer-core/lib/cjs/puppeteer/cdp/ExecutionContext.js:391:56)\n" +
+			"\nNode.js v20.20.2\n",
+
+		// The case that proves triggerUncaughtException alone is not enough. This run worked for
+		// NINE MINUTES, printed 25 status lines, then threw synchronously out of htcrawl. node
+		// printed no internal frame here, only the source line, the stack and the trailer. 21 of the
+		// 29 crashed domdig traces look like this one, and every one of them was recorded clean.
+		"node, synchronous throw with no internal frame": "[!] 404\n[!] 404\n" +
+			"[!] Unexpected error, retrying...Error: Execution context was destroyed\n" +
+			"/app/node_modules/puppeteer-core/lib/cjs/puppeteer/cdp/IsolatedWorld.js:73\n" +
+			"        const error = new Error('Execution context was destroyed');\n" +
+			"                      ^\n\n" +
+			"Error: Execution context was destroyed\n" +
+			"    at Crawler.start (/app/node_modules/htcrawl/main.js:340:14)\n" +
+			"    at DOMDig.scanDom (/app/domdig.js:277:22)\n" +
+			"\nNode.js v20.20.2\n",
+
+		// lfihunt, 50 seconds in, exit 1. It had finished five checkers and then died trying to
+		// PROMPT on a stdin that is not a terminal. Partial work plus a dead process still reads as
+		// clean without this.
+		"python, dying on a prompt with no terminal": "Running EnvironChecker...\n" +
+			"Warning: Input is not a terminal (fd=0).\n" +
+			"Traceback (most recent call last):\n" +
+			"  File \"/opt/LFIHunt/scanner.py\", line 118, in <module>\n" +
+			"    main()\n" +
+			"  File \"/usr/local/lib/python3.11/site-packages/prompt_toolkit/input/vt100.py\", line 185, in _attached_input\n" +
+			"    raise EOFError\n" +
+			"EOFError\n",
+
+		// Not observed in the stored corpus, and kept because the Go tools (nuclei, dalfox, wcvs,
+		// nomore403, pphack, http2smugl) are the largest group in the runner. Both halves are
+		// required, which is what the negative test below pins.
+		"go, runtime panic": "panic: runtime error: invalid memory address or nil pointer dereference\n" +
+			"[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x6f1a2c]\n\n" +
+			"goroutine 42 [running]:\n" +
+			"main.(*Scanner).probe(0x0, {0xc0001a2000, 0x1f})\n" +
+			"\t/src/scanner.go:118 +0x2c\n",
+
+		// smugglex is Rust and is built from git HEAD rather than the crate, so it is the binary in
+		// this set most likely to panic.
+		"rust, panic": "thread 'main' panicked at src/request.rs:212:39:\n" +
+			"called `Option::unwrap()` on a `None` value\n" +
+			"note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+	}
+	for name, output := range crashes {
+		if !crashed(output) {
+			t.Errorf("%s: the process DIED, but this run would be filed as clean:\n%s", name, output)
+		}
+	}
+}
+
+// The counterpart, and the reason this matches on the message rather than on the exit code. The
+// constraint is identical to the one on refusedItsCommandLine: several of these tools exit
+// non-zero as their ordinary way of saying they found nothing, so a marker that can appear in a
+// healthy run trades one silent clean for a wall of false errors, and an operator who learns to
+// ignore errors is back where they started.
+//
+// Verified beyond these fixtures: matching all 567 rows of vector_scan_traces (2026-09-06 to
+// 2026-09-17) against this marker set returns 30 rows, all 30 exit non-zero and all 30 carry a
+// stack trace. None of the 484 exit-0 runs match. That query is the test that matters.
+func TestAZeroFindingsRunIsNotMistakenForACrash(t *testing.T) {
+	notCrashes := map[string]string{
+		// dalfox's ordinary nothing-found exit: status 1, empty output, eight times in the corpus.
+		"dalfox found nothing and exited 1": "",
+
+		// lfimap exits 255 to say the target answered something it will not scan. Real output, three
+		// occurrences.
+		"lfimap refusing a 404 target, exit 255": "[-] Initial request yielded 404 response. Request " +
+			"might not be correctly specified. To force-continue specify '--http-ok 404' to treat it " +
+			"as expected.\n",
+
+		// A real clean sqlmap run. Its banner carries a version and a URL and none of it is a crash.
+		"a clean sqlmap run": "        ___\n       __H__\n ___ ___[.]_____ ___ ___  {1.10.8.45#dev}\n" +
+			"[*] starting @ 02:29:35 /2026-09-06/\n" +
+			"[INFO] testing if GET parameter 'q' is dynamic\n" +
+			"[WARNING] GET parameter 'q' does not seem to be injectable\n",
+
+		// The domdig ORACLE run: 70 seconds, exit 0, seven confirmed DOM XSS. This is the positive
+		// control whose runtime exposed the crash, and it must stay clean of every marker.
+		"the domdig oracle finding seven DOM XSS": "[\n  {\n    \"type\": \"domxss\",\n" +
+			"    \"payload\": \"<iMg src=a oNerrOr=alert(1)>\",\n    \"element\": \"GET/q\",\n" +
+			"    \"confirmed\": true,\n    \"message\": \"DOM XSS found\"\n  }\n]\n",
+
+		// THE CASE THE MARKER SET IS SHAPED AROUND. nuclei and dalfox print the matched response
+		// body, and a target is free to put the word panic, a version string or a stack trace in it.
+		// The Go marker needs the goroutine dump as well, and the node marker needs its trailer on a
+		// line of its own, precisely so that quoting a target cannot abort a scan that really ran.
+		"a scanner quoting the target's own error page": "[critical] [apache-struts] " +
+			"http://target/x.action matched: HTTP/1.1 500\n" +
+			"body: java.lang.NullPointerException at com.example.Handler.run(Handler.java:42) " +
+			"panic: user not found (request id 7f2a)\n" +
+			"server: Node.js v20 behind nginx\n",
+
+		// The same trap from the other side: a fingerprinting tool naming a runtime is not a crash.
+		"a technology banner": "[INFO] target runs Node.js v18.19.0 / Express 4.18\n",
+	}
+	for name, output := range notCrashes {
+		if crashed(output) {
+			t.Errorf("%s: an ordinary result was reported as a crash:\n%s", name, output)
+		}
 	}
 }

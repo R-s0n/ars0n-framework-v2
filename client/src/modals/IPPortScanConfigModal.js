@@ -308,7 +308,7 @@ function IPPortScanConfigModal({ show, handleClose, activeTarget, onTrimNetworkR
       <Modal.Header closeButton>
         <Modal.Title className="text-danger">
           <i className="bi bi-hdd-network me-2" />
-          Discover Live Web Servers (On-Prem) &mdash; configuration
+          Discover Live Web Servers (On-Prem) - configuration
         </Modal.Title>
       </Modal.Header>
       <Modal.Body style={{ minHeight: '60vh' }}>

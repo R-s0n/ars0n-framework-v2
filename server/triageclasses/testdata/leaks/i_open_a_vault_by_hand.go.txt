@@ -1,0 +1,13 @@
+// ATTEMPT 14, SECOND FORM: OPEN A VAULT DIRECTLY.
+//
+// If the package-level minter is gone but the vault constructor is free, a class opens its own
+// vault, mints into it naming any owner it likes, and the handle it gets back is a handle into
+// that owner's partition. Partitioning the read side and leaving the write side open undoes the
+// partitioning, so the constructor takes the runner capability too.
+package leakfixture
+
+import "ars0n-framework-v2-server/utils/triage"
+
+func leakOpenAVault(ctx triage.ClassifyCtx) *triage.PerturbedVault {
+	return triage.NewPerturbedVault(ctx.Route.Obs().RunID)
+}

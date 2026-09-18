@@ -50,10 +50,10 @@ func GetAttackVectorRequest(w http.ResponseWriter, r *http.Request) {
 	var port *int
 	if dbPool.QueryRow(context.Background(), `
 		SELECT method, scheme, domain, port, path, insertion_point, parameters,
-		       COALESCE(raw_request,''), COALESCE(evidence_url,'')
+		       COALESCE(raw_request,''), COALESCE(evidence_url,''), COALESCE(fragment,'')
 		FROM attack_vectors WHERE id = $1`, id).
 		Scan(&v.Method, &v.Scheme, &v.Domain, &port, &v.Path, &v.InsertionPoint, &v.Parameters,
-			&rawRequest, &evidenceURL) != nil {
+			&rawRequest, &evidenceURL, &v.Fragment) != nil {
 		writeJSONError(w, http.StatusNotFound, "not_found", "No such attack vector.")
 		return
 	}
@@ -77,6 +77,19 @@ func GetAttackVectorRequest(w http.ResponseWriter, r *http.Request) {
 				"about it: the verb, the host, the path and the parameters. %s stands where a value "+
 				"would go, because the framework knows the parameter is read and not what was sent in it.",
 			attackVectorSlot)
+	}
+
+	// A fragment vector's input is in NEITHER rendering, and it cannot be: the request bytes are
+	// what left the browser, and the fragment is the part that did not. markInputSpans would have
+	// searched those bytes for the fragment's parameter names, failed to find any, and marked
+	// nothing, leaving an operator looking at a request with no highlighted input and no reason
+	// given. Rather than leave that silence, the fragment is appended below the request, labelled
+	// as not sent, with the payload position marked where it actually is.
+	if v.InsertionPoint == "fragment" {
+		parts = append(parts, appendFragmentParts(v)...)
+		note += " The fragment is shown below the request rather than in it, because a fragment is " +
+			"never transmitted: the browser strips it. Only a browser-driven tool can put a payload " +
+			"there, which in this framework means domdig."
 	}
 
 	raw := strings.Builder{}
@@ -180,6 +193,23 @@ func buildVectorRequest(v attackVector) []vectorRequestPart {
 		add("\n")
 	}
 	return parts
+}
+
+// appendFragmentParts renders the fragment under the request, with the controllable position marked.
+//
+// Two shapes, because the two are attacked differently. A fragment carrying key=value pairs, which
+// is the OAuth implicit grant and the SPA route with its own query, has one markable span per name.
+// A bare route or anchor has no names at all, so the whole fragment is the span, the same way a path
+// vector marks its last segment.
+func appendFragmentParts(v attackVector) []vectorRequestPart {
+	parts := []vectorRequestPart{{Text: "\n[not sent, read by client-side script] #"}}
+	// fragmentSpans is the same renderer the composer uses, so what is shown here is what the tool
+	// is handed. They used to be two implementations and they disagreed: this one rendered the
+	// parameters inside a fragment and the composer dropped them, so an operator read a fragment off
+	// the preview that domdig never received. See fragmentSpans.
+	parts = append(parts, fragmentSpans(v.Fragment, v.Parameters,
+		func(string) string { return attackVectorSlot })...)
+	return append(parts, vectorRequestPart{Text: "\n"})
 }
 
 // markInputSpans finds each parameter inside bytes the framework did not compose, and marks the span

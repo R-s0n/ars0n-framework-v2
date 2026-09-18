@@ -2549,7 +2549,7 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
                     + 'ONE test per rule; there is no "and" or "or". Write the second test as a second '
                     + 'rule.\n\n'
                     + 'fields: status, body, size, time_ms, header.<name>, and any of those against an '
-                    + 'earlier step as step.<name-or-id>.<field> — quote a step name with spaces: '
+                    + 'earlier step as step.<name-or-id>.<field> - quote a step name with spaces: '
                     + 'step."GET /login".status\n'
                     + 'operators: == != > < >= <= (numbers), ~ !~ (contains, case-insensitive), '
                     + '=~ (RE2 regular expression)'}
@@ -2564,7 +2564,7 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
                     data-bs-theme="dark"
                     title={rule.field === 'header'
                       ? 'There is no "is absent". A header the target did not send is ABSENT, and '
-                        + 'absent matches nothing at all — not even "is not" or "does not contain". '
+                        + 'absent matches nothing at all - not even "is not" or "does not contain". '
                         + 'Test that it IS present, and put the missing case in an OTHERWISE row.'
                       : undefined}
                   >
@@ -3537,7 +3537,7 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
         <span
           className="text-info text-truncate"
           style={{ fontFamily: MONO, flex: '1 1 160px', minWidth: 0 }}
-          title={`${row.target}${row.stepName ? ` — ${row.stepName}` : ''}`}
+          title={`${row.target}${row.stepName ? ` - ${row.stepName}` : ''}`}
         >
           {row.target || '/'}
         </span>
@@ -3590,12 +3590,12 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
               )}
               <span className="text-light">{outcome || 'matched'}</span>
               {row.delayMs != null && row.action === 'retry' && (
-                <span className="text-white-50 ms-1">— waited {Math.round(row.delayMs)}ms</span>
+                <span className="text-white-50 ms-1">- waited {Math.round(row.delayMs)}ms</span>
               )}
             </>
           ) : (
             <span className="text-white-50 fst-italic">
-              no rule matched{row.action ? ` — ${outcome}` : ' — continued to the next step'}
+              no rule matched{row.action ? ` - ${outcome}` : ' - continued to the next step'}
             </span>
           )}
           {/* A condition that could NOT be judged - a regex that will not compile, a number

@@ -200,37 +200,7 @@ func ComposeDalfox(v VectorInput, settings map[string]any, reportPath string) ([
 // Edited as text rather than through net/url, for the same reason sqliTargetURL is: round-tripping
 // through url.URL re-encodes the path and changes the bytes on the wire.
 func dalfoxTargetURL(v VectorInput) string {
-	base := v.TargetURL()
-	if !strings.Contains(base, "{") {
-		return base
-	}
-	pathPart, queryPart, hasQuery := strings.Cut(base, "?")
-	scheme, rest, hasScheme := strings.Cut(pathPart, "://")
-	if !hasScheme {
-		return base
-	}
-	host, path, hasPath := strings.Cut(rest, "/")
-	if !hasPath {
-		return base
-	}
-
-	segments := strings.Split(path, "/")
-	replaced := false
-	for i, segment := range segments {
-		if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
-			segments[i] = VectorCanary
-			replaced = true
-		}
-	}
-	if !replaced {
-		return base
-	}
-
-	out := scheme + "://" + host + "/" + strings.Join(segments, "/")
-	if hasQuery {
-		out += "?" + queryPart
-	}
-	return out
+	return vectorConcreteTemplatedURLFrom(v.TargetURL(), v.EvidenceURL)
 }
 
 // parseDalfoxForVector reads dalfox's report and then holds it to the vector it was aimed at.
@@ -321,6 +291,28 @@ func ComposeDomdig(v VectorInput, settings map[string]any, reportPath string) ([
 	tool, _ := VectorToolByKey("domdig")
 	var warnings []string
 
+	// -m DECIDES WHETHER THE URL IS FUZZED AT ALL, and it is a csv rather than a boolean, so the
+	// Blinding map cannot express it: that map asks "is this setting engaged", and `modes` is engaged
+	// whatever its value. Left unchecked, `modes: domscan` produces a run that crawls the DOM
+	// injecting into form fields and NEVER TOUCHES the query string or the hash, which is the whole
+	// of what a query or fragment vector is. It finishes, finds nothing, exits 0 and is filed clean.
+	//
+	// Same shape as the dalfox userAgent defect that cost an earlier run 53 vectors and 48,859
+	// requests for zero findings: a setting that silently removes the mechanism the vector depends on.
+	// Refusing to compose is how the dalfox path branch above handles its own version of this, and it
+	// is the only answer that does not end in a false clean.
+	//
+	// Default is all modes, so an unset `modes` fuzzes and this never fires.
+	if modes, ok := settings["modes"]; ok {
+		if csv := strings.TrimSpace(stringifySetting(modes)); csv != "" && !csvContains(csv, "fuzz") {
+			warnings = append(warnings, "domdig's scan modes are set to \""+csv+"\", which leaves out "+
+				"`fuzz`. Only fuzz mode injects into the query string and the URL hash, so a "+
+				v.InsertionPoint+" vector has nothing done to it. This vector was NOT scanned. Add "+
+				"`fuzz` to the modes setting, or clear it to use domdig's default of all modes.")
+			return nil, warnings
+		}
+	}
+
 	args := []string{"/app/domdig.js"}
 	args = append(args, composeVectorSettings(tool, settings, "", nil, &warnings)...)
 	// -J prints findings as JSON on stdout and -q silences the progress chatter that would otherwise
@@ -336,6 +328,16 @@ func ComposeDomdig(v VectorInput, settings map[string]any, reportPath string) ([
 // discovery regex is (?<=\?|\&)[^=&]+ over the raw URL and would also pick up parameters this vector
 // does not claim. TargetURL has already guaranteed every named parameter is physically present with
 // a value, which is what xssFuzz's substitution needs in order to match at all.
+// csvContains reports whether a comma separated setting names this mode, ignoring spacing and case.
+func csvContains(csv, want string) bool {
+	for _, part := range strings.Split(csv, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), want) {
+			return true
+		}
+	}
+	return false
+}
+
 func ComposeXSSFuzz(v VectorInput, settings map[string]any, reportPath string) ([]string, []string) {
 	tool, _ := VectorToolByKey("xssfuzz")
 	var warnings []string

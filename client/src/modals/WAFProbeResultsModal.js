@@ -179,7 +179,7 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
               in a run it is otherwise easy to read one endpoint's verdict as the estate's. */}
           {scan?.endpoint_label && (
             <span className="text-white ms-2" style={{ fontSize: '0.85rem' }}>
-              — {scan.endpoint_label}
+              - {scan.endpoint_label}
             </span>
           )}
           {probe?.probe_version && (

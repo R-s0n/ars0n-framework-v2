@@ -8,6 +8,12 @@
 // rejected "--delay 0.5" and exited without sending a request. So for each tool here the "lies"
 // field names the specific way ITS output misleads, in preference to anything more general.
 //
+// AND IT IS A LIST, so a tool that fails open in three ways gets three strings rather than one
+// paragraph. These scanners are the entries most likely to grow: every run that turns out to have
+// tested nothing teaches a new one. Append it. An action override ADDS to the tool level lies
+// instead of replacing them and its own lies LEAD, because only the first lie leads the compact
+// reminder. The authoring rules are written out in full at the top of data.js.
+//
 // The step values are the framework's own methodology keys (server/utils/methodology.go), so this
 // guidance cannot contradict get_methodology. The Routing and WAF Probe is the one thing in this
 // domain that sits outside the eight steps, and its entries say so rather than inventing a step.
@@ -41,12 +47,62 @@ module.exports = {
     tool: 'Runs Dalfox, domdig and xssFuzz against this target\'s consolidated attack vectors and '
       + 'reports which vectors each one can actually reach. Only Dalfox reaches all five insertion '
       + 'points.',
+    // RANKED BY DELIVERY, not by where the payload executed.
+    //
+    // This is a `rule` and not a `lies` on purpose. A lie is "this tool will mislead you", and on
+    // this point the scanners do not: dalfox reports a cookie finding accurately and the row is
+    // true. What is wrong is what a reader DOES with a true row. `rule` is attached immediately
+    // after `tool` and before `vuln`, which is the only slot that reaches a caller BEFORE they
+    // choose what to run and what to file, and it is inherited by every action of this tool, so
+    // eligibility, run and results all carry it without four copies.
+    //
+    // MEASURED, live database, scope target 1e9b4bec: 75 cookie and 55 header vectors against 32
+    // query and 53 path, and zero fragment. The corpus itself points the budget at the one class
+    // that is worth nothing until a chain is named.
+    rule: 'WEAPONISABLE MEANS THE ATTACKER CONTROLS THE URL, because a URL is what you put in a '
+      + 'link and send to a victim. Rank a finding by its insertion point before you rank it by '
+      + 'severity. query, path and fragment are attacker-delivered and reportable on their own. '
+      + 'cookie and header are set by the browser the victim already has, so on their own they '
+      + 'are self-XSS, '
+      + 'and one becomes real only with a NAMED and demonstrated chain that lets an attacker set '
+      + 'that value: CRLF injection into a Set-Cookie, a cookie write from a sibling subdomain the '
+      + 'parent trusts, or a cache that stores the payload and serves it to other users. Without '
+      + 'the chain the honest status is not_enough_info, whatever severity the row carries. Keep '
+      + 'scanning cookie and header vectors, since those chains are what turn them into findings, '
+      + 'but do not call one an XSS until you can name the chain that delivers it. Fragment sits in '
+      + 'the top tier and only domdig reaches one, because a fragment never leaves the browser. '
+      + 'A zero fragment count is usually the truth rather than a gap: see manage_attack_vectors. '
+      // Added when the reflection probe landed. The two rankings ARE compatible and an agent
+      // holding both will otherwise assume they compete: this one ranks DELIVERY, the grade ranks
+      // RENDERABILITY, and a finding needs both. Said here rather than only on the probe, because
+      // `rule` is inherited by every action of this tool and this is the tool where a caller
+      // decides what is reportable.
+      + 'THE XSS LABEL FROM THE REFLECTION PROBE DOES NOT OVERRIDE ANY OF THIS. The grade answers '
+      + 'a different question: whether what came back could be rendered as markup. '
+      + 'xss_candidate_high on a cookie or header vector is a reflection in an HTML response that '
+      + 'the attacker still cannot deliver, so it stays self-XSS and not_enough_info until the '
+      + 'chain is named; a query, path or fragment vector stays deliverable whatever its grade. '
+      + 'Rank with both: delivery decides whether it is reportable, the grade decides which of the '
+      + 'deliverable ones to spend the scanners on first.',
     vuln: 'Cross-site scripting runs attacker JavaScript in a victim session on the target origin, '
       + 'which is session theft, silent request forgery and account takeover.',
-    lies: 'domdig and xssFuzz scan the query string and the URL hash only, so their silence about a '
-      + 'body, header, cookie or path vector is not evidence about it. Dalfox v3 removed its '
-      + 'headless browser, so type V means the payload reached an executable position in a parsed '
-      + 'response, not that script executed.',
+    // The user agent lie goes FIRST, ahead of the query-only one that used to lead, because it is
+    // the most expensive failure measured on this section and because only the first lie reaches
+    // the compact reminder. A tool that cannot reach an insertion point at least says so under
+    // cannot_reach; a blinded dalfox reports a complete, successful, empty scan.
+    lies: [
+      'Setting dalfox\'s User agent makes it find the reflection and then verify NOTHING. Measured '
+        + 'on dalfox 3.2.1 with that one flag changed and nothing else, "found reflected 1 params" '
+        + 'goes from "XSS found 1 XSS" with a POC to "XSS found 0 XSS", for ANY value including '
+        + 'Mozilla/5.0, and the requests are still sent so the run looks healthy from every angle '
+        + 'except the result. It cost two full runs, 53 vectors and 48,859 requests, for zero '
+        + 'findings on a target with four documented XSS. It is in the dalfox Blinding map '
+        + '(server/utils/xssOptions.go), so eligibility reports it as blinding; a run does not.',
+      'domdig and xssFuzz scan the query string and the URL hash only, so their silence about a '
+        + 'body, header, cookie or path vector is not evidence about it. Dalfox v3 removed its '
+        + 'headless browser, so type V means the payload reached an executable position in a parsed '
+        + 'response, not that script executed.',
+    ],
     next: 'manage_vector_selection, manage_sqli, manage_threat_model',
     learn: 'kb://reports/accepted/xss-reports',
     derived: false,
@@ -54,14 +110,52 @@ module.exports = {
       eligibility: {
         tool: 'How many of this target\'s vectors each scanner can test, and which settings are '
           + 'blinding it. START HERE, because two of the three cover query only.',
-        lies: 'Measured against 71 real vectors: Dalfox 71, domdig 27, xssFuzz 27. A tool reporting '
-          + 'no findings says nothing about the vectors listed under cannot_reach.',
+        lies: [
+          'Measured against 71 real vectors: Dalfox 71, domdig 27, xssFuzz 27. A tool reporting '
+            + 'no findings says nothing about the vectors listed under cannot_reach.',
+          'This action can only report a tool blinded if that tool HAS a Blinding map, and xssFuzz '
+            + 'has none: server/utils/xssOptions.go registers one for dalfox and one for domdig and '
+            + 'nothing for xssFuzz, so no setting you ever save for it can raise a blinded_warning '
+            + 'here. Two of its settings cut coverage silently. --limit 4 uses only the first 4 tags '
+            + 'and events, and a custom payload file switches it to static testing and skips payload '
+            + 'generation entirely. Both leave a run that reads exactly like a complete one.',
+        ],
         next: 'manage_vector_selection, manage_xss',
       },
+      save_settings: {
+        lies: 'A repeatable setting written as ONE NEWLINE JOINED STRING becomes a single flag '
+          + 'carrying a literal newline, because settingValues (server/utils/vectorCompose.go) '
+          + 'splits a JSON array and never splits a string. Measured in the dalfox container on one '
+          + 'vector: no -H at all sent 172 requests and found the bug, two separate -H flags sent '
+          + '174 and found it, the newline joined form sent 1 request, found nothing and exited 0, '
+          + 'with dalfox reporting the target unreachable on a request build error while '
+          + 'meta.incomplete stayed FALSE, which is the only field dalfoxIncomplete reads '
+          + '(server/utils/xssParse.go), so the vector is filed CLEAN. The positive control does not '
+          + 'catch it: canarySettings (server/utils/vectorCanary.go) strips the whole Session group '
+          + 'before the oracle probe and dalfox\'s headers live in that group, so the canary runs '
+          + 'WITHOUT your broken header and certifies the run green. Send a list, one value per '
+          + 'element.',
+        next: 'manage_xss, manage_vector_selection',
+      },
       run: {
-        lies: 'domdig drives real Chromium at roughly 7 minutes per vector, so a domdig run that '
-          + 'finished quickly did not scan the list. Dalfox header targeting is inverted: it finds '
-          + 'the bug only when the observed value of THAT header is not also supplied.',
+        lies: [
+          'domdig drives real Chromium at roughly 7 minutes per vector, so a domdig run that '
+            + 'finished quickly did not scan the list. Dalfox header targeting is inverted: it finds '
+            + 'the bug only when the observed value of THAT header is not also supplied.',
+          'dalfox\'s On session loss defaults to ABORT, which turns an unauthenticated sweep of '
+            + 'cookie vectors into UNTESTED rather than clean. Every cookie vector is handed '
+            + '--cookies name=value, supplying credentials is what switches dalfox\'s own session '
+            + 'heuristics on, and against an API that answers 401 to an anonymous request the '
+            + 'preflight baseline is already unauthenticated, so dalfox stops. Measured on one run '
+            + 'against the reference estate: 28 vectors recorded "SESSION_LOST: preflight response '
+            + 'already looks unauthenticated (HTTP 401)", every single one of them a cookie vector. '
+            + 'Set it to continue when there is no session to lose.',
+          'Starting all three at once with tools:["dalfox","domdig","xssfuzz"] starts three runs '
+            + 'over three DIFFERENT selections and three different eligibility counts, so there is '
+            + 'no single coverage number for the section. A tool that failed to start comes back '
+            + 'under not_started with no results at all, which reads exactly like a tool that '
+            + 'found nothing.',
+        ],
         next: 'manage_xss, manage_vector_selection',
       },
       results: {
@@ -264,13 +358,31 @@ module.exports = {
     step: S_BYPASS,
     tool: 'Runs nomore403 and Forbidden against a hand-picked endpoint list per tool, drawn from '
       + 'the URLs that already answered 401, 403 or 405.',
+    // The second half of this used to read "a 403 is the strongest starting position a target offers
+    // because it proves the resource exists", full stop, which the second lie below then spent a
+    // paragraph refuting with a measurement. Both were attached to the same response, so the entry
+    // argued with itself. The claim is true of a denial the APPLICATION issued and false of one a
+    // proxy issued on its behalf, so the condition is now in the claim rather than only in the
+    // rebuttal.
     vuln: 'A bypass reaches a resource the application meant to withhold, which is usually an admin '
-      + 'function, and a 403 is the strongest starting position a target offers because it proves '
-      + 'the resource exists.',
-    lies: 'Forbidden judges on status alone and never on a body diff, so its report is a candidate '
-      + 'list rather than a finding list. A target that has stopped denying anything turns every '
-      + 'variation into a bypass of a control that is already gone, which the parser reports as a '
-      + 'stale-target row.',
+      + 'function. A 403 the APPLICATION issued is the strongest starting position a target offers, '
+      + 'because it proves the resource exists; a 401 or 403 from a proxy in front of the '
+      + 'application proves only that the prefix is proxied, and telling the two apart is the first '
+      + 'job here rather than a detail.',
+    lies: [
+      'Forbidden judges on status alone and never on a body diff, so its report is a candidate '
+        + 'list rather than a finding list. A target that has stopped denying anything turns every '
+        + 'variation into a bypass of a control that is already gone, which the parser reports as a '
+        + 'stale-target row.',
+      'An anonymous 401 under a proxied prefix proves that THE PREFIX IS PROXIED and never that the '
+        + 'route exists, so a 4xx list gathered without a credential is not a route inventory and '
+        + 'the "it proves the resource exists" half of the vuln note does not apply. Measured on the '
+        + 'reference estate: eight /internal routes proven real by an authenticated run were probed '
+        + 'beside eight fresh random names, all eight random names answered 401 with the same '
+        + '29 byte body, and five of the eight real routes (quotes, paper_accounts, accounts, '
+        + 'country-infos, assets) were byte identical to them. Send a cannot-exist control under '
+        + 'the same prefix in the SAME run before reading a 401 as evidence of anything.',
+    ],
     next: 'manage_fuzz, manage_threat_model',
     learn: 'kb://reports/accepted/auth-bypass-reports',
     derived: false,
@@ -278,9 +390,19 @@ module.exports = {
       denied_endpoints: {
         tool: 'The URLs that already answered 401, 403, 404, 405 or 407, in scope first and the '
           + 'access-control ones marked primary. This is the section\'s input.',
-        lies: 'These come from CONTENT DISCOVERY. With no path fuzzing there are no denials, and '
-          + 'zero targets reads as a well protected target: on the reference engagement there were '
-          + 'no 401s or 403s anywhere while an unauthenticated /admin bypass was real.',
+        lies: [
+          'These come from CONTENT DISCOVERY. With no path fuzzing there are no denials, and '
+            + 'zero targets reads as a well protected target: on the reference engagement there were '
+            + 'no 401s or 403s anywhere while an unauthenticated /admin bypass was real.',
+          'The in_scope badge on this list is what the one-click picker filters on, and it used to '
+            + 'be a SECOND OPINION rather than the boundary the scanners enforce. A last-two-labels '
+            + 'hostname comparison offered 24 URLs on a target whose programme names one host, and '
+            + '15 of those 24 sat on five hosts that are not in scope, at roughly 1000 nomore403 '
+            + 'requests each. It now asks the same ScanScope the crawler and the fuzzer obey, and '
+            + 'it is FAIL CLOSED: an unparseable URL, a scope target naming no host, or an '
+            + 'exclusion list that will not read all judge OUT of scope. A candidate you know '
+            + 'belongs here can still be marked by hand.',
+        ],
         next: 'manage_fuzz, manage_access_bypass',
       },
       save_settings: {
@@ -428,10 +550,36 @@ module.exports = {
     step: S_CONSOLIDATE,
     tool: 'Shows and changes which consolidated attack vectors each scanner is pointed at, per '
       + 'tool, and reports the four counts that describe coverage.',
-    lies: 'selected is the operator\'s choice and eligible is what a scan actually SENDS: measured, '
-      + 'Dalfox reported total 215, selected 215, eligible 78, so calling that scan 215 vectors '
-      + 'overstates it by 137. Report eligible, or report both, and never report selected as '
-      + 'coverage.',
+    // A `rule` rather than a `lies`: the four counts this tool reports are correct, and the defect
+    // is the ORDER an operator runs them in. It belongs here because this is the tool where the
+    // order is chosen, and it is deliberately a companion to manage_xss's rule rather than a copy
+    // of it: that one says what is REPORTABLE, this one says what to spend the budget on first.
+    //
+    // MEASURED, live database, scope target 1e9b4bec: avg(array_length(parameters,1)) is 22.1 on
+    // the 75 cookie vectors (max 23) against 3.3 on the 32 query vectors, and xssCompose.go:134
+    // emits one -p per parameter name, so the cost per cookie vector is roughly seven times the
+    // cost per query vector before a single payload is chosen.
+    rule: 'SPEND THE BUDGET ON THE URL-BORNE INSERTION POINTS FIRST. query, path and fragment are '
+      + 'the ones an attacker can put in a link, so a finding there needs no chain; cookie and '
+      + 'header need one named before they are worth reporting. The corpus pushes the other way and '
+      + 'the cost is measured rather than estimated: on scope target 1e9b4bec the 75 cookie vectors '
+      + 'carry 22.1 parameters each on average against 3.3 on the 32 query vectors, and one -p is '
+      + 'emitted per parameter, so cookie vectors are about 1658 of the roughly 1890 parameter '
+      + 'slots in the whole vector list. ORDER the run on this, do not deselect on it: a cookie '
+      + 'vector is still what a CRLF or cache-poisoning chain lands on.',
+    lies: [
+      'selected is the operator\'s choice and eligible is what a scan actually SENDS: measured, '
+        + 'Dalfox reported total 215, selected 215, eligible 78, so calling that scan 215 vectors '
+        + 'overstates it by 137. Report eligible, or report both, and never report selected as '
+        + 'coverage.',
+      'Selection is stored SPARSELY as explicit OFF rows and absence means enabled, so a narrowing '
+        + 'made during an earlier per-vector phase is still in force for every later sweep and '
+        + 'nothing at run time announces it. Measured in the live database on a scope target with '
+        + '230 vectors: 13 tools each carry 212 to 214 rows at enabled=false in '
+        + 'vector_scan_selection, so a sweep an operator would describe as "sqlmap over everything" '
+        + 'sends 18 vectors. Assert the eligible count for the tool BEFORE starting a run, not '
+        + 'after.',
+    ],
     next: 'manage_xss, manage_sqli, manage_attack_vectors',
     learn: 'kb://methodology/web-app-methodology',
     derived: false,
@@ -455,17 +603,62 @@ module.exports = {
           + 'successfully, so it reads as a clean result rather than as a scan that never happened.',
         next: 'manage_vector_selection',
       },
+      // The action behind "scan all attack vectors with the XSS label". It is a deselect_all
+      // followed by a select, so it inherits deselect_all's failure mode and has to say so.
+      select_only: {
+        tool: 'Makes the selection EXACTLY the set you name, for every tool named, resolving the '
+          + 'set from an XSS grade or a reflection status instead of a list of ids.',
+        lies: [
+          'NARROWING IS A BUDGET DECISION, NOT A VERDICT. Everything outside the set is switched '
+            + 'off and stays off, so a later sweep of one of these tools reports on this set and '
+            + 'nothing else, and the vectors left out are UNTESTED rather than clean. That includes '
+            + 'every vector the probe could not answer for: blocked, error, not_probed, and '
+            + 'needs_browser, which is every fragment.',
+          'The label ranks how the response REFLECTS, not which tool can reach the insertion point, '
+            + 'so now_eligible can be well below the size of the set you selected. Quote '
+            + 'now_eligible per tool, never the set size, as what the scan will send.',
+        ],
+        next: 'manage_xss, manage_vector_selection',
+      },
     },
   },
 
   manage_attack_vectors: {
     step: S_CONSOLIDATE,
     tool: 'Rebuilds the vector list from the four sources other scans already filled, and lets you '
-      + 'read, correct, add and delete vectors. Consolidation sends no traffic at the target.',
-    lies: 'This list is what every scanner below will run against, so its gaps become their blind '
-      + 'spots: a zero at an insertion point means every tool will report nothing wrong there '
-      + 'because nothing was ever sent there. A healthy total is not coverage, since all 19 cookie '
-      + 'vectors on the reference target were cookies the browser happened to carry.',
+      + 'read, correct, add and delete vectors. Consolidation sends no traffic at the target. '
+      + 'The reflection probe lives here too, as its own action that DOES send traffic: it puts a '
+      + 'canary through every query, path, cookie, header and body input and grades what comes '
+      + 'back, which is where the XSS label on a vector comes from. Cookie and header probes are '
+      + 'GET and idempotent; a body probe is refused unless the run opts in, because it has to send '
+      + 'the verb that changes data, and PUT and DELETE are never sent at all.',
+    // Two lies, and the order is a delivery decision. The existing one stays at index 0 because
+    // compactLine repeats lies[0] and a gap at a point that EXISTS is the more common failure. The
+    // fragment one is second because it is the rarer, structural case.
+    lies: [
+      'This list is what every scanner below will run against, so its gaps become their blind '
+        + 'spots: a zero at an insertion point means every tool will report nothing wrong there '
+        + 'because nothing was ever sent there. A healthy total is not coverage, since all 19 '
+        + 'cookie vectors on the reference target were cookies the browser happened to carry.',
+      'THE FRAGMENT IS THE SIXTH INSERTION POINT AND ITS ZERO IS NOT LIKE THE OTHER FIVE. '
+        + 'A zero at query, path, cookie, header or body means nobody looked. A fragment never '
+        + 'reaches the server, so no crawler, archive or parameter miner can discover one and '
+        + 'no HTTP tool can test one: a fragment vector is emitted ONLY where a hash was '
+        + 'actually observed, in a capture or in a client route consolidation recognised, and '
+        + 'domdig is the only tool in the framework that can be handed one. So an application '
+        + 'using history routing rather than hash routing genuinely has none, and zero there is '
+        + 'the correct count rather than a gap. Do not conclude a target has no DOM XSS from a '
+        + 'zero here, and do not hand-add fragment vectors for client routes you have not seen.',
+      // Third, and it never leads a compact line on purpose: it is the lesson a caller needs when
+      // they READ the label, and the two actions that return the label lead with it themselves.
+      'THE ABSENCE OF AN XSS LABEL IS NOT EVIDENCE OF SAFETY. Four of the seven reflection '
+        + 'statuses mean NOT KNOWN rather than not vulnerable: not_probed, blocked, error and '
+        + 'needs_browser. blocked means the probe request was REJECTED, and a payload carrying < is '
+        + 'exactly what a WAF drops, so on a well defended target the honest reading of a run of '
+        + 'blocked rows is "the probe was eaten", not "nothing reflects anywhere". needs_browser is '
+        + 'every fragment input, where an HTTP probe structurally cannot answer the question and '
+        + 'only domdig can. Read the census, not the emptiness of a filtered list.',
+    ],
     next: 'manage_vector_selection, manage_xss, manage_sqli',
     learn: 'kb://methodology/web-app-methodology',
     derived: false,
@@ -478,7 +671,8 @@ module.exports = {
       },
       list: {
         tool: 'The vectors themselves with a by_insertion_point breakdown. Check the count at each '
-          + 'of the five points before running anything.',
+          + 'of the five sent points before running anything; the sixth, fragment, is only ever '
+          + 'non-zero where a hash was observed.',
         lies: 'A crawler or archive source reports no method, so those rows carry a hardcoded GET '
           + 'with method_confidence "implied". Scanning a POST route as GET tests a different '
           + 'handler.',
@@ -495,6 +689,40 @@ module.exports = {
           + 'because a payload insertion point in each is two vectors by definition. Pass '
           + 'insertion_point to keep only one.',
         next: 'manage_attack_vectors',
+      },
+      // The reflection probe. Two actions, and each one leads with the lie a caller of THAT action
+      // is about to meet: the probe misleads by finishing, the rows mislead by being graded.
+      probe_reflection: {
+        tool: 'Sends one canary through every query parameter and path segment on the vectors in '
+          + 'scope and records what came back. THIS SENDS TRAFFIC; consolidate still sends none.',
+        lies: 'A PROBE THAT FINISHED FAST MAY HAVE BEEN REJECTED FAST. A run whose rows are all '
+          + 'blocked sent every request and learned nothing, and it reaches you as a completed run '
+          + 'with a full set of rows. Read the by_status census on action "reflection" before '
+          + 'treating a finished probe as coverage.',
+        next: 'manage_attack_vectors, manage_vector_selection',
+      },
+      reflection: {
+        tool: 'The probe rows per vector and per parameter, each with its status, which of < > " \' '
+          + 'survived, the response content type and the derived grade, plus a census of both.',
+        lies: [
+          'xss_candidate_low IS A REAL REFLECTION THAT CANNOT BE RENDERED, and reporting one is '
+            + 'reporting a non-bug. Measured: /api/v1/echo returns <svg onload=alert(1)> byte for '
+            + 'byte and the response is pinned to application/json, with Accept, format=, '
+            + 'callback=, jsonp= and a .html suffix all refused. Record it, do not chase it.',
+          'A grade is a PRIORITY SIGNAL AND NOT A FINDING. The probe proves an input is reflected; '
+            + 'it does not prove a payload executes, so the XSS tools still have to run over the '
+            + 'graded vectors. The grade now ranks DELIVERY as well as renderability, so a cookie '
+            + 'or header reflection comes back xss_candidate_chain rather than high: it renders, '
+            + 'and it is self-XSS until a chain that sets that value is named, which is the '
+            + 'standing rule on manage_xss.',
+          'A NOT-SENT ROW IS NOT A CLEAN ROW, and on an authenticated estate it is the biggest '
+            + 'group. is_credential means the input IS the session, so no request went out: '
+            + 'measured on the reference target, all 49 header vectors fuzz authorization and 700 '
+            + 'of 1655 cookie slots are the Cognito session. probe_refused means the probe declined '
+            + 'to send: a PUT or DELETE body at any setting, or a POST or PATCH body without the '
+            + 'run\'s opt in, because a canary in one field of a POST creates a real record.',
+        ],
+        next: 'manage_vector_selection, manage_xss',
       },
     },
   },
@@ -552,11 +780,20 @@ module.exports = {
     vuln: 'Content discovery finds what nothing links to, which is where the admin panel, the backup '
       + 'file and the forgotten API version live, and it is what fills the access-bypass section '
       + 'with the 401s and 403s it needs.',
-    lies: 'With no matcher set, ffuf installs its default, which includes 401 and 403, so an '
-      + 'endpoint answering uniformly produces one finding per wordlist word: a real run stored 4997 '
-      + 'identical 401s caused by an expired bearer token frozen into a seeded step. A flow whose '
-      + 'steps all fuzz parameters, headers or cookies on endpoints already known has not done '
-      + 'content discovery at all, however many steps it has.',
+    lies: [
+      'With no matcher set, ffuf installs its default, which includes 401 and 403, so an '
+        + 'endpoint answering uniformly produces one finding per wordlist word: a real run stored '
+        + '4997 identical 401s caused by an expired bearer token frozen into a seeded step. A flow '
+        + 'whose steps all fuzz parameters, headers or cookies on endpoints already known has not '
+        + 'done content discovery at all, however many steps it has.',
+      'An allow-list matched at FULL ARITY makes single-segment fuzzing structurally blind, so the '
+        + 'best route on a target can read as absent. Measured: /internal/owner/account-recovery '
+        + 'answers 401 with the same 29 byte default-deny body at depth 3 and depth 4, reaches the '
+        + 'DATABASE at depth 5 (500, SQLSTATE 22P02) and the router at depth 6 (404), while a fake '
+        + 'root at every one of those arities stays 401/29. On a prefix like that the 404 is the '
+        + 'POSITIVE result and the 401 is the wall, which inverts the usual filter: sweep the '
+        + 'deeper arities with placeholder segments and filter only the default-deny shape.',
+    ],
     next: 'manage_access_bypass, manage_attack_vectors, manage_wordlists',
     learn: 'kb://methodology/recon-methodology',
     derived: false,

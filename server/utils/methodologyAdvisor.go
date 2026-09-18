@@ -97,6 +97,17 @@ type TargetState struct {
 	Threats           int            `json:"threat_model_entries"`
 	Mechanisms        int            `json:"documented_mechanisms"`
 	ActiveCredentials int            `json:"active_session_tokens"`
+	// FragmentsObserved is how many times this target was actually seen carrying a URL fragment: a
+	// captured URL with a hash in it, or an endpoint consolidation recognised as a client route.
+	//
+	// It exists so the advisor can tell an empty fragment count that is a GAP from one that is the
+	// TRUTH. Every other insertion point is discoverable: a crawler, an archive or a parameter miner
+	// can find a query, header, cookie, body or path input. A fragment never reaches the server, so
+	// nothing can discover one, and an application using history routing rather than hash routing
+	// genuinely has none. Without this number the advisor raised the same gap on every such target
+	// and told the operator to hand-write vectors for routes that do not exist, which is how an
+	// advisory stops being read. -1 means the check could not be run, and an unknown is never advice.
+	FragmentsObserved int `json:"observed_fragments"`
 	// Unreadable names the checks that could not be run at all. A count of -1 means unknown, and the
 	// advisor must never turn an unknown into advice: telling an operator to do work they have already
 	// done is how an advisory gets ignored, and being ignored is the only way this feature can fail.
@@ -172,6 +183,25 @@ func readTargetState(ctx context.Context, id string) TargetState {
 	                           WHERE scope_target_id = $1 AND COALESCE(is_active, FALSE)
 	                             AND COALESCE(token_role,'credential') = 'credential'`)
 
+	// Both halves of the union are evidence a fragment is in use on this target: a captured URL that
+	// carried one, and an endpoint whose identity consolidation recognised as a client route or
+	// flagged as having had a fragment. A hash-routed SPA produces the second; an anchor-linked page
+	// produces the first.
+	s.FragmentsObserved = one("observed_fragments", `
+		WITH seen AS (
+			SELECT 1 FROM manual_crawl_captures
+			 WHERE scope_target_id = $1 AND COALESCE(url,'') LIKE '%#%'
+			UNION ALL
+			SELECT 1 FROM consolidated_url_endpoints
+			 WHERE scope_target_id = $1 AND deleted_at IS NULL
+			   AND (COALESCE(client_route,'') <> ''
+			        -- had_fragment is a KEY INSIDE normalization_flags, not a column. Written as a
+			        -- column the query errors, one() records the check as unreadable, and the gap is
+			        -- then silent for the wrong reason.
+			        OR COALESCE((normalization_flags->>'had_fragment')::boolean, FALSE))
+		)
+		SELECT count(*) FROM seen`)
+
 	for _, point := range VectorInsertionPoints {
 		s.VectorsByPoint[point] = 0
 	}
@@ -239,10 +269,25 @@ func adviseOnState(s TargetState) []AdvisorFinding {
 	// Insertion point coverage. An empty point is a guaranteed clean report from every tool.
 	if s.Vectors > 0 {
 		var empty []string
+		fragmentEmpty := false
 		for _, p := range VectorInsertionPoints {
-			if s.VectorsByPoint[p] == 0 {
-				empty = append(empty, p)
+			if s.VectorsByPoint[p] != 0 {
+				continue
 			}
+			// THE FRAGMENT IS JUDGED SEPARATELY, AND USUALLY NOT AT ALL.
+			//
+			// Every other point on this list is discoverable, so a zero means nobody looked. A
+			// fragment never reaches the server: no crawler, archive or parameter miner can find
+			// one, and an application using history routing rather than hash routing has none to
+			// find. Counting it with the others produced a gap on EVERY history-routed target,
+			// telling the operator that every tool in every section was blind (only domdig can
+			// reach a fragment at all) and advising them to hand-write vectors for client routes
+			// that do not exist. A zero that is the truth must not be reported as a hole.
+			if p == "fragment" {
+				fragmentEmpty = true
+				continue
+			}
+			empty = append(empty, p)
 		}
 		if len(empty) > 0 {
 			add("gap", "consolidate-vectors", "Insertion points with no coverage at all",
@@ -251,6 +296,19 @@ func adviseOnState(s TargetState) []AdvisorFinding {
 					"a gap in coverage, not a clean result.", empty),
 				"Add vectors by hand at the empty points on endpoints where they make sense, or accept "+
 					"and record that those points are untested on this target.",
+				"injection")
+		}
+		// Raised ONLY on evidence. Greater than zero, so an unreadable check (-1) stays silent too:
+		// this advisor's own rule is that an unknown never becomes advice.
+		if fragmentEmpty && s.FragmentsObserved > 0 {
+			add("gap", "consolidate-vectors", "A fragment was observed and no fragment vector exists",
+				fmt.Sprintf("%d captured URL(s) or consolidated endpoint(s) on this target carry a "+
+					"fragment, and there are 0 fragment vectors. A fragment is the only container "+
+					"DOM XSS lives in and the only one every HTTP tool is structurally blind to, so "+
+					"nothing has tested it.", s.FragmentsObserved),
+				"Run Consolidate Attack Vectors, which reads the fragment off a capture and off a "+
+					"client route. Then scan the fragment vectors with domdig, the one tool that "+
+					"drives a browser and can reach a hash.",
 				"injection")
 		}
 	}

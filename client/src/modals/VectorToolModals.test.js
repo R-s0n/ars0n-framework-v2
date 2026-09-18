@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import VectorToolResultsModal from './VectorToolResultsModal';
 import VectorToolConfigModal from './VectorToolConfigModal';
 import AttackToolCard from '../components/AttackToolCard';
@@ -138,7 +138,11 @@ test('a vector the operator switched off stays switchable, one the tool cannot r
 
   // Three live checkboxes: the two eligible query vectors and the one the operator switched off.
   // The body and header vectors the tool cannot reach get no control at all.
-  const boxes = screen.getAllByRole('checkbox');
+  //
+  // Asked of the vector list, not of the screen. The screen also carries the Reflecting-first
+  // switch, and counting whatever checkboxes exist would make this test fail on the next control
+  // added to the toolbar while saying nothing about which vector is switchable.
+  const boxes = within(screen.getByTestId('vector-rows')).getAllByRole('checkbox');
   expect(boxes).toHaveLength(3);
   expect(screen.getByLabelText('GET http://t/b?q=1')).not.toBeChecked();
   expect(screen.getByLabelText('GET http://t/a?q=1')).toBeChecked();
@@ -236,8 +240,9 @@ test('a vector held back by a setting is locked, and nothing calls that unreacha
   // A tool with no settings groups opens on the vector tab rather than on no tab at all.
   await waitFor(() => expect(screen.getByText('of 2 vectors will be scanned')).toBeInTheDocument());
 
-  // Locked, because no checkbox here sends it.
-  expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+  // Locked, because no checkbox here sends it. Counted over the vector list alone, for the reason
+  // given on the test above.
+  expect(within(screen.getByTestId('vector-rows')).getAllByRole('checkbox')).toHaveLength(1);
   expect(screen.getByText('not sent')).toBeInTheDocument();
   // But the row points at the setting that would, and the group is not libelled as out of reach.
   expect(screen.getByText(/Turn on "scanBodyVectors"/)).toBeInTheDocument();

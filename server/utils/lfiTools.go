@@ -124,7 +124,7 @@ func init() {
 			// "[+] LFI -> 'http://host/read//etc/passwd'". The section header degrades to
 			// "Testing GET '' parameter" for a path because LFImap names the input by reading the query
 			// string, and that cosmetic detail reads exactly like a failure. It is not one.
-			InsertionPoints: VectorInsertionPoints,
+			InsertionPoints: VectorHTTPInsertionPoints,
 			Compose:         ComposeLFImap,
 			Parse:           parseLFImapOutput,
 			// Without this, a run that sent NOTHING was recorded clean. Measured: 125 of 250 traces on

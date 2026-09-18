@@ -1,0 +1,18 @@
+// REACH THE MARKER MINTER, WHICH classes.go CLAIMED WAS IMPOSSIBLE WHILE IT WAS NOT.
+//
+// The package doc said a class could not reach the minter, so the ordinal stripe was an invariant
+// of the system rather than a convention. triage.MintMarkerAt sat exported next to that sentence
+// and its own comment said it was safe to hand to a classifier. Both could not be true, and an
+// adversarial audit called triage.MintMarkerAt from the classifier package on every one of
+// fifteen attempts.
+//
+// A class that mints its own marker allocates its own ordinal, and the R12 stripe stops being
+// something the system guarantees and becomes something each of twenty-seven classes has to
+// remember. The minter takes the capability now, so the sentence is true.
+package leakfixture
+
+import "ars0n-framework-v2-server/utils/triage"
+
+func leakMintAMarker(ctx triage.ClassifyCtx) (triage.Marker, error) {
+	return triage.MintMarkerAt(ctx.Route.Obs().RunID, triage.ClassSQL, 4)
+}

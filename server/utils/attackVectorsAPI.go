@@ -31,7 +31,8 @@ func GetAttackVectorSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetAttackVectorCoverage answers GET /attack-vectors/{scope_target_id}/coverage: how many vectors
-// exist at each of the five insertion points.
+// exist at each insertion point. Six of them: the five that are SENT, and the fragment, which is
+// not.
 //
 // WHY A ZERO HERE IS THE MOST IMPORTANT NUMBER ON THE PAGE. Every scan is bounded by this list. If
 // there are no header vectors then every tool will report nothing wrong with headers, not because
@@ -85,10 +86,8 @@ func GetAttackVectorCoverage(w http.ResponseWriter, r *http.Request) {
 		}
 		gaps = append(gaps, map[string]string{
 			"insertion_point": point,
-			"consequence": "No " + point + " vectors exist, so every tool in every section will " +
-				"report nothing wrong with " + point + " input on this target. That is a gap in " +
-				"coverage, not a clean result.",
-			"why": insertionPointGapReason(point),
+			"consequence":     insertionPointGapConsequence(point),
+			"why":             insertionPointGapReason(point),
 		})
 	}
 
@@ -97,6 +96,27 @@ func GetAttackVectorCoverage(w http.ResponseWriter, r *http.Request) {
 		"gaps":               gaps,
 		"points":             VectorInsertionPoints,
 	})
+}
+
+// insertionPointGapConsequence says what an empty count at this point actually costs.
+//
+// It is per point because it was not, and the one generic sentence ended up arguing with the `why`
+// beside it in the same JSON object. The generic text says every tool in every section reports
+// nothing wrong, which is true of the five points that are SENT and false of the fragment: only
+// domdig can ever test one, and an application using history routing genuinely has none, so zero
+// there is the correct count rather than missing coverage. A reader handed both sentences at once
+// learns only that the framework does not know.
+func insertionPointGapConsequence(point string) string {
+	if point == "fragment" {
+		return "No fragment vectors exist. A fragment never leaves the browser, so this is not a " +
+			"gap the other sections share: domdig is the only tool that can test one, and only " +
+			"where a fragment was actually observed. On an application that uses history routing " +
+			"rather than hash routing, and whose captured URLs carry no hash, zero is the correct " +
+			"count and not a hole in coverage."
+	}
+	return "No " + point + " vectors exist, so every tool in every section will report nothing " +
+		"wrong with " + point + " input on this target. That is a gap in coverage, not a clean " +
+		"result."
 }
 
 // insertionPointGapReason explains why a point is usually empty, in terms of how this framework
@@ -114,6 +134,13 @@ func insertionPointGapReason(point string) string {
 	case "path":
 		return "Path vectors need a segment that was observed varying. Add them by hand on routes " +
 			"that end in an identifier, a filename or a template name."
+	case "fragment":
+		return "Fragment vectors are only produced where a fragment was actually observed: a " +
+			"captured URL carrying one, or a client route consolidation recognised. A fragment " +
+			"never reaches the server, so no crawler, archive or parameter miner can find one, and " +
+			"an application using history routing rather than hash routing genuinely has none. " +
+			"Zero here is usually the truth rather than a gap. Where it is not, the fragment is " +
+			"where DOM XSS lives and domdig is the only tool that can test it."
 	case "body":
 		return "Body vectors come from requests that were actually submitted. A form nobody " +
 			"submitted during the crawl produces none, and neither does a widget that posts JSON " +
@@ -188,7 +215,15 @@ func GetAttackVectors(w http.ResponseWriter, r *http.Request) {
 		SELECT id::text, method, method_confidence, scheme, domain, port, path, insertion_point,
 		       insertion_confidence, parameters, parameters_origin, sources,
 		       COALESCE(evidence_url,''), COALESCE(raw_request,''), COALESCE(notes,''),
-		       manual_added, edited_at, first_seen, last_seen, times_seen
+		       manual_added, edited_at, first_seen, last_seen, times_seen,
+		       COALESCE(fragment,''),
+		       COALESCE(reflection_status,''),
+		       COALESCE((SELECT p.content_type FROM vector_reflection_probes p
+		                 WHERE p.vector_id = attack_vectors.id AND p.status = attack_vectors.reflection_status
+		                 ORDER BY p.probed_at DESC LIMIT 1), ''),
+		       COALESCE((SELECT p.survived FROM vector_reflection_probes p
+		                 WHERE p.vector_id = attack_vectors.id AND p.status = attack_vectors.reflection_status
+		                 ORDER BY p.probed_at DESC LIMIT 1), ARRAY[]::text[])
 		FROM attack_vectors WHERE `+where+`
 		ORDER BY domain, path, method, insertion_point`, args...)
 	if err != nil {
@@ -198,26 +233,43 @@ func GetAttackVectors(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type vector struct {
-		ID                  string     `json:"id"`
-		Method              string     `json:"method"`
-		MethodConfidence    string     `json:"method_confidence"`
-		Scheme              string     `json:"scheme"`
-		Domain              string     `json:"domain"`
-		Port                *int       `json:"port,omitempty"`
-		Path                string     `json:"path"`
-		InsertionPoint      string     `json:"insertion_point"`
-		InsertionConfidence string     `json:"insertion_confidence"`
-		Parameters          []string   `json:"parameters"`
-		ParametersOrigin    string     `json:"parameters_origin"`
-		Sources             []string   `json:"sources"`
-		EvidenceURL         string     `json:"evidence_url,omitempty"`
-		RawRequest          string     `json:"raw_request,omitempty"`
-		Notes               string     `json:"notes,omitempty"`
-		ManualAdded         bool       `json:"manual_added"`
-		EditedAt            *time.Time `json:"edited_at,omitempty"`
-		FirstSeen           time.Time  `json:"first_seen"`
-		LastSeen            time.Time  `json:"last_seen"`
-		TimesSeen           int        `json:"times_seen"`
+		ID               string `json:"id"`
+		Method           string `json:"method"`
+		MethodConfidence string `json:"method_confidence"`
+		Scheme           string `json:"scheme"`
+		Domain           string `json:"domain"`
+		Port             *int   `json:"port,omitempty"`
+		Path             string `json:"path"`
+		Fragment         string `json:"fragment,omitempty"`
+		// The reflection probe's verdict and the grade derived from it. reflection_grade is computed
+		// HERE rather than by each client, because the client and the MCP layer had already drifted
+		// apart on the content type rule: XML graded high on screen and low in the filter.
+		ReflectionStatus      string     `json:"reflection_status,omitempty"`
+		ReflectionContentType string     `json:"reflection_content_type,omitempty"`
+		ReflectionSurvived    []string   `json:"reflection_survived,omitempty"`
+		ReflectionGrade       string     `json:"reflection_grade,omitempty"`
+		InsertionPoint        string     `json:"insertion_point"`
+		InsertionConfidence   string     `json:"insertion_confidence"`
+		Parameters            []string   `json:"parameters"`
+		ParametersOrigin      string     `json:"parameters_origin"`
+		Sources               []string   `json:"sources"`
+		EvidenceURL           string     `json:"evidence_url,omitempty"`
+		RawRequest            string     `json:"raw_request,omitempty"`
+		Notes                 string     `json:"notes,omitempty"`
+		ManualAdded           bool       `json:"manual_added"`
+		EditedAt              *time.Time `json:"edited_at,omitempty"`
+		FirstSeen             time.Time  `json:"first_seen"`
+		LastSeen              time.Time  `json:"last_seen"`
+		TimesSeen             int        `json:"times_seen"`
+		// The probe's own rows for this vector, one per input.
+		//
+		// IT WAS ALREADY BEING RENDERED AND NEVER SENT. AttackVectorsModal has drawn a per-input
+		// table off vector.reflection_probes since the probe shipped, and nothing ever populated
+		// the field, so the table has never once appeared: every vector showed only the rolled-up
+		// badge, and a roll-up hides the useful half. A vector with five parameters where exactly
+		// one reflects is a vector with one thing to test, and the detail saying WHY an input was
+		// not measured only exists down here.
+		ReflectionProbes []reflectionProbeRow `json:"reflection_probes,omitempty"`
 	}
 	out := []vector{}
 	for rows.Next() {
@@ -225,8 +277,19 @@ func GetAttackVectors(w http.ResponseWriter, r *http.Request) {
 		if rows.Scan(&v.ID, &v.Method, &v.MethodConfidence, &v.Scheme, &v.Domain, &v.Port, &v.Path,
 			&v.InsertionPoint, &v.InsertionConfidence, &v.Parameters, &v.ParametersOrigin,
 			&v.Sources, &v.EvidenceURL, &v.RawRequest, &v.Notes, &v.ManualAdded, &v.EditedAt,
-			&v.FirstSeen, &v.LastSeen, &v.TimesSeen) == nil {
+			&v.FirstSeen, &v.LastSeen, &v.TimesSeen, &v.Fragment,
+			&v.ReflectionStatus, &v.ReflectionContentType, &v.ReflectionSurvived) == nil {
+			v.ReflectionGrade = XSSCandidateGrade(v.ReflectionStatus, v.ReflectionContentType, v.ReflectionSurvived,
+				v.InsertionPoint)
 			out = append(out, v)
+		}
+	}
+
+	// ONE query for every vector on the page rather than one per vector: a two hundred vector list
+	// would otherwise be two hundred round trips to draw a table.
+	if probes := loadReflectionProbeRows(ctx, scopeTargetID); len(probes) > 0 {
+		for i := range out {
+			out[i].ReflectionProbes = probes[out[i].ID]
 		}
 	}
 
@@ -242,6 +305,66 @@ func GetAttackVectors(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// reflectionProbeRow is one input's stored verdict, as the vector list hands it to the UI.
+type reflectionProbeRow struct {
+	Parameter      string `json:"parameter"`
+	InsertionPoint string `json:"insertion_point"`
+	Status         string `json:"status"`
+	// Grade is the SERVER'S verdict for this one input, and it is on the row because without it
+	// the client had to derive one. It derived it from status and content type alone, because
+	// those were the only two fields this payload carried, so every raw reflection into an HTML or
+	// empty content type rendered XSS High: the two fail-loud defaults for an absent survived list
+	// and an absent insertion point both said yes. The results panel one tab over showed the
+	// server's grade for the same input, so the same row read High here and Needs a Chain there.
+	// Go is the authority on the grade and there is now only one derivation of it.
+	Grade       string   `json:"grade"`
+	Survived    []string `json:"survived"`
+	ContentType string   `json:"content_type,omitempty"`
+	HTTPStatus  int      `json:"http_status,omitempty"`
+	Evidence    string   `json:"evidence,omitempty"`
+	// Detail is WHY, in the row, which is where a reason belongs. A refusal, a block, a dead
+	// credential and a passive echo each have something to say about one input, and saying it on
+	// the card instead turns a card into a paragraph.
+	Detail string `json:"detail,omitempty"`
+	// EvidenceSource is "active" (a canary was sent) or "passive" (a value the crawl already sent
+	// was found in the response the crawl already stored). The row means a different thing in each
+	// case, so the table shows it rather than leaving the reader to infer it from the status.
+	EvidenceSource string `json:"evidence_source,omitempty"`
+}
+
+// withGrade fills Grade from the four fields that belong together, derived on read and never
+// stored, exactly as the results endpoint does it. Any row leaving this file goes through here.
+func (p reflectionProbeRow) withGrade() reflectionProbeRow {
+	p.Grade = XSSCandidateGrade(p.Status, p.ContentType, p.Survived, p.InsertionPoint)
+	return p
+}
+
+// loadReflectionProbeRows returns every stored probe row for a target, grouped by vector.
+func loadReflectionProbeRows(ctx context.Context, scopeTargetID string) map[string][]reflectionProbeRow {
+	rows, err := dbPool.Query(ctx, `
+		SELECT vector_id::text, COALESCE(parameter,''), COALESCE(insertion_point,''), status,
+		       COALESCE(survived, ARRAY[]::text[]), COALESCE(content_type,''), http_status,
+		       COALESCE(evidence,''), COALESCE(detail,''), COALESCE(evidence_source,'active')
+		FROM vector_reflection_probes
+		WHERE scope_target_id = $1
+		ORDER BY vector_id, parameter`, scopeTargetID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := map[string][]reflectionProbeRow{}
+	for rows.Next() {
+		var vectorID string
+		var p reflectionProbeRow
+		if rows.Scan(&vectorID, &p.Parameter, &p.InsertionPoint, &p.Status, &p.Survived,
+			&p.ContentType, &p.HTTPStatus, &p.Evidence, &p.Detail, &p.EvidenceSource) != nil {
+			continue
+		}
+		out[vectorID] = append(out[vectorID], p.withGrade())
+	}
+	return out
+}
+
 type attackVectorRequest struct {
 	Method         string   `json:"method"`
 	URL            string   `json:"url"`
@@ -253,6 +376,10 @@ type attackVectorRequest struct {
 	Parameters     []string `json:"parameters"`
 	Notes          string   `json:"notes"`
 	RawRequest     string   `json:"raw_request"`
+	// Fragment is the hash, with or without its leading "#", for a fragment vector whose URL is not
+	// being pasted whole. The edit form has no URL box at all, so without this field the insertion
+	// point could be SET to fragment and the fragment itself could never be supplied.
+	Fragment string `json:"fragment"`
 }
 
 // CreateAttackVector answers POST /attack-vectors/{scope_target_id}.
@@ -356,6 +483,10 @@ func attackVectorsFromRequest(req attackVectorRequest) ([]attackVector, []string
 		Port: req.Port, Path: req.Path, InsertionConfidence: "observed",
 		ParametersOrigin: "observed", Parameters: req.Parameters,
 	}
+	// The point the operator actually asked for, resolved BEFORE the URL is taken apart, because
+	// the two branches below have to know whether this row is going to be a fragment vector. It is
+	// applied again at the end: this is the same value, read early, not a second decision.
+	wantedPoint := normaliseInsertionPoint(req.InsertionPoint)
 	if u := strings.TrimSpace(req.URL); u != "" {
 		parsed, err := url.Parse(u)
 		if err != nil || parsed.Host == "" {
@@ -368,11 +499,56 @@ func attackVectorsFromRequest(req attackVectorRequest) ([]attackVector, []string
 				v.Path = "/"
 			}
 			// A query string in the URL names the parameters, so the operator does not have to twice.
-			if len(v.Parameters) == 0 && parsed.RawQuery != "" {
+			//
+			// Not when the operator explicitly asked for the fragment. The names in a query string
+			// are QUERY names, and lending them to a fragment vector composes a hash out of inputs
+			// no client-side script reads, then files whatever comes back against a fragment nobody
+			// observed. It also slips past fragmentVectorError, whose only test for "this fragment
+			// vector has something in it" is a non-empty fragment OR a parameter: measured, POSTing
+			// https://h.example.com/x?a=1 with insertion_point=fragment was ACCEPTED as
+			// fragment="" parameters=[a] and composed #a=rs0n. This is the create-side twin of the
+			// rule fragmentUpdateError already applies to an edit.
+			if len(v.Parameters) == 0 && parsed.RawQuery != "" && wantedPoint != "fragment" {
 				v.Parameters = queryKeys(parsed.RawQuery)
 				if req.InsertionPoint == "" {
 					v.InsertionPoint = "query"
 				}
+			}
+			// A hash in the pasted URL is read the same way, and it WINS over the query string when
+			// the operator named no insertion point. Someone who types a URL with a fragment on it
+			// meant the fragment: the query string is usually just the rest of the address they
+			// copied, and defaulting to query would silently file the row under a point no DOM sink
+			// is reachable from.
+			if fragment := parsed.EscapedFragment(); fragment != "" {
+				if parts, ok := parseFragment(fragment); ok {
+					v.Fragment = parts.Route
+					if req.InsertionPoint == "" {
+						v.InsertionPoint = "fragment"
+					}
+					// The fragment's own names are adopted whenever the row IS a fragment vector,
+					// not only when the operator left the point blank. Pasting
+					// #/connect/edit?token=abc and then picking `fragment` from the select used to
+					// drop the token and compose the bare route, which is the same silent loss of
+					// the payload slot that D1 was, one layer up.
+					if (req.InsertionPoint == "" || wantedPoint == "fragment") && len(req.Parameters) == 0 {
+						v.Parameters = parts.Names
+						v.Signals = parts.Signals
+					}
+				}
+			}
+		}
+	}
+	// A fragment typed into its own field, rather than pasted on the end of a URL. Same parser, so
+	// #/connect/edit?tab=x typed by hand becomes the same row as the same string pasted on a URL.
+	if raw := strings.TrimSpace(req.Fragment); raw != "" {
+		if parts, ok := parseFragment(raw); ok {
+			v.Fragment = parts.Route
+			if len(parts.Names) > 0 && len(req.Parameters) == 0 {
+				v.Parameters = parts.Names
+				v.Signals = parts.Signals
+			}
+			if req.InsertionPoint == "" {
+				v.InsertionPoint = "fragment"
 			}
 		}
 	}
@@ -393,11 +569,18 @@ func attackVectorsFromRequest(req attackVectorRequest) ([]attackVector, []string
 		errs = append(errs, "A vector needs a host. Give a full URL, or fill in the domain.")
 	}
 	if v.InsertionPoint == "" {
-		errs = append(errs, "A vector needs an insertion point: query, body, header, cookie or path.")
+		errs = append(errs, "A vector needs an insertion point: query, body, header, cookie, path "+
+			"or fragment.")
 	}
-	if len(v.Parameters) == 0 && v.InsertionPoint != "path" {
+	// The fragment joins the path as a point whose value is not a named parameter. A bare client
+	// route or a scroll anchor, #/billing or #preferences, is one opaque slot and has no names in it
+	// at all, so requiring one would refuse the most common fragment there is.
+	if len(v.Parameters) == 0 && v.InsertionPoint != "path" && v.InsertionPoint != "fragment" {
 		errs = append(errs, "A vector needs at least one parameter name, unless the insertion point "+
-			"is the path itself.")
+			"is the path or the fragment itself.")
+	}
+	if msg := fragmentVectorError(v.InsertionPoint, v.Fragment, v.Parameters); msg != "" {
+		errs = append(errs, msg)
 	}
 	return []attackVector{v}, errs
 }
@@ -574,10 +757,10 @@ func UpdateAttackVector(w http.ResponseWriter, r *http.Request) {
 	var scopeTargetID string
 	if dbPool.QueryRow(ctx, `
 		SELECT scope_target_id::text, method, scheme, domain, COALESCE(port,0), path,
-		       insertion_point, parameters
+		       insertion_point, parameters, COALESCE(fragment,'')
 		FROM attack_vectors WHERE id = $1`, id).
 		Scan(&scopeTargetID, &cur.Method, &cur.Scheme, &cur.Domain, &cur.Port, &cur.Path,
-			&cur.InsertionPoint, &cur.Parameters) != nil {
+			&cur.InsertionPoint, &cur.Parameters, &cur.Fragment) != nil {
 		writeJSONError(w, http.StatusNotFound, "not_found", "No such attack vector.")
 		return
 	}
@@ -594,15 +777,57 @@ func UpdateAttackVector(w http.ResponseWriter, r *http.Request) {
 	if v := strings.TrimSpace(req.Scheme); v != "" {
 		cur.Scheme = v
 	}
+	wasPoint := cur.InsertionPoint
 	if point := normaliseInsertionPoint(req.InsertionPoint); point != "" {
 		cur.InsertionPoint = point
+	}
+	// A fragment supplied with the edit, read through the same parser as the create path, so a route
+	// carrying its own query arrives as a route plus its names rather than as one opaque string.
+	fragmentGiven := false
+	if raw := strings.TrimSpace(req.Fragment); raw != "" {
+		if parts, ok := parseFragment(raw); ok {
+			fragmentGiven = true
+			cur.Fragment = parts.Route
+			// The names come off the fragment only when the row IS a fragment vector after this
+			// edit. Without that test, `manage_attack_vectors update` carrying a fragment but no
+			// insertion_point and no parameters replaces a QUERY vector's parameter names with the
+			// fragment's, re-keys the row, and pushes its real key into superseded_keys, which
+			// permanently blocks consolidation from ever re-creating it. The hash itself is
+			// discarded a few lines down for exactly this reason; the names have to go with it.
+			// The UI never hit this because it sends '' for every non-fragment point.
+			if len(parts.Names) > 0 && req.Parameters == nil && cur.InsertionPoint == "fragment" {
+				cur.Parameters = parts.Names
+			}
+		}
+	}
+	// Only a fragment vector carries a fragment. An operator moving a row to another point is saying
+	// the payload goes somewhere that IS sent, and leaving the old hash on it would keep it in the
+	// identity of a vector that no longer has one.
+	if cur.InsertionPoint != "fragment" {
+		cur.Fragment = ""
 	}
 	if req.Parameters != nil {
 		cur.Parameters = req.Parameters
 	}
-	if len(cur.Parameters) == 0 && cur.InsertionPoint != "path" {
+	// THE GUARD THE CREATE PATH HAD AND THIS ONE DID NOT. Without it, switching a query vector to
+	// fragment stored insertion_point='fragment' with fragment='', TargetURL composed the ordinary
+	// query URL, domdig scanned it, and the clean result was filed against a fragment that never
+	// existed. The edit form now has a fragment field, so the answer to a switch with no fragment is
+	// to refuse it rather than to store an empty one.
+	if msg := fragmentUpdateError(cur.InsertionPoint, wasPoint, cur.Fragment, cur.Parameters,
+		fragmentGiven); msg != "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid_vector", msg)
+		return
+	}
+	// fragment is exempt for the same reason path is: its value is not a named parameter. cur.Fragment
+	// was loaded above and is carried through untouched, which it has to be. key() folds the fragment
+	// in, so an edit that read the row without it would recompute a DIFFERENT key for a vector nobody
+	// changed, record the real one in superseded_keys, and permanently block consolidation from
+	// re-creating it.
+	if len(cur.Parameters) == 0 && cur.InsertionPoint != "path" && cur.InsertionPoint != "fragment" {
 		writeJSONError(w, http.StatusBadRequest, "invalid_vector",
-			"A vector needs at least one parameter name unless its insertion point is the path.")
+			"A vector needs at least one parameter name unless its insertion point is the path "+
+				"or the fragment.")
 		return
 	}
 
@@ -612,6 +837,7 @@ func UpdateAttackVector(w http.ResponseWriter, r *http.Request) {
 		UPDATE attack_vectors
 		SET method = $2, scheme = $3, domain = $4, path = $5, insertion_point = $6,
 		    parameters = $7, vector_key = $8, notes = COALESCE(NULLIF($9,''), notes),
+		    fragment = $10,
 		    edited_at = NOW(),
 		    -- Remember the identity this row is moving away from, so consolidation does not put the
 		    -- uncorrected version back the next time it runs.
@@ -622,7 +848,7 @@ func UpdateAttackVector(w http.ResponseWriter, r *http.Request) {
 		    insertion_confidence = 'observed'
 		WHERE id = $1`,
 		id, cur.Method, cur.Scheme, cur.Domain, cur.Path, cur.InsertionPoint, params,
-		cur.key(), req.Notes); err != nil {
+		cur.key(), req.Notes, cur.Fragment); err != nil {
 		// The only way this collides is an edit onto a vector that already exists, which is a merge
 		// rather than an error worth a stack trace.
 		writeJSONError(w, http.StatusConflict, "already_exists",

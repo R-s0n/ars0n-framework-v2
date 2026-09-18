@@ -1008,7 +1008,7 @@ const ExploreAttackSurfaceModal = ({
                 {renderFiltersForTab()}
               </div>
 
-              {/* G1.6: virtualized so only the rows near the viewport mount — the DOM stays
+              {/* G1.6: virtualized so only the rows near the viewport mount - the DOM stays
                   constant whether there are 10 assets or 10k. Columns are flex-weighted (this is
                   a flex "table", not a <table>), so widths are even rather than content-sized. */}
               <VirtualizedTable

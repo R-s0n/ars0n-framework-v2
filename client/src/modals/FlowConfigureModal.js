@@ -847,7 +847,7 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
     // read as a single green tick, because the operator would then run believing the programme's
     // mandatory header is going out.
     if (done.length) setSaveNotice(`Saved: ${done.join('; ')}.`);
-    if (failed.length) setSaveError(`Not saved — ${failed.join('; ')}.`);
+    if (failed.length) setSaveError(`Not saved - ${failed.join('; ')}.`);
   };
 
   const attemptClose = () => {
@@ -1076,7 +1076,7 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
                 <div className="mt-1">
                   {fallbackSetAside.toLocaleString()} more recorded endpoint
                   {fallbackSetAside === 1 ? ' is' : 's are'} not listed, because the preview set them
-                  aside for reasons that belong to the run rather than to the endpoint — recorded with
+                  aside for reasons that belong to the run rather than to the endpoint - recorded with
                   a verb the preview was not sending, or an unusable URL. They are not blocked, and
                   they are not hidden from Detect Flows.
                 </div>
@@ -1171,18 +1171,18 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
                 className="d-inline-block align-middle me-1"
                 style={{ width: '10px', height: '10px', background: '#495057' }}
               />
-              ticked — a run may request it
+              ticked - a run may request it
             </span>
             <span className="text-white-50">
               <span
                 className="d-inline-block align-middle me-1"
                 style={{ width: '10px', height: '10px', background: '#1b1e21', border: '1px solid #495057' }}
               />
-              unticked — your scoping decision, tick it back any time
+              unticked - your scoping decision, tick it back any time
             </span>
             <span className="text-danger">
               <i className="bi bi-shield-lock-fill me-1" />
-              excluded — a written safety rule, no checkbox, changed only in Detect Flows
+              excluded - a written safety rule, no checkbox, changed only in Detect Flows
             </span>
           </div>
         </div>
@@ -1248,7 +1248,7 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
                 <div className="text-center py-2 border-top border-secondary">
                   <span className="text-warning" style={{ fontSize: '0.7rem' }}>
                     Showing the first {RENDER_CAP.toLocaleString()} of {filtered.length.toLocaleString()}.
-                    This is a display cap only — your selection covers all
+                    This is a display cap only - your selection covers all
                     {' '}{filtered.length.toLocaleString()}, drawn or not.
                   </span>
                   <Button
@@ -1283,7 +1283,7 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
           : (
             <span className="text-white-50 fst-italic">
               {effectiveUA.unknownBase && uaMode === 'append'
-                ? '«whatever User-Agent this run would otherwise send — this screen was not told what it is»'
+                ? '«whatever User-Agent this run would otherwise send - this screen was not told what it is»'
                 : '«unchanged: the framework\'s own User-Agent»'}
             </span>
           )}
@@ -1297,7 +1297,7 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
         </div>
       ) : (
         <div className="text-white-50 fst-italic">
-          «no programme header — check the brief before you run anything»
+          «no programme header - check the brief before you run anything»
         </div>
       )}
       <div>

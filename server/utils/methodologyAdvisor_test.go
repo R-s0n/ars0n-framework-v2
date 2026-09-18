@@ -151,3 +151,105 @@ func TestEveryPieceOfAdviceNamesSomethingToDo(t *testing.T) {
 		}
 	}
 }
+
+// A TARGET WITH NO HASH ROUTING HAS NO FRAGMENT GAP, and must not be told it does.
+//
+// The insertion-point check counted the fragment with the other five and raised the generic gap on
+// every history-routed target: "these insertion points have zero vectors: [fragment]. Every tool in
+// every section will report nothing wrong with them", plus an action telling the operator to add
+// vectors by hand at the empty point. Every clause of that is wrong here. Only domdig can reach a
+// fragment, so "every tool in every section" is not the consequence; a fragment is not discoverable
+// by anything, so nobody failed to look; and the routes it advises hand-writing do not exist.
+//
+// Measured on the live target the day this was written: 4643 captures with a hash in the URL, 0;
+// endpoints with a client route or a recorded fragment, 0. The right answer there is silence.
+func TestNoHashRoutingMeansNoFragmentGap(t *testing.T) {
+	s := TargetState{
+		CrawlCaptures: 8260, Vectors: 417, ContentDiscovery: 1, FuzzRuns: 1,
+		FragmentsObserved: 0,
+		VectorsByPoint: map[string]int{
+			"query": 129, "path": 97, "cookie": 86, "header": 64, "body": 41, "fragment": 0},
+	}
+	for _, f := range adviseOnState(s) {
+		if strings.Contains(strings.ToLower(f.Title+f.Detail+f.Action), "fragment") {
+			t.Errorf("a target with no observed fragment was told it has a fragment gap: %s / %s",
+				f.Title, f.Detail)
+		}
+	}
+}
+
+// And where a fragment WAS observed, the zero is a real gap and is raised in its own words.
+//
+// This is the privatealps.net state, measured the same day: 7 observations, 0 fragment vectors,
+// because consolidation had not been run since the fragment point existed.
+func TestAnObservedFragmentWithNoVectorIsAGap(t *testing.T) {
+	s := TargetState{
+		CrawlCaptures: 8260, Vectors: 417, ContentDiscovery: 1, FuzzRuns: 1,
+		FragmentsObserved: 7,
+		VectorsByPoint: map[string]int{
+			"query": 129, "path": 97, "cookie": 86, "header": 64, "body": 41, "fragment": 0},
+	}
+	var found *AdvisorFinding
+	for i, f := range adviseOnState(s) {
+		if strings.Contains(strings.ToLower(f.Title), "fragment") {
+			found = &adviseOnState(s)[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("a fragment was observed and no fragment vector exists, and nothing said so")
+	}
+	if !strings.Contains(found.Detail, "7") {
+		t.Errorf("the advice must state the measured count, got: %s", found.Detail)
+	}
+	if !strings.Contains(strings.ToLower(found.Action), "domdig") {
+		t.Errorf("the advice must name the one tool that can reach a fragment, got: %s", found.Action)
+	}
+	if strings.Contains(found.Detail, "every tool in every section") {
+		t.Errorf("the generic consequence is false for the fragment: %s", found.Detail)
+	}
+}
+
+// An UNREADABLE check is not a zero and is not evidence either way. The advisor's own rule.
+func TestAnUnreadableFragmentCountRaisesNothing(t *testing.T) {
+	s := TargetState{
+		CrawlCaptures: 10, Vectors: 54, ContentDiscovery: 1, FuzzRuns: 1,
+		FragmentsObserved: -1,
+		Unreadable:        []string{"observed_fragments"},
+		VectorsByPoint: map[string]int{
+			"query": 24, "body": 10, "cookie": 20, "header": 5, "path": 5, "fragment": 0},
+	}
+	for _, f := range adviseOnState(s) {
+		// The unreadable-checks note is allowed to NAME observed_fragments: saying "this check did
+		// not run" is the opposite of turning it into advice, and reporting it is what stops a
+		// failed query from reading as a zero.
+		if f.Title == "Some checks could not be run" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(f.Title+f.Detail), "fragment") {
+			t.Errorf("an unreadable count became advice: %s / %s", f.Title, f.Detail)
+		}
+	}
+}
+
+// The coverage endpoint used to argue with itself in one JSON object: a generic consequence saying
+// the fragment is a gap in coverage, beside a why saying zero there is usually the truth.
+func TestTheFragmentConsequenceDoesNotContradictItsOwnReason(t *testing.T) {
+	c := insertionPointGapConsequence("fragment")
+	if strings.Contains(c, "every tool in every section") {
+		t.Errorf("only domdig reaches a fragment, so this is false: %s", c)
+	}
+	if !strings.Contains(c, "domdig") {
+		t.Errorf("the fragment consequence must name the one tool that reaches it: %s", c)
+	}
+	if strings.Contains(insertionPointGapReason("fragment"), "gap") !=
+		strings.Contains(c, "gap") {
+		// Both mention a gap, or neither does. They may not say opposite things about one.
+		t.Logf("consequence: %s", c)
+	}
+	for _, point := range []string{"query", "header", "cookie", "path", "body"} {
+		if !strings.Contains(insertionPointGapConsequence(point), "every tool in every section") {
+			t.Errorf("%s is a SENT point and its zero really is that gap: %s",
+				point, insertionPointGapConsequence(point))
+		}
+	}
+}

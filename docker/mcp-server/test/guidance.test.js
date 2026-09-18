@@ -49,6 +49,188 @@ test('lookup merges a per-action override over the tool entry', () => {
   assert.strictEqual(scoped.vuln, base.vuln, 'a field the override does not restate is inherited');
 });
 
+// --- lies is a list ----------------------------------------------------------------------------
+//
+// `lies` is the one field that accumulates rather than being replaced, because a lie is a fact about
+// the TOOL and stays true when a caller picks one action of it. These tests pin three things: the
+// old single-string shape still works, an action that has learned its own lie is handed the
+// tool-level ones as well instead of silently replacing them, and the ACTION'S OWN lie is the one
+// that leads, because that is the only one the compact reminder can still deliver.
+//
+// Every test in this block was written to fail against the pre-list code. Three earlier ones did
+// not: they passed unchanged against it and therefore pinned nothing, which is the reason the
+// dedupe, budget and registry-lint tests below look the way they do. `String(anArray)` comma-joins
+// and `firstSentence` stops at the first full stop, so the old compactLine returned the same lead
+// by accident for any list whose first entry ends in a sentence.
+
+test('a lies field written as a plain string still resolves, as a list of one', () => {
+  // The shape 103 entries were authored in. asLies is the single place that rule lives, so it is
+  // checked directly as well as through a real entry.
+  assert.deepStrictEqual(guidance.asLies('one lie'), ['one lie']);
+  assert.deepStrictEqual(guidance.asLies(['one lie']), ['one lie']);
+
+  const entry = guidance.lookup('find_high_value_targets');
+  assert.ok(Array.isArray(entry.lies), 'every attached lies field is a list, whatever it was authored as');
+  assert.strictEqual(entry.lies.length, 1);
+  assert.ok(entry.lies[0].includes('ROI is computed'));
+});
+
+test('a lies field written as a list returns all of them, in order', () => {
+  const line = guidance.compactLine({
+    step: 'S',
+    tool: 'T.',
+    lies: ['FIRST LIE, long enough to be a sentence.', 'SECOND LIE, also long enough.'],
+    next: 'x',
+  });
+  // Only the first leads the reminder. The rest went out in full on the first call.
+  assert.ok(line.includes('FIRST LIE'), `the first lie should lead: ${line}`);
+  assert.ok(!line.includes('SECOND LIE'), `only one lie belongs in the compact line: ${line}`);
+});
+
+test('an action override accumulates lies rather than replacing the tool level ones', () => {
+  // A real pair: manage_sqli/run defines its own lies and the tool entry defines its own. Before
+  // this change the tool-level lesson (how the SQLi section as a whole misleads) was dropped on
+  // exactly the call that runs the scanners, which is when it matters most.
+  const base = guidance.lookup('manage_sqli');
+  const scoped = guidance.lookup('manage_sqli', 'run');
+
+  assert.ok(base.lies.length > 0, 'manage_sqli should carry tool-level lies');
+  assert.ok(scoped.lies.length > base.lies.length,
+    'the action adds to the tool-level lies instead of replacing them');
+  for (const lie of base.lies) {
+    assert.ok(scoped.lies.includes(lie), 'a tool-level lie survives an action override');
+  }
+  assert.deepStrictEqual(scoped.lies.slice(scoped.lies.length - base.lies.length), base.lies,
+    'the tool-level lies follow the action ones, in their authored order');
+  assert.ok(!base.lies.includes(scoped.lies[0]),
+    'the ACTION lie leads: the tool-level one went out in full on the session first call, the ' +
+    'action one has been delivered zero times, so the reminder repeats the action one');
+
+  // And the contrast that makes the rule a decision rather than an accident: every other field the
+  // override restates is still replaced outright. manage_sqli/run restates next and nothing else.
+  assert.notStrictEqual(scoped.next, base.next, 'next is replaced, not accumulated');
+  assert.strictEqual(scoped.tool, base.tool, 'a field the override does not restate is inherited');
+});
+
+test('the action lie, not the tool lie, leads the compact line of every action that has one', () => {
+  // The delivery guard, registry-wide. The brief is tracked per TOOL (guidance/session.js), so the
+  // full entry goes out once per tool per session and every later call gets compactLine(). The
+  // first version of the list change ordered tool-level lies first, so the reminder always repeated
+  // the tool lie: MEASURED, 156 action overrides define lies and the action lie led 0 of the 343
+  // compact lines, which for an eight-action tool means seven lessons delivered on no call at all.
+  const missed = [];
+  let checked = 0;
+  for (const [name, entry] of Object.entries(guidance.ALL)) {
+    for (const [action, override] of Object.entries(entry.actions || {})) {
+      const own = guidance.asLies(override.lies);
+      if (own.length === 0) continue;
+      checked++;
+      const merged = guidance.lookup(name, action);
+      if (merged.lies[0] !== own[0]) missed.push(`${name}:${action}`);
+    }
+  }
+  assert.deepStrictEqual(missed, [], `these actions cannot deliver their own lie: ${missed.join(', ')}`);
+  // Not vacuous: if a refactor stopped overrides carrying lies at all the loop above would pass on
+  // an empty set, which is the failure this assertion exists to catch.
+  assert.ok(checked > 100, `expected the registry to still hold action-level lies, found ${checked}`);
+});
+
+test('a lie repeated by an action override is not attached twice', () => {
+  const shared = 'A zero here can mean nothing was eligible.';
+  const entry = {
+    step: 'S',
+    tool: 'T.',
+    lies: [shared, 'Only the tool level knows this one.'],
+    next: 'x',
+    actions: { run: { lies: [shared, 'Only the action knows this one.'] } },
+  };
+  // lookup() reads the registry, so the dedupe is exercised through the same code path by
+  // temporarily registering the fixture rather than by reimplementing the merge here.
+  guidance.ALL.__lies_fixture__ = entry;
+  try {
+    const merged = guidance.lookup('__lies_fixture__', 'run');
+    // Exact list, not a contains check: the dedupe and the most-specific-first order are one
+    // decision and asserting only the count would pass on either ordering.
+    assert.deepStrictEqual(merged.lies, [
+      shared,
+      'Only the action knows this one.',
+      'Only the tool level knows this one.',
+    ], 'the repeated lie appears once, at the ACTION position, which is first');
+  } finally {
+    delete guidance.ALL.__lies_fixture__;
+  }
+});
+
+test('the compact line takes one lie whole and never the comma join of the list', () => {
+  // This is what the earlier "five lies still fit the budget" test failed to pin. `String(array)`
+  // comma-joins, and the old compactLine passed the raw field to firstSentence, so with a first lie
+  // that ENDS IN A FULL STOP the old code happened to return the same lead and the test could not
+  // tell the two implementations apart. A first lie shorter than MIN_SENTENCE can: firstSentence
+  // skips a terminator that early, runs on into the comma and returns "Short one., Then the next
+  // lie entirely." The lead must be the first lie and nothing else, whatever its length.
+  const joined = guidance.compactLine({
+    step: '6/8 Vector Scanning',
+    tool: 'Runs the scanners.',
+    lies: ['A zero is not a clean.', 'THE SECOND LIE, which must not be dragged in behind a comma.'],
+    next: 'get_tool_output',
+  });
+  assert.ok(joined.includes('A zero is not a clean.'), `the first lie leads: ${joined}`);
+  assert.ok(!joined.includes('THE SECOND LIE'), `one lie, not a comma join: ${joined}`);
+  assert.ok(!joined.includes('.,'), `the array was stringified rather than indexed: ${joined}`);
+});
+
+test('the compact line still fits the budget when an entry carries five lies', () => {
+  const entry = {
+    step: '6/8 Vector Scanning',
+    tool: 'Runs the SQL injection scanners against the selected vectors.',
+    lies: [
+      'A scanner handed a flag it does not understand exits 0 having sent nothing and the runner '
+        + 'records every vector clean, which is indistinguishable in the response from a real clean.',
+      'The vector count counts rows the run skipped, so it is a selection size and not a coverage number.',
+      'A per-vector timeout is recorded as a completed scan rather than as an incomplete one.',
+      'The results view reads the last run only, so an older finding on the same vector is not shown.',
+      'An empty findings list is also what a run that never started looks like from here.',
+    ],
+    next: 'get_tool_output, then manage_attack_vectors',
+  };
+  const line = guidance.compactLine(entry);
+  // The registry has no five-lie entry yet, so this is the only place the ceiling is exercised
+  // against one. The registry-wide budget test further down is what guards the shipped entries.
+  assert.ok(line.length <= guidance.COMPACT_MAX,
+    `five lies must not widen the reminder: ${line.length} characters`);
+  assert.ok(line.startsWith('6/8 Vector Scanning.'), `the step survives: ${line}`);
+  assert.ok(line.includes('Next: '), `the next pointer survives: ${line}`);
+  assert.ok(!line.includes('vector count'), 'only the first lie is allowed into the reminder');
+});
+
+test('every lies field in the registry survives asLies without losing an entry', () => {
+  // A DATA LINT, not a regression test, and it is kept as one deliberately. It passes against any
+  // version of the merge because what it checks is the registry, not the code: a null, a number or
+  // an empty string authored into a lies list is dropped SILENTLY by asLies, so an author would see
+  // a lesson quietly not ship. The cheapest place to catch that is here.
+  //
+  // It calls asLies rather than restating the rule, which the first version of it did. Restating it
+  // meant the lint agreed with a broken asLies by construction and could not notice a change in it;
+  // comparing the input count with the survivor count notices both a bad entry and a bad drop.
+  const bad = [];
+  const check = (where, value) => {
+    if (value === undefined) return;
+    const raw = Array.isArray(value) ? value : [value];
+    if (raw.length === 0) bad.push(`${where} has an empty lies list`);
+    const kept = guidance.asLies(value);
+    if (kept.length !== raw.length) {
+      bad.push(`${where}: asLies kept ${kept.length} of ${raw.length} lies, so one is being dropped`);
+    }
+  };
+  for (const [name, entry] of Object.entries(guidance.ALL)) {
+    check(name, entry.lies);
+    for (const [action, override] of Object.entries(entry.actions || {})) {
+      check(`${name}:${action}`, override.lies);
+    }
+  }
+  assert.deepStrictEqual(bad, [], bad.join(', '));
+});
+
 test('lookup falls back to the tool entry for an action with no override', () => {
   const base = guidance.lookup('manage_sqli');
   const unknownAction = guidance.lookup('manage_sqli', 'no_such_action_exists');
@@ -116,7 +298,7 @@ test('every real entry derives a non-empty compact line', () => {
 //
 // This replaces an assertion that read `line.length < entry.tool.length + 400`, which named the
 // right property and could not fail: it compared the line against a bound derived from a field the
-// line does not contain. Under it the mean line was 218 characters and the worst was 401, on
+// line does not contain. Under it the mean line was 217 characters and the worst was 394, on
 // run_endpoint_scan.
 test('no compact line exceeds the budget, for any tool or action', () => {
   const over = [];
@@ -374,4 +556,149 @@ test('every tool named in a next pointer exists', () => {
   }
   assert.deepStrictEqual([...unknown], [],
     `next pointers name tools that do not exist: ${[...unknown].join(', ')}`);
+});
+
+// --- `rule`: a standing constraint, not a caveat ----------------------------------------------
+
+test('a rule is inherited by every action of the tool that defines it', () => {
+  // Not a fixture. manage_xss carries the weaponisability bar and none of its four actions restate
+  // it, so the bar has to arrive through inheritance or it reaches nobody at the moment they are
+  // reading findings and deciding what is reportable.
+  const base = guidance.lookup('manage_xss');
+  assert.ok(base.rule && base.rule.length > 0, 'manage_xss lost its rule');
+  for (const action of Object.keys(guidance.ALL.manage_xss.actions)) {
+    const scoped = guidance.lookup('manage_xss', action);
+    assert.strictEqual(scoped.rule, base.rule, `manage_xss/${action} did not inherit the rule`);
+  }
+});
+
+test('a rule never reaches the compact line, however long it is', () => {
+  // This is what makes `rule` the right home for a long standing constraint. compactLine spends its
+  // 200 characters on step, one lie and next; a rule is delivered in full on the session's first
+  // call for the tool and costs the repeated reminder nothing. If that ever changes, a 973 character
+  // rule would blow the ceiling on every call of a scan loop.
+  const entry = { step: 'S', tool: 'TOOL SENTENCE.', lies: 'LIES SENTENCE.', next: 'x' };
+  const withoutRule = guidance.compactLine(entry);
+  const withRule = guidance.compactLine({ ...entry, rule: 'R'.repeat(5000) });
+  assert.strictEqual(withRule, withoutRule);
+});
+
+test('every rule in the registry is a non-empty string', () => {
+  const bad = [];
+  for (const [name, entry] of Object.entries(guidance.ALL)) {
+    const cases = [[name, entry], ...Object.entries(entry.actions || {})
+      .map(([a, o]) => [`${name}/${a}`, o])];
+    for (const [label, obj] of cases) {
+      if (!('rule' in obj)) continue;
+      if (typeof obj.rule !== 'string' || obj.rule.trim().length === 0) bad.push(label);
+    }
+  }
+  assert.deepStrictEqual(bad, [], `these rules are not usable text: ${bad.join(', ')}`);
+});
+
+test('the XSS rule still ranks every insertion point the corpus can produce', () => {
+  // A content assertion on purpose. The ranking is the whole substance of this rule and it is one
+  // sentence away from being edited into a general warning that ranks nothing, which would read
+  // fine and teach nothing.
+  //
+  // fragment is one of the six the consolidator emits. It used to be named here as a class that did
+  // not exist, which stopped being true when the Go side gained the insertion point in the same
+  // tree; the comment is corrected rather than deleted because the reason it is in the list changed
+  // and the list did not. A fragment vector is emitted only where a hash was observed, and domdig
+  // is the only tool that reaches one.
+  const rule = guidance.lookup('manage_xss').rule;
+  for (const point of ['query', 'path', 'fragment', 'cookie', 'header']) {
+    assert.ok(rule.includes(point), `the XSS rule no longer names the ${point} insertion point`);
+  }
+  // The fragment is top tier and undiscoverable, so the rule has to say who can reach one. Without
+  // this an edit could put fragment back in the ranking while dropping the reason its count is
+  // usually zero, and an agent would read a zero as "this target has no DOM XSS".
+  assert.ok(rule.includes('domdig'), 'the XSS rule no longer names the one tool that reaches a fragment');
+  // The three chains are what make a cookie or header finding reportable at all. Naming the class
+  // without naming a route to it is the advice that gets ignored.
+  for (const chain of ['Set-Cookie', 'sibling subdomain', 'cache']) {
+    assert.ok(rule.includes(chain), `the XSS rule no longer names the ${chain} chain`);
+  }
+});
+
+test('the attack vector lies do not deny that the fragment insertion point exists', () => {
+  // THE GUIDANCE LAYER AND THE GO LAYER SHIPPED IN THE SAME TREE AND CONTRADICTED EACH OTHER.
+  //
+  // lies[1] read "THERE IS NO FRAGMENT INSERTION POINT ... the consolidator simply never emits one
+  // ... domdig fuzzes the URL hash and can never be handed one". Every clause of that was made false
+  // by the Go change beside it: insertion_point now has six values, the consolidator emits a
+  // fragment vector from an observed hash, and domdig declares fragment in its reach. On the first
+  // manage_attack_vectors call of any session the framework would have taught an agent that a
+  // feature it had just built did not exist.
+  //
+  // The honest lesson is the one that survives: the zero at that point is not like the other five.
+  const lies = guidance.lookup('manage_attack_vectors').lies;
+  const fragmentLie = lies.find((l) => l.toLowerCase().includes('fragment'));
+  assert.ok(fragmentLie, 'the fragment is the one point whose zero needs explaining');
+  for (const denial of [
+    'THERE IS NO FRAGMENT INSERTION POINT',
+    'never emits one',
+    'can never be handed one',
+    'structurally absent',
+  ]) {
+    assert.ok(!fragmentLie.includes(denial),
+      `the guidance still denies the fragment point the Go layer emits: "${denial}"`);
+  }
+  assert.ok(fragmentLie.includes('domdig'),
+    'the lesson has to name the one tool that can reach a fragment');
+  assert.ok(/observed/i.test(fragmentLie),
+    'the lesson has to say a fragment vector is emitted only where a hash was observed');
+
+  // lies[0] is what compactLine repeats on every call, so it must not have moved.
+  assert.ok(lies[0].startsWith('This list is what every scanner below will run against'),
+    'the repeated lie changed, which changes every compact line on this tool');
+});
+
+// --- the census the comments claim -------------------------------------------------------------
+//
+// index.js justifies leading the compact line with the ACTION lie by a measured census, twice, in
+// prose: so many action overrides define lies, and the action lie led 0 of so many compact lines
+// under the old tool-first ordering. Prose goes stale the next time the registry grows, and a
+// stale measurement reads exactly like a current one. So the numbers are read back out of the
+// comments and compared against the live registry. When this fails, recount and edit the comment.
+// Do not delete the numbers: the ordering rule has no other justification on record.
+test('the measured census in the comments still matches the registry', () => {
+  let overridesWithLies = 0;
+  let lines = 0;
+  let actionLedUnderOldOrdering = 0;
+
+  for (const [name, entry] of Object.entries(guidance.ALL)) {
+    const toolLies = guidance.asLies(entry.lies);
+    lines += 1; // the line for a call with no action
+    for (const override of Object.values(entry.actions || {})) {
+      lines += 1;
+      const ownLies = guidance.asLies(override && override.lies);
+      if (ownLies.length === 0) continue;
+      overridesWithLies += 1;
+      // Tool lies first, action lies after, deduped: the ordering this file replaced.
+      if ([...toolLies, ...ownLies][0] === ownLies[0]) actionLedUnderOldOrdering += 1;
+    }
+  }
+
+  assert.strictEqual(actionLedUnderOldOrdering, 0,
+    'a tool entry has lost its own lies, so the old ordering would no longer bury the action lie');
+
+  // Both files state the census: index.js twice, and the delivery test above once.
+  // Comment continuations are unwrapped first, so a claim that happens to break across two lines
+  // is still one sentence to the regexes below.
+  const source = ['src/guidance/index.js', 'test/guidance.test.js']
+    .map((f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8')).join('\n')
+    .replace(/\n\s*\/\/ ?/g, ' ');
+  const counted = [...source.matchAll(/(\d+) action overrides define/g)].map((m) => Number(m[1]));
+  const totals = [...source.matchAll(/0 of the (\d+) compact lines/g)].map((m) => Number(m[1]));
+  assert.ok(counted.length >= 3 && totals.length >= 3,
+    'the census claim has been reworded, so this test can no longer read it; recount by hand');
+  for (const claimed of counted) {
+    assert.strictEqual(claimed, overridesWithLies,
+      `a comment claims ${claimed} action overrides define lies; the registry has ${overridesWithLies}`);
+  }
+  for (const claimed of totals) {
+    assert.strictEqual(claimed, lines,
+      `a comment claims ${claimed} compact lines; the registry produces ${lines}`);
+  }
 });

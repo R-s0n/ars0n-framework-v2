@@ -880,7 +880,7 @@ func AbortWAFProbeScan(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "abort_requested"})
 }
 
-// GetWAFProbeTripLedger handles GET /waf-probe/trip-ledger — deliberate blocks spent from this
+// GetWAFProbeTripLedger handles GET /waf-probe/trip-ledger - deliberate blocks spent from this
 // egress in the last 24 hours, shown in the consent tab so the cost is visible before it is spent.
 func GetWAFProbeTripLedger(w http.ResponseWriter, r *http.Request) {
 	var total int

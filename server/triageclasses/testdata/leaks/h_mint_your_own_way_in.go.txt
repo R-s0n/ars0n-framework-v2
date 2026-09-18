@@ -1,0 +1,20 @@
+// ATTEMPT 14: SEND NOTHING, MINT A THROWAWAY, AND THE HANDLE OPENS EVERYBODY'S.
+//
+// Every other attack needs the class to hold one of its own responses. This one removes the
+// precondition: a class that has sent NOTHING calls the exported package-level minter with the
+// run id it already has from ctx.Route.Obs().RunID, gets a handle into the run's shared vault,
+// and reflects through it. The audit ran this and it returned every class's body.
+//
+// The package-level minter is gone. Nothing outside tests called it, and a package-level entry
+// point that resolves a run by id is the same shape of hole as the run registry that //go:linkname
+// reached. The runner holds its own vault from NewPerturbedVault, which takes the capability.
+package leakfixture
+
+import "ars0n-framework-v2-server/utils/triage"
+
+func leakMintYourOwnWayIn(ctx triage.ClassifyCtx) (triage.Perturbed, error) {
+	runID := ctx.Route.Obs().RunID
+	return triage.NewPerturbed(
+		triage.Observation{RunID: runID, Kind: triage.ObsProbe, Class: triage.ClassExample},
+		triage.ClassExample, "THROWAWAY-1", uint64(triage.ClassExample), "")
+}

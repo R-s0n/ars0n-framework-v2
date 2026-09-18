@@ -25,6 +25,11 @@
 // every entry below routes to get_tool_output: it is the only surface that holds the argv and the
 // stdout, and it is how four LinkFinder runs storing "Usage: python linkfinder.py" were eventually
 // found after four rounds of changing configuration to make the symptom move.
+//
+// "lies" IS A LIST. One string per distinct way the tool misleads, first one leads the compact
+// reminder, and an action override ADDS to the tool level ones rather than replacing them, ahead of
+// them, so the action's own lie is what the reminder repeats. A bare string still works and means a
+// list of one. Full authoring rules at the top of data.js.
 
 // The step labels, shared with the other three domain files so one step cannot end up with two
 // names. See steps.js.
@@ -198,6 +203,40 @@ module.exports = {
         next: 'get_tool_output action:\"runs\"',
       },
     },
+  },
+
+  // === Workflow book ==========================================================================
+  //
+  // The pulled half of the teaching layer. Everything else in this registry is PUSHED: it rides
+  // along with a result whether or not anyone asked, because the failure it prevents is an agent not
+  // knowing a step exists. A workflow is too long for that and is only useful to someone who has
+  // already decided to run that campaign, so these two entries exist to make the store FINDABLE and
+  // nothing more. They are the pointer; get_workflow is the thing.
+
+  list_workflows: {
+    step: S_ANY,
+    tool: 'The workflow book: stored campaign runbooks for the kinds of work that take hours, with ' +
+      'what each is for, when to reach for it, what it was measured on and how many gotchas it ' +
+      'carries. Call it at the start of a campaign, before configuring the first tool.',
+    lies: 'The book holds only what somebody has written up, so an empty answer means nobody has ' +
+      'recorded that campaign yet and never that the campaign is simple.',
+    next: 'get_workflow, then the tools that workflow names',
+    derived: false,
+  },
+
+  get_workflow: {
+    step: S_ANY,
+    tool: 'One stored workflow: preconditions, ordered do/assert/verify/looks-like steps, the ' +
+      'lessons the last run learned and the gotchas, each carrying the measurement that produced ' +
+      'it. Reading it starts nothing. Read the gotchas before the steps.',
+    rule: 'The steps are one sentence each and were never the hard part. Every gotcha in this book ' +
+      'is a tool that was told something it did not understand, exited 0, reported nothing and was ' +
+      'recorded as clean, and not one of them is visible in a result. A run that follows the steps ' +
+      'and skips the gotchas is the run that produced them.',
+    lies: 'A workflow is a record of ONE campaign against ONE target on one day, named in ' +
+      'measured_on, so its counts and durations are that run rather than a promise about yours.',
+    next: 'list_workflows, then the tools that workflow names',
+    derived: false,
   },
 
   // === Methodology ============================================================================

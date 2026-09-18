@@ -363,9 +363,23 @@ def build_recommendations(ctx, rate):
 
     nf = r.get("notfound_fingerprint") or {}
     if nf.get("filterable") and nf.get("fingerprint", {}).get("status") == 200:
-        rec("ffuf", "filterSize", str(nf["fingerprint"].get("median_wire_size")),
-            "Soft-404 responses are a stable size and would otherwise all read as hits",
-            CONF_MEASURED, finding="soft_404")
+        # DECODED, not wire. ffuf's -fs compares the length of the body it ended up with, and Go's
+        # HTTP client transparently gunzips whenever ffuf did not set Accept-Encoding itself, which
+        # is the normal case. Recommending the wire size here told the operator to filter the
+        # compressed length against a decoded comparison, so the filter would never fire.
+        fp = nf["fingerprint"]
+        size = fp.get("median_decoded_size") or fp.get("median_wire_size")
+        if size:
+            rec("ffuf", "filterSize", str(size),
+                "Soft-404 responses are a stable size and would otherwise all read as hits. "
+                "Decoded length, which is what ffuf compares unless the step pins Accept-Encoding",
+                CONF_MEASURED, finding="soft_404")
+        else:
+            # Emitting nothing beats emitting a number that filters nothing: a wrong filter reads as
+            # a configured scan and hides that the soft-404 was never handled at all.
+            suppressed.append({"field": "filterSize",
+                               "reason": "the soft-404 body size could not be measured, so no size "
+                                         "filter can be derived; filter on the body fingerprint"})
     elif nf.get("verdict") == "soft_404_indistinguishable":
         suppressed.append({"field": "filterSize",
                            "reason": "soft-404 bodies resemble real content; a size filter would "

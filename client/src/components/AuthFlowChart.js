@@ -23,7 +23,7 @@ const AuthFlowChart = ({ steps = [], selectedStepId, onSelectStep }) => {
   if (!steps.length) {
     return (
       <div className="text-center text-white-50 py-4 fst-italic">
-        No steps yet — add a step below to start building this flow.
+        No steps yet - add a step below to start building this flow.
       </div>
     );
   }

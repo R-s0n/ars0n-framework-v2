@@ -21,6 +21,11 @@ package utils
 // dalfox
 // ---------------------------------------------------------------------------------------------
 
+import (
+	"fmt"
+	"strings"
+)
+
 var dalfoxGroups = []string{"Scanning", "Payloads", "Blind XSS", "Discovery", "Mining",
 	"Network", "Engine", "WAF", "Session", "Scope", "Output"}
 
@@ -267,7 +272,7 @@ func init() {
 			Key: "dalfox", Name: "Dalfox", Category: "xss",
 			Binary: "dalfox", Container: "ars0n-framework-v2-dalfox-1",
 			Groups: dalfoxGroups, Options: dalfoxOptions, OwnedFlags: dalfoxOwned,
-			InsertionPoints: VectorInsertionPoints,
+			InsertionPoints: VectorHTTPInsertionPoints,
 			// dalfox CAN reach all five points, which is why InsertionPoints stays complete. It does
 			// not TEST three of them unless asked. See the OptInPoints doc comment on VectorTool for
 			// the measurement: pointed at all 249 vectors it covered body 49/49, header 40/40 and
@@ -322,13 +327,23 @@ func init() {
 			Key: "domdig", Name: "domdig", Category: "xss",
 			Binary: "node", Container: "ars0n-framework-v2-domdig-1",
 			Groups: domdigGroups, Options: domdigOptions, OwnedFlags: domdigOwned,
-			InsertionPoints: []string{"query"},
+			// The only tool in the framework that reaches a fragment, and the reason the point was
+			// worth adding. domdig drives a real Chromium: its -m fuzz mode injects into the query
+			// string AND the hash, and its findings name the channel "hash" (vectorExplain.go:155).
+			// Every other tool here speaks HTTP, where the fragment has already been stripped.
+			//
+			// Before this line the corpus could not produce a fragment vector at all, so half of
+			// this tool's fuzz mode had never been pointed at anything.
+			InsertionPoints: []string{"query", "fragment"},
+			VectorEligible:  domdigVectorEligible,
+			Incomplete:      domdigIncomplete,
 			Compose:         ComposeDomdig,
 			Parse:           parseDomdigJSON,
 			Blinding:        map[string]string{"dryRun": "all"},
-			Limitation: "domdig fuzzes the query string and the URL hash. Cookies (-c) and headers (-E) " +
-				"are static authentication values rather than fuzz targets, and it navigates rather than " +
-				"issuing a POST, so body, header, cookie and path vectors are not eligible for it.",
+			Limitation: "domdig fuzzes the query string and the URL hash, so query and fragment vectors " +
+				"are eligible. Cookies (-c) and headers (-E) are static authentication values rather " +
+				"than fuzz targets, and it navigates rather than issuing a POST, so body, header, " +
+				"cookie and path vectors are not eligible for it.",
 			SkipReason: domdigSkipReason,
 		},
 		VectorTool{
@@ -347,6 +362,98 @@ func init() {
 	)
 }
 
+// domdigIncomplete catches the run that never got a page to scan, whatever the exit code said.
+//
+// This is the backstop behind domdigVectorEligible, and it is needed because that gate is FAIL-OPEN:
+// a vector whose content type nobody recorded is still attempted, and when the endpoint turns out to
+// be JSON, domdig refuses every navigation and can still exit 0. Exit 0 with no findings is a clean
+// result everywhere else in this runner, so without this the coverage number goes up for a vector
+// that was never tested. Measured against the live container:
+//
+//	/api/v1/echo?message=rs0n   ->  [!] Content type is not text/html   (per payload), exit 0
+//	http://api:8443/...?q=rs0n  ->  [!] 404                             (per payload), exit 1
+//
+// Both mean the same thing: domdig never loaded a document it could scan. Of the 31 exit-1 domdig
+// traces stored, 17 are the 404 shape and 4 are the content-type shape, so between them they are
+// two thirds of every domdig failure on record and neither was being reported as untested.
+//
+// THE FINDING TEST IS WHAT KEEPS THIS HONEST. A crawl of a real HTML page can meet one non-HTML
+// sub-resource or one 404 link and still do its job, so a run that produced findings is never called
+// incomplete no matter how many refusals it printed. Only a run that refused AND found nothing is
+// reported as untested, which is exactly the case that would otherwise read as clean.
+func domdigIncomplete(stdout, report string) string {
+	// A REPORT THIS BUILD CANNOT READ IS THE LOUDEST CASE, so it is checked before anything that
+	// could quieten it. The disarm below used to be a substring match for "DOM XSS found" on stdout,
+	// which meant a run whose report failed to parse but whose text carried the marker was let
+	// through as clean: findings were discarded by the parser and nothing said so.
+	rows, err := domdigDecodeReport(stdout)
+	if err != nil {
+		return fmt.Sprintf("domdig printed a -J report this build could not read (%v), so any "+
+			"findings in it were dropped by the parser. Treat this vector as though nothing was "+
+			"tested and read the stored trace.", err)
+	}
+	// Findings outrank every refusal marker, and the test for them is now the PARSED report rather
+	// than a phrase in the text, so a run can only be called clean by a report that was read.
+	if len(rows) > 0 || strings.Contains(report, "\"type\"") {
+		return ""
+	}
+	if n := strings.Count(stdout, "Content type is not text/html"); n > 0 {
+		return fmt.Sprintf("domdig refused the target %d time(s) with \"Content type is not "+
+			"text/html\". It drives a browser and only scans HTML, so this endpoint was never "+
+			"loaded and nothing was tested. Scan it with dalfox or xssFuzz instead, which speak "+
+			"HTTP and read a JSON response perfectly well.", n)
+	}
+	if n := strings.Count(stdout, "[!] 404"); n >= 3 {
+		return fmt.Sprintf("domdig got a 404 on %d navigation(s) and never loaded the page, so "+
+			"nothing was tested. The URL it was given does not resolve: check whether a templated "+
+			"path segment reached it literally.", n)
+	}
+	// LAST, BECAUSE THE TWO ABOVE EXPLAIN THEMSELVES BETTER.
+	//
+	// Every one of the 31 exit-1 traces ends in a Node fatal error report, but for 21 of them the
+	// real story is the 404 or the refusal that preceded it. The 10 that are left crashed on a live
+	// page with nothing else to say, and those were filed CLEAN: zero findings, and no marker either
+	// branch above recognises. One cause was found and patched (docker/domdig), and this is here so
+	// that the next crash is reported as untested on the day it appears rather than a week later.
+	//
+	// Node prints the "Node.js vX.Y.Z" banner only at the end of a fatal error report, and the
+	// findings test at the top of this function already lets a run that produced results through.
+	if strings.Contains(stdout, "triggerUncaughtException") || strings.Contains(stdout, "\nNode.js v") {
+		return "domdig's browser process died on an uncaught exception, so nothing was tested. " +
+			"The stored trace ends with the stack that killed it."
+	}
+	return ""
+}
+
+// domdigVectorEligible refuses an endpoint that is KNOWN to answer with something other than HTML.
+//
+// domdig drives a real Chromium and will not scan a document it cannot parse as a page. Run against
+// a JSON API it prints one line per payload and finds nothing:
+//
+//	$ node /app/domdig.js -J -q https://app.example.com/api/v1/echo?message=rs0n
+//	[!] Content type is not text/html          (x5)
+//	[!] Unexpected error, retrying...TargetCloseError: Protocol error (Page.navigate)
+//	... repeated until the budget is gone, exit 0
+//
+// That is indistinguishable from a clean scan in every record the framework keeps, which is the
+// fail-open this codebase keeps meeting: the run happened, the tool exited, nothing was found, and
+// nothing was tested. Measured on one live estate: 28 of 30 query vectors were JSON API endpoints,
+// so an authenticated domdig pass would have spent hours proving nothing about 28 of them.
+//
+// UNKNOWN IS ELIGIBLE, deliberately. An empty content type means no crawl ever recorded one, not
+// that the endpoint is not HTML. Skipping on unknown would drop every vector the crawls never
+// reached, and losing a real target costs more than wasting a scan on a JSON one.
+func domdigVectorEligible(v VectorInput) (bool, string) {
+	ct := strings.ToLower(strings.TrimSpace(v.ResponseContentType))
+	if ct == "" || strings.Contains(ct, "html") {
+		return true, ""
+	}
+	return false, "This endpoint answers " + v.ResponseContentType + ", and domdig drives a browser " +
+		"that only scans text/html: it would print \"Content type is not text/html\" once per payload " +
+		"and find nothing. Scan it with dalfox or xssFuzz, which speak HTTP and do not care what the " +
+		"response is."
+}
+
 func domdigSkipReason(insertionPoint string) string {
 	switch insertionPoint {
 	case "body":
@@ -358,7 +465,7 @@ func domdigSkipReason(insertionPoint string) string {
 	case "path":
 		return "domdig fuzzes the query string and the URL hash. A path segment is neither."
 	}
-	return "domdig can only test a query parameter."
+	return "domdig can only test a query parameter or a URL fragment."
 }
 
 func xssFuzzSkipReason(insertionPoint string) string {
@@ -371,6 +478,10 @@ func xssFuzzSkipReason(insertionPoint string) string {
 		return "xssFuzz has no cookie option at all."
 	case "path":
 		return "xssFuzz substitutes with re.sub(\"name=([^&]+)\") over the query string. A path segment never matches it."
+	case "fragment":
+		return "xssFuzz calls requests.get, and a URL fragment is never sent: Python's urllib strips " +
+			"it before the request goes out, exactly as a browser does. The payload would be built " +
+			"and then discarded, and the clean result would mean nothing."
 	}
 	return "xssFuzz can only test a query parameter."
 }

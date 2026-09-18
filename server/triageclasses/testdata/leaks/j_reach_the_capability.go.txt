@@ -1,0 +1,19 @@
+// THE CAPABILITY ITSELF: IMPORT IT AND GRANT ONE.
+//
+// Every gate in the layer is the same gate, so the obvious attack is to walk through it rather
+// than around it: import the capability package and call Grant.
+//
+// This is the fixture that proves the whole mechanism, and it is the reason the classifiers live
+// at server/triageclasses instead of under server/utils. Go's internal rule makes
+// a/b/internal/c importable by everything rooted at a/b and by nothing else. The capability is at
+// server/utils/internal/triagecap, so package utils and package triage can name it and this
+// package cannot. While the classifiers lived at server/utils/triage/classes they were rooted at
+// server/utils and the rule would have waved them straight through; moving the directory is what
+// makes the compiler refuse.
+package leakfixture
+
+import "ars0n-framework-v2-server/utils/internal/triagecap"
+
+func leakGrantYourself() triagecap.Runner {
+	return triagecap.Grant()
+}

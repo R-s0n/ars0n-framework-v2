@@ -283,7 +283,7 @@ const MetaDataModal = memo(({
       <i className="bi bi-arrow-down text-primary ms-1"></i>;
   };
 
-  // G1.10: debounce the filter inputs so typing stays responsive — the expensive filter/sort
+  // G1.10: debounce the filter inputs so typing stays responsive - the expensive filter/sort
   // over (up to 10k) target URLs only runs ~250ms after the last keystroke. The inputs stay
   // bound to the immediate `filters` state below; only this derivation uses the debounced copy.
   const debouncedFilters = useDebounce(filters, 250);

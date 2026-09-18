@@ -1,0 +1,75 @@
+diff --git a/domdig.js b/domdig.js
+index 28df02b..371a922 100755
+--- a/domdig.js
++++ b/domdig.js
+@@ -154,25 +154,59 @@ class DOMDig {
+ 				let src;
+ 				for(const frame of frames){
+ 					// console.log(frame.url())
+-					const fu = new URL(frame.url());
++					let fu;
++					try{
++						fu = new URL(frame.url());
++					}catch(e){
++						// about:blank and already detached frames have no parsable URL.
++						continue;
++					}
+ 					if(fu.origin == origin){
+ 						src = frame;
+ 					}
+ 				}
+-				src.evaluate( (dst, messages) => {
+-					if(window.top.location.toString() == dst){
++				if(!src){
++					// The sender navigated away before the message was handled.
++					return;
++				}
++				// AWAITED ON PURPOSE. Left unawaited, a rejection from this evaluate has no handler
++				// anywhere and Node 20 kills the process. That is how a third party iframe (Stripe,
++				// Cloudflare Turnstile) ended scans with "SecurityError: Blocked a frame ... from
++				// accessing a cross-origin frame" and exit 1 before a single payload was sent.
++				// Awaited, the rejection goes to the exposeFunction wrapper instead of the process.
++				await src.evaluate( (dst, messages) => {
++					// Re-posting needs to know WHICH frame dst names, and only a frame that is same
++					// origin with top can find that out. When it is not, the destination cannot be
++					// identified and there is nothing to send. That is a real limit of the technique,
++					// not an error being swallowed: the browser blocks the read either way.
++					let topHref;
++					try{
++						topHref = window.top.location.toString();
++					}catch(e){
++						return;
++					}
++					if(topHref == dst){
+ 						for(let message of messages){
+ 							window.top.postMessage(message, "*");
+ 						}
+-					} else {
+-						window.top.document.querySelectorAll("iframe").forEach(frame => {
+-							if(frame.contentWindow.document.location.toString() == dst){
+-								for(let message of messages){
+-									frame.contentWindow.postMessage(message, "*");
+-								}
+-							}
+-						})
++						return;
+ 					}
++					// Reaching here means top is readable, so window.top.document is too.
++					window.top.document.querySelectorAll("iframe").forEach(frame => {
++						let frameHref;
++						try{
++							frameHref = frame.contentWindow.document.location.toString();
++						}catch(e){
++							// A cross-origin iframe does not expose its URL to this frame. Skipping it
++							// keeps the remaining iframes in the loop, which a throw would abandon.
++							return;
++						}
++						if(frameHref == dst){
++							for(let message of messages){
++								frame.contentWindow.postMessage(message, "*");
++							}
++						}
++					})
+ 				}, url, fuzzMessages);
+ 			})
+ 			this.crawler.page().evaluateOnNewDocument(() => {

@@ -306,7 +306,7 @@ func init() {
 			Groups: commixGroups, Options: commixOptions, OwnedFlags: commixOwned,
 			// Header is listed as reachable, and then refused per vector by name. Measured: a Referer
 			// carrying the injection IS found, so the point is reachable; a custom header is not.
-			InsertionPoints: VectorInsertionPoints,
+			InsertionPoints: VectorHTTPInsertionPoints,
 			Compose:         ComposeCommix,
 			Parse:           parseCommixOutput,
 			SkipReason:      commixSkipReason,
@@ -323,7 +323,7 @@ func init() {
 			Key: "sstimap", Name: "SSTImap", Category: "cmdi",
 			Binary: "python", Container: "ars0n-framework-v2-sstimap-1",
 			Groups: sstimapGroups, Options: sstimapOptions, OwnedFlags: sstimapOwned,
-			InsertionPoints: VectorInsertionPoints,
+			InsertionPoints: VectorHTTPInsertionPoints,
 			Compose:         ComposeSSTImap,
 			Parse:           parseSSTImapOutput,
 			Timeout:         20 * time.Minute,

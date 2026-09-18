@@ -42,8 +42,17 @@ type VectorInput struct {
 	InsertionPoint string
 	Parameters     []string
 	EvidenceURL    string
-	ContentType    string
-	Body           string
+	// Fragment is the client-side route or anchor, without its leading hash, for a fragment vector.
+	// Empty for every other insertion point.
+	Fragment    string
+	ContentType string
+	Body        string
+	// ResponseContentType is what the ENDPOINT was last seen answering with, as distinct from
+	// ContentType above, which is what the REQUEST carries. Empty means unknown.
+	//
+	// Only the browser-driven tools need it, and they need it badly: domdig refuses anything that is
+	// not text/html, so a JSON endpoint costs a full scan budget and yields nothing.
+	ResponseContentType string
 	// ObservedValues are the values recorded for the vector's parameters, where any were seen.
 	ObservedValues map[string]string
 	// Run is the sub-scan label, for tools that need more than one invocation per target. Empty for
@@ -74,6 +83,17 @@ type VectorInput struct {
 // re.sub("name=([^&]+)") against the URL TEXT, so a parameter that is not physically present in the
 // string matches nothing and the tool reports clean.
 func (v VectorInput) TargetURL() string {
+	// A fragment vector is composed first and separately, because the fragment has to come LAST and
+	// the branches below append a query string to whatever they were handed. Falling through would
+	// have produced .../settings#/billing?tab=x, which moves tab=x inside the fragment where no
+	// server ever sees it, and the tool would report on a request nobody made.
+	if v.InsertionPoint == "fragment" {
+		rawQuery := ""
+		if parsed, err := url.Parse(v.EvidenceURL); err == nil {
+			rawQuery = parsed.RawQuery
+		}
+		return fragmentTargetURL(v.baseURL(), rawQuery, v.Fragment, v.Parameters, v.valueFor)
+	}
 	if v.InsertionPoint == "query" && strings.Contains(v.EvidenceURL, "?") {
 		if merged, ok := v.mergeMissingParams(); ok {
 			return merged
@@ -525,4 +545,115 @@ func observedRequestValues(raw, insertionPoint string) map[string]string {
 		}
 	}
 	return out
+}
+
+// vectorConcreteTemplatedURL replaces every TEMPLATED path segment with a concrete value.
+//
+// A consolidated endpoint stores an identifier segment as a template, so a URL arrives here as
+// /rest/products/{id}/reviews. Sent literally that is a route the application does not have: it
+// answers 404 or a catch-all page, and whatever was measuring the endpoint ends up measuring the
+// error page instead. sqliTargetURL has done this for sqlmap and ghauri since the marker rules were
+// established, dalfoxTargetURL was given it later, and the reflection probe needs the same thing for
+// the same reason, so it lives here once rather than in three files.
+//
+// EVERY templated segment is replaced, not only the last one. sqlmap needs one concrete segment to
+// hang its * marker on; dalfox probes every segment in turn and the reflection probe replaces the
+// last one, so any brace left anywhere breaks the route for all of them.
+//
+// THE CONCRETE VALUE COMES FROM THE EVIDENCE URL WHERE THERE IS ONE, and only falls back to the
+// canary when there is not.
+//
+// Substituting the canary unconditionally was the original behaviour and it aimed half the corpus
+// at resources that do not exist. MEASURED on a live engagement: 112 of 218 vectors carry a
+// templated segment, so /api/v1/paper_accounts/{uuid}/trade_account/margin was scanned as
+// /api/v1/paper_accounts/rs0n/trade_account/margin. There is no account called rs0n. Every tool
+// pointed at one of those was measuring a 401, a 403 or a not-found page, and reporting it as a
+// clean scan of the endpoint.
+//
+// The real identifier was already in hand the whole time: 97 of those 112 vectors carry a concrete
+// id in their OWN evidence_url, which is the request the crawl actually observed. Taking the
+// segment from there sends the tool to the resource the vector was derived from.
+//
+// Falling back to the canary rather than refusing, because a vector with no evidence URL still has
+// to be scanned somehow, and rs0n in the path is at least visible in the results as the reason a
+// row looks odd.
+//
+// Edited as text rather than through net/url, for the same reason sqliTargetURL is: round-tripping
+// through url.URL re-encodes the path and changes the bytes on the wire.
+func vectorConcreteTemplatedURL(base string) string {
+	return vectorConcreteTemplatedURLFrom(base, "")
+}
+
+// vectorConcreteTemplatedURLFrom is the same substitution with a source of real segment values.
+//
+// evidenceURL is the request the crawl observed for this vector. Its path is walked in step with
+// the templated one, so a brace at position 3 takes the evidence's position 3. Segment counts must
+// match, or the two paths describe different routes and borrowing between them would build a URL
+// that was never observed anywhere.
+func vectorConcreteTemplatedURLFrom(base, evidenceURL string) string {
+	if !strings.Contains(base, "{") {
+		return base
+	}
+	pathPart, queryPart, hasQuery := strings.Cut(base, "?")
+	scheme, rest, hasScheme := strings.Cut(pathPart, "://")
+	if !hasScheme {
+		return base
+	}
+	host, path, hasPath := strings.Cut(rest, "/")
+	if !hasPath {
+		return base
+	}
+
+	segments := strings.Split(path, "/")
+	observed := templatedPathSegments(evidenceURL, len(segments))
+	replaced := false
+	for i, segment := range segments {
+		if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
+			// The observed value first. It is only used when it is not itself a template and not
+			// empty: an evidence URL that also carries a brace is another templated row, not a
+			// sighting, and borrowing from it would just move the problem.
+			if i < len(observed) && observed[i] != "" && !strings.HasPrefix(observed[i], "{") {
+				segments[i] = observed[i]
+			} else {
+				segments[i] = VectorCanary
+			}
+			replaced = true
+		}
+	}
+	if !replaced {
+		return base
+	}
+
+	out := scheme + "://" + host + "/" + strings.Join(segments, "/")
+	if hasQuery {
+		out += "?" + queryPart
+	}
+	return out
+}
+
+// templatedPathSegments returns the evidence URL's path segments when it describes the same route
+// shape as the templated path, and nil otherwise.
+//
+// The arity check is the whole safety of this. /a/{id}/b and /a/x/y/b are different routes, and
+// lining them up by index would take "y" for {id} and produce a URL nothing ever served. Refusing
+// to borrow across a different segment count means the worst case is the canary fallback, which is
+// what the behaviour was before.
+func templatedPathSegments(evidenceURL string, want int) []string {
+	if evidenceURL == "" || want <= 0 {
+		return nil
+	}
+	pathPart, _, _ := strings.Cut(evidenceURL, "?")
+	_, rest, hasScheme := strings.Cut(pathPart, "://")
+	if !hasScheme {
+		return nil
+	}
+	_, path, hasPath := strings.Cut(rest, "/")
+	if !hasPath {
+		return nil
+	}
+	segments := strings.Split(path, "/")
+	if len(segments) != want {
+		return nil
+	}
+	return segments
 }

@@ -1,0 +1,16 @@
+// Leak (d), first half: RANGE OVER THE VAULT'S held MAP.
+//
+// This is the leak an adversarial reviewer found after the vault closed the first three, and it
+// was measured reading an SSTI observation and a SQL observation out of a single SSTI handle with
+// the owner check never consulted. One handle plus one range statement is every class's response.
+package leakfixture
+
+import "ars0n-framework-v2-server/utils/triage"
+
+func leakRangeVault(p triage.Perturbed) []triage.Observation {
+	var out []triage.Observation
+	for _, e := range p.vault.held {
+		out = append(out, e.obs)
+	}
+	return out
+}

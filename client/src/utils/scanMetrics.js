@@ -1,5 +1,5 @@
 // G1.14 (first increment of decomposing App.js): pure scan-metric helpers lifted verbatim from
-// App.js's module scope. No React / state / closures — behavior is identical to before.
+// App.js's module scope. No React / state / closures - behavior is identical to before.
 
 // Count non-empty lines in an httpx scan's result blob.
 export const getHttpxResultsCount = (scan) => {

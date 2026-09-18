@@ -295,6 +295,28 @@ func UpdateSessionToken(w http.ResponseWriter, r *http.Request) {
 		validationStatus, validationDetail = "", ""
 	}
 
+	// A NEW VALUE CARRIES A NEW EXPIRY, and the old one must not outlive it.
+	//
+	// token.ExpiresAt here is the MERGED field, so when the caller sends a fresh token_value and no
+	// expires_at (which is exactly what a refresh looks like) it still holds the PREVIOUS token's
+	// expiry. DeriveSessionTokenExpiry returns any non-nil explicit value untouched, so the dead
+	// expiry won every time and the derivation below never ran.
+	//
+	// MEASURED 2026-09-17: a bearer was refreshed, stored correctly (the row's token_value matched
+	// the freshly minted JWT byte for byte, whose own exp was 887 seconds in the future), and
+	// expires_at still read 2026-09-16, 33 hours in the past. ApplySessionTokens filters on
+	// `expires_at > NOW()`, so the framework dropped the live credential it had just been given and
+	// scanned anonymously. Downstream that reads as a login wall on every endpoint: 129 of 143
+	// probes in one run came back 401.
+	//
+	// Only when the value actually changed, and only when the caller did not state an expiry
+	// themselves. An operator who types an expiry means it, including for a token the framework
+	// cannot parse.
+	expiresAt := token.ExpiresAt
+	if valueChanged && payload.ExpiresAt == nil {
+		expiresAt = nil
+	}
+
 	result, err := dbPool.Exec(context.Background(), `
 		UPDATE session_tokens SET
 		  auth_flow_id = $1, name = $2, token_type = $3, header_name = $4, cookie_name = $5,
@@ -307,7 +329,7 @@ func UpdateSessionToken(w http.ResponseWriter, r *http.Request) {
 		nullUUID(token.AuthFlowID), token.Name, token.TokenType, token.HeaderName, token.CookieName,
 		token.ParamName, token.ValuePrefix, token.TokenValue, token.ScopeDomains, token.CookiePath,
 		token.CookieDomain, token.CookieSecure, token.CookieHTTPOnly, token.CookieSameSite,
-		DeriveSessionTokenExpiry(token.TokenValue, token.ExpiresAt),
+		DeriveSessionTokenExpiry(token.TokenValue, expiresAt),
 		token.IsActive, token.Notes, validationStatus, validationDetail, tokenID, token.TokenRole)
 	if err != nil {
 		log.Printf("[SESSION-TOKEN] Failed to update token %s: %v", tokenID, err)
@@ -821,9 +843,23 @@ func runSessionTokenValidation(token SessionToken) (string, string, map[string]i
 	// authenticated request received into the control request, the control would stop being
 	// anonymous, and every token on every target would come back looking honoured.
 	//
-	// Scope is nil, deliberately. The only URL this ever requests is the scope target's own base
-	// URL, which it builds itself, so there is nothing for a host boundary to protect against.
-	client := NewScanClient(budget, 20*time.Second, "", nil)
+	// SCOPED, and the comment that used to sit here was false. It said "the only URL this ever
+	// requests is the scope target's own base URL, which it builds itself, so there is nothing for
+	// a host boundary to protect against". It does not build it: authFlowProbeURL and
+	// authRequiredProbeURL read a URL out of the CORPUS with no host filter, and the corpus holds
+	// every host the crawls ever saw.
+	//
+	// MEASURED on the engaged target: 5 distinct auth-required hosts, and the ORDER BY url LIMIT 1
+	// picks api-wallet-alpacax.staging-v2.tradetalk.us, which is explicitly OUT OF SCOPE on that
+	// programme. Each validation sends two requests, the authenticated arm and the control, so
+	// every session health check was two requests at a host the operator never authorised.
+	//
+	// It became urgent when the reflection probe started calling SessionStillHonoured every 50
+	// probes: a 1911 probe run is 38 checks, so one run could put 76 unscoped requests on an
+	// excluded host. The boundary belongs here rather than at the call sites, which is the same
+	// lesson ScanClient.Do's own header records about this having leaked twice before.
+	client := NewScanClient(budget, 20*time.Second, "", nil).
+		WithScope(LoadScanScope(token.ScopeTargetID))
 
 	// Companions go on BOTH arms, which is the whole point of separating them from credentials.
 	//

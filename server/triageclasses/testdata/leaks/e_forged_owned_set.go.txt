@@ -1,0 +1,17 @@
+// Leak (b), REWRITTEN FOR THE TYPE THAT REPLACED THE OWNER ARGUMENT.
+//
+// Obs(as ClassID) is gone and a class now reads through triage.OwnedResponses, whose class is set
+// by triage.OwnFor. OwnFor is a filter and can only narrow, so the obvious attack is not to call
+// it: build the set directly, label it with your own class, and put somebody else's handles in it.
+//
+// Both fields are unexported, so from here the only OwnedResponses that can be built is the zero
+// value: class ClassNone, which is no registered owner, holding nothing.
+package leakfixture
+
+import "ars0n-framework-v2-server/utils/triage"
+
+func leakForgedOwnedSet(stolen []triage.Perturbed) (triage.Observation, error) {
+	mine := triage.OwnedResponses{class: triage.ClassSQL, held: stolen}
+	_, obs, err := mine.At(0)
+	return obs, err
+}

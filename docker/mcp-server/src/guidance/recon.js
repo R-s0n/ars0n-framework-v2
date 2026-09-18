@@ -9,6 +9,11 @@
 // the database. An agent cannot tell any of those apart from a genuinely empty target, so the "lies"
 // field on these entries is mostly about which zeros are real.
 //
+// "lies" IS A LIST. One string per distinct way the tool misleads, ordered most specific first: an
+// action override ADDS its lies to the tool level ones and they lead, because only the first leads
+// the compact reminder and the tool level one already went out in full. A bare string still works
+// and means a list of one. The authoring rules are written out in full at the top of data.js.
+//
 // STEP VOCABULARY. The framework's own methodology (server/utils/methodology.go) is the URL workflow's
 // eight steps, and a tool that maps onto one carries "N/8" with an abbreviation of that step's title.
 // The number is what carries the identity, because two of those titles are sentences rather than

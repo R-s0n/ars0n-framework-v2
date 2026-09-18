@@ -127,7 +127,7 @@ func TestLFImapReachesEveryInsertionPoint(t *testing.T) {
 	if !ok {
 		t.Fatal("lfimap is not registered")
 	}
-	for _, point := range VectorInsertionPoints {
+	for _, point := range VectorHTTPInsertionPoints {
 		if !VectorToolCanReach(tool, point) {
 			t.Errorf("LFImap was measured to reach %s", point)
 		}

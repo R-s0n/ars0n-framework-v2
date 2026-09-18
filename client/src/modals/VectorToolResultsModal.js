@@ -597,8 +597,14 @@ function VectorToolResultsModal({
                 afternoon of reconstruction. */}
             {tab === 'traces' && (
               traces.length === 0 ? (
+                /* "No runs" used to be ambiguous between a run that never happened and one whose
+                   output had been pruned, because pruning deleted the row. It no longer does: a
+                   pruned run keeps its row and is badged below. So an empty list now means one
+                   thing, and this says which. */
                 <div className="text-white-50 py-4 text-center" style={{ fontSize: '0.85rem' }}>
-                  No runs were recorded for this scan.
+                  No commands were executed for this scan. Retention never removes a row, only the
+                  captured output, so this is not aged-out history: nothing ran. Check the Skipped
+                  and Untested tabs for the reason.
                 </div>
               ) : (
                 <>
@@ -616,6 +622,9 @@ function VectorToolResultsModal({
                               text={t.exit_detail && t.exit_detail.startsWith('0') ? undefined : 'dark'}>
                               {t.timed_out ? 'timed out' : (t.exit_detail || 'exited').split(',')[0]}
                             </Badge>
+                            {t.stdout_pruned && (
+                              <Badge bg="dark" text="light">output aged out</Badge>
+                            )}
                             <span className="text-white-50" style={{ fontSize: '0.75rem' }}>
                               {Math.round((t.duration_ms || 0) / 100) / 10}s, {t.stdout_bytes} bytes
                               {t.attempt > 1 && `, attempt ${t.attempt}`}
@@ -640,7 +649,9 @@ function VectorToolResultsModal({
                                 if (res.ok) setOpenTrace(await res.json());
                               } catch (err) { /* the command above is still readable */ }
                             }}>
-                              Load output ({t.stdout_bytes} bytes)
+                              {t.stdout_pruned
+                                ? `Output aged out (was ${t.stdout_bytes} bytes)`
+                                : `Load output (${t.stdout_bytes} bytes)`}
                             </Button>
                           )}
                         </Accordion.Body>

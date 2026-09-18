@@ -39,7 +39,7 @@ const ACCENT = '#dc3545';
 // reads as failure rather than as a column that does not apply.
 const MetricValue = ({ value, emphasis }) => {
   if (typeof value !== 'number') {
-    return <span style={{ color: 'rgba(255,255,255,0.25)' }}>&mdash;</span>;
+    return <span data-metric-empty="" style={{ color: 'rgba(255,255,255,0.25)' }}>-</span>;
   }
   if (value === 0) {
     return <span style={{ color: 'rgba(255,255,255,0.35)' }}>0</span>;

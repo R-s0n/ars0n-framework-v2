@@ -76,22 +76,99 @@ func parseDalfoxJSONL(stdout, report string, vector vectorRow) []VectorFinding {
 	return findings
 }
 
+// domdigReportOffsets locates every possible start of the -J report inside domdig's stdout.
+//
+// NOT strings.Index(stdout, "["), which is what this did first. domdig writes warnings through
+// utils.printWarning, which prefixes them with a literal "[!] ", and -q does NOT silence those: 21
+// of the 42 stored domdig traces begin "[!] 404" or "[!] Content type is not text/html". The first
+// "[" in that stdout belongs to a warning, json.Unmarshal fails on it, and the run reports zero
+// findings however many it really had. A crawl of a real page that meets one dead link and then
+// finds an XSS is exactly the case that was being discarded.
+//
+// The report is console.log(prettifyJson(vulnsjar)) as the last thing before exit, and prettifyJson
+// opens an array at column zero, so the report begins on a line that is exactly "[" or "[]".
+// Matching a whole line also means a payload containing a bracket cannot be mistaken for the start
+// of the report.
+//
+// EVERY candidate line is returned rather than the last one, because "the last one" is wrong in the
+// other direction. Anything printed after the report whose trimmed line is exactly "[]" won it, the
+// decode then succeeded on an empty array, and a run with real findings was recorded clean with
+// those findings discarded. The caller chooses between the candidates by what they decode to.
+func domdigReportOffsets(stdout string) []int {
+	var offsets []int
+	pos := 0
+	for _, line := range strings.Split(stdout, "\n") {
+		if t := strings.TrimSpace(line); t == "[" || t == "[]" {
+			offsets = append(offsets, pos)
+		}
+		pos += len(line) + 1
+	}
+	return offsets
+}
+
+// domdigRow is one entry of domdig's -J report.
+type domdigRow struct {
+	Type      string `json:"type"`
+	URL       string `json:"url"`
+	Payload   string `json:"payload"`
+	Element   string `json:"element"`
+	Message   string `json:"message"`
+	Confirmed *bool  `json:"confirmed"`
+}
+
+// domdigDecodeReport reads the -J array out of stdout, and says which of the three things happened.
+//
+// (nil, nil) means domdig never printed a report. Nothing was lost; the run may still be a refusal.
+// (rows, nil) means the report was read, and len(rows) == 0 is a real clean scan.
+// (nil, err) means A REPORT WAS PRINTED AND THIS BUILD COULD NOT READ IT. That is the one case that
+// must never reach a caller as "no findings": findings may have been in there.
+//
+// A Decoder rather than json.Unmarshal over stdout[start:], which is what this did first. Unmarshal
+// requires the whole remainder to be exactly one JSON value, so ANYTHING printed after the report
+// failed it and the run reported zero findings however many it really had. The leading-warning case
+// was fixed by matching the report line whole; this is the same defect at the other end.
+// A Decoder stops at the close of the first value and leaves the rest of the stream alone.
+//
+// Candidates are tried from the LAST backwards, because the report is normally the last thing
+// printed, and the first one that decodes to a NON-EMPTY array is the report: a stray "[]" printed
+// after it decodes to nothing and cannot outrank real findings. An unreadable candidate outranks an
+// empty one, so a truncated report followed by a stray "[]" is still reported as unreadable rather
+// than turned into a clean scan.
+func domdigDecodeReport(stdout string) ([]domdigRow, error) {
+	offsets := domdigReportOffsets(stdout)
+	var firstErr error
+	empty := false
+	for i := len(offsets) - 1; i >= 0; i-- {
+		var rows []domdigRow
+		if err := json.NewDecoder(strings.NewReader(stdout[offsets[i]:])).Decode(&rows); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if len(rows) > 0 {
+			return rows, nil
+		}
+		empty = true
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if empty {
+		return []domdigRow{}, nil
+	}
+	return nil, nil
+}
+
 // parseDomdigJSON reads domdig's -J report off stdout. domdig has no --output flag, so stdout is the
 // only channel, which is why -q is framework owned: progress chatter mixed into it cannot be parsed.
+//
+// A parse failure returns no findings here and is NOT the end of it: domdigIncomplete decodes the
+// same report and reports the vector untested, so a report this build cannot read can never be
+// recorded as a clean scan.
 func parseDomdigJSON(stdout, report string, vector vectorRow) []VectorFinding {
-	start := strings.Index(stdout, "[")
-	if start < 0 {
-		return nil
-	}
-	var rows []struct {
-		Type      string `json:"type"`
-		URL       string `json:"url"`
-		Payload   string `json:"payload"`
-		Element   string `json:"element"`
-		Message   string `json:"message"`
-		Confirmed *bool  `json:"confirmed"`
-	}
-	if json.Unmarshal([]byte(stdout[start:]), &rows) != nil {
+	rows, err := domdigDecodeReport(stdout)
+	if err != nil {
 		return nil
 	}
 

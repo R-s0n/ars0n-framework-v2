@@ -13,7 +13,7 @@ import (
 )
 
 // Client Identifiers are candidate unique identifiers pulled out of a discovered endpoint's raw
-// HTTP request (path/query IDs, JWT/base64 claims, etc.) — the targets for IDOR / access-control
+// HTTP request (path/query IDs, JWT/base64 claims, etc.) - the targets for IDOR / access-control
 // testing in the Authorization > Client Identity view. Stored per scope target, keyed to the
 // endpoint URL + method so they survive endpoint re-consolidation.
 

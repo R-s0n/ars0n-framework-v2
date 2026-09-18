@@ -1,5 +1,10 @@
-import { Modal, Button, Form, Badge, Spinner, Alert } from 'react-bootstrap';
-import { useState, useEffect, useCallback } from 'react';
+import { Modal, Button, Form, Badge, Spinner, Alert, Nav } from 'react-bootstrap';
+import { Fragment, useState, useEffect, useCallback } from 'react';
+import ReflectionResultsPanel, { survivedSummary } from './ReflectionResultsPanel';
+import {
+  reflectionBadge, vectorGrade, vectorReflectionStatus, probeAsVector, REFLECTION_FILTERS,
+  matchesReflectionFilter, GRADE_LABEL,
+} from '../data/reflectionGrades';
 
 // Every unique attack vector for a target, and the place to disagree with the list.
 //
@@ -31,6 +36,38 @@ const POINT_TONE = {
   header: 'border-secondary text-light',
   cookie: 'border-secondary text-light',
   path: 'border-secondary text-white-50',
+  // Toned like query and body rather than like the ambient points, because a fragment is chosen by
+  // whoever composes the link. It is also the only point no HTTP tool can test, so a row wearing
+  // this badge is a row only domdig will ever have touched.
+  fragment: 'border-warning text-warning',
+};
+
+// What the reflection probe found, as a word and then a colour.
+//
+// Never a bare colour, and never omitted for a vector that has not been probed. "Not Probed",
+// "Blocked", "Probe Error" and "Needs Browser" are four different reasons the framework cannot
+// answer the question, and an empty cell for any of them would be read as clean. The colours come
+// from the shared vocabulary so this list, the tool config modal and the workflow card agree.
+const ReflectionBadge = ({ vector }) => {
+  const b = reflectionBadge(vector);
+  return (
+    <span
+      title={b.why}
+      style={{
+        display: 'inline-block',
+        fontSize: '0.6rem',
+        lineHeight: 1.5,
+        padding: '0 0.4em',
+        borderRadius: '0.25rem',
+        border: `1px solid ${b.border}`,
+        background: b.background,
+        color: b.color,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {b.label}
+    </span>
+  );
 };
 
 // A mark shown only when a value was ASSUMED rather than measured. Absence means observed, which is
@@ -43,6 +80,14 @@ const Assumed = ({ when, children }) => (when ? (
 
 function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
   const [vectors, setVectors] = useState([]);
+  // Two views of the same probe, and they are not redundant. The vector list is the roll-up the
+  // operator scans FROM; the probe list is the per-input evidence they read AFTER Investigate. A
+  // tab rather than a fourth modal: same data, same target, and the reflection filter over there
+  // is the thing the operator is usually holding when they want this.
+  const [tab, setTab] = useState('vectors');
+  // Bumped by the footer's Refresh so the button is not dead on the probe tab: the panel keys off
+  // it and refetches. A button that does nothing on one tab teaches the operator to distrust it.
+  const [reloadKey, setReloadKey] = useState(0);
   const [counts, setCounts] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -51,6 +96,10 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
   const [hostFilter, setHostFilter] = useState('');
   const [sourceFilter, setSourceFilter] = useState('');
   const [signalFilter, setSignalFilter] = useState('');
+  // Alongside pointFilter rather than folded into it: an operator narrowing to query vectors and an
+  // operator narrowing to the ones that reflect are asking two different questions, and the useful
+  // move is usually both at once.
+  const [reflectionFilter, setReflectionFilter] = useState('');
   const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState(false);
   // Expanded rows and what each one loaded. Fetched on expand rather than with the list: rendering a
@@ -156,6 +205,10 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
         insertion_point: editing.insertion_point,
         parameters: String(editing.parametersText || '')
           .split(',').map((p) => p.trim()).filter(Boolean),
+        // Sent only for a fragment vector. The server clears it on every other point anyway, and
+        // sending the old hash along with a move to query would ask it to keep something it is
+        // about to drop.
+        fragment: editing.insertion_point === 'fragment' ? (editing.fragment || '') : '',
         notes: editing.notes,
       }),
     }));
@@ -171,9 +224,19 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
   const hostOptions = tally(vectors.map((v) => v.domain));
   const sourceOptions = tally(vectors.flatMap((v) => v.sources || []));
   const signalOptions = tally(vectors.flatMap((v) => v.signals || []));
+  // Counted the same way the other filters are, and an option with no rows is left out, so the list
+  // never offers a choice that empties the table. The one exception it deliberately keeps is "Never
+  // probed": on a target nobody has probed that is every row, and the operator needs to be able to
+  // find them.
+  const reflectionOptions = REFLECTION_FILTERS
+    .map((f) => [f.key, f.label, vectors.filter(f.match).length])
+    .filter((o) => o[2] > 0);
+
+  const highCandidates = vectors.filter((v) => vectorGrade(v) === 'xss_candidate_high').length;
 
   const term = search.toLowerCase();
   const shown = vectors.filter((v) => {
+    if (!matchesReflectionFilter(v, reflectionFilter)) return false;
     if (pointFilter && v.insertion_point !== pointFilter) return false;
     if (hostFilter && v.domain !== hostFilter) return false;
     if (sourceFilter && !(v.sources || []).includes(sourceFilter)) return false;
@@ -189,6 +252,26 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
         <Modal.Title className="text-danger">Unique Attack Vectors</Modal.Title>
       </Modal.Header>
       <Modal.Body style={{ overflowY: 'auto' }}>
+        <Nav variant="tabs" activeKey={tab} onSelect={(k) => k && setTab(k)} className="mb-3">
+          <Nav.Item>
+            <Nav.Link eventKey="vectors">Attack Vectors</Nav.Link>
+          </Nav.Item>
+          <Nav.Item>
+            <Nav.Link eventKey="probes"
+              title="Every input the reflection probe touched, worst first, including the ones it could not answer for.">
+              Reflection Results
+            </Nav.Link>
+          </Nav.Item>
+        </Nav>
+
+        {/* Mounted only when opened, so the probe rows are not fetched for an operator who came
+            here to edit a vector. */}
+        {tab === 'probes' && (
+          <ReflectionResultsPanel key={reloadKey} activeTarget={activeTarget} />
+        )}
+
+        {tab === 'vectors' && (
+        <>
         {error && <Alert variant="danger" className="py-2 small">{error}</Alert>}
 
         <div className="d-flex flex-wrap gap-2 align-items-center mb-3">
@@ -201,6 +284,15 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
             value={pointFilter} onChange={(e) => setPointFilter(e.target.value)}>
             <option value="">Any insertion point</option>
             {pointOptions.map(([p, n]) => <option key={p} value={p}>{p} ({n})</option>)}
+          </Form.Select>
+
+          <Form.Select size="sm" style={{ width: 'auto' }} data-bs-theme="dark"
+            value={reflectionFilter} onChange={(e) => setReflectionFilter(e.target.value)}
+            title="What the reflection probe found: whether a canary sent through this vector came back, and whether the response was something a browser renders.">
+            <option value="">Any reflection result</option>
+            {reflectionOptions.map(([key, label, n]) => (
+              <option key={key} value={key}>{label} ({n})</option>
+            ))}
           </Form.Select>
 
           <Form.Select size="sm" style={{ width: 'auto', maxWidth: '260px' }} data-bs-theme="dark"
@@ -228,21 +320,41 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
             showing {shown.length} of {vectors.length}
             {counts.hosts ? ` · ${counts.hosts} host${counts.hosts === 1 ? '' : 's'}` : ''}
             {counts.manual ? ` · ${counts.manual} by hand` : ''}
+            {/* The headline figure, in the accent colour, because it is the one number on this
+                screen that says where to start. Suppressed at zero rather than shown as "0 XSS
+                High", which would read as a probe result on a target nobody has probed. */}
+            {highCandidates > 0 && (
+              <span className="text-danger">
+                {` · ${highCandidates} ${GRADE_LABEL.xss_candidate_high}`}
+              </span>
+            )}
           </span>
         </div>
 
         {loading ? (
           <div className="text-center py-5"><Spinner animation="border" variant="danger" /></div>
         ) : shown.length === 0 ? (
+          // Two different empty tables, and only one of them is fixed by consolidating. Telling an
+          // operator who has filtered to "XSS High only" to go and run Consolidate sends them to
+          // redo work already done; the list is full, their filter matched nothing.
           <Alert variant="dark" className="border-secondary text-white-50">
-            No attack vectors yet. Run <strong>Consolidate</strong> to build them from everything the
-            crawls, the archives, Arjun, x8 and FFUF found, or add one by hand.
+            {vectors.length === 0 ? (
+              <>
+                No attack vectors yet. Run <strong>Consolidate</strong> to build them from everything
+                the crawls, the archives, Arjun, x8 and FFUF found, or add one by hand.
+              </>
+            ) : (
+              <>
+                None of the {vectors.length} attack vectors match these filters.
+              </>
+            )}
           </Alert>
         ) : (
           <table className="table table-dark table-sm align-middle">
             <thead>
               <tr className="text-white-50" style={{ fontSize: '0.72rem', textTransform: 'uppercase' }}>
-                <th>Verb</th><th>Host</th><th>Path</th><th>Insertion</th><th>Parameters</th>
+                <th>Verb</th><th>Host</th><th>Path</th><th>Insertion</th><th>Reflection</th>
+                <th>Parameters</th>
                 <th>Signals / Sources</th><th style={{ width: '150px' }}></th>
               </tr>
             </thead>
@@ -259,8 +371,12 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
                     </Assumed>
                   </td>
                   <td className="text-white-50 small">{v.domain}</td>
-                  <td className="text-truncate" style={{ maxWidth: '300px' }} title={v.path}>
+                  <td className="text-truncate" style={{ maxWidth: '300px' }}
+                    title={v.fragment ? `${v.path}#${v.fragment}` : v.path}>
                     <code className="text-light small">{v.path}</code>
+                    {/* Without this, two fragment vectors on one path are two identical looking rows:
+                        the hash is the only thing that tells #/billing from #/profile. */}
+                    {v.fragment ? <code className="text-warning small">#{v.fragment}</code> : null}
                   </td>
                   <td>
                     <Badge bg="dark" className={`border ${POINT_TONE[v.insertion_point] || ''}`}>
@@ -270,10 +386,22 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
                       Arjun derives the place from the verb rather than measuring it.
                     </Assumed>
                   </td>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    <ReflectionBadge vector={v} />
+                    {/* The content type sits under the badge for a reflecting row, because it is
+                        the difference between XSS High and XSS Low and the operator should not
+                        have to hover to learn which one they are looking at. */}
+                    {v.reflection_content_type
+                      && vectorReflectionStatus(v).startsWith('reflected_') && (
+                      <div className="text-white-50" style={{ fontSize: '0.6rem' }}>
+                        {String(v.reflection_content_type).split(';')[0]}
+                      </div>
+                    )}
+                  </td>
                   <td className="text-truncate" style={{ maxWidth: '280px' }}
                     title={(v.parameters || []).join(', ')}>
                     <code className="text-light small">
-                      {(v.parameters || []).join(', ') || '—'}
+                      {(v.parameters || []).join(', ') || 'none'}
                     </code>
                     <Assumed when={v.parameters_origin === 'union'}>
                       Every parameter ever seen on this endpoint, not a combination observed in one
@@ -309,7 +437,9 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
                 </tr>,
                 expanded[v.id] && (
                   <tr key={`${v.id}-detail`}>
-                    <td colSpan={7} className="p-3" style={{ backgroundColor: '#161616' }}>
+                    {/* Eight, not seven: the Reflection column above is counted here too, and a
+                        colSpan short by one leaves an empty cell that shifts the whole detail row. */}
+                    <td colSpan={8} className="p-3" style={{ backgroundColor: '#161616' }}>
                       <VectorDetail
                         vector={v}
                         request={requests[v.id]}
@@ -325,9 +455,12 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
             </tbody>
           </table>
         )}
+        </>
+        )}
       </Modal.Body>
       <Modal.Footer>
-        <Button variant="outline-secondary" onClick={load} disabled={loading}>Refresh</Button>
+        <Button variant="outline-secondary" disabled={loading}
+          onClick={() => { load(); setReloadKey((k) => k + 1); }}>Refresh</Button>
         <Button variant="secondary" onClick={handleClose}>Close</Button>
       </Modal.Footer>
 
@@ -369,7 +502,7 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
                   <Form.Select size="sm" className="bg-dark text-white border-secondary"
                     value={editing.insertion_point}
                     onChange={(e) => setEditing({ ...editing, insertion_point: e.target.value })}>
-                    {['query', 'body', 'header', 'cookie', 'path'].map((p) => (
+                    {['query', 'body', 'header', 'cookie', 'path', 'fragment'].map((p) => (
                       <option key={p} value={p}>{p}</option>
                     ))}
                   </Form.Select>
@@ -382,6 +515,20 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
                     onChange={(e) => setEditing({ ...editing, parametersText: e.target.value })} />
                 </div>
               </div>
+              {editing.insertion_point === 'fragment' ? (
+                <>
+                  <Form.Label className="text-white small mt-2">Fragment</Form.Label>
+                  <Form.Control size="sm" className="bg-dark text-white border-secondary custom-input"
+                    placeholder="/billing, or access_token=...&token_type=..."
+                    value={editing.fragment || ''}
+                    onChange={(e) => setEditing({ ...editing, fragment: e.target.value })} />
+                  <div className="text-white-50 mt-1" style={{ fontSize: '0.72rem' }}>
+                    The part after the #, as the browser holds it. It is what domdig is pointed at,
+                    so a fragment vector without one tests nothing and is refused. A route carrying
+                    its own query, #/connect/edit?tab=x, fills the parameters in for you.
+                  </div>
+                </>
+              ) : null}
               <Form.Label className="text-white small mt-2">Note</Form.Label>
               <Form.Control size="sm" className="bg-dark text-white border-secondary custom-input"
                 value={editing.notes || ''}
@@ -408,7 +555,10 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
 // user-controlled are drawn in the accent colour. Rendering from parts rather than from a string with
 // markers in it means a parameter named with a quote or an angle bracket cannot break the view or be
 // mistaken for framework text.
-const VectorDetail = ({ vector, request, note, onNoteChange, onSaveNote, saving }) => {
+// Exported for the test that pins the Survived column. The vector-detail table is the other
+// renderer of a probe row, and it is the one that used to print a yellow dash for a blocked
+// input and for a clean one alike.
+export const VectorDetail = ({ vector, request, note, onNoteChange, onSaveNote, saving }) => {
   const copy = () => { navigator.clipboard?.writeText(request?.raw || ''); };
 
   return (
@@ -450,6 +600,97 @@ const VectorDetail = ({ vector, request, note, onNoteChange, onSaveNote, saving 
         {request?.note && (
           <div className="text-white-50 fst-italic" style={{ fontSize: '0.72rem' }}>
             {request.note}
+          </div>
+        )}
+
+        {/* THE PROBE'S OWN ROWS, one per parameter, when the list endpoint carried them.
+            The vector's badge is a roll-up of these, and a roll-up hides the useful part: a vector
+            with five parameters where exactly one reflects is a vector with one thing to test. The
+            evidence snippet is the proof that the canary really came back, which is what stops a
+            status being taken on faith. */}
+        {(vector.reflection_probes || []).length > 0 && (
+          <div className="mt-3">
+            <div className="text-danger small fw-bold mb-1">What the reflection probe found</div>
+            <table className="table table-dark table-sm mb-0" style={{ fontSize: '0.72rem' }}>
+              <thead>
+                <tr className="text-white-50">
+                  <th>Input</th><th>Result</th><th>How</th><th>Survived</th><th>Answered</th>
+                </tr>
+              </thead>
+              <tbody>
+                {vector.reflection_probes.map((p, i) => {
+                  // The SAME reader one tab over uses. A blocked row and a row that was sent
+                  // and came back clean both have an empty survived list, and this column used
+                  // to print a yellow dash for both: the one case where nothing is known read
+                  // exactly like the one case where everything is.
+                  const surv = survivedSummary(p.survived, p.status);
+                  return (
+                  <Fragment key={`${p.parameter || 'path'}-${i}`}>
+                    <tr>
+                      <td className="text-light">
+                        <code>{p.parameter || (p.insertion_point === 'path' ? 'path segment' : 'value')}</code>
+                      </td>
+                      {/* probeAsVector, never a hand-built object: this call site used to pass
+                          status and content type alone, so the badge re-derived a grade from two
+                          of the four fields it needs and showed XSS High on every raw reflection,
+                          including the ones the server graded low or chain. */}
+                      <td><ReflectionBadge vector={probeAsVector(p)} /></td>
+                      {/* Which pass answered this input. A passive row was read out of an exchange
+                          the crawl already stored and cost the target nothing; an active row is a
+                          canary that was sent. Two different claims, so the table says which
+                          rather than leaving it to be guessed from the status. */}
+                      <td className="text-white-50">
+                        {p.evidence_source === 'passive' ? 'stored' : 'probe'}
+                      </td>
+                      {/* The characters that came back unencoded, printed literally, then WHICH
+                          KIND they are. An angle bracket opens a tag and a lone quote does not,
+                          and a dash on a row nothing was ever sent to is not a clean result. */}
+                      <td title={surv.note}
+                        style={{ color: surv.markup ? '#dc3545' : 'rgba(255,255,255,0.5)' }}>
+                        <code style={{ color: 'inherit' }}>{surv.chars.join(' ') || '-'}</code>
+                        {surv.markup && surv.chars.length > 0 && (
+                          <span className="ms-1" style={{ fontSize: '0.65rem' }}>opens a tag</span>
+                        )}
+                        {surv.weak && (
+                          <span className="ms-1" style={{ fontSize: '0.65rem' }}>quotes only</span>
+                        )}
+                        {!surv.measured && (
+                          <span className="ms-1 text-warning" style={{ fontSize: '0.65rem' }}>not measured</span>
+                        )}
+                      </td>
+                      <td className="text-white-50">
+                        {p.http_status ? `${p.http_status} ` : ''}
+                        {String(p.content_type || '').split(';')[0] || '-'}
+                      </td>
+                    </tr>
+                    {/* WHY, AND ONLY HERE. The reason an input was refused, blocked, or answered
+                        without a request is a fact about that one input, so it sits under that one
+                        input. It used to be summarised onto the Consolidate card as a paragraph,
+                        where it described nothing in particular and was too long to read. */}
+                    {p.detail && (
+                      <tr>
+                        <td colSpan={5} className="text-white-50 fst-italic pt-0"
+                          style={{ fontSize: '0.68rem', borderTop: 'none' }}>
+                          {p.detail}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+            {vector.reflection_probes.some((p) => p.evidence) && (
+              <pre className="text-light small p-2 rounded mt-2 mb-0" style={{
+                backgroundColor: '#0d0d0d', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                fontSize: '0.7rem', maxHeight: '140px', overflowY: 'auto',
+              }}>
+                {vector.reflection_probes
+                  .filter((p) => p.evidence)
+                  .map((p) => `${p.parameter || 'path'}: ${p.evidence}`)
+                  .join('\n')}
+              </pre>
+            )}
           </div>
         )}
       </div>

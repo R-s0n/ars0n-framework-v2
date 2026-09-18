@@ -1,5 +1,7 @@
 package utils
 
+import "strings"
+
 // What a finding from a given tool actually means, as hard-coded reference attached to every
 // matching result.
 //
@@ -40,6 +42,81 @@ func ExplainFinding(tool, kind string) FindingExplanation {
 		return entry
 	}
 	return FindingExplanation{}
+}
+
+// findingVictimDelivered is the set of tools in this file whose findings need a VICTIM to run the
+// payload, which is the only case where delivery can gate severity.
+//
+// Everything else here is server side. A SQL injection, an access-control bypass or an error
+// signature is exploited by the attacker sending their OWN request, so a cookie or header vector is
+// exactly as reachable as a query one and there is no gate to apply. Gating those would be the same
+// overclaim in the other direction, and this file exists to stop overclaiming.
+var findingVictimDelivered = map[string]bool{
+	"dalfox":  true,
+	"domdig":  true,
+	"pphack":  true,
+	"xssfuzz": true,
+}
+
+// FindingDeliveryNote is the ONE place the DELIVERY half of severity lives for this file.
+//
+// SEVERITY IS EXECUTION AND DELIVERY. Every SeverityNote below reasons only about execution, so a
+// payload that runs in a cookie the victim sets on themselves walked all the way to high while the
+// MCP guidance layer called the same row not_enough_info. Two screens, opposite answers.
+//
+// THE RULE IS NOT THIS FILE'S INVENTION and the other copies are named so they can be kept in step:
+// docker/mcp-server/src/guidance/scanning.js under manage_xss.rule says a query, path or fragment
+// vector stays deliverable whatever its grade, while a cookie or header vector is self-XSS and
+// not_enough_info until a NAMED chain is demonstrated. The Go copy that grades probe rows on it is
+// XSSCandidateGrade in reflectionProbe.go, via XSSCandidateChain.
+//
+// WHICH POINTS THOSE ARE IS NOT RESTATED HERE. It calls ReflectionInsertionPointDeliverable, because
+// two lists is how the content type rule diverged across three layers earlier in this project.
+//
+// One sentence, appended rather than copied into twenty-nine paragraphs, and empty whenever the
+// gate does not bite: a note that fires on every row says nothing.
+// findingVictimDelivered names the tools whose findings need a VICTIM to reach the payload. Only
+// dalfox can currently trip the gate, because domdig, xssfuzz and pphack are all restricted to
+// insertion points that are already deliverable (xssOptions.go, miscTools.go). The others are kept
+// so a later widening of any of their InsertionPoints does not silently lose the gate.
+func FindingDeliveryNote(tool, insertionPoint string) string {
+	if !findingVictimDelivered[strings.ToLower(strings.TrimSpace(tool))] {
+		return ""
+	}
+	if ReflectionInsertionPointDeliverable(insertionPoint) {
+		return ""
+	}
+	// THE CHAIN IS NAMED PER POINT, because the three cookie chains do not reach a body and saying
+	// they do is worse than saying nothing. A review caught the first version handing the operator
+	// "CRLF into Set-Cookie, a cookie write from a sibling subdomain, a cache poison" for a BODY
+	// vector, along with the claim that the victim's browser "sets" a body value. It does not, and
+	// dalfox does reach body, so that wrong sentence was reachable in production.
+	//
+	// ReflectionInsertionPointDeliverable's own comment already knew the right answer for body and
+	// this is where it gets said: a cross-site form POST reaches a form-encoded endpoint with no
+	// CSRF token, which is a real chain and a named one, but a chain rather than a link.
+	switch strings.ToLower(strings.TrimSpace(insertionPoint)) {
+	case "body":
+		return "Delivery gate: a body value is not something a link carries, so on its own this is " +
+			"self-XSS. It becomes reportable once you name and demonstrate the chain that submits " +
+			"it: a cross-site form POST to a form-encoded endpoint with no CSRF token is the usual one."
+	default:
+		return "Delivery gate: the payload sits in a " +
+			strings.ToLower(strings.TrimSpace(insertionPoint)) + " value the victim's own browser " +
+			"sends, so execution here is self-XSS until you name and demonstrate the chain that " +
+			"sets it: CRLF into Set-Cookie, a cookie write from a sibling subdomain, or a cache poison."
+	}
+}
+
+// ExplainFindingForVector is ExplainFinding with the delivery half of severity added for the
+// insertion point the finding was actually aimed at. Callers that know the insertion point should
+// use this one; ExplainFinding is the same answer for an unknown point.
+func ExplainFindingForVector(tool, kind, insertionPoint string) FindingExplanation {
+	out := ExplainFinding(tool, kind)
+	if note := FindingDeliveryNote(tool, insertionPoint); note != "" {
+		out.SeverityNote = strings.TrimSpace(out.SeverityNote + " " + note)
+	}
+	return out
 }
 
 var findingExplanations = map[string]FindingExplanation{

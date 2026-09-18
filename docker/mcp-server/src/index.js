@@ -59,6 +59,7 @@ const { replayRequestSchema, replayRequest, manageRequestVersionsSchema, manageR
 const { manageFlowDetectionSchema, manageFlowDetection, manageFlowConfigSchema, manageFlowConfig, getFlowMetricsSchema, getFlowMetrics } = require('./tools/flowdetection');
 const { manageFlowBuilderSchema, manageFlowBuilder } = require('./tools/flowbuilder');
 const { browseKnowledgeBaseSchema, browseKnowledgeBase, readKnowledgeFileSchema, readKnowledgeFile, searchKnowledgeBaseSchema, searchKnowledgeBase } = require('./tools/knowledgebase');
+const { listWorkflowsSchema, listWorkflows, getWorkflowSchema, getWorkflow } = require('./tools/workflowbook');
 
 const guidance = require('./guidance');
 const guidanceSession = require('./guidance/session');
@@ -407,12 +408,12 @@ function createServer() {
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_vector_selection', 'See and control which attack vectors each vector-testing scanner runs against, per tool, across all twelve sections (xss, sqli, cmdi, redirect-ssrf, lfi, cache, smuggling, access-bypass, graphql, sensitive-leak, exposed-git, misc). The per-vector twin of manage_param_enum. IT RETURNS TWO COUNTS THAT ARE NOT THE SAME NUMBER, and collapsing them is how a scan gets misreported: selected is what the operator chose, and defaults to everything because selection is stored sparsely as deselections only; eligible is what the scan WILL ACTUALLY SEND, and is always smaller when the tool cannot reach an insertion point or a setting has it off. Measured on the reference target, Dalfox is selected for 215 vectors and sends to 78, so selected_but_unreachable is 137 vectors that are unknown rather than clean. Always quote eligible as coverage. Takes category explicitly rather than inferring it from the tool name: the route is category-prefixed, an unknown category 404s at the router, and a valid-but-wrong category returns 200 with data read through the wrong route, so a guess can be silently wrong. Selection is per tool, so deselecting a vector for sqlmap leaves Ghauri still scanning it.', manageVectorSelectionSchema.shape, async (params) => {
+  server.tool('manage_vector_selection', 'See and control which attack vectors each vector-testing scanner runs against, per tool, across all twelve sections (xss, sqli, cmdi, redirect-ssrf, lfi, cache, smuggling, access-bypass, graphql, sensitive-leak, exposed-git, misc). The per-vector twin of manage_param_enum. IT RETURNS TWO COUNTS THAT ARE NOT THE SAME NUMBER, and collapsing them is how a scan gets misreported: selected is what the operator chose, and defaults to everything because selection is stored sparsely as deselections only; eligible is what the scan WILL ACTUALLY SEND, and is always smaller when the tool cannot reach an insertion point or a setting has it off. Measured on the reference target, Dalfox is selected for 215 vectors and sends to 78, so selected_but_unreachable is 137 vectors that are unknown rather than clean. Always quote eligible as coverage. Takes category explicitly rather than inferring it from the tool name: the route is category-prefixed, an unknown category 404s at the router, and a valid-but-wrong category returns 200 with data read through the wrong route, so a guess can be silently wrong. Selection is per tool, so deselecting a vector for sqlmap leaves Ghauri still scanning it, and tools: [...] sets several scanners in one call so a section cannot end up pointed at three different sets. select_only makes the selection EXACTLY the set you name and takes a grade or a reflection_status instead of ids, which is how "scan the vectors carrying the XSS label with all three XSS tools" becomes one call. Narrowing by grade leaves everything else UNTESTED rather than clean, including every vector the probe could not answer for.', manageVectorSelectionSchema.shape, async (params) => {
     const result = await manageVectorSelection(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_xss', 'Configure and run the XSS scanners (Dalfox, domdig, xssFuzz) against the unique attack vectors of this target. Settings live in the same server-side store the Config modal writes, so a change here is visible there and the other way round. Start with the eligibility action: only Dalfox can reach header, body, cookie and path insertion points, so a clean result from domdig or xssFuzz says nothing about the vectors they never sent.', manageXSSSchema.shape, async (params) => {
+  server.tool('manage_xss', 'Configure and run the XSS scanners (Dalfox, domdig, xssFuzz) against the unique attack vectors of this target. Settings live in the same server-side store the Config modal writes, so a change here is visible there and the other way round. Start with the eligibility action: only Dalfox can reach header, body, cookie and path insertion points, so a clean result from domdig or xssFuzz says nothing about the vectors they never sent. run, status and results take tools: ["dalfox","domdig","xssfuzz"] to act on all three in one call, each over its own selection and its own eligibility, so the three coverage numbers are three different numbers.', manageXSSSchema.shape, async (params) => {
     const result = await manageXSS(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
@@ -555,6 +556,26 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
+  // ============================================================
+  // WORKFLOW BOOK
+  // ============================================================
+  // Stored campaign runbooks, in the repo, pulled by name. The distinction from the knowledge base
+  // above is provenance: that corpus is vendored prose about how web application testing is done in
+  // general, this one is what THIS framework measured on a real run, with the counts attached.
+  //
+  // The distinction from the guidance layer is delivery. `lies` is pushed onto every tool result
+  // whether or not anyone asked. A workflow is long and is only useful to someone who has already
+  // decided to run that kind of campaign, so it is pulled once at the start instead.
+  server.tool('list_workflows', 'The workflow book: stored campaign runbooks for the kinds of work that take hours and go wrong in ways a result cannot show. Each row says what the workflow is for, when to reach for it, what it was measured on, what it cost, and how many preconditions, steps, lessons and gotchas it carries. Call this at the START of a campaign, before configuring the first tool, not after a run has already gone wrong. The steps in these entries were never the hard part; the gotchas are, and they are the reason the book exists.', listWorkflowsSchema.shape, async (params) => {
+    const result = await listWorkflows(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_workflow', 'Read one stored workflow: its preconditions, its ordered steps as do/assert/verify/looks-like units, the lessons the last run learned, and the gotchas. READ THE GOTCHAS FIRST. Every gotcha carries the measurement that produced it, a source naming where that measurement can be re-checked, the symptom, and the fix, because the failures these workflows record are all of one kind: a tool that was told something it did not understand, exited 0, reported nothing, and was recorded as clean. Nothing here is truncated to fit a budget, since a cut list of gotchas reads exactly like a complete one; a workflow too large for one read is refused with its section sizes so you can ask for one section. This is a knowledge store and reading it starts nothing.', getWorkflowSchema.shape, async (params) => {
+    const result = await getWorkflow(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
   server.tool('manage_fuzz', 'The live ffuf fuzz flow: review what a run found, change what a step sends, price it, run it and follow it. This is the implementation the URL workflow actually executes; run_scan "ffuf_url" and manage_tool_config "ffuf" drive an older one whose tables are empty, so use this for anything ffuf. Start with action summary, which reports per step whether the findings are discoveries or one response repeated, and the option that would exclude that response.', manageFuzzSchema.shape, async (params) => {
     const result = await manageFuzz(params);
     // Guidance rides along with the RESULT rather than waiting to be asked for. A caller who knew to
@@ -683,7 +704,7 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_attack_vectors', 'Unique Attack Vectors: consolidate the list from everything the other tools found, read it, and correct it. A vector is one HTTP verb, host, path, parameter SET and payload insertion point (query, body, header, cookie or path); two requests differing only in the VALUE sent are the same vector. Consolidate sends no traffic at the target, and never rebuilds a vector the operator edited or deleted.', manageAttackVectorsSchema.shape, async (params) => {
+  server.tool('manage_attack_vectors', 'Unique Attack Vectors: consolidate the list from everything the other tools found, read it, and correct it. A vector is one HTTP verb, host, path, parameter SET and payload insertion point (query, body, header, cookie, path or fragment); two requests differing only in the VALUE sent are the same vector. A fragment vector is the URL hash: it never reaches the server, so no HTTP tool can test it and only domdig, which drives a browser, is eligible for one. Consolidate sends no traffic at the target, and never rebuilds a vector the operator edited or deleted. ALSO CARRIES THE REFLECTION PROBE, which is a separate step that DOES send traffic: probe_reflection puts a canary through every query, path, cookie, header and body input and records whether it came back and whether any of < > " \' survived unencoded; reflection reads the rows and the census; list filters by grade or reflection_status. It runs PASSIVE FIRST, reading the request/response pairs the crawl already stored and recording every input whose value comes back whole as reflected_observed with NO REQUEST SENT, then ACTIVE. Cookie and header probes stay GET and are idempotent; POST, PATCH, PUT and DELETE are never sent at any setting, so a body vector reads probe_refused on the active pass and is answered by the passive one. The grade is the XSS label and it is graded rather than boolean: xss_candidate_high is reflected raw into an HTML response at an input an attacker can put in a LINK, xss_candidate_chain is the same reflection at a cookie, header or body input, which renders and is self-XSS until a chain that sets the value is named, xss_candidate_low is reflected raw into a non-HTML one and is a real reflection that cannot be rendered (measured: /api/v1/echo returns <svg onload=alert(1)> byte for byte and is pinned to application/json), xss_candidate_none is escaped or absent, and xss_unknown is blocked, error, needs_browser, is_credential, probe_refused or not_probed, which means NOTHING IS KNOWN and never that the vector is safe. is_credential is the input BEING the session, so no request went out: measured on the reference target that is all 49 header vectors and 700 of 1655 cookie slots.', manageAttackVectorsSchema.shape, async (params) => {
     const result = await manageAttackVectors(params);
     const guidance = await methodology.stepGuidance('consolidate-vectors');
     return { content: [{ type: 'text', text: JSON.stringify({ ...result, methodology: guidance }, null, 2) }] };
@@ -861,7 +882,7 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
   });
 
   // ============================================================
-  // SETTINGS (new) — parity with the web UI Settings modal. The MCP Server section is read-only
+  // SETTINGS (new) - parity with the web UI Settings modal. The MCP Server section is read-only
   // (returned by get_settings, but there is no tool to modify it).
   // ============================================================
   server.tool('get_settings', 'Read all framework settings: per-tool rate limits, custom HTTP (user-agent/header), Burp Suite config, recon API keys (masked), AI provider API keys (masked), and the read-only MCP server config.', getSettingsSchema.shape, async (params) => {
@@ -869,7 +890,7 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('update_settings', 'Update framework settings — per-tool rate limits, custom user-agent/header, and Burp Suite proxy/API config. Only pass the fields you want to change; the rest are preserved. Does NOT modify the MCP Server section.', updateSettingsSchema.shape, async (params) => {
+  server.tool('update_settings', 'Update framework settings - per-tool rate limits, custom user-agent/header, and Burp Suite proxy/API config. Only pass the fields you want to change; the rest are preserved. Does NOT modify the MCP Server section.', updateSettingsSchema.shape, async (params) => {
     const result = await updateSettings(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
@@ -948,7 +969,7 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
   });
 
   // ============================================================
-  // REQUEST FLOW REPLAY — the repeater, detected flows, active detection, and the builder.
+  // REQUEST FLOW REPLAY - the repeater, detected flows, active detection, and the builder.
   // Same rule as manage_wildcard_tools: everything the Request Flow Replay screens can do is
   // reachable here, and nothing here does something those screens cannot. The feature added 42
   // HTTP routes; these seven tools are the whole of it.
@@ -1060,7 +1081,7 @@ async function main() {
     console.log(`[MCP] SSE endpoint: http://0.0.0.0:${PORT}/sse`);
     console.log(`[MCP] Health check: http://0.0.0.0:${PORT}/health`);
     if (!AUTH_TOKEN) {
-      console.warn('[MCP] WARNING: MCP_AUTH_TOKEN is not set — /sse and /messages are unauthenticated');
+      console.warn('[MCP] WARNING: MCP_AUTH_TOKEN is not set - /sse and /messages are unauthenticated');
     }
   });
 }

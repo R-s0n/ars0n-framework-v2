@@ -10,7 +10,8 @@ import (
 // The tools that TEST attack vectors, as one registry.
 //
 // XSS came first and SQL injection turned out to be the same shape: a set of scanners, each able to
-// reach some subset of the five insertion points, each configured from a server-side store that the
+// reach some subset of the insertion points (the five that are sent, plus the fragment, which only
+// a browser-driven tool reaches), each configured from a server-side store that the
 // Config modal and the MCP tool both edit. Ten more sections are planned. Copying the settings
 // store, the eligibility check, the runner and the API once per section would be roughly nine
 // hundred lines duplicated twelve times, and the copies only have to disagree once for a scan to
@@ -210,7 +211,20 @@ type VectorTool struct {
 
 // VectorInsertionPoints is every insertion point an attack vector can carry. Kept here so an
 // eligibility report can name the ones a tool CANNOT reach, not only the ones it can.
-var VectorInsertionPoints = []string{"query", "body", "header", "cookie", "path"}
+var VectorInsertionPoints = []string{"query", "body", "header", "cookie", "path", "fragment"}
+
+// VectorHTTPInsertionPoints is every point that is actually SENT: the five containers that appear
+// somewhere in the request bytes.
+//
+// This exists because "fragment" must not be reachable by default. Thirty-odd tools were declared
+// with InsertionPoints: VectorInsertionPoints as shorthand for "this one reaches everything", and
+// appending the fragment to that list would have made sqlmap, ffuf, nuclei and the rest claim they
+// can test a container the browser strips before the request leaves. Each of them would have been
+// handed the vector, sent a request with no fragment in it, exited 0, and had the result recorded as
+// a clean test of the fragment. That is precisely the silent miscount vectorEligibility.go was
+// written to stop, so the shorthand now means the five sent points and a tool that genuinely drives
+// a browser opts in by naming "fragment" explicitly. domdig is the only one that does.
+var VectorHTTPInsertionPoints = []string{"query", "body", "header", "cookie", "path"}
 
 // VectorCanary is the value substituted for a parameter whose name is known but whose value was
 // never observed. On the reference target 16 of 27 query vectors are in that state: discovered by

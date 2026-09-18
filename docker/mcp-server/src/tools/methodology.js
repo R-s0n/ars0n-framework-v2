@@ -43,6 +43,16 @@ const toolGuidanceSchema = z.object({
     'Tool key, e.g. dalfox, sqlmap, ghauri, forbidden, pphack. Omit for every tool that has guidance.'),
   kind: z.string().optional().describe(
     'Optional finding kind for a more specific answer, e.g. V for a dalfox verified finding.'),
+  // SEVERITY DEPENDS ON DELIVERY, NOT ONLY ON EXECUTION, and without this the MCP path gets the
+  // ungated answer. The server computes the delivery half from the insertion point: an XSS that
+  // executes in a cookie or header value is self-XSS until a chain is named, and a body value needs
+  // a cross-site form POST. Omit it and you get the generic note, which reads as though execution
+  // alone settles severity.
+  insertion_point: z.string().optional().describe(
+    'The insertion point the finding was aimed at: query, path, fragment, cookie, header or body. '
+    + 'Supply it whenever you know it. Severity has a delivery half as well as an execution half, '
+    + 'and a cookie, header or body finding is self-XSS until a chain is named, so the answer is '
+    + 'different for the same tool and kind at a different point.'),
 });
 
 async function stepGuidance(stepKey) {
@@ -98,7 +108,8 @@ function register(server) {
     'point, which is exactly the identity the attack_vectors table keys on: two requests differing ' +
     'only in the VALUE sent are the same vector. A LOGIC attack vector is one of four things: an ' +
     'overly complex mechanism, a database query using an id from the HTTP request, granular access ' +
-    'controls, or a hacky implementation. Also returns the five insertion points and the catalogue ' +
+    'controls, or a hacky implementation. Also returns the six insertion points, five of which are '
+    + 'sent and one of which, the fragment, never leaves the browser, and the catalogue ' +
     'of what ffuf is actually used for. Read this before deciding what to test.',
     attackVectorModelSchema.shape,
     async () => {
@@ -127,7 +138,9 @@ function register(server) {
     toolGuidanceSchema.shape,
     async (params) => {
       const q = params.tool ? `?tool=${encodeURIComponent(params.tool)}` +
-        (params.kind ? `&kind=${encodeURIComponent(params.kind)}` : '') : '';
+        (params.kind ? `&kind=${encodeURIComponent(params.kind)}` : '') +
+        (params.insertion_point
+          ? `&insertion_point=${encodeURIComponent(params.insertion_point)}` : '') : '';
       const data = await apiGet(`/tool-guidance${q}`);
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     });

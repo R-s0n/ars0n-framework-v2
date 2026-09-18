@@ -200,10 +200,12 @@ func TestTInjADoesNotClaimCookiesOrPaths(t *testing.T) {
 }
 
 // SSTImap needs no marker and no level for a cookie or a header: -P defaults to QBHC. It was the
-// only tool here to find the injection at all five points.
+// only tool here to find the injection at all five SENT points. The fragment is deliberately not
+// among them, so the list here is VectorHTTPInsertionPoints: SSTImap speaks HTTP and a fragment
+// never reaches the wire, so claiming it would mean vectors handed over and reported clean untested.
 func TestSSTImapReachesEveryInsertionPoint(t *testing.T) {
 	tool, _ := VectorToolByKey("sstimap")
-	for _, point := range VectorInsertionPoints {
+	for _, point := range VectorHTTPInsertionPoints {
 		if !VectorToolCanReach(tool, point) {
 			t.Errorf("SSTImap was measured to reach %s", point)
 		}

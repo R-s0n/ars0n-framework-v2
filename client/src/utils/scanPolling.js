@@ -6,7 +6,7 @@
 // is bumped and all outstanding timers are cleared, so the previous target's recursive polling
 // chains stop firing.
 //
-// This fixes the timer leak (chains used to accumulate on every target switch — the effects had
+// This fixes the timer leak (chains used to accumulate on every target switch - the effects had
 // no cleanup, so each switch started a fresh recursive setTimeout chain while the old ones kept
 // running forever) and the bulk of the stale-write races (a cancelled chain no longer fetches +
 // setState for a target you've navigated away from). The only residual is a single fetch that is

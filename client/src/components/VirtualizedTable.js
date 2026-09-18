@@ -1,7 +1,7 @@
 import VirtualizedList from './VirtualizedList';
 
 /**
- * VirtualizedTable — tabular virtualization on top of {@link VirtualizedList} (G1.5).
+ * VirtualizedTable - tabular virtualization on top of {@link VirtualizedList} (G1.5).
  *
  * Because react-window rows are absolutely positioned, a real <table> can't be virtualized
  * directly. This renders a non-scrolling flex header above a virtualized body of flex rows; the

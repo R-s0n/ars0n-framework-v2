@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Target Behaviour Probe v2 — entry point.
+"""Target Behaviour Probe v2 - entry point.
 
 Characterises how a target routes requests, handles volume, and behaves in ways that corrupt
 automated scanning. Replaces the v1 probe, which only answered "is there a WAF" and only tuned ffuf.

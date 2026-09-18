@@ -63,7 +63,7 @@ PAYLOAD_CLASSES = (
     "sensitive_path",
 )
 
-# Classes considered "core" — enough to establish ruleset shape without a long tail.
+# Classes considered "core" - enough to establish ruleset shape without a long tail.
 DEFAULT_PAYLOAD_CLASSES = ("xss", "sqli_error", "traversal", "rce", "ssti")
 
 

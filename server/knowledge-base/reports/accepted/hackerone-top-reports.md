@@ -1218,7 +1218,7 @@
 994. [Reflected XSS: Taxonomy Converter via tax parameter](https://hackerone.com/reports/495515) to WordPress - 15 upvotes, $0
 995. [Хранимая XSS в личных сообщениях новое место](https://hackerone.com/reports/310339) to ok.ru - 15 upvotes, $0
 996. [XSS on www.██████ alerts and a number of other pages](https://hackerone.com/reports/450315) to U.S. Dept Of Defense - 15 upvotes, $0
-997. [[█████] — DOM-based XSS on endpoint `/?s=`](https://hackerone.com/reports/708592) to U.S. Dept Of Defense - 15 upvotes, $0
+997. [[█████] - DOM-based XSS on endpoint `/?s=`](https://hackerone.com/reports/708592) to U.S. Dept Of Defense - 15 upvotes, $0
 998. [Reflected xss on 8x8.vc](https://hackerone.com/reports/771110) to 8x8 - 15 upvotes, $0
 999. [Stored XSS in Name of Team Member Invitation](https://hackerone.com/reports/786301) to Localize - 15 upvotes, $0
 1000. [Reflected cross-site scripting vulnerability on a DoD website](https://hackerone.com/reports/774792) to U.S. Dept Of Defense - 15 upvotes, $0
@@ -1278,8 +1278,8 @@
 1054. [xss on reset password page](https://hackerone.com/reports/1763404) to U.S. Dept Of Defense - 14 upvotes, $0
 1055. [DOM XSS at `https://adobedocs.github.io/indesign-api-docs/?configUrl={site}` due to outdated Swagger UI](https://hackerone.com/reports/1736327) to Adobe - 14 upvotes, $0
 1056. [Self-XSS due to image URL can be eploited via XSSJacking techniques in review email](https://hackerone.com/reports/1397940) to Judge.me  - 14 upvotes, $0
-1057. [CVE‑2025‑4123 — Grafana Open Redirect → Stored XSS → SSRF (Full Read) at ██████](https://hackerone.com/reports/3286945) to U.S. Dept Of Defense - 14 upvotes, $0
-1058. [Reflected XSS Vulnerability in  SSL VPN Endpoint — CVE-2025-0133](https://hackerone.com/reports/3238607) to U.S. Dept Of Defense - 14 upvotes, $0
+1057. [CVE‑2025‑4123 - Grafana Open Redirect → Stored XSS → SSRF (Full Read) at ██████](https://hackerone.com/reports/3286945) to U.S. Dept Of Defense - 14 upvotes, $0
+1058. [Reflected XSS Vulnerability in  SSL VPN Endpoint - CVE-2025-0133](https://hackerone.com/reports/3238607) to U.S. Dept Of Defense - 14 upvotes, $0
 1059. [XSS в теле письма, в новой версии почты.](https://hackerone.com/reports/369201) to Mail.ru - 13 upvotes, $1000
 1060. [[www.dropboxforum.com] - reflected XSS in search](https://hackerone.com/reports/413599) to Dropbox - 13 upvotes, $512
 1061. [Stored XSS at 'Buy Button' page](https://hackerone.com/reports/186462) to Shopify - 13 upvotes, $500
@@ -2155,7 +2155,7 @@
 1931. [[███████] Reflected GET XSS (/mission.php?...&missionDate=*)](https://hackerone.com/reports/648298) to U.S. Dept Of Defense - 4 upvotes, $0
 1932. [Reflected XSS on card.starbucks.com.sg/unsubRevert.php via the 'ct' Parameter](https://hackerone.com/reports/541199) to Starbucks - 4 upvotes, $0
 1933. [Stored XSS on scan.nextcloud.com](https://hackerone.com/reports/390728) to Nextcloud - 4 upvotes, $0
-1934. [[████████] — XSS on `/███████_flight/images` via `advanced_val` parameter](https://hackerone.com/reports/689257) to U.S. Dept Of Defense - 4 upvotes, $0
+1934. [[████████] - XSS on `/███████_flight/images` via `advanced_val` parameter](https://hackerone.com/reports/689257) to U.S. Dept Of Defense - 4 upvotes, $0
 1935. [Unrestricted file upload leads to stored xss on https://████████/](https://hackerone.com/reports/854445) to U.S. Dept Of Defense - 4 upvotes, $0
 1936. [XSS (Cross site scripting) on https://apimgr.8x8.com](https://hackerone.com/reports/412754) to 8x8 - 4 upvotes, $0
 1937. [Stored XSS agent_status ](https://hackerone.com/reports/418271) to 8x8 - 4 upvotes, $0
@@ -2795,7 +2795,7 @@
 190. [SSRF bypass](https://hackerone.com/reports/863221) to Concrete CMS - 14 upvotes, $0
 191. [Blind SSRF as normal user from mailapp](https://hackerone.com/reports/1913095) to Nextcloud - 14 upvotes, $0
 192. [Responsive Server-side Request Forgery (SSRF)](https://hackerone.com/reports/1895874) to Nextcloud - 14 upvotes, $0
-193. [CVE‑2025‑4123 — Grafana Open Redirect → Stored XSS → SSRF (Full Read) at ██████](https://hackerone.com/reports/3286945) to U.S. Dept Of Defense - 14 upvotes, $0
+193. [CVE‑2025‑4123 - Grafana Open Redirect → Stored XSS → SSRF (Full Read) at ██████](https://hackerone.com/reports/3286945) to U.S. Dept Of Defense - 14 upvotes, $0
 194. [Bypass of the SSRF protection (Slack commands, Phabricator integration)](https://hackerone.com/reports/61312) to Slack - 13 upvotes, $100
 195. [Blind SSRF on synthetics.newrelic.com](https://hackerone.com/reports/141304) to New Relic - 13 upvotes, $0
 196. [Internal Ports Scanning via Blind SSRF](https://hackerone.com/reports/263169) to New Relic - 13 upvotes, $0
@@ -4470,7 +4470,7 @@
 120. [Open Redirect ███.8x8.com](https://hackerone.com/reports/1637571) to 8x8 - 15 upvotes, $0
 121. [Open Redirect on [My.com]](https://hackerone.com/reports/244721) to Mail.ru - 14 upvotes, $0
 122. [Open Redirect on the nl.wordpress.net](https://hackerone.com/reports/309058) to WordPress - 14 upvotes, $0
-123. [CVE‑2025‑4123 — Grafana Open Redirect → Stored XSS → SSRF (Full Read) at ██████](https://hackerone.com/reports/3286945) to U.S. Dept Of Defense - 14 upvotes, $0
+123. [CVE‑2025‑4123 - Grafana Open Redirect → Stored XSS → SSRF (Full Read) at ██████](https://hackerone.com/reports/3286945) to U.S. Dept Of Defense - 14 upvotes, $0
 124. [Open redirection in OAuth](https://hackerone.com/reports/55525) to Shopify - 13 upvotes, $500
 125. [[apps.shopify.com] Open Redirect](https://hackerone.com/reports/160047) to Shopify - 13 upvotes, $500
 126. [Open redirect GET-Based on https://www.flickr.com/browser/upgrade/?continue=](https://hackerone.com/reports/1217570) to Flickr - 13 upvotes, $150

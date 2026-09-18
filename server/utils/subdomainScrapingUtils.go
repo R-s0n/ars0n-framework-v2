@@ -156,7 +156,7 @@ func RunSublist3rScan(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"scan_id": scanID})
 }
 
-// ExecuteAndParseSublist3rScan — the original Sublist3r tool is obsolete (its search-engine
+// ExecuteAndParseSublist3rScan - the original Sublist3r tool is obsolete (its search-engine
 // scrapers are all blocked, DNSdumpster/Virustotal are broken), so this scan no longer shells out
 // to sublist3r.py. It has been repurposed into a native "Passive OSINT" aggregator that unions
 // subdomains from working, key-free passive sources (RapidDNS, URLScan.io, OTX AlienVault passive
@@ -1288,7 +1288,7 @@ func fetchCTLSubdomains(domain string, cfg ctlRunConfig) (subdomains []string, s
 	if crtErr == nil {
 		return subs, crtShSource, nil
 	}
-	log.Printf("[CTL] [WARN] crt.sh failed for %s (%v) — falling back to certspotter", domain, crtErr)
+	log.Printf("[CTL] [WARN] crt.sh failed for %s (%v) - falling back to certspotter", domain, crtErr)
 
 	subs, csErr := ctlFetchWithRetries(cfg, certspotter)
 	if csErr == nil {

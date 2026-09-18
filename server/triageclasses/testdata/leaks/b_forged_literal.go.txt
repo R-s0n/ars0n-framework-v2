@@ -1,0 +1,15 @@
+// Leak (b): FORGE A Perturbed COMPOSITE LITERAL CARRYING ANOTHER CLASS'S TICKET.
+//
+// A composite literal goes around NewPerturbed, and with it around the stripe assertion, the
+// marker check and the vault's record of who owns what. The old shape kept an owner field on the
+// value, so a forger could write owner: ClassSQL over somebody else's observation and the
+// accessor, which compared against that same field, agreed.
+//
+// The field names are unexported, so from another package there is nothing to write.
+package leakfixture
+
+import "ars0n-framework-v2-server/utils/triage"
+
+func leakForgedLiteral(victim triage.Perturbed) triage.Perturbed {
+	return triage.Perturbed{vault: victim.vault, ticket: victim.ticket}
+}

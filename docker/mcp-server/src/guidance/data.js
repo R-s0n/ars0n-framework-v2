@@ -13,6 +13,25 @@
 // columns it did not mention. Those three account for nearly every incident this estate has
 // recorded in this area, so they are what the "lies" fields say.
 //
+// AUTHORING "lies": IT IS A LIST, SO APPEND, DO NOT REWRITE. This note applies to all four domain
+// files, not only this one.
+//   - Write one string per DISTINCT way the tool misleads. A bare string is read as a one element
+//     list, which is why every entry authored before the field became a list still works unchanged,
+//     but a second lie goes in an array rather than getting glued onto the end of the first.
+//   - The run of the tool that taught you something IS the trigger. If you called a tool, read its
+//     output, and had to work out for yourself why the number in it was not the number it looked
+//     like, that is a lie this file does not have yet. Add it, with the measurement that showed it.
+//   - An action override ACCUMULATES. actions.<name>.lies is added to the tool level ones rather
+//     than replacing them, because a lie is a fact about the tool and stays true for one action.
+//     Do not restate a tool level lie in an override to keep it: it is already there, and an exact
+//     duplicate is dropped anyway.
+//   - The merged list is MOST SPECIFIC FIRST: an action's own lies, then the tool level ones. The
+//     compact reminder repeats lies[0] on every call after the first, and the brief is tracked per
+//     TOOL, so the tool level lie has already gone out in full and the action's has not. Writing a
+//     lie in an override is therefore what makes it lead the reminder for that action.
+//   - WITHIN one level, put the lie that bites hardest FIRST, for the same reason: order is a
+//     decision and not just a list.
+//
 // The step names come from steps.js, which abbreviates server/utils/methodology.go in its own Order:
 // manual-crawl(10), content-discovery(20), archive-discovery(30), parameter-discovery(40),
 // consolidate-vectors(50), vector-scanning(60), access-bypass(70), threat-model(80). Inventing a step
@@ -144,6 +163,11 @@ module.exports = {
     tool: 'The STRIDE threat model: one row per claim about how the application could be abused, ' +
       'plus the flows that demonstrate it and the ad hoc notes recording what testing actually ' +
       'showed. A threat is a hypothesis with a test attached, not a finding.',
+    rule: 'VALIDATED REQUIRES A PROOF OF CONCEPT. Set test_status validated only when you can point ' +
+      'at the requests that show what an attacker GAINS, not at a mechanism being present or a ' +
+      'control being absent. Anything of the shape "exploitable IF X", where X is unproven, is ' +
+      'not_enough_info. Write the winning sequence into steps or a note at the same time, because a ' +
+      'validated row nobody can reproduce is indistinguishable from a guess six weeks later.',
     vuln: 'This is where access control and business logic bugs are caught, because they have no ' +
       'signature a scanner can match: a successful IDOR looks like an ordinary 200 and is only ' +
       'findable if the intended rule was written down first.',
@@ -177,7 +201,9 @@ module.exports = {
           'back and merged underneath your fields, because the route itself replaces every column.',
         lies: 'Without the read-back merge a partial update blanks the columns it did not mention, ' +
           'which is how seven columns were wiped on 58 rows in one call. A verification that checks ' +
-          'only the fields you sent proves nothing; diff the whole row.',
+          'only the fields you sent proves nothing; diff the whole row. And before you move a row ' +
+          'to validated, check it against the proof-of-concept bar: an attacker has to GAIN ' +
+          'something you can point at, or the honest status is not_enough_info.',
         next: 'manage_threat_model action:"list"',
       },
       delete: {
@@ -596,10 +622,20 @@ module.exports = {
     tool: 'The tokens every other scan sends: create, read, update, delete, switch active, and ' +
       'parse a raw Set-Cookie line, Cookie header or Authorization header into properly scoped ' +
       'tokens. Only ACTIVE tokens within their scope_domains are attached to traffic.',
-    lies: 'A valid credential is not always enough. On a load-balanced target the session store can ' +
-      'be per backend, so the session cookie alone gets a 302 to login while the same request with ' +
-      'the routing cookie gets a 200; register that companion cookie with token_role:"companion" or ' +
-      'every authenticated scan silently runs as anonymous.',
+    lies: [
+      'A valid credential is not always enough. On a load-balanced target the session store can ' +
+        'be per backend, so the session cookie alone gets a 302 to login while the same request ' +
+        'with the routing cookie gets a 200; register that companion cookie with ' +
+        'token_role:"companion" or every authenticated scan silently runs as anonymous.',
+      'THERE IS NO "RUN UNAUTHENTICATED" SWITCH on the vector sections. An active token here is ' +
+        'never put on a vector scanner\'s command line, but it still governs every vector run: ' +
+        'runVectorScan calls SessionStillHonoured every 8 vectors (server/utils/vectorScan.go), ' +
+        'and a stored credential that grades anything other than active breaks the loop and files ' +
+        'every remaining vector as UNTESTED. Measured: one dalfox run stopped after 8 of 215 ' +
+        'vectors because a bearer validated as expired, so 207 vectors carry no verdict. A target ' +
+        'with no active token returns honoured and scans anonymously, so deactivate the tokens to ' +
+        'get a genuinely unauthenticated arm rather than hoping the scanner ignores them.',
+    ],
     next: 'check_session_tokens action:"validate", then run_endpoint_scan',
     derived: false,
     actions: {

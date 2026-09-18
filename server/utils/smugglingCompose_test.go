@@ -363,7 +363,7 @@ func TestSmugglingToolsScanURLsNotParameters(t *testing.T) {
 			t.Errorf("%s unit of work is a URL and the card has to say so", key)
 		}
 		// Nothing is refused by insertion point: the insertion point is not what is being tested.
-		for _, point := range VectorInsertionPoints {
+		for _, point := range VectorHTTPInsertionPoints {
 			if !VectorToolCanReach(tool, point) {
 				t.Errorf("%s should accept a %s vector and fold it into the URL scan", key, point)
 			}

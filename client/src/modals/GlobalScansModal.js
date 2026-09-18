@@ -1111,11 +1111,11 @@ function GlobalScansModal({
     );
   };
 
-  // Keep slowburn log in sync with progress — append new entries only
+  // Keep slowburn log in sync with progress - append new entries only
   const prevLogLengthRef = useRef(0);
   useEffect(() => {
     if (slowburnProgress?.log && slowburnProgress.log.length > 0) {
-      // If the progress log is shorter than what we had, a new scan started — keep previous log and append
+      // If the progress log is shorter than what we had, a new scan started - keep previous log and append
       if (slowburnProgress.log.length < prevLogLengthRef.current) {
         // New scan started, append its entries to existing log
         setSlowburnLog(prev => [...prev, ...slowburnProgress.log]);
@@ -1316,7 +1316,7 @@ function GlobalScansModal({
             </Button>
           </div>
           <small className="text-muted">
-            Format: <code>username:api_token</code> — Get your API token from HackerOne Settings &gt; API Token
+            Format: <code>username:api_token</code> - Get your API token from HackerOne Settings &gt; API Token
           </small>
         </div>
 

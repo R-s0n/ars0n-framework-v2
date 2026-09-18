@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 
 /**
- * useDebounce — returns a copy of `value` that only updates after `value` has stopped changing
+ * useDebounce - returns a copy of `value` that only updates after `value` has stopped changing
  * for `delay` ms (G1.10).
  *
  * Used so a filter <input> can stay controlled by immediate state (typing feels instant) while

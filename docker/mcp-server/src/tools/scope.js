@@ -46,7 +46,7 @@ const getTargetScansSchema = z.object({
 });
 
 async function getTargetScans(params) {
-  // Trim the inline raw scan output — this endpoint returns every scan's full result and can be
+  // Trim the inline raw scan output - this endpoint returns every scan's full result and can be
   // hundreds of KB, which overflows the model context.
   const result = await apiGet(`/scopetarget/${params.target_id}/scans`);
   return trimScanRecords(result);

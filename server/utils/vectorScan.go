@@ -173,6 +173,48 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 	canary := runCanaryControl(ctx, scanID, scopeTargetID, tool, settings, sectionSettings,
 		targetHeaderWords, targetParamWords, len(order))
 
+	// THE BUDGET CONTROL. See vectorRateLimit.go for the measurements; the short version is that a
+	// 429 body reflects nothing, so a rate limited scan and a clean one are byte identical and 140
+	// vectors were recorded clean with no way to tell which.
+	//
+	// One plain request before each vector and one after it. Two requests against the ~189 a single
+	// dalfox vector spends on one parameter is about 1% overhead, which is what makes this affordable
+	// per vector rather than once per scan. Before AND after because the case that actually happened
+	// is mid-vector: the window was fine at the start, the vector spent the rest of it, and everything
+	// after that was answered by the rate limiter.
+	//
+	// Built the same way every other request issuer in this package is: LoadScanScope so the boundary
+	// is enforced inside Do rather than remembered here, HostBudget so the controls are paced like
+	// anything else, and the scoped credentials because the measured budget headers are on the
+	// AUTHENTICATED API. An anonymous control would have read /version, which returned 200 throughout
+	// the window in which /api/v1/accounts was returning 429.
+	budgetScope := LoadScanScope(scopeTargetID)
+	budgetPace := NewHostBudget()
+	budgetRPS, budgetConcurrency := LoadProbeContext(scopeTargetID).EffectiveRate()
+	budgetClient := NewScanClient(budgetPace, vectorBudgetTimeout, "", nil).WithScope(budgetScope)
+	budgetAuth := LoadScopedAuthContext(scopeTargetID)
+	budgetPaced := map[string]bool{}
+	budgetUntested := 0
+	// The MOST CONSERVATIVE rate any observation justified, not the best one. A window that was
+	// nearly spent when it was measured is the one whose number is safe to obey.
+	advisedRPS, advisedLimit, advisedWindow := 0.0, 0, 0
+
+	budgetControl := func(phase string, vector vectorRow) BudgetObservation {
+		host := strings.ToLower(strings.TrimSpace(vector.Domain))
+		if host != "" && !budgetPaced[host] {
+			budgetPace.Acquire(host, budgetRPS, budgetConcurrency, "vector budget control")
+			budgetPaced[host] = true
+		}
+		obs := ProbeVectorBudget(ctx, budgetClient, budgetAuth, phase,
+			vector.toInput().TargetURL(), host)
+		RecordBudgetObservation(ctx, scanID, vector.ID, obs)
+		if obs.RecommendedRPS > 0 && (advisedRPS == 0 || obs.RecommendedRPS < advisedRPS) {
+			advisedRPS = obs.RecommendedRPS
+			advisedLimit, advisedWindow = obs.Snapshot.Limit, obs.Snapshot.WindowSeconds
+		}
+		return obs
+	}
+
 	completed, found := 0, 0
 	// The vectors this run actually SENT, which is not the same as the vectors it was eligible to
 	// send. A cancelled or session-lost scan breaks out of this loop with most of `order` untouched,
@@ -240,6 +282,55 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 		}
 		siblings := shared[key]
 
+		// The control BEFORE the vector. An already closed window is worth waiting out when the target
+		// said how long it would be: the measured window is 60 seconds, against a vector that costs
+		// minutes, so waiting is cheaper than throwing the vector away. BudgetWait refuses to wait on
+		// an unstated or very long reset, and then the vector is recorded untested rather than run
+		// into a wall.
+		before := budgetControl("before", vector)
+		if wait := BudgetWait(before); wait > 0 {
+			log.Printf("[VECTOR] %s: %s budget is spent, waiting %s for the window to reset",
+				tool.Key, vector.Domain, wait)
+			time.Sleep(wait)
+			before = budgetControl("before_after_wait", vector)
+		}
+
+		// STILL REFUSED AFTER THE WAIT MEANS THE VECTOR IS NOT SENT. The comment above used to claim
+		// the vector was "recorded untested rather than run into a wall", and it was recorded
+		// untested and then run into the wall anyway, because runVectorOnce was called
+		// unconditionally.
+		//
+		// That is the expensive half of this bug rather than the dishonest half. BudgetWait returns 0
+		// for the two commonest refusal shapes, a 429 with no reset hint and a 429 whose window is
+		// longer than we will wait, so on a target that had just answered 429 the runner went ahead
+		// and spent a full vector on it: about 189 requests for dalfox. The programme this was
+		// measured against treats service degradation as grounds for removal, and hammering a host
+		// that has just said no is exactly that.
+		//
+		// The vector is skipped, not failed. It keeps its untested reason, the operator can re-run it
+		// when the window has refilled, and the target is left alone in the meantime.
+		if before.Verdict == BudgetRefused || before.Verdict == BudgetExhausted {
+			log.Printf("[VECTOR] %s: %s is still refusing after the wait, skipping this vector rather "+
+				"than spending it into a closed window", tool.Key, vector.Domain)
+			skipReason := BudgetUntestedReason(before, before)
+			for _, id := range siblings {
+				if dbErr := recordScanTargetIdentity(ctx, scanID,
+					identityFor(id, vector.IsBypassTarget, vector.IsGraphQLTarget, vector.IsLeakTarget,
+						vector.EvidenceURL), "error", skipReason, 0); dbErr != nil {
+					log.Printf("[VECTOR] recording skipped vector %s: %v", id, dbErr)
+				}
+			}
+			RecordBudgetObservation(ctx, scanID, vector.ID, before)
+			budgetUntested++
+			completed++
+			if _, dbErr := dbPool.Exec(ctx, `
+				UPDATE vector_scans SET completed_vectors = $2, current_host = $3
+				WHERE id = $1`, scanID, completed, vector.Domain); dbErr != nil {
+				log.Printf("[VECTOR] updating progress: %v", dbErr)
+			}
+			continue
+		}
+
 		findings, warnings, err := runVectorOnce(ctx, scanID, scopeTargetID, tool, vector, settings,
 			sectionSettings, targetHeaderWords, targetParamWords, 1)
 
@@ -265,6 +356,10 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 			sentVectors[sibling] = true
 		}
 
+		// The control AFTER the vector, taken before the verdict is written because the verdict
+		// depends on it.
+		after := budgetControl("after", vector)
+
 		status, reason := "clean", strings.Join(warnings, " ")
 		if err != nil {
 			status = "error"
@@ -272,6 +367,23 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 			log.Printf("[VECTOR] %s vector %s: %v", tool.Key, vector.ID, err)
 		} else if len(findings) > 0 {
 			status = "findings"
+		}
+
+		// A RATE LIMITED VECTOR IS UNTESTED, NOT CLEAN, in the same vocabulary the cancellation and
+		// session-loss paths above already use. Findings are never demoted: a payload that fired
+		// fired, whatever the target was doing to the requests around it. What changes is the zero.
+		if untested := BudgetUntestedReason(before, after); untested != "" {
+			budgetUntested++
+			if status == "clean" {
+				status = "error"
+				reason = strings.TrimSpace(untested + " " + reason)
+			} else {
+				reason = strings.TrimSpace(reason + " " + untested)
+			}
+		} else if status == "clean" {
+			// The other half of the same idea: a zero that survives is made to carry the measurement
+			// that justifies it, so a later reader is not asked to take it on trust.
+			reason = strings.TrimSpace(reason + " " + BudgetCleanEvidence(before, after))
 		}
 
 		// Every vector behind this scan gets the same verdict, so none of them reads as untested.
@@ -324,6 +436,31 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 		}
 	}
 
+	// WHAT THE TARGET SAID ABOUT ITS OWN BUDGET, at the scan level.
+	//
+	// The advice goes in its own column so it survives a run that also failed for another reason: the
+	// measured rate is the number to set before the NEXT run, and folding it into error would lose it
+	// exactly when something went wrong. The untested count goes into error with COALESCE, alongside
+	// cancellation and session loss, because it is the same class of statement: this run does not
+	// count for those vectors.
+	if advice := BudgetRateAdvice(advisedRPS, advisedLimit, advisedWindow); advice != "" {
+		if _, dbErr := dbPool.Exec(ctx, `UPDATE vector_scans SET rate_advice = $2 WHERE id = $1`,
+			scanID, advice); dbErr != nil {
+			log.Printf("[VECTOR] recording rate advice: %v", dbErr)
+		}
+	}
+	if budgetUntested > 0 {
+		summary := fmt.Sprintf("UNTESTED: %d of %d vectors were sent while the target was refusing "+
+			"or had exhausted its request budget, so their results are unknown rather than clean. A "+
+			"429 body reflects no payload, which is why the scanner itself could not tell. Lower the "+
+			"tool's rate and re-run those vectors.", budgetUntested, len(order))
+		if _, dbErr := dbPool.Exec(ctx, `
+			UPDATE vector_scans SET error = COALESCE(NULLIF(error, ''), $2) WHERE id = $1`,
+			scanID, summary); dbErr != nil {
+			log.Printf("[VECTOR] recording budget exhaustion: %v", dbErr)
+		}
+	}
+
 	// A FAILED CONTROL WITHHOLDS THE VERDICT. Written last so it cannot be overwritten by the session
 	// check, and written with COALESCE so it never clobbers a session-loss message that is already
 	// there: both mean the run does not count, and the first one to notice is the one worth reading.
@@ -343,25 +480,52 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 	pruneVectorTraces(ctx, scopeTargetID, tool.Key)
 }
 
-// vectorTraceScansKept is how many runs of one tool on one target keep their stored output.
+// pruneVectorTraces ages out stored output for one tool on one target.
 //
-// Traces exist to diagnose a run you do not believe, and that is nearly always a recent one. Keeping
-// every run forever would grow without bound: one row per vector per run, up to 64 KB each, on a
-// table nothing ever deletes from. Three is enough to compare a suspicious run against the two before
-// it, which is the actual diagnostic question.
+// Retention itself was never the bug. Keeping every run forever grows without bound: one row per
+// vector per run, up to vectorTraceStdoutLimit (64 KB) each, on a table nothing else deletes from.
+// The two defects were that the old policy DELETED the row, which made a pruned run and a run that
+// never happened indistinguishable, and that it counted SCANS, which under this operator's
+// one-vector-per-scan pattern kept 3 vectors out of 140 (measured: every dalfox scan before 21:14
+// had 0 traces and every one after had 2).
 //
-// Only the OUTPUT is dropped. The verdict rows in vector_scan_vectors and the findings are untouched,
-// so scan history stays complete and only the bulky forensic detail ages out.
-const vectorTraceScansKept = 3
-
+// So: the row always survives, only stdout is replaced, and the unit of retention is the vector run.
+// planTraceBlanking holds the policy and is tested without a database; this function is the query
+// around it. The verdict rows in vector_scan_vectors and the findings are untouched either way.
 func pruneVectorTraces(ctx context.Context, scopeTargetID, toolKey string) {
+	rows, err := dbPool.Query(ctx, `
+		SELECT t.id::text, t.timed_out, t.exit_detail, t.stdout_pruned
+		FROM vector_scan_traces t
+		JOIN vector_scans s ON s.id = t.scan_id
+		WHERE s.scope_target_id = $1 AND s.tool = $2
+		ORDER BY t.created_at DESC, t.id DESC
+		LIMIT $3`, scopeTargetID, toolKey, vectorTraceScanRows)
+	if err != nil {
+		log.Printf("[VECTOR] reading traces to prune for %s: %v", toolKey, err)
+		return
+	}
+	var all []traceRetention
+	for rows.Next() {
+		var row traceRetention
+		if rows.Scan(&row.ID, &row.TimedOut, &row.ExitDetail, &row.Pruned) != nil {
+			continue
+		}
+		all = append(all, row)
+	}
+	rows.Close()
+
+	blank := planTraceBlanking(all)
+	if len(blank) == 0 {
+		return
+	}
+	// stdout_bytes is deliberately NOT reset. It is how big the output WAS, which is half of what a
+	// reader wants from a row whose output is gone, and overwriting it with the length of the note
+	// would quietly turn a 64 KB run into a 200 byte one.
 	if _, err := dbPool.Exec(ctx, `
-		DELETE FROM vector_scan_traces
-		WHERE scan_id IN (
-			SELECT id FROM vector_scans
-			WHERE scope_target_id = $1 AND tool = $2
-			ORDER BY created_at DESC OFFSET $3
-		)`, scopeTargetID, toolKey, vectorTraceScansKept); err != nil {
+		UPDATE vector_scan_traces
+		SET stdout = $2, stdout_pruned = TRUE, pruned_at = NOW()
+		WHERE id::text = ANY($1) AND stdout_pruned = FALSE`,
+		blank, vectorTracePrunedNote); err != nil {
 		log.Printf("[VECTOR] pruning traces for %s: %v", toolKey, err)
 	}
 }
@@ -407,9 +571,41 @@ func runCanaryControl(ctx context.Context, scanID, scopeTargetID string, tool Ve
 	}
 
 	row := canaryVectorRow(scopeTargetID, tool.Key, spec)
+
+	// A RECENT PASS FOR THE SAME TOOL, SETTINGS, CONTAINERS AND ORACLE IS STILL EVIDENCE.
+	//
+	// The control proves a TOOL AND ITS SETTINGS work; it says nothing about the vector being
+	// scanned. Every control failure this project has actually hit is of that kind: ghauri
+	// rejecting --delay 0.5, dalfox blinded by --user-agent, Forbidden printing its usage banner,
+	// an oracle image serving its index page. None of them varies per vector, so running the
+	// control once per vector re-measures a constant.
+	//
+	// It costs real time. An authenticated campaign is one scan per vector because the session is
+	// refreshed between them, and the control is 49.7s for sqlmap and 129s for ghauri. Across a
+	// 140-vector arm that is 1.9 hours and 5.0 hours respectively, about a quarter of the run.
+	//
+	// canaryReusablePass fails closed on every gate: unknown container state, changed settings,
+	// restarted or rebuilt container (tool OR oracle), an oracle that stopped serving the marker,
+	// age, a use cap, and any recorded failure, which also forces two consecutive fresh passes
+	// before reuse resumes. The only error direction available is running the control more often.
+	if reused, ok := canaryReusablePass(ctx, tool, spec, canarySettings(tool, settings), sectionSettings); ok {
+		if dbErr := recordScanTargetIdentity(ctx, scanID,
+			identityFor(row.ID, row.IsBypassTarget, row.IsGraphQLTarget, row.IsLeakTarget, row.EvidenceURL),
+			canaryReusedStatus, canaryPassReason(tool.Key, reused), 0); dbErr != nil {
+			log.Printf("[VECTOR] recording reused control: %v", dbErr)
+		}
+		return reused
+	}
+
 	findings, _, err := runVectorOnce(ctx, scanID, scopeTargetID, tool, row,
 		canarySettings(tool, settings), sectionSettings, targetHeaderWords, targetParamWords, 1)
 	outcome := evaluateCanary(spec, true, len(findings), err)
+
+	if outcome.Passed {
+		recordCanaryPass(ctx, tool, spec, canarySettings(tool, settings), sectionSettings)
+	} else {
+		recordCanaryFailure(tool.Key)
+	}
 
 	status, reason := "findings", "Positive control PASSED: "+tool.Key+" found the known vulnerability "+
 		"on the canary oracle, so this run was genuinely testing something."
@@ -855,20 +1051,74 @@ func runVectorOnce(ctx context.Context, scanID, scopeTargetID string, tool Vecto
 				"%s, so nothing was tested: %s", tool.Key, exitDescription(err), tailOf(string(output)))
 		}
 
+		// A tool that DIED is not a clean result either, and it is the same defect one layer down: the
+		// refusal check above only knows argument parser complaints, so a process that started, ran,
+		// and then had its runtime kill it walked straight past it into "clean". Measured 2026-09-17:
+		// two domdig vectors crashed on a cross origin Stripe iframe in 3.2s and 3.5s with byte
+		// identical output and both were filed clean, while the positive control ran 70 seconds.
+		//
+		// Paired with a NON-ZERO EXIT rather than with producedNothing, and that is deliberate in both
+		// directions. Every runtime here dies non-zero (node 1, python 1, go 2, rust 101), so the
+		// pairing costs no real crash; and requiring it is what stops a scanner that exited 0 having
+		// quoted a target's own stack trace out of a 500 page from being turned into an error. The
+		// findings printed before the crash are parsed and returned alongside the error, because a
+		// tool that crashed at second 565 had already done most of its work.
+		if !timedOut && err != nil && crashed(string(output)) {
+			all = append(all, tool.Parse(string(output), report, vector)...)
+			return all, warnings, fmt.Errorf("%s CRASHED rather than finishing (exit %s), so this "+
+				"vector is UNTESTED rather than clean: %s", tool.Key, exitDescription(err),
+				tailOf(string(output)))
+		}
+
 		// A tool that says its own run was INCOMPLETE is not a clean result. Checked before parsing so
 		// that an abort cannot be mistaken for "nothing here", and the findings gathered before the
 		// abort are still returned alongside the error.
 		if tool.Incomplete != nil {
 			if why := tool.Incomplete(string(output), report); why != "" {
+				// Appended rather than replaced. A tool that stopped has said why in its own words,
+				// which is the better message, but "lower the rate and re-run" is a different
+				// instruction from "this tool aborted" and the operator needs it when both are true.
+				if rl := throttledByTarget(stripANSI(string(output))); rl != "" {
+					why += " It was also being throttled while it ran: " + rl
+				}
 				all = append(all, tool.Parse(string(output), report, vector)...)
 				return all, warnings, fmt.Errorf("%s stopped before it finished, so this vector is "+
 					"UNTESTED rather than clean: %s", tool.Key, why)
 			}
 		}
 
+		// A tool that was RATE LIMITED BY THE TARGET did not test this vector either, and this check
+		// is SHARED across every tool rather than per registry entry: see vectorThrottleDetect.go for
+		// why, and for the corpus the rule was validated against. It runs after tool.Incomplete
+		// because the tool's own account of stopping is the more specific one, and it matters most in
+		// the case where tool.Incomplete says nothing at all: the tool did not stop, it exited 0, and
+		// it spent the back half of its budget injecting into the rate limiter.
+		// stripANSI FIRST, because that is the text the rule was validated against. Every stored
+		// trace is stripped on the way into vector_scan_traces, so the 575-trace false positive
+		// measurement behind this rule describes stripped output; running the rule on the raw bytes
+		// here would be running a different rule from the one that was measured. Cheap, and the
+		// runner already pays for one strip per run when it stores the trace.
+		if why := throttledByTarget(stripANSI(string(output))); why != "" {
+			all = append(all, tool.Parse(string(output), report, vector)...)
+			return all, warnings, fmt.Errorf("%s was RATE LIMITED by the target, so this vector is "+
+				"UNTESTED rather than clean: %s", tool.Key, why)
+		}
+
+		parsed := tool.Parse(string(output), report, vector)
+
+		// A tool that said NOTHING AT ALL and has no report file has not demonstrated a clean
+		// result. See saidNothingAtAll: this is the last hole in the chain of guards above.
+		//
+		// timedOut is excluded for the same reason the guards above exclude it: a run stopped at
+		// its limit already says so in a warning, and for CacheBoom that is its normal ending.
+		if !timedOut && saidNothingAtAll(tool, string(output), len(parsed)) {
+			return all, warnings, fmt.Errorf("%s printed nothing at all and exited %s, and it "+
+				"reports only on stdout, so this vector is UNTESTED rather than clean", tool.Key,
+				exitDescription(err))
+		}
+
 		// Stamped here rather than in each parser, so a new tool cannot forget it and have every one
 		// of its findings rejected by the foreign key on the way into the database.
-		parsed := tool.Parse(string(output), report, vector)
 		for i := range parsed {
 			// ALL of the identity flags, stamped from the row rather than trusted from the parser.
 			//
@@ -1101,6 +1351,115 @@ func refusedItsCommandLine(output string) bool {
 		if strings.Contains(lower, marker) {
 			return true
 		}
+	}
+	return false
+}
+
+// crashMarkers are the strings a LANGUAGE RUNTIME writes as the process dies. They are matched
+// case sensitively and anchored where the runtime anchors them, because the only thing standing
+// between this and a wall of false errors is that no scanner writes these about a target.
+//
+// Not "Exception in thread": grep over docker/*/Dockerfile finds no openjdk, temurin or maven
+// image anywhere in this framework, so there is no tool that could emit it and the marker is
+// unjustifiable here. Not "Segmentation fault" either, for the same reason: nothing measured.
+var (
+	// Node's fatal trailer. node prints "Node.js v20.20.2" as the last line of its uncaught
+	// exception report and at NO other time, so the line anchor is what makes it safe: a scanner
+	// quoting a version string out of a target's page prints it mid-line, not as the whole line.
+	// This is the load-bearing Node marker. Measured: 29 of the 30 crashed traces carry it, and
+	// only 8 of those also carry triggerUncaughtException, so matching the internal frame alone
+	// would have missed 21 crashed runs.
+	nodeFatalBanner = regexp.MustCompile(`(?m)^Node\.js v[0-9]`)
+
+	// Go's runtime dump. "panic:" alone is not enough, because nuclei and dalfox print a matched
+	// response body and a target is free to say the word: the goroutine dump is what only the Go
+	// runtime writes. "fatal error:" covers the runtime aborts that are not panics, such as
+	// concurrent map writes, which print the same dump. Go tools here: nuclei, dalfox, wcvs,
+	// nomore403, pphack, http2smugl.
+	goRuntimeDump = regexp.MustCompile(`goroutine \d+ \[`)
+)
+
+// crashed reports whether output is a language runtime announcing that the process DIED, rather
+// than a tool reporting the result of a scan.
+//
+// Measured 2026-09-17: domdig loaded a page carrying a Stripe iframe, reached into the cross origin
+// frame, and node killed the process on the unhandled rejection 3.2 seconds in:
+//
+//	node:internal/process/promises:391
+//	    triggerUncaughtException(err, true /* fromPromise */);
+//	DOMException: SecurityError: Failed to read a named property 'document' from 'Window' ...
+//	Node.js v20.20.2
+//
+// Both vectors were recorded CLEAN. refusedItsCommandLine could not see it, because a runtime crash
+// carries none of the argument parser phrasings, and THE EXIT CODE CANNOT DISCRIMINATE: domdig
+// exits 1 both when it found nothing and when it died. The stack trace in stdout is the only
+// reliable discriminator, which is why this matches on the message exactly as its companion does.
+//
+// The design constraint is the same one stated above refusedItsCommandLine and it is the whole
+// point: several of these tools exit non-zero as their ordinary way of saying nothing was found, so
+// a marker that can appear in a healthy run trades one silent clean for a wall of false errors, and
+// an operator who learns to ignore errors is back where they started. Every marker below was
+// verified against all 567 rows of vector_scan_traces (2026-09-06 to 2026-09-17): 30 rows match, all
+// 30 carry a stack trace, and NONE of the 484 successful exit-0 runs match. That query is the test
+// that matters; the unit tests beside it only pin the captured fixtures.
+// saidNothingAtAll reports a run that produced NO OUTPUT, NO REPORT FILE and NO FINDINGS, which
+// is not a clean result and was being filed as one.
+//
+// Every other guard in this runner is a TEXT MATCH over the tool's output, and on an empty
+// string they all say no: crashed("") is false, refusedItsCommandLine("") is false,
+// throttledByTarget("") is empty, and domdigIncomplete("", "") is empty. For a tool registered
+// WITHOUT UsesReportFile there is no report to fall back on either, so producedNothing collapses
+// to err != nil with nothing to pair it with, and the run reaches the end of runVectorOnce with
+// zero findings and no error: a clean vector. A container that was OOM killed or SIGKILLed
+// produces exactly this shape. CombinedOutput captures stdout AND stderr, so zero bytes across
+// both means the process never got far enough to say anything, whatever its exit code was.
+//
+// Fourteen of the thirty one registered tools report on stdout alone and are covered here:
+// cacheboom, commix, sstimap, graphql-cop, graphw00f, snallygaster, mantra, lfimap, jwt-tool,
+// pphack, ssrfmap, ghauri, domdig and xssfuzz. recollapse is the fifteenth and never reaches
+// this point, because its branch returns its own error when its probe could not run.
+//
+// ZERO BYTES is the whole test, deliberately, because the cost of widening it is turning a quiet
+// tool into a permanent error. No tool in the registry is silent on a clean run: snallygaster is
+// composed with -j and prints an empty array, domdig's -q leaves its -J report line alone, and
+// mantra's -s is framework owned precisely because silent mode suppresses the finding lines. A
+// tool that really did print nothing when it found nothing would need its own registry flag
+// rather than a weaker rule here, and TestSaidNothingAtAllCoversEveryStdoutOnlyTool is where the
+// next one would be declared.
+func saidNothingAtAll(tool VectorTool, output string, findings int) bool {
+	return findings == 0 && !tool.UsesReportFile && strings.TrimSpace(output) == ""
+}
+
+func crashed(output string) bool {
+	for _, marker := range []string{
+		// node's own fatal frame, printed by internal/process/promises when a rejection escapes.
+		// This is the exact frame the domdig Stripe crash printed.
+		"triggerUncaughtException",
+		// The error name node gives a rejection whose reason is not an Error. Same fatal path, other
+		// half of it. Zero occurrences in the stored corpus, kept because domdig is puppeteer driven
+		// and the rejections it does not catch are the whole failure mode here.
+		"UnhandledPromiseRejection",
+		// Python's default excepthook header, with the colon, which is how it is always printed.
+		// Measured: lfihunt died on a prompt_toolkit EOFError 50 seconds into a run and the vector
+		// was recorded clean. Python tools here: sqlmap, ghauri, sqlidetector, commix, sstimap,
+		// xssfuzz, lfihunt, lfimap, cacheboom, ssrfmap, graphql-cop, clairvoyance, jwt-tool,
+		// snallygaster, recollapse.
+		"Traceback (most recent call last):",
+		// Rust's panic line: "thread 'main' panicked at src/main.rs:10:5". smugglex is the Rust tool
+		// in this set and is built from git HEAD, so it is the one most likely to panic.
+		"panicked at",
+	} {
+		if strings.Contains(output, marker) {
+			return true
+		}
+	}
+	if nodeFatalBanner.MatchString(output) {
+		return true
+	}
+	// Both halves required. See goRuntimeDump.
+	if goRuntimeDump.MatchString(output) &&
+		(strings.Contains(output, "panic: ") || strings.Contains(output, "fatal error: ")) {
+		return true
 	}
 	return false
 }

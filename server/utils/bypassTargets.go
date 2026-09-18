@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -17,63 +18,132 @@ import (
 // whether a host belongs to the scope target, and deciding which column a scan row or finding is
 // keyed by.
 
-// bypassHostInScope reports whether a target URL belongs to the scope target rather than to a third
-// party.
+// bypassScopeJudge decides whether a candidate URL belongs to the scope target, using the
+// framework's OWN boundary rather than a second opinion kept in this file.
 //
 // This matters more here than anywhere else in the framework. A 403 is exactly what somebody else's
 // infrastructure returns to a request it did not expect, so the 4xx tables fill up with hosts that
 // are not the target at all: on one real scope target the commonest hosts in the 4xx set were an
 // unrelated auth provider and a payment site. Pointing a bypass scan at those means sending hundreds
-// of deliberately malformed requests at a company nobody has authorised us to test.
+// of deliberately malformed requests at a company nobody has authorised us to test. nomore403 alone
+// spends roughly a thousand requests per URL.
 //
-// The comparison is the last two labels of the hostname, which is wrong for a handful of multi-part
-// suffixes like co.uk and deliberately errs towards INCLUDING rather than excluding, because a
-// target wrongly dropped is a scan that silently misses something.
-func bypassHostInScope(targetURL, scopeHost string) bool {
-	if scopeHost == "" {
-		return true
-	}
-	parsed, err := url.Parse(targetURL)
-	if err != nil {
-		return true
-	}
-	host := strings.ToLower(parsed.Hostname())
-	scopeHost = strings.ToLower(scopeHost)
-	if host == "" || host == scopeHost {
-		return true
-	}
-	return strings.HasSuffix(host, "."+registrableSuffix(scopeHost)) ||
-		host == registrableSuffix(scopeHost)
+// WHAT THIS REPLACED, AND WHY. The judgement used to be a comparison of the LAST TWO LABELS of the
+// hostname, with a comment saying it "deliberately errs towards INCLUDING rather than excluding". On
+// a real engagement whose scope target is app.staging-v2.tradetalk.us, that admitted every
+// *.tradetalk.us host: authx, data, wallet-api, paper-api, api-wallet-alpacax and stream.data were
+// all handed to the operator badged in_scope=true, and none of them is in the programme's scope.
+// Three operator overrides already said so and all three were invisible to that comparison:
+//
+//	scope_rules              - one enabled rule, "=app.staging-v2.tradetalk.us", exact host, and
+//	                           because rules REPLACE the legacy boundary every other host is
+//	                           default_deny. The framework's own answer was already exact.
+//	scope_target_scope_hosts - authx, data and cognito-idp all stored at in_scope=false.
+//	in_scope_override        - a column on access_bypass_targets with no reader and no writer.
+//
+// The fix is not a narrower heuristic. It is to stop holding a second opinion: ask the same
+// ScanScope that gates the crawler, the fuzzer and the flow runner, in the same order the flow
+// runner asks it - the operator's explicit deny FIRST, then the boundary - so a host can only be
+// offered here if the scanner would have been allowed to send to it anyway.
+//
+// THE DIRECTION IS NOW FAIL-CLOSED, and that is the deliberate reversal. An unparseable URL, a
+// scope target that names no host, or an exclusion list that will not read, all judge OUT of scope.
+// The old code returned true for every one of those. A candidate wrongly dropped is a badge the
+// operator can see and override by marking the endpoint anyway; a candidate wrongly admitted is
+// unauthorised traffic, which cannot be taken back.
+//
+// Wildcard programmes are unaffected. A Wildcard scope target's boundary really is its registrable
+// domain, so ScanScope keeps admitting its subdomains; what disappears is this file inventing that
+// same width for a URL target that never asked for it.
+type bypassScopeJudge struct {
+	scope  *ScanScope
+	denied map[string]bool
+	// loaded distinguishes "boundary established" from the zero value. A zero judge admits nothing.
+	loaded bool
 }
 
-func registrableSuffix(host string) string {
-	labels := strings.Split(strings.Trim(host, "."), ".")
-	if len(labels) <= 2 {
-		return host
+// loadBypassScopeJudge reads the boundary for a scope target. Any failure yields a judge that
+// admits nothing.
+// No context parameter: neither ExcludedScopeHosts nor LoadScanScope takes one, and accepting a
+// ctx this cannot honour would claim a cancellation that never happens.
+func loadBypassScopeJudge(scopeTargetID string) bypassScopeJudge {
+	if strings.TrimSpace(scopeTargetID) == "" {
+		return bypassScopeJudge{}
 	}
-	return strings.Join(labels[len(labels)-2:], ".")
+	denied, err := ExcludedScopeHosts(scopeTargetID)
+	if err != nil {
+		log.Printf("[BYPASS] target %s: exclusion list unreadable, no candidate is marked in scope: %v",
+			scopeTargetID, err)
+		return bypassScopeJudge{}
+	}
+	return bypassScopeJudgeFor(LoadScanScope(scopeTargetID), denied)
 }
 
-// bypassScopeHost reads the hostname a scope target names.
-func bypassScopeHost(ctx context.Context, scopeTargetID string) string {
-	var raw string
-	if err := dbPool.QueryRow(ctx,
-		`SELECT COALESCE(scope_target,'') FROM scope_targets WHERE id = $1`,
-		scopeTargetID).Scan(&raw); err != nil {
-		return ""
+// bypassScopeJudgeFor pairs a boundary with the operator's exclusions. The one place loaded is set,
+// so "a judge with no boundary admits nothing" cannot be undone by a caller building the struct by
+// hand, and the one entry point a test can reach without a database.
+func bypassScopeJudgeFor(scope *ScanScope, denied map[string]bool) bypassScopeJudge {
+	if scope == nil {
+		return bypassScopeJudge{}
 	}
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
+	return bypassScopeJudge{scope: scope, denied: denied, loaded: true}
+}
+
+// InScope reports whether a candidate URL may be offered as a target of this scope target.
+func (j bypassScopeJudge) InScope(rawURL string) bool {
+	if !j.loaded {
+		return false
 	}
-	if !strings.Contains(raw, "://") {
-		raw = "https://" + raw
-	}
-	parsed, err := url.Parse(raw)
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
-		return ""
+		return false
 	}
-	return strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "*.")
+	host := strings.ToLower(strings.Trim(parsed.Hostname(), "."))
+	if host == "" {
+		return false
+	}
+	return bypassHostAllowed(j.scope, j.denied, host)
+}
+
+// Describe renders the boundary the badges were judged against, so "why is this marked out of
+// scope" has an answer on screen rather than in a log line.
+func (j bypassScopeJudge) Describe() string {
+	if !j.loaded || j.scope == nil {
+		return "nothing (this target's scope boundary could not be read, so no candidate is in scope)"
+	}
+	out := j.scope.Describe()
+	if len(j.denied) > 0 {
+		hosts := make([]string, 0, len(j.denied))
+		for h := range j.denied {
+			hosts = append(hosts, h)
+		}
+		sort.Strings(hosts)
+		out += "; excluded by the operator: " + strings.Join(hosts, ", ")
+	}
+	return out
+}
+
+// bypassHostAllowed is the decision, deny before allow, the same order detectedFlowRun.go uses.
+//
+// The deny check is NOT redundant with the boundary. A host the operator marked in_scope=false that
+// also sits inside the target's registrable domain is still admitted by ScanScope.Allows, because
+// the legacy half of that boundary is a domain rule. See ExcludedScopeHosts.
+//
+// A nil ScanScope means no boundary was established. ScanScope.Allows answers true for a nil
+// receiver, which is right for a caller that opted out of scoping and wrong for every caller here,
+// so it is refused explicitly rather than by omission.
+func bypassHostAllowed(scope *ScanScope, denied map[string]bool, host string) bool {
+	if host == "" || scope == nil {
+		return false
+	}
+	if IsDeniedFlowHost(denied, host) {
+		return false
+	}
+	// AllowsNarrow, not Allows: this decides whether to OFFER a host to nomore403 and Forbidden,
+	// which send on the order of a thousand malformed requests per URL, so a host the operator named
+	// must not carry its whole registrable domain in with it. See AllowsNarrow for why Allows itself
+	// cannot be narrowed instead.
+	return scope.AllowsNarrow(host)
 }
 
 // splitURLParts pulls a URL apart into the pieces vectorRow keeps them in.

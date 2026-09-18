@@ -1178,7 +1178,7 @@ export const DetectFlowsModal = ({ show, handleClose, activeTarget }) => {
                           matched <code className="text-info">{row.pattern}</code>
                         </span>
                       )}
-                      {row.detail && <span className="text-white-50 ms-1">— {row.detail}</span>}
+                      {row.detail && <span className="text-white-50 ms-1">- {row.detail}</span>}
                     </div>
                   ))}
                   {!showAllSkipped && group.rows.length > 40 && (
@@ -1425,7 +1425,7 @@ export const DetectFlowsModal = ({ show, handleClose, activeTarget }) => {
                   {/* The count comes off the plan, and only when the plan is for what is in the form
                       now. Labelling the button with a stale number would promise a size the run is
                       not going to be. */}
-                  {planIsForThisConfig && ` — ${requestCount.toLocaleString()} requests`}
+                  {planIsForThisConfig && ` - ${requestCount.toLocaleString()} requests`}
                 </>
               )}
           </Button>

@@ -111,8 +111,12 @@ test('columns are unique per type rather than shared', async () => {
 
 test('a metric never produced shows a dash, not a zero', async () => {
   // OnePay has no network_ranges key at all, and its Ranges column must not claim zero.
-  const text = await mount({ activeTarget: targets[0] });
-  expect(text).toContain('—');
+  await mount({ activeTarget: targets[0] });
+  // Asserting the element, not the character: the placeholder is now a plain hyphen, and
+  // toContain('-') would match 'staging-v2' and pass without the placeholder rendering at all.
+  const empty = document.body.querySelectorAll('[data-metric-empty]');
+  expect(empty.length).toBeGreaterThan(0);
+  expect(empty[0].textContent).toBe('-');
 });
 
 test('it survives an empty list, no active target, and an unknown type', async () => {

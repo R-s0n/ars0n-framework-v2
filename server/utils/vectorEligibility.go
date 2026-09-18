@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // Which vectors a tool can actually test, and why the rest were left out.
@@ -60,12 +61,69 @@ type VectorEligibilityReport struct {
 // Written per tool rather than generically because "the tool does not support it" is not actionable
 // and invites the reader to assume it is a framework limitation that will be fixed.
 func vectorSkipReason(tool VectorTool, insertionPoint string) string {
+	own := ""
 	if tool.SkipReason != nil {
-		if reason := tool.SkipReason(insertionPoint); reason != "" {
-			return reason
-		}
+		own = tool.SkipReason(insertionPoint)
+	}
+	if insertionPoint == "fragment" && !mentionsFragment(own) {
+		// The fragment is the one point whose reason is a fact about HTTP rather than about the
+		// tool, so it is stated once here rather than repeated in thirty per-tool SkipReason
+		// functions. A tool with something specific to say still wins, which is what the
+		// mentionsFragment check is for: without it the catch-all default most of those functions
+		// end in, "SQLiDetector can only test a query parameter", would be returned for a fragment.
+		// That sentence is true and it is the wrong answer. It reads as a parameter-shape limitation
+		// the operator might work around, when the real fact is that nothing SQLiDetector sends
+		// could ever carry a fragment.
+		//
+		// It matters that this reads as a capability statement and not as a defect. An operator
+		// seeing "0 of 4 fragment vectors eligible" on sqlmap has to be able to tell that nothing
+		// was missed, because there was never anything for an HTTP tool to send.
+		return tool.Name + " sends HTTP requests, and a URL fragment is never sent: the client " +
+			"strips it before the request leaves, so it appears in no request line and no header. " +
+			"Only a tool that drives a real browser can put a payload there. In this framework that " +
+			"is domdig, whose fuzz mode injects into the hash."
+	}
+	if own != "" {
+		return own
 	}
 	return tool.Name + " cannot reach a " + insertionPoint + " insertion point."
+}
+
+// mentionsFragment reports whether a tool's own skip reason is actually ABOUT the URL fragment,
+// rather than a catch-all that happens to have been handed one.
+//
+// "hash" has to count, because that is what domdig and most operators call the fragment. It counts
+// only as a WHOLE WORD and only beside "url", because the substring is everywhere else too: a
+// response hash, a hash parameter, a password hash, hashcat, hashes. A catch-all ending in any of
+// those would be returned INSTEAD of the shared fragment explanation, and a catch-all like
+// "SQLiDetector can only test a query parameter" reads as a parameter-shape limitation an operator
+// might work around rather than as the fact that nothing SQLiDetector sends could ever carry a
+// fragment. That is the exact failure this guard was written to prevent, so the guard must not be
+// the thing that causes it. A literal "#" counts too: nothing else in a skip reason writes one.
+func mentionsFragment(reason string) bool {
+	lowered := strings.ToLower(reason)
+	if strings.Contains(lowered, "fragment") || strings.Contains(lowered, "#") {
+		return true
+	}
+	words := strings.FieldsFunc(lowered, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	for i, word := range words {
+		if word != "hash" {
+			continue
+		}
+		// The qualifier sits within a few words either side: "the URL hash", "the hash of the URL",
+		// "injects into the hash in the URL".
+		for j := i - 3; j <= i+3; j++ {
+			if j < 0 || j >= len(words) || j == i {
+				continue
+			}
+			if words[j] == "url" || words[j] == "urls" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // vectorPointNeedsOptIn reports whether this tool would reach the point but has not been asked to.
@@ -269,14 +327,47 @@ func loadRowsFor(ctx context.Context, tool VectorTool, scopeTargetID string) ([]
 // vector has said it is not worth testing, and resurrecting it in a scan would undo that by hand
 // every time.
 func loadVectorRows(ctx context.Context, scopeTargetID string) ([]vectorRow, error) {
+	// The response content type comes along for the ride, as a CORRELATED SUBQUERY rather than a
+	// join, because consolidated_url_endpoints holds one row per method per path and a join would
+	// multiply every vector by however many of them there are.
+	//
+	// It is here for the browser-driven tools. domdig navigates a real Chromium and refuses anything
+	// that is not text/html, one "[!] Content type is not text/html" per payload, so pointing it at a
+	// JSON API burns the full scan budget and reports nothing. Measured on this estate: of 30 query
+	// vectors, 14 are known JSON, 2 are known text/html, and 14 are unknown. Without this column all
+	// 30 look identical to the eligibility check.
+	//
+	// TWO SOURCES, because the consolidated table is the poorer one. It holds a content type for 202
+	// of 1060 endpoints here, since the rows that come from archives, LinkFinder and ffuf are URLs
+	// nobody fetched. endpoint_validation_results is where the Validate step records what actually
+	// came back, and it has one for 1673 of 1934 rows. Consulting both recovered 3 more of the 14
+	// unknown query vectors, and all 3 agreed with a hand probe of the live endpoint.
 	rows, err := dbPool.Query(ctx, `
-		SELECT id::text, COALESCE(method,'GET'), COALESCE(scheme,'https'), COALESCE(domain,''),
-		       COALESCE(port,0), COALESCE(path,'/'), COALESCE(insertion_point,'query'),
-		       COALESCE(parameters, ARRAY[]::text[]), COALESCE(evidence_url,''),
-		       COALESCE(raw_request,'')
-		FROM attack_vectors
-		WHERE scope_target_id = $1 AND deleted_at IS NULL
-		ORDER BY insertion_point, domain, path`, scopeTargetID)
+		SELECT av.id::text, COALESCE(av.method,'GET'), COALESCE(av.scheme,'https'), COALESCE(av.domain,''),
+		       COALESCE(av.port,0), COALESCE(av.path,'/'), COALESCE(av.insertion_point,'query'),
+		       COALESCE(av.parameters, ARRAY[]::text[]), COALESCE(av.evidence_url,''),
+		       COALESCE(av.raw_request,''), COALESCE(av.fragment,''),
+		       COALESCE(av.reflection_status,''),
+		       COALESCE((SELECT p.content_type FROM vector_reflection_probes p
+		                 WHERE p.vector_id = av.id AND p.status = av.reflection_status
+		                 ORDER BY p.probed_at DESC LIMIT 1), ''),
+		       COALESCE((SELECT p.survived FROM vector_reflection_probes p
+		                 WHERE p.vector_id = av.id AND p.status = av.reflection_status
+		                 ORDER BY p.probed_at DESC LIMIT 1), ARRAY[]::text[]),
+		       COALESCE(
+		         (SELECT e.content_type FROM consolidated_url_endpoints e
+		          WHERE e.scope_target_id = av.scope_target_id AND e.path = av.path
+		            AND COALESCE(e.content_type,'') <> ''
+		          ORDER BY e.last_seen DESC LIMIT 1),
+		         (SELECT r.content_type FROM endpoint_validation_results r
+		          JOIN consolidated_url_endpoints e2 ON e2.id = r.endpoint_id
+		          WHERE r.scope_target_id = av.scope_target_id AND e2.path = av.path
+		            AND COALESCE(r.content_type,'') <> ''
+		          ORDER BY r.id DESC LIMIT 1),
+		         '')
+		FROM attack_vectors av
+		WHERE av.scope_target_id = $1 AND av.deleted_at IS NULL
+		ORDER BY av.insertion_point, av.domain, av.path`, scopeTargetID)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +377,9 @@ func loadVectorRows(ctx context.Context, scopeTargetID string) ([]vectorRow, err
 	for rows.Next() {
 		var v vectorRow
 		if err := rows.Scan(&v.ID, &v.Method, &v.Scheme, &v.Domain, &v.Port, &v.Path,
-			&v.InsertionPoint, &v.Parameters, &v.EvidenceURL, &v.RawRequest); err != nil {
+			&v.InsertionPoint, &v.Parameters, &v.EvidenceURL, &v.RawRequest,
+			&v.Fragment, &v.ReflectionStatus, &v.ReflectionContentType, &v.ReflectionSurvived,
+			&v.ResponseContentType); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -306,6 +399,26 @@ type vectorRow struct {
 	Parameters     []string
 	EvidenceURL    string
 	RawRequest     string
+	// Fragment is the client-side route or anchor, without its leading hash. Only a fragment vector
+	// carries one, and without it a browser-driven tool would be pointed at the page rather than at
+	// the view the payload has to be read in.
+	Fragment string
+
+	// ReflectionStatus is the summary of the reflection probe across this vector's parameters, and
+	// ReflectionContentType is what the endpoint answered with on the probe that produced it. They
+	// travel together because the GRADE needs both: raw reflection into text/html is a live lead and
+	// raw reflection into application/json is the /api/v1/echo case, real but unrenderable.
+	ReflectionStatus      string
+	ReflectionContentType string
+	// ReflectionSurvived is which of < > " ' came back unencoded on the probe that produced the
+	// headline status. It travels with the content type because the grade needs both: a single
+	// quote surviving a JSON response is an artefact of JSON escaping, not evidence of anything.
+	ReflectionSurvived []string
+
+	// ResponseContentType is what this endpoint was last seen answering with, or "" when nothing
+	// observed it. Empty means UNKNOWN, never "not html": a tool that skipped on unknown would drop
+	// every vector the crawls never reached, which is the larger loss.
+	ResponseContentType string
 
 	// IsBypassTarget marks a row that came from access_bypass_targets rather than attack_vectors.
 	//
@@ -339,6 +452,10 @@ func (v vectorRow) toInput() VectorInput {
 		InsertionPoint: v.InsertionPoint,
 		Parameters:     v.Parameters,
 		EvidenceURL:    v.EvidenceURL,
+		Fragment:       v.Fragment,
+
+		ResponseContentType: v.ResponseContentType,
+
 		ObservedValues: map[string]string{},
 	}
 	if v.RawRequest != "" {

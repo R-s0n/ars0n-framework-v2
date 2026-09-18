@@ -241,7 +241,7 @@ func init() {
 			// All five. REcollapse itself still sends nothing, but the framework now sends its output
 			// (redirectProbe.go), and the prober reaches every insertion point including a path segment,
 			// which is the proxy-style endpoint where a path IS a URL.
-			InsertionPoints:        VectorInsertionPoints,
+			InsertionPoints:        VectorHTTPInsertionPoints,
 			RequiresSectionSetting: "listeningWebhookURL",
 			// NO DedupeKey any more. It used to build one list per target because nothing here sent
 			// anything; now the send is the scan, so it has to run per vector like every other detector.

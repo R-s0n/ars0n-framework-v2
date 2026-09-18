@@ -51,16 +51,25 @@ var attackVectorInsertionPoints = map[string]string{
 	"header": "a request header",
 	"cookie": "a cookie",
 	"path":   "a path segment, where the value is part of the URL itself",
+	// The fragment is the one container that is NOT sent. It is here because it is where DOM XSS
+	// lives and because domdig fuzzes it; see the header of attackVectorFragment.go for the full
+	// argument and for the measurement that this point had never been produced before.
+	"fragment": "the URL fragment, which stays in the browser and never reaches the server",
 }
 
 // attackVector is one row, as built by consolidation or typed by hand.
 type attackVector struct {
-	Method              string
-	MethodConfidence    string
-	Scheme              string
-	Domain              string
-	Port                int
-	Path                string
+	Method           string
+	MethodConfidence string
+	Scheme           string
+	Domain           string
+	Port             int
+	Path             string
+	// Fragment is the templated client-side route or anchor, WITHOUT its leading hash. Empty for
+	// every insertion point but "fragment". It is a column of its own rather than being folded into
+	// Path because Path is read by a dozen callers that build a URL out of it, and a path carrying
+	// a hash would make each of them compose the query string on the wrong side of it.
+	Fragment            string
 	InsertionPoint      string
 	InsertionConfidence string
 	Parameters          []string
@@ -86,10 +95,26 @@ func (v attackVector) key() string {
 	if v.Port > 0 {
 		host = fmt.Sprintf("%s:%d", v.Domain, v.Port)
 	}
-	sum := sha256.Sum256([]byte(strings.Join([]string{
+	parts := []string{
 		strings.ToUpper(v.Method), strings.ToLower(host), v.Path,
 		v.InsertionPoint, strings.Join(params, ","),
-	}, "\x00")))
+	}
+	// The fragment joins the identity ONLY when there is one, and that conditional is not tidiness.
+	//
+	// insertion_point is already in the tuple, so a fragment vector can never collide with the query
+	// vector for the same path whatever happens here. What this guards is the other direction:
+	// appending an empty sixth component unconditionally would change the hash of every row already
+	// stored, orphaning all 230 vectors on the live target behind keys nothing computes any more and
+	// re-inserting each of them under a new key on the next consolidation. Appending only when
+	// non-empty leaves every existing key byte-identical.
+	//
+	// Two fragments on one path DO have to stay apart: #/billing and #/profile are two client-side
+	// views and a payload in one says nothing about the other. The route is templated first, so
+	// #/orders/12345 and #/orders/67890 still collapse to one row.
+	if v.Fragment != "" {
+		parts = append(parts, v.Fragment)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -124,9 +149,9 @@ func upsertAttackVector(ctx context.Context, scopeTargetID string, v attackVecto
 	err := dbPool.QueryRow(ctx, `
 		INSERT INTO attack_vectors (scope_target_id, vector_key, method, method_confidence, scheme,
 		    domain, port, path, insertion_point, insertion_confidence, parameters, parameters_origin,
-		    sources, evidence_url, raw_request, notes, manual_added, signals)
+		    sources, evidence_url, raw_request, notes, manual_added, signals, fragment)
 		VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,0),$8,$9,$10,$11,$12,$13,NULLIF($14,''),NULLIF($15,''),
-		        NULLIF($16,''),$17,$18)
+		        NULLIF($16,''),$17,$18,$19)
 		ON CONFLICT (scope_target_id, vector_key) DO UPDATE
 		SET last_seen = NOW(),
 		    times_seen = attack_vectors.times_seen + 1,
@@ -154,7 +179,7 @@ func upsertAttackVector(ctx context.Context, scopeTargetID string, v attackVecto
 		scopeTargetID, v.key(), strings.ToUpper(v.Method), v.MethodConfidence, v.Scheme,
 		strings.ToLower(v.Domain), v.Port, v.Path, v.InsertionPoint, v.InsertionConfidence,
 		params, v.ParametersOrigin, sources, v.EvidenceURL, v.RawRequest, v.Notes,
-		v.ManualAdded, signals).Scan(&inserted)
+		v.ManualAdded, signals, v.Fragment).Scan(&inserted)
 	return inserted, err
 }
 
@@ -180,6 +205,15 @@ func ConsolidateAttackVectors(w http.ResponseWriter, r *http.Request) {
 		},
 		func(c context.Context, id string) (sourceResult, error) {
 			res, err := vectorsFromEndpoints(c, id)
+			return sourceResult(res), err
+		},
+		// ITS OWN SOURCE, NOT FOLDED INTO THE ONE ABOVE. It was, and its seen count was added to
+		// that one's: both read consolidated_url_endpoints, so an endpoint with parameters AND a
+		// client route was counted twice and the summary's "seen" stopped being a count of
+		// anything. A separate row is also the honest shape, since this is a different question
+		// asked of the same table.
+		func(c context.Context, id string) (sourceResult, error) {
+			res, err := vectorsFromClientRoutes(c, id)
 			return sourceResult(res), err
 		},
 		func(c context.Context, id string) (sourceResult, error) {
@@ -356,6 +390,19 @@ func manualCrawlCaptureVectors(c manualCrawlCapture) (immediate, ambient []attac
 	// nothing, so they are skipped here while a query or body parameter on the same path is still
 	// judged on what it carries.
 	staticPath := vectorPathIsStaticAsset(path)
+
+	// The fragment the browser was holding, which is the only place it is ever recorded: it is not
+	// in the request line, so buildRawRequest cannot carry it and no server-side source can produce
+	// it. Emitted only where one was OBSERVED; see parseFragment for why it is never synthesised.
+	//
+	// Guarded by staticPath alongside the other containers, though for a different reason. Cookies
+	// on a .js file prove nothing because the browser attaches them to everything; a fragment on a
+	// .js file is not input at all, because nothing parses the hash of a script URL.
+	if !staticPath {
+		if fragVector, hasFragment := fragmentVectorFrom(base, captureFragment(c.URL)); hasFragment {
+			immediate = append(immediate, fragVector)
+		}
+	}
 
 	// An identifier IN THE PATH is user-controlled input the application reads, and swapping it is
 	// the whole of an access-control test. Without this the richest vectors on a real target,
@@ -600,7 +647,98 @@ func vectorsFromEndpoints(ctx context.Context, scopeTargetID string) (vectorSour
 			out.Added++
 		}
 	}
+
 	return out, nil
+}
+
+// vectorsFromClientRoutes promotes the client_route consolidation already stores.
+//
+// A SECOND QUERY RATHER THAN A COLUMN ON THE ONE ABOVE, because that one INNER JOINs
+// consolidated_url_parameters and a hash-routed endpoint usually has no parameters at all. Folding
+// this in would have made the fragment visible only on endpoints that happened to also carry a query
+// string, which is the subset least in need of it.
+//
+// endpointIdentity.go:176 has filled client_route since the identity layer was written, from
+// clientRouteFrom, which keeps a fragment only when it is an SPA route (#/x or #!x) and discards
+// scroll anchors. Measured on 2026-09-17: rows with a non-empty client_route, across every scope
+// target in the database, 0. So this path is structurally correct and has no data to run on yet.
+// That is the honest state of it, and it is written this way so that the first hash-routed target to
+// arrive produces vectors without anyone having to notice.
+func vectorsFromClientRoutes(ctx context.Context, scopeTargetID string) (vectorSourceResult, error) {
+	out := vectorSourceResult{Source: "client_routes"}
+	rows, err := dbPool.Query(ctx, `
+		SELECT e.url, upper(COALESCE(e.method,'GET')), COALESCE(e.method_confidence,''),
+		       COALESCE(e.domain,''), e.port, COALESCE(e.path,'/'), COALESCE(e.scheme,'https'),
+		       COALESCE(e.sources,'{}'), e.client_route
+		FROM consolidated_url_endpoints e
+		WHERE e.scope_target_id = $1
+		  AND e.deleted_at IS NULL
+		  AND COALESCE(e.override_status, e.validation_status, '') <> 'ruled_out'
+		  AND COALESCE(e.client_route,'') <> ''`, scopeTargetID)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var rawURL, method, confidence, domain, path, scheme, clientRoute string
+		var port *int
+		var sources []string
+		if rows.Scan(&rawURL, &method, &confidence, &domain, &port, &path, &scheme,
+			&sources, &clientRoute) != nil {
+			continue
+		}
+		out.Seen++
+		v, ok := clientRouteVector(rawURL, method, confidence, domain, port, path, scheme,
+			sources, clientRoute)
+		if !ok {
+			out.Excluded++
+			continue
+		}
+		if ins, upErr := upsertAttackVector(ctx, scopeTargetID, v); upErr == nil && ins {
+			out.Added++
+		}
+	}
+	return out, rows.Err()
+}
+
+// clientRouteVector turns one consolidated_url_endpoints row into the fragment vector it describes.
+//
+// SPLIT OUT OF THE LOOP ABOVE SO IT CAN BE TESTED, because the query it sits behind has never
+// executed against data: client_route is non-empty on 0 rows in the whole database, so the port
+// pointer, the empty-domain guard, the templating, the signal order and the 'union' origin were all
+// unexercised. The file that holds this already records that the WIRING is where the last two
+// defects of this section lived.
+func clientRouteVector(rawURL, method, confidence, domain string, port *int, path, scheme string,
+	sources []string, clientRoute string) (attackVector, bool) {
+	if domain == "" {
+		return attackVector{}, false
+	}
+	path, pathSignals := templateVectorPath(path)
+	if confidence == "" {
+		confidence = "implied"
+	}
+	base := attackVector{
+		Method: method, MethodConfidence: confidence, Scheme: scheme, Domain: domain,
+		Path: path, Sources: sources, EvidenceURL: rawURL, Signals: pathSignals,
+		// 'union' and not 'observed'. The names inside a client route reach this row through
+		// consolidation, which merges every sighting of an endpoint into one; the combination
+		// was not necessarily in one browser bar at one moment. Only a manual crawl can say
+		// that, and it says it with its own 'observed' rows.
+		ParametersOrigin: "union",
+	}
+	if port != nil {
+		base.Port = *port
+	}
+	if len(base.Sources) == 0 {
+		base.Sources = []string{"crawl"}
+	}
+	v, ok := fragmentVectorFrom(base, clientRoute)
+	if !ok {
+		return attackVector{}, false
+	}
+	v.Signals = append(append([]string{}, pathSignals...), v.Signals...)
+	return v, true
 }
 
 // vectorsFromParamEnum covers Arjun and x8: parameter NAMES discovered on an endpoint.
@@ -895,6 +1033,12 @@ func normaliseInsertionPoint(raw string) string {
 		return "cookie"
 	case "path", "url_path":
 		return "path"
+	case "fragment", "hash", "url_fragment", "anchor":
+		// "hash" is what domdig calls this channel in its own findings, and what an operator typing
+		// a vector by hand is most likely to write. Note this is NOT related to the cacheBusterParams
+		// entry named "hash", which suppresses a PARAMETER called hash and has nothing to do with the
+		// fragment; the two were easy to confuse and are now both commented.
+		return "fragment"
 	}
 	if _, ok := attackVectorInsertionPoints[s]; ok {
 		return s
@@ -1104,6 +1248,10 @@ func vectorIsNoise(path string, names []string) bool {
 var cacheBusterParams = map[string]bool{
 	"v": true, "ver": true, "version": true, "t": true, "ts": true, "time": true,
 	"cb": true, "cachebust": true, "cache": true, "_": true, "rnd": true, "random": true,
+	// "hash" here is a PARAMETER NAME, the content digest in ?hash=a1b2c3 that busts a cache. It has
+	// nothing to do with the URL fragment or the "fragment" insertion point; normaliseInsertionPoint
+	// is where that lives. The two were the only two matches for "hash" in this file and reading one
+	// as the other would suggest fragment vectors are being suppressed, which they are not.
 	"hash": true, "rev": true, "build": true, "nocache": true, "dt": true, "r": true,
 	"utm_source": true, "utm_medium": true, "utm_campaign": true, "utm_term": true,
 	"utm_content": true, "gclid": true, "fbclid": true, "msclkid": true,

@@ -249,7 +249,20 @@ const manageThreatModelSchema = z.object({
   test_status: TEST_STATUS.optional().describe(
     'Whether this threat has been tested against the target yet, and what happened. ' +
     'untested is the default on create and means nobody has run it. ' +
-    'validated means the attack worked. ' +
+    'validated means A PROOF OF CONCEPT EXISTS: a sequence of requests, recorded in the steps or a ' +
+    'note, whose result shows WHAT AN ATTACKER GAINS. Not that the mechanism is present, not that a ' +
+    'control is missing, not that the code looks wrong. If the claim reads "exploitable IF X" and X ' +
+    'has not itself been demonstrated, the status is not_enough_info however sound the reasoning. ' +
+    'Two worked examples, because the line is easier to copy than to define. PASSES: a post-login ' +
+    'redirect where a crafted path was stored verbatim, a genuine login was completed, and an ' +
+    'off-origin navigation was recorded afterwards in two spellings against a same-origin ' +
+    'discriminator arm, so an attacker gains a customer deposited on their own infrastructure. ' +
+    'FAILS: a credential wrapped under a key the app publishes, where the wrapping is genuinely ' +
+    'reversible but the server accepts the plaintext identically, so knowing the key grants nothing ' +
+    'that sending the raw value does not. The second one was marked validated and moderate while its ' +
+    'own impact field said "no privilege gain", which is the exact mistake this sentence exists to ' +
+    'stop. A validated row with no weaponization costs more than it is worth: it sits beside the ' +
+    'rows that do have proofs and makes a reader trust all of them less. ' +
     'rejected means it WAS run and the attack did not work: the claim is disproved. ' +
     'not_enough_info means it was run or attempted and the result could not be SETTLED - the ' +
     'precondition could not be met, the refusal did not say whether it was the control or the ' +
@@ -1016,6 +1029,11 @@ function compactThreat(t, full) {
   const limit = full ? BODY_LIMIT : BODY_PREVIEW;
   return clean({
     id: t.id,
+    // The short human-quotable code: S001, T001 and so on, numbered per STRIDE category within one
+    // scope target. It is listed FIRST after the id because it is what an operator will say out loud
+    // ("validate S023") rather than the uuid, and a tool that returns the uuid alone forces them back
+    // to copying identifiers around.
+    threat_code: t.threat_code,
     category: t.category,
     url: t.url,
     mechanism: t.mechanism,

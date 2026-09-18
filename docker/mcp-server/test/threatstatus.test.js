@@ -117,10 +117,21 @@ maybe('the description forbids recording an unsettled test as rejected', () => {
 
 maybe('the description still teaches the other three and the preserve-on-omit rule', () => {
   const d = tm.manageThreatModelSchema.shape.test_status.description;
-  for (const re of [/untested is the default on create/, /validated means the attack worked/,
+  // `validated` used to be taught as "the attack worked", which a model reads as "the mechanism is
+  // present". That produced rows marked validated whose own impact field said no privilege gain, so
+  // the bar is now a demonstrated proof of concept. The assertion tracks the INTENT, that validated
+  // is still defined and still defined in terms of an attacker gaining something, rather than
+  // pinning a sentence somebody will reword again.
+  for (const re of [/untested is the default on create/, /validated means/,
     /PRESERVED when omitted/]) {
     assert.match(d, re, `the fourth status was added at the cost of ${re}`);
   }
+  assert.match(d, /PROOF OF CONCEPT/,
+    'validated must be gated on a proof of concept, not on the mechanism merely being present');
+  assert.match(d, /WHAT AN ATTACKER GAINS/,
+    'the bar has to be stated in terms of attacker gain, which is the part that makes it testable');
+  assert.match(d, /exploitable IF/,
+    'the "vulnerable IF, but the IF is unproven" case must route to not_enough_info by name');
 });
 
 maybe('no other description in this tool still lists the statuses as three', () => {

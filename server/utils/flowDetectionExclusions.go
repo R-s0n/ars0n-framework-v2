@@ -125,7 +125,7 @@ func flowExclusionMatches(pattern, host, path, rawQuery string) bool {
 	// `/home/` are the same rule, which is what an operator typing either of them means.
 	base := strings.TrimSuffix(pathPart, "/")
 	if base == "" {
-		// The pattern was "/" — the whole host, which is a thing an operator is allowed to say.
+		// The pattern was "/" - the whole host, which is a thing an operator is allowed to say.
 		return true
 	}
 	trimmedCandidate := strings.TrimSuffix(candidate, "/")

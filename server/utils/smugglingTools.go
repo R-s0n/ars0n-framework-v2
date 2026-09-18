@@ -134,7 +134,7 @@ func init() {
 			// All five, because none of them is what is being tested. Smuggling is a property of the
 			// URL and the server chain behind it, so a vector at any insertion point contributes the
 			// same thing: its URL. They are folded together by DedupeKey rather than refused.
-			InsertionPoints: VectorInsertionPoints,
+			InsertionPoints: VectorHTTPInsertionPoints,
 			UsesReportFile:  true,
 			DedupeKey:       smugglingEndpointKey,
 			ScanUnit:        "URL",
@@ -157,7 +157,7 @@ func init() {
 			Key: "http2smugl", Name: "http2smugl", Category: "smuggling",
 			Binary: "http2smugl", Container: "ars0n-framework-v2-http2smugl-1",
 			Groups: http2smuglGroups, Options: http2smuglOptions, OwnedFlags: http2smuglOwned,
-			InsertionPoints: VectorInsertionPoints,
+			InsertionPoints: VectorHTTPInsertionPoints,
 			UsesReportFile:  true,
 			DedupeKey:       smugglingEndpointKey,
 			ScanUnit:        "URL",

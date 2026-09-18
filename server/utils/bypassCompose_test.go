@@ -388,15 +388,20 @@ func TestNomore403GradesSameLengthResponsesDown(t *testing.T) {
 // tables fill up with third parties. Measured on a real scope target: the commonest hosts in its 4xx
 // set were an unrelated auth provider and a payment site. Scanning those means sending hundreds of
 // deliberately malformed requests at a company nobody authorised us to test.
+//
+// REWRITTEN when the judgement moved onto ScanScope. The case this test used to end with - "with no
+// scope host known the target must still be scanned" - asserted the fail-OPEN direction, and that
+// direction is the defect: see TestBypassScopeFailsClosed for what replaced it.
 func TestBypassScanStaysInScope(t *testing.T) {
-	scope := "mercury-dev.countr.one"
+	// A URL target with no authored rules: the legacy boundary, unchanged.
+	scope := newScanScope("mercury-dev.countr.one", nil, nil)
 
 	for _, in := range []string{
 		"https://mercury-dev.countr.one/admin",
 		"https://global.cdn.mercury-dev.countr.one/admin",
 		"https://countr.one/admin",
 	} {
-		if !bypassHostInScope(in, scope) {
+		if !bypassScopeJudgeFor(scope, nil).InScope(in) {
 			t.Errorf("%s belongs to the target and must be scanned", in)
 		}
 	}
@@ -405,15 +410,9 @@ func TestBypassScanStaysInScope(t *testing.T) {
 		"https://dev-partner-auth.one.app/admin",
 		"https://www.onepay.com/admin",
 	} {
-		if bypassHostInScope(out, scope) {
+		if bypassScopeJudgeFor(scope, nil).InScope(out) {
 			t.Errorf("%s is a third party and must not be scanned by default", out)
 		}
-	}
-
-	// With no scope host known, nothing is held back: a target wrongly dropped is a scan that
-	// silently misses something, which is worse than one that asks.
-	if !bypassHostInScope("https://anything.example.com/x", "") {
-		t.Error("with no scope host known the target must still be scanned")
 	}
 }
 

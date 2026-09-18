@@ -102,6 +102,14 @@ const buildSchema = (tools, extraActions = []) => z.object({
   target_id: z.string().optional().describe('Scope target id. Defaults to the active target.'),
   tool: z.enum(tools).optional().describe(
     'Which scanner. Required for everything except eligibility, which covers all of them when omitted.'),
+  // A section is run as a section. "Scan this with all three XSS tools" was three calls, and three
+  // calls is three chances to start two of them and forget the third, which afterwards looks
+  // exactly like a tool that found nothing.
+  tools: z.array(z.enum(tools)).optional().describe(
+    'run, status and results only: act on several scanners in one call, e.g. all three XSS tools. '
+    + 'They are started in the order given, each over its OWN selection and its own eligibility, so '
+    + 'read the per-tool eligible count in the reply rather than assuming they cover the same '
+    + 'vectors. Ignored by the settings actions, which are per tool by nature.'),
   settings: z.record(z.any()).optional().describe(
     'Settings to store, keyed by the option keys option_reference lists. A null value removes a key.'),
   replace: z.boolean().optional().describe(
@@ -140,6 +148,52 @@ async function manageVectorTools(category, tools, params) {
       path += `?q=${encodeURIComponent(params.search)}`;
     }
     return apiGet(path);
+  }
+
+  // The multi-tool form of run, status and results. Handled before the switch because it is the
+  // same three route shapes repeated, and because a partial failure has to be reported per tool
+  // rather than thrown: a run that started two of three scanners and then threw would leave the
+  // caller believing none of them started.
+  const MULTI_ACTIONS = { run: 'scan', status: 'status', results: 'results' };
+  const many = Array.isArray(params.tools) && params.tools.length > 0
+    ? [...new Set(params.tools)] : null;
+  if (many) {
+    if (!MULTI_ACTIONS[params.action]) {
+      return {
+        error: `tools is only accepted by run, status and results. ${params.action} acts on one `
+          + 'tool at a time. Use eligibility with no tool to cover the whole section.',
+      };
+    }
+    const strangers = many.filter((t) => !tools.includes(t));
+    if (strangers.length > 0) {
+      return { error: `${strangers.join(', ')} is not a ${category} scanner. ${category} has: ${tools.join(', ')}.` };
+    }
+    const results = {};
+    for (const tool of many) {
+      const segment = MULTI_ACTIONS[params.action];
+      const url = `/${category}/${targetId}/${tool}/${segment}`;
+      try {
+        results[tool] = params.action === 'run' ? await apiPost(url, {}) : await apiGet(url);
+      } catch (error) {
+        // Recorded against the tool rather than thrown, so the reply says WHICH tool did not start.
+        // A thrown error here would be read as "the run failed" for all of them.
+        results[tool] = { error: String(error && error.message ? error.message : error) };
+      }
+    }
+    const failed = Object.entries(results).filter(([, r]) => r && r.error).map(([t]) => t);
+    return {
+      tools: many,
+      action: params.action,
+      results,
+      not_started: failed.length > 0 ? failed : undefined,
+      note: params.action === 'run'
+        ? 'Each tool runs over its own selection and its own eligibility, so the three coverage '
+          + 'numbers are three different numbers. Poll with action status and tools, and read '
+          + 'eligible per tool before reporting what was covered. A tool listed in not_started '
+          + 'never ran and has no results, which is not the same as finding nothing.'
+        : 'One reply per tool. Compare them rather than merging them: a tool that cannot reach an '
+          + 'insertion point reports nothing about it, and that silence looks identical to clean.',
+    };
   }
 
   switch (params.action) {

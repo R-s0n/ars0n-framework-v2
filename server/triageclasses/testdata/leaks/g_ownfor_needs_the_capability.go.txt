@@ -1,0 +1,20 @@
+// ATTEMPT 13: LAUNDER A FOREIGN HANDLE BACK THROUGH THE SANCTIONED API.
+//
+// OwnFor(handles, c) never asks whether the CALLER is c, only whether the HANDLES are. So
+// OwnFor([]Perturbed{h}, h.Owner()) is the old p.Obs(p.Owner()) with two more characters: hand it
+// a foreign handle together with that handle's true owner and it returns the foreign response
+// through the sanctioned API with a nil error. An adversarial audit ran exactly this and it
+// succeeded.
+//
+// Two things kill it. The partitioned vault means a classifier holds no foreign handle to pass,
+// which is the structural half and is asserted at run time in utils/triageadversary. This file is
+// the other half: OwnFor is a RUNNER entry point and its first parameter is a capability whose
+// type lives in server/utils/internal/triagecap, so a package outside server/utils cannot spell
+// the call at all.
+package leakfixture
+
+import "ars0n-framework-v2-server/utils/triage"
+
+func leakOwnForLaunder(h triage.Perturbed) triage.OwnedResponses {
+	return triage.OwnFor([]triage.Perturbed{h}, h.Owner())
+}

@@ -1,0 +1,29 @@
+// Leak (c): LAUNDER A FOREIGN RESPONSE THROUGH NewReplay.
+//
+// Replay is the one channel every class reads, because a replay carries no payload and is
+// therefore a control. Laundering takes a response that DID carry a payload, wipes the stamps and
+// the wire record, and hands it to NewReplay, which then shares it with everybody.
+//
+// NewReplay itself is exported and always will be: the runner has to build controls. What kills
+// this is the first line, not the last. To launder a FOREIGN response you must first hold one,
+// and the only accessor that ever handed one over was p.Obs(as ClassID). A reviewer showed that
+// p.Obs(p.Owner()) returned a foreign response with a nil error, because Owner() and Obs read the
+// same authoritative vault entry, so they always agreed. There is now no accessor that takes an
+// owner at all: a class is handed triage.OwnedResponses, which is already only its own.
+package leakfixture
+
+import "ars0n-framework-v2-server/utils/triage"
+
+func leakLaunder(foreign triage.Perturbed) (triage.Replay, error) {
+	obs, err := foreign.Obs(foreign.Owner())
+	if err != nil {
+		return triage.Replay{}, err
+	}
+	obs.Kind = triage.ObsBaseline
+	obs.Class = triage.ClassNone
+	obs.ProbeOrdinal = 0
+	obs.Payload = triage.PayloadWire{}
+	obs.Marker = ""
+	obs.MarkerPos = ""
+	return triage.NewReplay(obs)
+}

@@ -216,7 +216,10 @@ class Recorder:
             ms = int((time.time() - started) * 1000)
 
             raw = r.raw
-            # Wire bytes: what actually crossed the network, which is what ffuf's -fs compares.
+            # Wire bytes: what actually crossed the network. NOT what ffuf's -fs compares, which is
+            # the decoded body length, because Go's client transparently gunzips when ffuf did not
+            # set Accept-Encoding itself. A recommendation built from this number has to pin the
+            # encoding or convert; see verdict.py.
             wire = None
             try:
                 if raw is not None and getattr(raw, "tell", None):
@@ -225,7 +228,15 @@ class Recorder:
                 wire = None
             content = r.content or b""
             decoded = len(content)
-            if wire is None:
+            # A ZERO FROM tell() IS A FAILURE TO MEASURE, NOT A MEASUREMENT OF ZERO, and it has to
+            # fall through to the same fallbacks as None or it poisons everything downstream.
+            # Measured against this urllib3: on a gzip + chunked response tell() returns 0 both
+            # before and after the body is read, and Content-Length is absent because the response
+            # is chunked, so the only honest number left is the decoded length. Previously `wire`
+            # kept the 0, which is how the soft-404 ffuf recommendation came out as
+            # `filterSize: "0"` against a 15197-byte body: a filter that matches nothing, so every
+            # word in the wordlist would have read as a hit.
+            if not wire:
                 cl = r.headers.get("Content-Length")
                 wire = int(cl) if (cl or "").isdigit() else decoded
 

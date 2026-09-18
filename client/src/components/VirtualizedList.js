@@ -2,14 +2,14 @@ import { useRef, useState, useEffect, useCallback } from 'react';
 import { VariableSizeList } from 'react-window';
 
 /**
- * VirtualizedList — dynamic-height vertical virtualization (G1.5).
+ * VirtualizedList - dynamic-height vertical virtualization (G1.5).
  *
  * Renders only the rows near the viewport, so the DOM node count stays roughly constant no
  * matter how many items there are. This is the fix for the screens that froze the browser by
  * mounting a node per row at 10k+ (Screenshot grid, attack-surface table, etc.).
  *
  * Row heights are measured after render via ResizeObserver, so variable / expandable content
- * works without hard-coded sizes — when a row grows or shrinks (e.g. the parent expands an
+ * works without hard-coded sizes - when a row grows or shrinks (e.g. the parent expands an
  * item) the list re-lays-out automatically.
  *
  * The parent does not need an explicit pixel height: this renders an outer box at `height`
