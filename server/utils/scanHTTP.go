@@ -120,7 +120,7 @@ type ScanResponse struct {
 // ScanClient is one client per run. Sharing it keeps connection reuse, the cookie jar, and the
 // pacing budget consistent across every request the run makes.
 type ScanClient struct {
-	http      *http.Client
+	http      *NoFollowClient
 	budget    *HostBudget
 	userAgent string
 	// pinnedEncoding keeps byte sizes comparable across the whole run. Comparing a gzipped
@@ -165,15 +165,14 @@ func NewScanClient(budget *HostBudget, timeout time.Duration, userAgent string, 
 		DisableCompression: true,
 	}
 	return &ScanClient{
-		http: &http.Client{
+		// Never follow. The hop itself is the observation, and a NoFollowClient is what makes that
+		// true: with a plain http.Client, net/http parses Location before it consults CheckRedirect,
+		// so a hop whose Location will not parse is discarded and reported as a transport failure.
+		http: NewNoFollowClient(&http.Client{
 			Transport: transport,
 			Timeout:   timeout,
 			Jar:       jar,
-			// Never follow. The hop itself is the observation.
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		}),
 		budget:         budget,
 		userAgent:      userAgent,
 		pinnedEncoding: "identity",
@@ -220,7 +219,7 @@ func (c *ScanClient) Do(ctx context.Context, req ScanRequest) ScanResponse {
 
 	timeout := req.Timeout
 	if timeout <= 0 {
-		timeout = c.http.Timeout
+		timeout = c.http.Timeout()
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -264,7 +263,10 @@ func (c *ScanClient) Do(ctx context.Context, req ScanRequest) ScanResponse {
 	out.ElapsedMS = time.Since(started).Milliseconds()
 	if err != nil {
 		out.Err = err
-		if c.budget != nil {
+		// Same rule as the triage runner: a request this process refused to build or send is not
+		// evidence about the target, and feeding it to the collapse detector aborts a run over a
+		// host that never misbehaved.
+		if c.budget != nil && triageErrReachedTheWire(err) {
 			c.budget.Observe(parsed.Hostname(), 0, out.ElapsedMS, true)
 		}
 		return out

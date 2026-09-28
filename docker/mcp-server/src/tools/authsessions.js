@@ -19,19 +19,22 @@ const { limitResults, clampLimit } = require('../utils/truncate');
 // recording are exactly what import filters on, and a second implementation of either drifts from
 // the first without anyone noticing.
 //
-// Size is the constraint on the way back. A recorded request carries the full raw request and both
-// bodies, a login response is routinely a whole HTML page, and a JWT is a kilobyte on its own, so
-// nothing returns whole by default: bodies are clipped, lists are clamped, and the verbose half of
-// every row sits behind detail:"full".
+// Size is the constraint on the way back, and it applies to BODIES: a recorded request carries the
+// full raw request and both bodies, and a login response is routinely a whole HTML page. So bodies
+// are clipped to a budget the caller can raise with max_body_chars, lists are clamped, and the
+// verbose half of every row sits behind detail:"full".
+//
+// Nothing that is itself a finding goes through that budget. raw_request is exempt because
+// update_step writes it back, and storing a truncated one means the replay engine later sends it at
+// the target as if it were real. token_value is exempt because it is the credential, and a shorter
+// credential is a wrong one. The validator's own output is exempt for the same reason: detail is
+// the sentence saying why a token was graded the way it was, and evidence is the structure behind
+// that grade, both written by the check that ran. When the finding IS an authentication one, those
+// two fields are the proof of it, and a proof with the middle cut out cannot be triaged, cannot be
+// deduplicated against the next run, and cannot be reported upstream.
 
 const CATEGORY = z.enum(['register', 'login', 'mfa_otp', 'magic_link', 'reset']);
 const TOKEN_TYPE = z.enum(['header', 'cookie', 'api_key', 'bearer', 'query']);
-
-// The ceiling on anything that came off the wire, applied per field.
-const BODY_LIMIT = 2000;
-// What a compact row shows of a body. Enough to read "Invalid credentials", a redirect target or
-// the first field of a JSON error, which is what a caller is actually after having run a replay.
-const BODY_PREVIEW = 600;
 
 // === Auth flows ================================================================================
 
@@ -124,8 +127,9 @@ const manageAuthFlowsSchema = z.object({
 
   detail: z.enum(['compact', 'full']).optional().describe(
     'compact (default) gives the status, timing, error, and a short preview of each response ' +
-    `body (${BODY_PREVIEW} chars). full adds the raw request, the complete response headers, and ` +
-    `up to ${BODY_LIMIT} chars of body per step.`),
+    `body (${DEFAULTS.list} chars). full adds the raw request, the complete response headers, and ` +
+    `up to ${DEFAULTS.record} chars of body per step. Reading one step with step_id gets ` +
+    `${DEFAULTS.single}, and max_body_chars raises any of them.`),
   max_results: z.number().optional().describe('Maximum rows (default 50, max 1000)'),
 
   max_body_chars: z.number().int().positive().optional().describe(
@@ -401,9 +405,23 @@ const manageAuthRecordingSchema = z.object({
   detail: z.enum(['compact', 'full']).optional().describe(
     'compact (default) is the verb, URL, status, timing, resource type, included flag and the ' +
     'names of any cookies the response set. full adds the raw request, both header sets, and up ' +
-    `to ${BODY_LIMIT} chars each of request and response body. full on a whole recording is very ` +
-    'large, so narrow with host, pattern or seqs first.'),
+    `to ${DEFAULTS.record} chars each of request and response body. full on a whole recording is ` +
+    'very large, so narrow with host, pattern or seqs first, and raise max_body_chars once you ' +
+    'have.'),
   max_results: z.number().optional().describe('Maximum rows (default 50, max 1000)'),
+
+  max_body_chars: z.number().int().positive().optional().describe(
+    'requests: raise the per-body character budget for THIS call. The default is sized for a wide ' +
+    'listing, and the thing worth reading in a captured request often sits past it: a bearer token ' +
+    'in a request body, or the account identifier in the response that proves which account the ' +
+    'recording belongs to. Narrow with seqs or pattern first, then raise this. Bounded at 200000, ' +
+    'and divided by the row count so raising it on a long listing degrades instead of exploding.'),
+  body_match: z.string().optional().describe(
+    'requests: return the window of each body AROUND the first case-insensitive occurrence of this ' +
+    'string, instead of the first N characters. The cheap way to pull one value out of a large ' +
+    'body. Says so plainly when there is no match.'),
+  body_match_window: z.number().int().positive().optional().describe(
+    'requests: how many characters either side of a body_match hit to return. Default 400.'),
 });
 
 async function manageAuthRecording(params) {
@@ -482,7 +500,14 @@ async function manageAuthRecording(params) {
         rows = rows.filter((r) => (r.url || '').toLowerCase().includes(needle));
       }
 
-      const projected = rows.map((r) => compactRecordedRequest(r, full));
+      // One row after a seqs or pattern filter is the deliberate read of a single captured
+      // request, and it gets the single-record budget rather than the listing one.
+      const body = bodyOptions(
+        params,
+        rows.length === 1 ? DEFAULTS.single : DEFAULTS.record,
+        rows.length,
+      );
+      const projected = rows.map((r) => compactRecordedRequest(r, full, body));
       return {
         // A recording is mostly page furniture, so the counts say up front how much of it is
         // actually headed into the flow before the caller reads a single row.
@@ -558,8 +583,8 @@ const manageSessionTokensSchema = z.object({
   action: z.enum(['list', 'get', 'create', 'update', 'delete',
                   'activate', 'deactivate', 'parse', 'events'])
     .describe(
-      'list: every token on a target, with the flow that can reissue each one. ' +
-      'get: one token, including its full value. ' +
+      'list: every token on a target, each with its value and the flow that can reissue it. ' +
+      'get: one token. ' +
       'create / update / delete: the token itself. ' +
       'activate: start sending this token on scans within its scope_domains. ' +
       'deactivate: stop, without deleting it. This is the one to reach for when a scan is ' +
@@ -624,10 +649,6 @@ const manageSessionTokensSchema = z.object({
     'parse: the text to pull tokens out of. A raw HTTP request with its headers, a curl command ' +
     'copied out of devtools, or a block of Set-Cookie lines all work.'),
 
-  include_values: z.boolean().optional().describe(
-    'list: return the full token values rather than a short preview (default false). The preview ' +
-    'is enough to tell two tokens apart or spot that one is stale; the values are long, and a ' +
-    'JWT is a kilobyte on its own. get always returns the full value.'),
   max_results: z.number().optional().describe('Maximum rows (default 50, max 1000)'),
 });
 
@@ -636,7 +657,7 @@ async function manageSessionTokens(params) {
     case 'list': {
       if (!params.target_id) return { error: 'list needs target_id' };
       const tokens = await fetchTokens(params.target_id);
-      const rows = tokens.map((t) => compactToken(t, !!params.include_values));
+      const rows = tokens.map((t) => compactToken(t));
       return {
         active_count: tokens.filter((t) => t.is_active).length,
         ...limitResults(rows, clampLimit(params.max_results)),
@@ -651,7 +672,7 @@ async function manageSessionTokens(params) {
       const tokens = await fetchTokens(params.target_id);
       const hit = tokens.find((t) => t.id === params.token_id);
       if (!hit) return { error: 'no token with that id on this target' };
-      return compactToken(hit, true);
+      return compactToken(hit);
     }
 
     case 'create': {
@@ -704,18 +725,22 @@ async function manageSessionTokens(params) {
       const tokens = Array.isArray(out.tokens) ? out.tokens : [];
       return {
         found: tokens.length,
-        tokens: tokens.map((t) => compactToken(t, !!params.include_values)),
+        tokens: tokens.map((t) => compactToken(t)),
       };
     }
 
     case 'events': {
       if (!params.token_id) return { error: 'events needs token_id' };
       const events = await apiGet(`/session-tokens/${params.token_id}/events`);
+      // Verbatim, both of them. An events row is the history of what this token did against the
+      // target, and the row that matters is the one where the grade changed: its detail names the
+      // two responses that disagreed and its evidence carries the URL, the subject and the
+      // comparison behind them. That is the finding, not a summary of it.
       const rows = (Array.isArray(events) ? events : []).map((e) => clean({
         kind: e.kind,
         status: e.status,
-        detail: clip(e.detail, BODY_PREVIEW),
-        evidence: clipEvidence(e.evidence),
+        detail: e.detail,
+        evidence: e.evidence,
         created_at: e.created_at,
       }));
       return limitResults(rows, clampLimit(params.max_results));
@@ -817,6 +842,8 @@ function compactFlow(f) {
   return clean({
     id: f.id,
     category: f.category,
+    // Verbatim. A flow description is the operator's own working note about which account the flow
+    // is for and which capture it was rebuilt from, and it is only useful whole.
     name: f.name,
     description: f.description,
     auth_type: f.auth_type,
@@ -845,8 +872,8 @@ function compactStep(s, full, opts) {
     error: s.error,
     location: headerValue(headers, 'location'),
     content_type: headerValue(headers, 'content-type'),
-    // Names only in compact form. The values are the session itself, they are long, and refresh
-    // already extracts them properly; what a caller needs here is whether the step issued one.
+    // Names only in compact form, purely to keep a listing small. detail:"full" returns
+    // response_headers whole, Set-Cookie values included.
     set_cookie_names: full ? undefined : cookieNames(headers),
     response_body: clipTo(s.response_body, body.limit, body),
 
@@ -885,8 +912,9 @@ function compactRecording(r) {
   });
 }
 
-function compactRecordedRequest(r, full) {
+function compactRecordedRequest(r, full, opts) {
   if (!r || typeof r !== 'object') return r;
+  const body = opts || { limit: DEFAULTS.record };
   return clean({
     id: r.id,
     seq: r.seq,
@@ -903,20 +931,19 @@ function compactRecordedRequest(r, full) {
     occurred_at: r.occurred_at,
 
     ...(full ? {
-      raw_request: clip(r.raw_request, BODY_LIMIT),
+      raw_request: clipTo(r.raw_request, body.limit, body),
       request_headers: r.request_headers,
-      request_body: clip(r.request_body, BODY_LIMIT),
+      request_body: clipTo(r.request_body, body.limit, body),
       response_headers: r.response_headers,
-      response_body: clip(r.response_body, BODY_LIMIT),
+      response_body: clipTo(r.response_body, body.limit, body),
       set_cookies: r.set_cookies,
     } : {}),
   });
 }
 
-function compactToken(t, withValue) {
+function compactToken(t) {
   if (!t || typeof t !== 'object') return t;
   const type = t.token_type || 'header';
-  const value = t.token_value || '';
   return clean({
     id: t.id,
     name: t.name,
@@ -933,8 +960,11 @@ function compactToken(t, withValue) {
     cookie_name: t.cookie_name,
     param_name: t.param_name,
     value_prefix: t.value_prefix,
-    token_value: withValue ? clip(value, BODY_LIMIT) : undefined,
-    value_preview: withValue ? undefined : preview(value),
+    // NEVER clipped, for the same reason raw_request is not. This is the credential itself, and a
+    // truncated one is not a shorter credential, it is a wrong one: a caller that pastes it gets a
+    // 401 and blames the target. Whether the value is a finding (a leaked token, a JWT whose claim
+    // set is the evidence) or the thing a scan authenticates with, it is only ever useful whole.
+    token_value: t.token_value,
     scope_domains: t.scope_domains,
     // Cookie attributes only on cookies. On a bearer token they are five empty columns.
     cookie: type === 'cookie' ? clean({
@@ -948,19 +978,25 @@ function compactToken(t, withValue) {
     notes: t.notes,
     last_validated_at: t.last_validated_at,
     last_validation_status: t.last_validation_status,
-    last_validation_detail: clip(t.last_validation_detail, BODY_PREVIEW),
+    // Verbatim. This is the last thing the validator said about this token, and the sentence that
+    // matters is the long one: the short ones are "HTTP 200".
+    last_validation_detail: t.last_validation_detail,
     last_refreshed_at: t.last_refreshed_at,
     created_at: t.created_at,
     updated_at: t.updated_at,
   });
 }
 
+// Compact in the sense of dropping empty columns, not in the sense of shortening anything. status,
+// detail and evidence are the entire output of a validate or a refresh: status is the grade, detail
+// is the reasoning, evidence is what the reasoning was drawn from. There is nothing left to trim
+// that would not be the answer.
 function compactCheck(out) {
   if (!out || typeof out !== 'object') return { status: 'unknown' };
   return clean({
     status: out.status,
-    detail: clip(out.detail, BODY_PREVIEW),
-    evidence: clipEvidence(out.evidence),
+    detail: out.detail,
+    evidence: out.evidence,
   });
 }
 
@@ -1047,28 +1083,6 @@ function clean(obj) {
   return out;
 }
 
-function clip(text, limit) {
-  if (typeof text !== 'string' || !text) return undefined;
-  if (text.length <= limit) return text;
-  return text.slice(0, limit) + `\n... [truncated, ${text.length - limit} chars remaining]`;
-}
-
-// Evidence is free-form JSON written by whatever check produced it, so it is measured serialised
-// rather than field by field. Replaced wholesale when it is too big, because half a JSON object is
-// worse than a string: a caller would parse it and act on a structure that is missing keys.
-function clipEvidence(evidence) {
-  if (!evidence || typeof evidence !== 'object') return undefined;
-  const s = JSON.stringify(evidence);
-  if (s.length <= BODY_LIMIT) return evidence;
-  return { truncated: true, size: s.length, preview: s.slice(0, BODY_LIMIT) };
-}
-
-function preview(value) {
-  if (!value) return undefined;
-  const head = value.slice(0, 12);
-  return value.length <= 12 ? head : `${head}… (${value.length} chars)`;
-}
-
 // Response headers come back as {name: [values]} from the Go replay engine and as {name: value}
 // from anything that round-tripped through JSON, so both are handled rather than guessed at.
 function headerValue(headers, name) {
@@ -1099,11 +1113,13 @@ function setCookieNames(setCookies) {
 }
 
 // Strips the transport wrapper off a thrown API error. "API POST /session-tokens/<uuid>/validate
-// failed (502): upstream timeout" is plumbing around the one clause that matters.
+// failed (502): upstream timeout" is plumbing around the one clause that matters. The clause itself
+// is returned whole: this lands in the detail field of a validate_all row, next to the details the
+// validator wrote, and the long ones are the API handing back the response it could not grade.
 function apiError(err) {
   const raw = String(err && err.message ? err.message : err);
   const m = raw.match(/failed \((\d+)\):\s*([\s\S]*)$/);
-  return clip((m ? m[2] : raw).trim(), BODY_PREVIEW);
+  return (m ? m[2] : raw).trim();
 }
 
 module.exports = {

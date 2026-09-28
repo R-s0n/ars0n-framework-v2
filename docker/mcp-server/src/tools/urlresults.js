@@ -23,6 +23,10 @@ const { limitResults, clampLimit } = require('../utils/truncate');
 
 // The ceiling on anything stored as a free-form blob, applied per field.
 const BLOB_LIMIT = 2000;
+// ...but it is a starting point, not a wall. max_blob_chars raises it for one call, up to the
+// shared ceiling, because a certificate chain, a whois record and a captured header set are
+// findings in their own right and a caller who needs the rest must be able to ask for it.
+const { resolveLimit } = require('../utils/clip');
 
 // The scan_type the discovered_endpoints rows are tagged with, mapped to the route that lists that
 // tool's scans. Note that the two names differ: the tag is the bare tool name, while four of the
@@ -183,6 +187,12 @@ const manageAttackSurfaceAssetsSchema = z.object({
     'findings and the parent/child relationships. Very large over a whole target, so narrow with ' +
     'asset_type or pattern first.'),
   max_results: z.number().optional().describe('list: maximum rows (default 50, max 1000)'),
+  max_blob_chars: z.number().int().positive().optional().describe(
+    'detail:"full": characters of each JSON blob (ssl_info, ssl_certificate, whois_info, ' +
+    'http_response_headers, findings_json, soa_record) to return, per field. Default 2000, ' +
+    'ceiling 200000. An oversized blob comes back as {truncated, size, preview}, so size tells ' +
+    'you what to set this to. The certificate SANs and the whois registrant are routinely past ' +
+    'the default, and those are the fields that name the next asset.'),
 });
 
 async function manageAttackSurfaceAssets(params) {
@@ -223,7 +233,8 @@ async function manageAttackSurfaceAssets(params) {
       }
 
       const full = params.detail === 'full';
-      const projected = rows.map((a) => compactAsset(a, full));
+      const blobLimit = resolveLimit(params.max_blob_chars, BLOB_LIMIT, rows.length || 1);
+      const projected = rows.map((a) => compactAsset(a, full, blobLimit));
       return limitResults(projected, clampLimit(params.max_results));
     }
 
@@ -439,7 +450,7 @@ async function manageClientIdentifiers(params) {
 // fields is ever populated on a given asset. Returning the whole row means six blocks of nulls per
 // asset across thousands of assets, so compact form returns the identity plus the block that
 // belongs to this asset's own type.
-function compactAsset(a, full) {
+function compactAsset(a, full, blobLimit = BLOB_LIMIT) {
   if (!a || typeof a !== 'object') return a;
 
   const byType = {
@@ -497,17 +508,17 @@ function compactAsset(a, full) {
     ...(full ? {
       created_at: a.created_at,
       screenshot_path: a.screenshot_path,
-      ssl_info: clipBlob(a.ssl_info),
-      ssl_certificate: clipBlob(a.ssl_certificate),
+      ssl_info: clipBlob(a.ssl_info, blobLimit),
+      ssl_certificate: clipBlob(a.ssl_certificate, blobLimit),
       ssl_expiry_date: a.ssl_expiry_date,
       ssl_issuer: a.ssl_issuer,
       ssl_subject: a.ssl_subject,
       ssl_version: a.ssl_version,
       ssl_cipher_suite: a.ssl_cipher_suite,
       ssl_protocols: emptyToUndefined(a.ssl_protocols),
-      http_response_headers: clipBlob(a.http_response_headers),
-      findings_json: clipBlob(a.findings_json),
-      whois_info: clipBlob(a.whois_info),
+      http_response_headers: clipBlob(a.http_response_headers, blobLimit),
+      findings_json: clipBlob(a.findings_json, blobLimit),
+      whois_info: clipBlob(a.whois_info, blobLimit),
       creation_date: a.creation_date,
       expiration_date: a.expiration_date,
       updated_date: a.updated_date,
@@ -526,7 +537,7 @@ function compactAsset(a, full) {
       cname_records: emptyToUndefined(a.cname_records),
       ptr_records: emptyToUndefined(a.ptr_records),
       srv_records: emptyToUndefined(a.srv_records),
-      soa_record: clipBlob(a.soa_record),
+      soa_record: clipBlob(a.soa_record, blobLimit),
       dns_records: emptyToUndefined(a.dns_records),
       // What this asset hangs off, e.g. the ASN an IP sits in or the FQDN a web server serves.
       // Reading the surface as a graph rather than six flat lists starts here.
@@ -544,7 +555,10 @@ function compactIdentifier(i) {
     id: i.id,
     endpoint_url: i.endpoint_url,
     method: i.method,
-    value: clip(i.value, BLOB_LIMIT),
+    // NEVER clipped. An identifier is the whole record: the id a test swaps for another account's,
+    // or a signed token whose claims are the finding. A shortened token is not a shorter token, it
+    // is a wrong one, and this row is the only place the value is served.
+    value: i.value,
     source: i.source,
     label: i.label,
     created_at: i.created_at,
@@ -587,11 +601,11 @@ function clip(text, limit) {
 // by whatever enrichment produced them, so they are measured serialised rather than field by field.
 // Replaced wholesale when too big, because half a JSON object is worse than a string: a caller
 // would parse it and act on a structure that is missing keys.
-function clipBlob(blob) {
+function clipBlob(blob, limit = BLOB_LIMIT) {
   if (!blob || typeof blob !== 'object') return undefined;
   const s = JSON.stringify(blob);
-  if (s.length <= BLOB_LIMIT) return blob;
-  return { truncated: true, size: s.length, preview: s.slice(0, BLOB_LIMIT) };
+  if (s.length <= limit) return blob;
+  return { truncated: true, size: s.length, preview: s.slice(0, limit) };
 }
 
 // Strips the transport wrapper off a thrown API error. "API POST /attack-surface-assets/add failed

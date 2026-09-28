@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  Button, Form, InputGroup, Spinner, Badge, Accordion, Table, OverlayTrigger, Tooltip,
+  Button, Form, InputGroup, Spinner, Badge, Accordion, Table, OverlayTrigger, Tooltip, Modal,
 } from 'react-bootstrap';
 
 // Single Request: a repeater over the requests the manual crawl already recorded.
@@ -23,11 +23,11 @@ import {
 //      the document was loaded with, and the EOL selector is how an operator changes that style
 //      deliberately rather than by accident.
 //
-//   2. The line-ending display toggle is display only. It renders a decorated copy of the buffer
-//      into a mirror element behind the textarea. That copy is never read back, so no amount of
-//      toggling can reach the bytes that get sent. The versions column does not change this: every
-//      path that leaves this file with bytes in it -- the send, and the version save -- reads
-//      rawRequest, never requestMirror, which is the only thing the toggle produces.
+//   2. Syntax colour and the line-ending display toggle are display only. They render a coloured copy
+//      of the buffer (renderHttpNodes) into a mirror element behind the textarea. That copy is never
+//      read back, so no amount of toggling or colouring can reach the bytes that get sent. The
+//      versions column does not change this: every path that leaves this file with bytes in it -- the
+//      send, and the version save -- reads rawRequest, never the mirror the render produces.
 //
 //      Two more display controls follow the same rule and are held to it the same way:
 //
@@ -37,22 +37,25 @@ import {
 //        the value a FORM submits. Nothing here submits a form -- the send reads rawRequest out of
 //        React state -- but "soft" is still what is written, so the question cannot arise.
 //
-//        JSON PRETTY-PRINTING happens on the RESPONSE only, in the responseText memo, which reads
-//        rawResponse and returns a string that is handed to a <pre> and to nothing else. The
-//        Raw/Pretty toggle is there because sometimes the exact bytes are the finding.
+//        JSON PRETTY-PRINTING on the RESPONSE is display only (the responseText memo hands a string to
+//        a <pre> and to nothing else), with a Raw/Pretty toggle because sometimes the exact bytes are
+//        the finding.
 //
-//      The request body is NOT auto-formatted, and that asymmetry is the point: the response is a
-//      view, the request is the payload. Reformatting a payload behind the operator's back would
-//      change what a target receives. The "Format JSON body" button is the one deliberate exception
-//      -- it is a button, it rewrites the visible buffer, it recomputes Content-Length to match the
-//      bytes it produced, and what it produced is then plainly there to read before anything is
-//      sent.
+//      The request body IS pretty-printed by default, unlike the response's display-only path, because
+//      the request pane is editable and the buffer has to BE what is shown -- so prettifyRequestJson
+//      folds the formatting into the loaded bytes on load and recomputes Content-Length. It only ever
+//      touches a JSON body (whitespace-insensitive), leaves everything else byte-exact, matches the
+//      "Format JSON body" button's own logic, and Raw mode still sends the buffer byte for byte. This
+//      is the deliberate reversal of the old "never reformat the request" rule, at the user's request,
+//      to match how Burp and Caido show a request by default.
 //
 //   3. Nothing the operator typed disappears without them being told. Before this file had
-//      versions, that was one window.confirm on every path that replaced the buffer. It still is,
-//      but the confirm is now the FALLBACK: the edit is first offered to the version store, and the
-//      confirm only fires if that could not keep it. An edit that was saved is not an unsaved edit,
-//      so asking about it would be a prompt the operator learns to click through.
+//      versions, that was one confirm on every path that replaced the buffer. It still is, but the
+//      confirm is now the FALLBACK: the edit is first offered to the version store, and the confirm
+//      only fires if that could not keep it. An edit that was saved is not an unsaved edit, so asking
+//      about it would be a prompt the operator learns to click through. The confirm is a small modal
+//      stacked on the pane (askConfirm), never a window.confirm: a browser dialog would freeze the
+//      page and cannot be styled.
 //
 // WHEN A VERSION IS CREATED, exhaustively:
 //
@@ -69,7 +72,12 @@ import {
 // to; that is reported in the column as "nothing to save", not as an error. Not when no request
 // has been loaded, because a version tree needs a root and a scratch buffer has none.
 
-const RESULT_LIMIT = 500;
+// The sitemap shows the whole matched corpus, not an arbitrary page of it: the tree the operator
+// navigates is built from these rows, and a tree that stops at 500 hides most of a real crawl
+// behind a limit nobody asked for. This is the server's scan ceiling, a guard against a
+// pathological corpus rather than a page size, and the only thing that truncates is exceeding it -
+// which the query language is then how you narrow back under it.
+const RESULT_LIMIT = 50000;
 
 // How long the operator has to stop typing before the edit is written down. Long enough that
 // composing a header does not leave a row per pause, short enough that walking away from the
@@ -217,55 +225,10 @@ function versionErrorMessage(data, body, status) {
   return `Framework returned ${status}`;
 }
 
-// Renders line terminators as visible glyphs. Display only: the result is never written back into
-// the request buffer and never sent. Each terminator is followed by a real newline so the decorated
-// copy keeps exactly the same number of visual lines as the original, which is what lets the mirror
-// element sit behind the textarea in alignment.
-function decorateLineEndings(text) {
-  if (!text) return '';
-  const parts = text.split(/(\r\n|\n|\r)/);
-  let out = '';
-  for (let i = 0; i < parts.length; i += 2) {
-    out += parts[i];
-    const terminator = parts[i + 1];
-    if (terminator === '\r\n') out += `${GLYPH_CR}${GLYPH_LF}\n`;
-    else if (terminator === '\n') out += `${GLYPH_LF}\n`;
-    else if (terminator === '\r') out += `${GLYPH_CR}\n`;
-  }
-  return out;
-}
-
-// The same decoration as a list of nodes, with every glyph in a zero-width box.
-//
-// Needed only when the panes wrap. Unwrapped, the mirror's lines can be two characters longer than
-// the textarea's with no consequence: nothing about where a line ends depends on how long it is.
-// Wrapped, it decides everything. A line two glyphs longer than the one behind it wraps two
-// characters earlier, gains a row, and every line below it in the mirror sits one row lower than the
-// text it is supposed to be sitting behind. Giving the glyph a width of zero means the text lays out
-// as if the glyph were not there, which is exactly the claim the mirror makes.
-function decorateLineEndingNodes(text) {
-  if (!text) return null;
-  const parts = text.split(/(\r\n|\n|\r)/);
-  const nodes = [];
-  for (let i = 0; i < parts.length; i += 2) {
-    if (parts[i]) nodes.push(parts[i]);
-    const terminator = parts[i + 1];
-    if (!terminator) continue;
-    let glyph = GLYPH_CR;
-    if (terminator === '\r\n') glyph = `${GLYPH_CR}${GLYPH_LF}`;
-    else if (terminator === '\n') glyph = GLYPH_LF;
-    nodes.push(
-      <span
-        key={`eol-${i}`}
-        style={{ display: 'inline-block', width: 0, whiteSpace: 'pre', overflow: 'visible' }}
-      >
-        {glyph}
-      </span>
-    );
-    nodes.push('\n');
-  }
-  return nodes;
-}
+// The line-ending glyphs (GLYPH_CR / GLYPH_LF) are now emitted by renderHttpNodes, folded into the
+// same coloured render as everything else, so the standalone decorateLineEndings helpers this pane
+// used to carry are gone: two code paths for the same overlay were how colour and glyphs came to
+// disagree about where a line ended.
 
 // Splits an HTTP message into its header block and its body at the first blank line, and hands back
 // the terminator it found rather than assuming one. A caller that rejoins with a different
@@ -327,48 +290,338 @@ function withContentLength(head, length, newline) {
   return out.join(newline);
 }
 
+// ---------------------------------------------------------------------------
+// Syntax highlighting for the request and response, the way Burp and Caido colour theirs.
+//
+// The one hard rule: highlighting NEVER changes a character. It wraps the exact bytes in coloured
+// spans and nothing else, because the request mirror sits pixel-for-pixel behind an editable
+// textarea and a single added or dropped character walks the caret off the text. Pretty-printing a
+// JSON body is a separate, explicit step (prettifyRequestJson / the response Pretty toggle) that
+// happens BEFORE this runs; by the time the colouriser sees the text, what it is given is what it
+// paints. Palette is VS Code Dark+, which is the dark-repeater look these tools share.
+const HL = {
+  method: '#4ec9b0',
+  path: '#d4d4d4',
+  version: '#808080',
+  status2: '#4ec9b0',
+  status3: '#569cd6',
+  status4: '#ce9178',
+  status5: '#f14c4c',
+  reason: '#d4d4d4',
+  headerName: '#9cdcfe',
+  headerValue: '#ce9178',
+  jsonKey: '#9cdcfe',
+  jsonString: '#ce9178',
+  jsonNumber: '#b5cea8',
+  jsonKeyword: '#569cd6',
+  jsonPunct: '#808080',
+  glyph: '#6a6a6a',
+  plain: '#d0d0d0',
+};
+
+function statusClass(code) {
+  const n = String(code)[0];
+  return n === '2' ? 'status2' : n === '3' ? 'status3' : n === '4' ? 'status4'
+    : n === '5' ? 'status5' : 'reason';
+}
+
+// Colours a JSON body into {text, cls} segments without reformatting it. Lenient: anything it cannot
+// place is left plain, so a body that is nearly-but-not-JSON still renders rather than throwing.
+function pushJsonSegments(push, body) {
+  const n = body.length;
+  let i = 0;
+  while (i < n) {
+    const c = body[i];
+    if (c === '"') {
+      let j = i + 1;
+      let esc = false;
+      while (j < n) {
+        const cj = body[j];
+        if (esc) esc = false;
+        else if (cj === '\\') esc = true;
+        else if (cj === '"') { j += 1; break; }
+        j += 1;
+      }
+      let k = j;
+      while (k < n && /\s/.test(body[k])) k += 1;
+      push(body.slice(i, j), body[k] === ':' ? 'jsonKey' : 'jsonString');
+      i = j;
+    } else if (c === '{' || c === '}' || c === '[' || c === ']' || c === ':' || c === ',') {
+      push(c, 'jsonPunct');
+      i += 1;
+    } else if (c === '-' || (c >= '0' && c <= '9')) {
+      let j = i + 1;
+      while (j < n && /[-+.0-9eE]/.test(body[j])) j += 1;
+      push(body.slice(i, j), 'jsonNumber');
+      i = j;
+    } else if ((c === 't' && body.startsWith('true', i))
+      || (c === 'f' && body.startsWith('false', i))
+      || (c === 'n' && body.startsWith('null', i))) {
+      const word = c === 't' ? 'true' : c === 'f' ? 'false' : 'null';
+      push(word, 'jsonKeyword');
+      i += word.length;
+    } else {
+      let j = i;
+      while (j < n) {
+        const cj = body[j];
+        if (cj === '"' || cj === '{' || cj === '}' || cj === '[' || cj === ']' || cj === ':'
+          || cj === ',' || cj === '-' || (cj >= '0' && cj <= '9')
+          || cj === 't' || cj === 'f' || cj === 'n') break;
+        j += 1;
+      }
+      if (j === i) j += 1;
+      push(body.slice(i, j), 'plain');
+      i = j;
+    }
+  }
+}
+
+// Splits an HTTP message into ordered {text, cls} segments. Terminators are their own plain segments
+// so the renderer can find every line break. Covers every character of the input exactly once.
+function httpSegments(text) {
+  const src = text || '';
+  if (!src) return [];
+  const segs = [];
+  const push = (t, cls) => { if (t) segs.push({ text: t, cls }); };
+  const { found, head, separator, body } = splitHttpMessage(src);
+
+  const headText = found ? head : src;
+  const headParts = headText.split(/(\r\n|\n|\r)/);
+  for (let idx = 0; idx < headParts.length; idx += 2) {
+    const line = headParts[idx];
+    const term = headParts[idx + 1] || '';
+    if (idx === 0) {
+      // Start line: a request (METHOD path HTTP/x) or a status line (HTTP/x 200 reason).
+      let m;
+      if (/^HTTP\/\d/i.test(line) && (m = line.match(/^(HTTP\/\S+)(\s+)(\d{3})(\s*)(.*)$/))) {
+        push(m[1], 'version'); push(m[2], 'plain'); push(m[3], statusClass(m[3]));
+        push(m[4], 'plain'); push(m[5], 'reason');
+      } else if ((m = line.match(/^(\S+)(\s+)(.*?)(\s+)(HTTP\/\S+)\s*$/))) {
+        push(m[1], 'method'); push(m[2], 'plain'); push(m[3], 'path');
+        push(m[4], 'plain'); push(m[5], 'version');
+      } else {
+        push(line, 'plain');
+      }
+    } else if (line !== '') {
+      const colon = line.indexOf(':');
+      if (colon > 0) {
+        push(line.slice(0, colon), 'headerName');
+        push(':', 'jsonPunct');
+        push(line.slice(colon + 1), 'headerValue');
+      } else {
+        push(line, 'plain');
+      }
+    }
+    push(term, 'plain');
+  }
+
+  if (found) {
+    push(separator, 'plain');
+    const trimmed = body.trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      pushJsonSegments(push, body);
+    } else {
+      push(body, 'plain');
+    }
+  }
+  return segs;
+}
+
+// Turns {text, cls} segments into React nodes. Splits every segment at its line breaks so a coloured
+// run that spans lines still lays out one line per break, and drops in the line-ending glyph when the
+// view asks for it. The glyph is zero-width so it never shifts the text the mirror sits behind.
+function renderHttpNodes(segments, showEol) {
+  const nodes = [];
+  let key = 0;
+  segments.forEach((seg) => {
+    const color = HL[seg.cls] || HL.plain;
+    const parts = seg.text.split(/(\r\n|\n|\r)/);
+    for (let i = 0; i < parts.length; i += 2) {
+      const content = parts[i];
+      const term = parts[i + 1];
+      if (content) {
+        nodes.push(<span key={`s${key}`} style={{ color }}>{content}</span>);
+        key += 1;
+      }
+      if (term !== undefined && term !== '') {
+        if (showEol) {
+          const glyph = term === '\r\n' ? `${GLYPH_CR}${GLYPH_LF}` : term === '\n' ? GLYPH_LF : GLYPH_CR;
+          nodes.push(
+            <span
+              key={`g${key}`}
+              style={{ display: 'inline-block', width: 0, whiteSpace: 'pre', overflow: 'visible', color: HL.glyph }}
+            >
+              {glyph}
+            </span>
+          );
+          key += 1;
+        }
+        nodes.push('\n');
+      }
+    }
+  });
+  return nodes;
+}
+
+// Pretty-prints a JSON request body and fixes its Content-Length, or returns the request unchanged
+// when there is nothing safe to do: no body, a chunked body, a body that is not JSON, one already
+// formatted this way, or a request that declares Content-Length twice (a smuggling shape we must not
+// collapse). This runs on load so a JSON request reads formatted by default, the way Burp and Caido
+// show it; non-JSON bodies are never touched, and Raw mode still sends the buffer byte for byte.
+function prettifyRequestJson(raw, newline) {
+  const parts = splitHttpMessage(raw);
+  if (!parts.found || parts.body.trim() === '') return raw;
+  if (/^\s*transfer-encoding\s*:.*chunked/im.test(parts.head)) return raw;
+  const trimmed = parts.body.trim();
+  if (!(trimmed.startsWith('{') || trimmed.startsWith('['))) return raw;
+  let value;
+  try { value = JSON.parse(parts.body); } catch (err) { return raw; }
+  const formatted = formatJsonText(value, newline);
+  if (formatted === parts.body) return raw;
+  const head = withContentLength(parts.head, byteLength(formatted), newline);
+  if (head === null) return raw;
+  return head + newline + newline + formatted;
+}
+
 // Builds the sitemap. Hosts at the top, then one node per path segment, leaves are individual
 // captures. A path ending in a slash keeps its whole segment list as directories and shows the
 // request itself as "/" underneath, the way Burp does, so a folder and the request to that folder
 // stay distinguishable.
-function buildTree(rows) {
+function captureTimeMs(value) {
+  const n = Date.parse(value);
+  return Number.isNaN(n) ? 0 : n;
+}
+
+// One leaf per ENDPOINT (method + host + path, query excluded), not one per capture. The captures
+// that landed on that endpoint are folded into leaf.variants, deduped by the server's request/response
+// signatures: identical exchanges collapse, and a differing query string, request body, status or
+// response body survives as a distinct variant. The variants are the versions the sitemap click opens.
+// See requestSig/responseSig on the server for what "distinct" means.
+// The overlay key for a variant, matching the server's five-column identity
+// (replayVariantMetaKey). NUL-joined in memory only; the wire form sends the parts as fields.
+function variantMetaKey(method, host, path, reqSig, respSig) {
+  return `${method}\u0000${host}\u0000${path}\u0000${reqSig || ''}\u0000${respSig || ''}`;
+}
+
+function buildTree(rows, variantMeta) {
+  const meta = variantMeta || {};
   const hosts = new Map();
-  let nextLeaf = 0;
 
   rows.forEach((row) => {
     const parts = parseUrlParts(row.url || row.endpoint || '');
     const host = row.host || parts.host || 'unknown';
-    const segments = parts.path.split('/').filter(Boolean);
-    const endsWithSlash = parts.path.endsWith('/') || segments.length === 0;
+    // The server-derived path already excludes the query; parseUrlParts agrees (pathname). Prefer the
+    // server value so the endpoint key and the server's grouping cannot drift.
+    const path = row.path || parts.path || '/';
+    const segments = path.split('/').filter(Boolean);
+    const endsWithSlash = path.endsWith('/') || segments.length === 0;
     const dirs = endsWithSlash ? segments : segments.slice(0, -1);
     const leafLabel = endsWithSlash ? '/' : segments[segments.length - 1];
+    const method = (row.method || 'GET').toUpperCase();
 
     if (!hosts.has(host)) {
-      hosts.set(host, { key: `h:${host}`, name: host, dirs: new Map(), leaves: [], count: 0 });
+      hosts.set(host, { key: `h:${host}`, name: host, dirs: new Map(), groups: new Map(), count: 0 });
     }
     let node = hosts.get(host);
     let key = node.key;
     dirs.forEach((segment) => {
       key = `${key}/${segment}`;
       if (!node.dirs.has(segment)) {
-        node.dirs.set(segment, { key, name: segment, dirs: new Map(), leaves: [], count: 0 });
+        node.dirs.set(segment, { key, name: segment, dirs: new Map(), groups: new Map(), count: 0 });
       }
       node = node.dirs.get(segment);
     });
 
-    nextLeaf += 1;
-    node.leaves.push({
-      id: row.id != null ? row.id : `row-${nextLeaf}`,
-      label: leafLabel,
-      method: (row.method || 'GET').toUpperCase(),
-      status: row.status_code != null ? row.status_code : row.status,
-      hasQuery: !!parts.query,
-      url: row.url || '',
-      row,
-    });
+    // One group per endpoint within this node. The node fixes host + dirs, so method + path is the
+    // whole identity, and it is stable across searches so it can key React rows and the selection.
+    const epKey = `${method}\u0000${host}\u0000${path}`;
+    let group = node.groups.get(epKey);
+    if (!group) {
+      group = { epKey, label: leafLabel, method, path, host, rows: [] };
+      node.groups.set(epKey, group);
+    }
+    group.rows.push(row);
   });
 
+  const makeLeaf = (group) => {
+    // Newest first, so the canonical variant the leaf opens with is the most recent recording. The
+    // rows arrive oldest-first (server ORDER BY timestamp ASC); reversing before the stable descending
+    // sort makes captures that share a millisecond resolve newest-first too, instead of the stable sort
+    // preserving the oldest at the front on a tie.
+    const sorted = [...group.rows].reverse().sort((a, b) => captureTimeMs(b.timestamp) - captureTimeMs(a.timestamp));
+    const byKey = new Map();
+    const order = [];
+    sorted.forEach((r) => {
+      // Dedupe on the server signatures. If BOTH are absent (a backend too old to send them), fall
+      // back to the capture id so distinct captures are never silently collapsed into one variant -
+      // over-showing is safe, over-merging loses recordings.
+      const vkey = (r.request_sig || r.response_sig)
+        ? `${r.request_sig || ''}\u0000${r.response_sig || ''}`
+        : `id\u0000${r.id}`;
+      if (byKey.has(vkey)) { byKey.get(vkey).count += 1; return; }
+      // The overlay row for this variant, if the operator has named it or made it primary. Keyed by the
+      // server's five-column identity, so an empty-sig variant (legacy) simply never matches and keeps
+      // its default name.
+      const mk = variantMetaKey(group.method, group.host, group.path, r.request_sig || '', r.response_sig || '');
+      const m = meta[mk];
+      const source = r.source || '';
+      const v = {
+        id: r.id,
+        method: group.method,
+        host: group.host,
+        path: group.path,
+        status: r.status_code != null ? r.status_code : r.status,
+        size: r.size,
+        mime: r.mime_type,
+        url: r.url || '',
+        query: parseUrlParts(r.url || '').query || '',
+        hasQuery: !!parseUrlParts(r.url || '').query,
+        timestamp: r.timestamp,
+        requestSig: r.request_sig || '',
+        responseSig: r.response_sig || '',
+        variantSig: vkey,
+        source,
+        // Name: the operator's if they set one, otherwise the source label the server derived
+        // ("Active detection", "Manual crawl"). A variant with no discernible source still gets a word.
+        name: (m && m.name) ? m.name : (source || 'Recorded'),
+        nameCustom: !!(m && m.name),
+        isPrimary: !!(m && m.is_primary),
+        count: 1,
+        row: r,
+      };
+      byKey.set(vkey, v);
+      order.push(vkey);
+    });
+    const variants = order.map((k) => byKey.get(k));
+    // The PRIMARY is the operator's chosen variant, or the newest recording when none is chosen. It is
+    // the one whose status the sitemap shows and the one a leaf click opens. Mark it on the variant
+    // itself so the column's star reflects the EFFECTIVE primary, not only a stored one - otherwise an
+    // endpoint nobody has chosen a primary for shows no star at all while the sitemap still picks one.
+    const primary = variants.find((v) => v.isPrimary) || variants[0] || null;
+    if (primary) primary.isPrimary = true;
+    return {
+      key: group.epKey,
+      label: group.label,
+      method: group.method,
+      host: group.host,
+      path: group.path,
+      status: primary ? primary.status : undefined,
+      primaryStatus: primary ? primary.status : undefined,
+      primaryId: primary ? primary.id : null,
+      hasQuery: variants.some((v) => v.hasQuery),
+      url: primary ? primary.url : (variants[0] ? variants[0].url : ''),
+      variants,
+      variantCount: variants.length,
+      captureCount: group.rows.length,
+      canonicalId: variants[0] ? variants[0].id : null,
+      row: primary ? primary.row : (variants[0] ? variants[0].row : null),
+    };
+  };
+
   const finish = (node) => {
+    node.leaves = Array.from(node.groups.values()).map(makeLeaf);
+    // Count ENDPOINTS under this node now, not captures: the per-endpoint variant count carries the
+    // "hit N times" fact, and a folder badge of endpoints is what the deduped tree is about.
     let count = node.leaves.length;
     const children = Array.from(node.dirs.values()).sort((a, b) => a.name.localeCompare(b.name));
     children.forEach((child) => { count += finish(child); });
@@ -421,13 +674,23 @@ export const SingleRequestPane = ({
   // Sitemap and search.
   const [query, setQuery] = useState('');
   const [captures, setCaptures] = useState([]);
+  // The variant overlay: names and the one primary per endpoint, keyed by variantMetaKey. A sparse
+  // map - only variants the operator has renamed or made primary have a row. buildTree reads it, so
+  // the tree, the sitemap status and the variants column all reflect the same choices.
+  const [variantMeta, setVariantMeta] = useState({});
   const [total, setTotal] = useState(0);
   const [corpusTotal, setCorpusTotal] = useState(null);
   const [truncated, setTruncated] = useState(false);
   const [searching, setSearching] = useState(false);
   const [queryError, setQueryError] = useState('');
   const [expanded, setExpanded] = useState({});
+  // selectedId now holds the ENDPOINT key of the selected sitemap leaf (method+host+path), not a
+  // capture id, because a leaf is one endpoint. The loaded capture within it is versionCaptureId.
   const [selectedId, setSelectedId] = useState(null);
+  // endpointVariants is DERIVED from the tree below (keyed by selectedId), never stored, so a
+  // re-search that rebuilds the leaves can never leave it describing captures the filter has since
+  // dropped. It is the selected endpoint's deduped variants - the recorded captures shown as versions
+  // - or empty when nothing is selected or a request was handed over from outside the sitemap.
   const searchSeq = useRef(0);
 
   // Request pane.
@@ -445,6 +708,14 @@ export const SingleRequestPane = ({
   const [respNote, setRespNote] = useState('');
   const [replaying, setReplaying] = useState(false);
   const [hasReplayed, setHasReplayed] = useState(false);
+  // What the response pane is currently showing, so it can say WHOSE response it is:
+  //   'recorded'   the response the crawl stored for this capture, shown on load next to the request.
+  //   'live'       the response a Replay just produced.
+  //   'unrecorded' a capture was loaded but the crawl stored no response for it (status 0).
+  //   null         nothing loaded, or an edited/handed-over request with no response of its own.
+  // A recorded response next to a request the operator has since edited is flagged, because at that
+  // point the two no longer belong together.
+  const [responseSource, setResponseSource] = useState(null);
 
   // The redirect chain, when one was followed. Every hop, in order, the last of which is the final
   // response. hopIndex is which one the response pane is showing.
@@ -455,10 +726,13 @@ export const SingleRequestPane = ({
   // Controls.
   const [showEol, setShowEol] = useState(false);
   const [rawMode, setRawMode] = useState(false);
-  const [wrapText, setWrapText] = useState(false);
-  // Off by default. A repeater's job is to show one exchange, and a redirect followed without being
-  // shown turns a 302 into a 200 and takes the thing being looked at with it.
-  const [followRedirects, setFollowRedirects] = useState(false);
+  // On by default: the panes hold long single-line tokens (a base64 blob, one line of minified
+  // JSON) far more often than not, and sideways scrolling to read them is the worse default.
+  const [wrapText, setWrapText] = useState(true);
+  // On by default. Following the chain is what makes a click show the exchange the operator meant,
+  // not a 302 they then have to chase by hand; every hop is still listed, so nothing is hidden by
+  // following it. Off is there for when the 3xx itself is the thing being looked at.
+  const [followRedirects, setFollowRedirects] = useState(true);
   const [maxRedirects, setMaxRedirects] = useState(10);
   // 'pretty' or 'raw'. Only consulted when the body actually is JSON; anything else is raw whatever
   // this says. Sticky across sends, because an operator who switched to raw wants raw.
@@ -472,6 +746,28 @@ export const SingleRequestPane = ({
   // means the request was handed over from somewhere else -- a tool finding, today -- and it is
   // shown next to REQUEST and again in the versions column, which cannot version it.
   const [handoverNote, setHandoverNote] = useState('');
+
+  // Confirmations render as a small modal stacked on top of this pane, never as a window.confirm. A
+  // browser dialog freezes the whole page (and, in the extension, every subsequent command), cannot
+  // be styled, and would sit outside the fullscreen modal. askConfirm returns a promise the modal's
+  // buttons resolve, so every call site stays a one-line await and the big modal never closes.
+  const [confirmDialog, setConfirmDialog] = useState(null);
+  const confirmResolveRef = useRef(null);
+  const askConfirm = useCallback((opts) => new Promise((resolve) => {
+    confirmResolveRef.current = resolve;
+    setConfirmDialog({
+      title: (opts && opts.title) || 'Are you sure?',
+      body: (opts && opts.body) || '',
+      confirmLabel: (opts && opts.confirmLabel) || 'Confirm',
+      variant: (opts && opts.variant) || 'danger',
+    });
+  }), []);
+  const resolveConfirm = useCallback((result) => {
+    setConfirmDialog(null);
+    const resolve = confirmResolveRef.current;
+    confirmResolveRef.current = null;
+    if (resolve) resolve(result);
+  }, []);
 
   // Versions column. versionCaptureId is the capture the column currently describes, and it is also
   // the gate on the whole feature: with nothing loaded there is no root to hang a tree off, so a
@@ -487,6 +783,11 @@ export const SingleRequestPane = ({
   const [versionNote, setVersionNote] = useState('');
   const [renamingId, setRenamingId] = useState(null);
   const [renameText, setRenameText] = useState('');
+  // The variant being renamed (its representative capture id) and the text in the box. Kept separate
+  // from the version rename above: a variant is a recording, a version is an edit, and their rename
+  // targets and endpoints differ.
+  const [variantRenamingId, setVariantRenamingId] = useState(null);
+  const [variantRenameText, setVariantRenameText] = useState('');
 
   const textareaRef = useRef(null);
   const mirrorRef = useRef(null);
@@ -577,11 +878,86 @@ export const SingleRequestPane = ({
     return () => clearTimeout(timer);
   }, [query, targetId, runSearch]);
 
+  // The variant overlay is per target, not per query, so it is fetched once per target and again after
+  // a rename or a primary change. buildTree merges it, so the sitemap status and the variants column
+  // both follow it without a re-search.
+  const loadVariantMeta = useCallback(async () => {
+    if (!targetId) { setVariantMeta({}); return; }
+    try {
+      const res = await fetch(`/api/replay-request/${targetId}/variant-meta`);
+      if (!res.ok) { setVariantMeta({}); return; }
+      const data = await res.json().catch(() => null);
+      const rows = (data && Array.isArray(data.variant_meta)) ? data.variant_meta : [];
+      const map = {};
+      rows.forEach((m) => {
+        if (!m) return;
+        map[variantMetaKey(m.method, m.host, m.path, m.request_sig, m.response_sig)] = {
+          name: m.name || '',
+          is_primary: !!m.is_primary,
+        };
+      });
+      setVariantMeta(map);
+    } catch {
+      setVariantMeta({});
+    }
+  }, [targetId]);
+
+  useEffect(() => { loadVariantMeta(); }, [loadVariantMeta]);
+
+  // Rename a variant, or make it the endpoint's primary. Both are one POST to the overlay; the reload
+  // is what makes the change show up in the sitemap and the column at once.
+  const postVariantMeta = useCallback(async (variant, patch) => {
+    const target = targetIdRef.current || targetId;
+    if (!target || !variant) return;
+    try {
+      await fetch(`/api/replay-request/${target}/variant-meta`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          method: variant.method,
+          host: variant.host,
+          path: variant.path,
+          request_sig: variant.requestSig,
+          response_sig: variant.responseSig,
+          ...patch,
+        }),
+      });
+    } catch {
+      // Swallowed: the reload below reflects whatever actually stuck rather than an optimistic guess.
+    }
+    loadVariantMeta();
+  }, [targetId, loadVariantMeta]);
+
+  const beginVariantRename = (variant) => {
+    if (!variant) return;
+    setVariantRenamingId(variant.id);
+    // Seed with the CUSTOM name only, so an empty box means "back to the source default" rather than
+    // pinning the default in as a custom name.
+    setVariantRenameText(variant.nameCustom ? (variant.name || '') : '');
+  };
+
+  const commitVariantRename = (variant) => {
+    const text = variantRenameText.trim();
+    setVariantRenamingId(null);
+    if (!variant) return;
+    // No change if the box holds what is already the custom name (or is empty and there was none).
+    const current = variant.nameCustom ? String(variant.name || '').trim() : '';
+    if (text === current) return;
+    postVariantMeta(variant, { name: text });
+  };
+
+  const setPrimaryVariant = (variant) => {
+    if (!variant || variant.isPrimary) return;
+    postVariantMeta(variant, { set_primary: true });
+  };
+
   // Fresh target, fresh state. A previous target's request left in the pane is a request sent to
   // the wrong host the moment somebody hits Replay.
   useEffect(() => {
     setQuery('');
     setCaptures([]);
+    setVariantMeta({});
+    setVariantRenamingId(null);
     setTotal(0);
     setCorpusTotal(null);
     setTruncated(false);
@@ -596,6 +972,7 @@ export const SingleRequestPane = ({
     setRespMs(null);
     setRespStatus(null);
     setRespNote('');
+    setResponseSource(null);
     setHasReplayed(false);
     setHops([]);
     setHopIndex(0);
@@ -636,8 +1013,27 @@ export const SingleRequestPane = ({
     targetIdRef.current = targetId;
   });
 
-  const tree = useMemo(() => buildTree(captures), [captures]);
+  const tree = useMemo(() => buildTree(captures, variantMeta), [captures, variantMeta]);
   const leafCount = useMemo(() => tree.reduce((sum, node) => sum + node.count, 0), [tree]);
+
+  // The selected endpoint's variants, derived from the freshly built tree rather than snapshotted on
+  // click. This is what keeps the versions column, its count, and the sitemap's own variant badge in
+  // agreement after a re-search: they all read the same leaf. Empty when nothing in the tree matches
+  // selectedId - a filtered-out endpoint, a handed-over request (selectedId null), or a fresh pane.
+  const endpointVariants = useMemo(() => {
+    if (!selectedId) return [];
+    const findIn = (nodes) => {
+      for (const node of nodes) {
+        for (const leaf of (node.leaves || [])) {
+          if (leaf.key === selectedId) return leaf.variants || [];
+        }
+        const deeper = findIn(node.children || []);
+        if (deeper) return deeper;
+      }
+      return null;
+    };
+    return findIn(tree) || [];
+  }, [tree, selectedId]);
 
   // v1, v2, v3 down the column. Numbered by position rather than stored, because the number is a
   // reading aid and the identity is the id; a deletion renumbering the rows below it is exactly
@@ -783,8 +1179,8 @@ export const SingleRequestPane = ({
           body: JSON.stringify({
             capture_id: captureId,
             parent_version_id: parentId,
-            // rawRequest, never requestMirror. The line-ending view builds a decorated copy of
-            // this buffer for the mirror element and that copy is not reachable from here.
+            // rawRequest, never the mirror. The colour/line-ending render builds a copy of this
+            // buffer for the mirror element and that copy is not reachable from here.
             raw_request: bytes,
             base_url: base,
           }),
@@ -886,6 +1282,9 @@ export const SingleRequestPane = ({
     setRespMs(null);
     setRespStatus(null);
     setRespNote('');
+    // A version is an edited request; the recorded response belonged to the original bytes, not
+    // these, so it is cleared rather than left claiming to be this version's answer.
+    setResponseSource(null);
     setHasReplayed(false);
     setHops([]);
     setHopIndex(0);
@@ -902,7 +1301,11 @@ export const SingleRequestPane = ({
     if (version.id === activeVersionId && !dirtyRef.current) return;
     const result = await saveVersionIfDirty();
     if (!result.saved && result.wasDirty
-      && !window.confirm('The request pane has edits that could not be saved as a version. Discard them and open the version you clicked?')) {
+      && !(await askConfirm({
+        title: 'Discard unsaved edits?',
+        body: 'The request pane has edits that could not be saved as a version. Discard them and open the version you clicked?',
+        confirmLabel: 'Discard & open',
+      }))) {
       return;
     }
     applyVersion(version);
@@ -952,7 +1355,11 @@ export const SingleRequestPane = ({
     const consequence = isActive
       ? `\n\nIt is the version open in the editor, so the pane falls back to the version it was edited from${dirtyRef.current ? ', taking the unsaved edits in the pane with it' : ''}.`
       : '\n\nAnything edited from it is kept, reparented onto its own parent.';
-    if (!window.confirm(`Delete "${name}"?${consequence}`)) return;
+    if (!(await askConfirm({
+      title: 'Delete version?',
+      body: `Delete "${name}"?${consequence}`,
+      confirmLabel: 'Delete',
+    }))) return;
     try {
       const res = await fetch(`/api/replay-request/versions/${version.id}`, { method: 'DELETE' });
       const body = await res.text();
@@ -993,6 +1400,7 @@ export const SingleRequestPane = ({
       if (!res.ok) {
         const message = pickString(data, ['error', 'message']) || body || `Framework returned ${res.status}`;
         setRawResponse(`Could not load that request.\n\n${message}`);
+        setResponseSource(null);
         return;
       }
       const raw = (typeof data === 'string' ? data : pickString(data, ['raw_request', 'raw', 'request'])) || '';
@@ -1002,25 +1410,72 @@ export const SingleRequestPane = ({
         const url = pickString(data, ['url']) || '';
         try { base = new URL(url).origin; } catch (err) { base = ''; }
       }
-      setRawRequest(raw);
-      setLoadedRequest(raw);
+      // A JSON body is pretty-printed on load, so a sitemap click reads formatted by default the way
+      // Burp and Caido show it. It is folded into the loaded bytes rather than left as a separate view
+      // because the request pane is editable: the buffer has to BE what is shown. baseline is set to
+      // the same value, so this normalisation does not read as an unsaved edit. Non-JSON bodies are
+      // returned untouched, and Raw mode still sends the buffer byte for byte.
+      const shown = prettifyRequestJson(raw, raw.includes('\r\n') ? '\r\n' : '\n');
+      setRawRequest(shown);
+      setLoadedRequest(shown);
       // Both refs move now rather than on the next render, so an auto-save decided between here
       // and that render compares against the request that was just loaded.
-      bufferRef.current = raw;
-      baselineRef.current = raw;
-      setEol(raw.includes('\r\n') ? 'CRLF' : 'LF');
+      bufferRef.current = shown;
+      baselineRef.current = shown;
+      setEol(shown.includes('\r\n') ? 'CRLF' : 'LF');
       setBaseUrl(base);
       baseUrlRef.current = base;
-      setRawResponse('');
-      setRespBytes(null);
-      setRespMs(null);
-      setRespStatus(null);
-      setRespNote('');
+
+      // Show the response the crawl recorded for this exact request, next to it, so a click on the
+      // sitemap is a whole exchange rather than a request beside an empty pane. The server builds
+      // original_raw_response from the stored status, headers and body, and returns "" only when no
+      // response was ever recorded (the capture's status is 0) - the one case there is nothing to
+      // show. There are no hops on a recorded response, so the chain view stays empty and the
+      // response pane reads straight off rawResponse.
+      const originalRaw = (typeof data === 'string' ? '' : pickString(data, ['original_raw_response'])) || '';
+      const originalStatus = pickNumber(data, ['original_status']);
+      const originalBody = pickString(data, ['original_body']) || '';
+      const originalMs = pickNumber(data, ['original_duration_ms']);
+      const bodyTruncated = !!(data && (data.response_body_truncated || data.responseBodyTruncated));
       setHasReplayed(false);
       setHops([]);
       setHopIndex(0);
       setRedirectCapped(false);
       setFormatNote('');
+      if (originalRaw.trim() !== '') {
+        setRawResponse(originalRaw);
+        setRespStatus(originalStatus && originalStatus > 0 ? originalStatus : null);
+        const haveBody = originalBody !== '';
+        // null, not 0, when the body was not stored: "0 bytes" reads as an empty response, and the
+        // recorded headers below often say a body of thousands of bytes was sent - just not kept.
+        setRespBytes(haveBody ? byteLength(originalBody) : null);
+        setRespMs(originalMs == null ? null : originalMs);
+        // Three cases, said once next to the response they explain: a truncated body is shorter than
+        // what the server sent; a body the crawl never stored while the headers say one existed is
+        // not an empty response and must not read as one; anything else needs no note.
+        const respParts = splitHttpMessage(originalRaw);
+        const headersSayBody = respParts.found && (
+          /[1-9]/.test(headerValueFrom(respParts.head, 'content-length') || '')
+          || (headerValueFrom(respParts.head, 'transfer-encoding') || '').trim() !== ''
+        );
+        setRespNote(
+          bodyTruncated
+            ? 'Recorded response. The crawl truncated the stored body, so it is shorter than what the '
+              + 'server returned - replay to fetch the whole of it.'
+            : (!haveBody && headersSayBody)
+              ? 'Recorded response headers. The crawl did not store this response’s body - '
+                + 'replay to fetch it.'
+              : ''
+        );
+        setResponseSource('recorded');
+      } else {
+        setRawResponse('');
+        setRespStatus(null);
+        setRespBytes(null);
+        setRespMs(null);
+        setRespNote('');
+        setResponseSource('unrecorded');
+      }
 
       // The version column follows the request. Cleared first so a slow list cannot leave the
       // previous request's versions sitting next to these bytes.
@@ -1037,6 +1492,7 @@ export const SingleRequestPane = ({
       if (onLoadedRef.current) onLoadedRef.current(captureId);
     } catch (err) {
       setRawResponse(`Could not load that request.\n\n${err.message}`);
+      setResponseSource(null);
     } finally {
       setLoadingCapture(false);
     }
@@ -1055,16 +1511,23 @@ export const SingleRequestPane = ({
       // A second handover landing while the save was in flight owns the pane now.
       if (cancelled) return;
       if (result.wasDirty && !result.saved
-        && !window.confirm('The request pane has unsaved edits. Discard them and load the selected request?')) {
+        && !(await askConfirm({
+          title: 'Discard unsaved edits?',
+          body: 'The request pane has unsaved edits. Discard them and load the selected request?',
+          confirmLabel: 'Discard & load',
+        }))) {
         return;
       }
-      setSelectedId(loadCaptureId);
+      // A capture handed in from another modal is a single request, not a sitemap endpoint: clearing
+      // the endpoint selection empties the derived variant list, so the versions column shows this
+      // capture's own tree.
+      setSelectedId(null);
       loadCapture(loadCaptureId);
     })();
     return () => { cancelled = true; };
     // saveVersionIfDirty is created once and never changes identity, which is what keeps this
     // effect armed only by the id. See the note on targetIdRef.
-  }, [loadCaptureId, loadCapture, saveVersionIfDirty]);
+  }, [loadCaptureId, loadCapture, saveVersionIfDirty, askConfirm]);
 
   // The second way bytes get into this pane: handed straight in, with no capture behind them.
   //
@@ -1107,6 +1570,8 @@ export const SingleRequestPane = ({
     setRespMs(null);
     setRespStatus(null);
     setRespNote('');
+    // Handed-over bytes are not in the corpus, so there is no recorded response to sit beside them.
+    setResponseSource(null);
     setHasReplayed(false);
     setHops([]);
     setHopIndex(0);
@@ -1141,31 +1606,70 @@ export const SingleRequestPane = ({
       // Same fallback as the capture path. A scratch buffer cannot be saved as a version at all, so
       // for those this confirm is the only thing standing between an edit and the bin.
       if (result.wasDirty && !result.saved
-        && !window.confirm('The request pane has unsaved edits. Discard them and load the request that was handed over?')) {
+        && !(await askConfirm({
+          title: 'Discard unsaved edits?',
+          body: 'The request pane has unsaved edits. Discard them and load the request that was handed over?',
+          confirmLabel: 'Discard & load',
+        }))) {
         return;
       }
+      // Handed-over bytes are not in the corpus, so there is no endpoint; clearing the selection
+      // empties the derived variant list.
+      setSelectedId(null);
       loadRawBytes(loadRawRequest);
     })();
     return () => { cancelled = true; };
-  }, [loadRawRequest, loadRawBytes, saveVersionIfDirty]);
+  }, [loadRawRequest, loadRawBytes, saveVersionIfDirty, askConfirm]);
 
+  // Selecting an endpoint leaf loads its most-recent (canonical) variant; the versions column derives
+  // the variant list from the same leaf. Clicking the same endpoint again reloads the canonical - it
+  // is a no-op ONLY when the canonical is already the loaded variant and the buffer is clean, so after
+  // stepping to another variant a re-click still snaps back to the canonical (the guard used to just
+  // check the endpoint key, which stranded a non-canonical variant).
   const selectLeaf = async (leaf) => {
-    // Clicking the current selection again is a reload, which is the only way back from a load that
-    // failed. It is a no-op only when the pane already holds that request.
-    // (Unchanged: reverting to the request as it was observed is what the ORIGINAL row in the
-    // versions column is for, so this stays a no-op rather than becoming a second revert gesture.)
-    if (leaf.id === selectedId && rawRequest !== '') return;
+    // Open the PRIMARY variant - the one whose status the sitemap shows - so the badge and the loaded
+    // request agree. Falls back to the newest recording when nothing is marked primary.
+    const primary = (leaf.variants && (leaf.variants.find((v) => v.isPrimary) || leaf.variants[0])) || null;
+    const primaryId = primary ? primary.id : null;
+    if (leaf.key === selectedId && rawRequest !== ''
+      && versionCaptureId === primaryId && !dirtyRef.current) return;
     const result = await saveVersionIfDirty();
     if (result.wasDirty && !result.saved
-      && !window.confirm('The request pane has unsaved edits. Discard them and load the selected request?')) {
+      && !(await askConfirm({
+        title: 'Discard unsaved edits?',
+        body: 'The request pane has unsaved edits. Discard them and load the selected request?',
+        confirmLabel: 'Discard & load',
+      }))) {
       return;
     }
-    setSelectedId(leaf.id);
-    if (!leaf.row || leaf.row.id == null) {
+    setSelectedId(leaf.key);
+    if (!primary || primary.id == null) {
       setRawResponse('That capture has no id, so the framework cannot fetch its raw request.');
+      setResponseSource(null);
       return;
     }
-    loadCapture(leaf.row.id);
+    loadCapture(primary.id);
+  };
+
+  // Selecting a variant in the versions column loads that recorded capture - its request AND its
+  // recorded response (loadCapture), unlike an edit version which clears the response. The endpoint
+  // selection is untouched, so the variant list stays put while the operator steps through it.
+  const loadVariant = async (variant) => {
+    if (!variant || variant.id == null) return;
+    // No-op only when this variant's RECORDED response is what the pane is showing. After a live
+    // Replay overwrote it (responseSource==='live'), a re-click must fall through and restore the
+    // recording - otherwise the "replay, then compare against the recording" step silently does nothing.
+    if (variant.id === versionCaptureId && responseSource === 'recorded' && !dirtyRef.current) return;
+    const result = await saveVersionIfDirty();
+    if (result.wasDirty && !result.saved
+      && !(await askConfirm({
+        title: 'Discard unsaved edits?',
+        body: 'The request pane has unsaved edits. Discard them and load the selected variant?',
+        confirmLabel: 'Discard & load',
+      }))) {
+      return;
+    }
+    loadCapture(variant.id);
   };
 
   // The browser hands back an LF-only value no matter what the buffer held, so the CRs go back in
@@ -1248,6 +1752,7 @@ export const SingleRequestPane = ({
     if (!rawRequest.trim()) {
       setRawResponse('Nothing to send. The request pane is empty.');
       setHasReplayed(false);
+      setResponseSource(null);
       return;
     }
     // Sending an edit is the moment it becomes worth keeping, so it is written down first. A save
@@ -1292,6 +1797,7 @@ export const SingleRequestPane = ({
         setRespMs(pickNumber(data, ['duration_ms', 'elapsed_ms', 'time_ms', 'duration']));
         setRespStatus(null);
         setHasReplayed(true);
+        setResponseSource('live');
         return;
       }
 
@@ -1316,6 +1822,7 @@ export const SingleRequestPane = ({
       const reportedStatus = pickNumber(data, ['status_code', 'status']);
       setRespStatus(reportedStatus ? reportedStatus : null);
       setHasReplayed(true);
+      setResponseSource('live');
     } catch (err) {
       setRawResponse(`Transport error.\n\n${err.message}`);
       setRespBytes(null);
@@ -1323,6 +1830,7 @@ export const SingleRequestPane = ({
       setRespStatus(null);
       setRespNote('');
       setHasReplayed(true);
+      setResponseSource('live');
     } finally {
       setReplaying(false);
     }
@@ -1335,10 +1843,14 @@ export const SingleRequestPane = ({
     return parts.found && parts.body.trim() !== '';
   }, [rawRequest]);
 
-  const requestMirror = useMemo(() => {
-    if (!showEol) return '';
-    return wrapText ? decorateLineEndingNodes(rawRequest) : decorateLineEndings(rawRequest);
-  }, [showEol, wrapText, rawRequest]);
+  // The syntax-coloured rendering that sits behind the editable textarea. Always on now (colour is
+  // the readability the request pane exists to give), with the line-ending glyphs folded in when that
+  // view is toggled. It colours the EXACT bytes in the buffer, so it stays character-aligned with the
+  // textarea whatever is typed. Line endings do not change the colours, so wrap is not a dependency.
+  const requestNodes = useMemo(
+    () => renderHttpNodes(httpSegments(rawRequest), showEol),
+    [rawRequest, showEol]
+  );
 
   // Which exchange the response pane is describing. With no chain that is simply the response; with
   // one it is the hop whose row is selected, and every number in the header and the footer follows
@@ -1354,6 +1866,11 @@ export const SingleRequestPane = ({
     () => hops.reduce((sum, hop) => sum + (Number(hop && hop.time_ms) || 0), 0),
     [hops]
   );
+
+  // There is a response worth putting numbers under when one was recorded by the crawl or produced
+  // by a live send. An 'unrecorded' capture and a fresh scratch buffer have none, and the footer
+  // says so rather than showing a zero.
+  const haveShownResponse = responseSource === 'recorded' || responseSource === 'live';
 
   // Is the response body JSON, and what does it look like formatted?
   //
@@ -1399,19 +1916,31 @@ export const SingleRequestPane = ({
   const responseText = useMemo(() => {
     const limit = 500000;
     const source = showingPretty ? responseJson.pretty : shownRaw;
-    const clipped = source.length > limit
+    return source.length > limit
       ? `${source.slice(0, limit)}\n\n[display truncated at ${limit.toLocaleString()} characters. The size below is the full response.]`
       : source;
-    return showEol ? decorateLineEndings(clipped) : clipped;
-  }, [shownRaw, showingPretty, responseJson, showEol]);
+  }, [shownRaw, showingPretty, responseJson]);
+
+  // The coloured rendering of whatever responseText holds. Line-ending glyphs are folded in here, the
+  // same as the request, rather than decorated into the string, so colour and glyphs coexist.
+  const responseNodes = useMemo(
+    () => renderHttpNodes(httpSegments(responseText), showEol),
+    [responseText, showEol]
+  );
 
   const renderLeaf = (leaf, depth) => {
-    const active = leaf.id === selectedId;
+    const active = leaf.key === selectedId;
+    // ONE status only: the primary variant's. The endpoint may have several recorded variants with
+    // several statuses, but the sitemap shows the one the operator chose as representative (or the
+    // newest, absent a choice). The rest are in the variants column.
+    const primaryStatus = leaf.primaryStatus != null ? leaf.primaryStatus : leaf.status;
     return (
       <div
-        key={`leaf-${leaf.id}`}
+        key={`leaf-${leaf.key}`}
         onClick={() => selectLeaf(leaf)}
-        title={leaf.url}
+        title={leaf.variantCount > 1
+          ? `${leaf.url}\n${leaf.variantCount} variants from ${leaf.captureCount} captures`
+          : leaf.url}
         className={`d-flex align-items-center py-1 pe-2 ${active ? 'bg-secondary bg-opacity-25' : ''}`}
         style={{ cursor: 'pointer', paddingLeft: `${8 + depth * 14}px` }}
       >
@@ -1428,9 +1957,28 @@ export const SingleRequestPane = ({
         >
           {leaf.label}{leaf.hasQuery ? '?' : ''}
         </code>
-        <Badge bg={statusVariant(leaf.status)} className="ms-1" style={{ fontSize: '0.55rem' }}>
-          {leaf.status || '?'}
-        </Badge>
+        {/* How many distinct request/response variants this one endpoint collapsed. Only shown when it
+            is more than one, so a normal single-recording endpoint stays quiet. */}
+        {leaf.variantCount > 1 && (
+          <Badge
+            bg="dark"
+            className="border border-info text-info ms-1"
+            style={{ fontSize: '0.55rem' }}
+            title={`${leaf.variantCount} variants from ${leaf.captureCount} captures`}
+          >
+            ×{leaf.variantCount}
+          </Badge>
+        )}
+        {primaryStatus != null && (
+          <Badge
+            bg={statusVariant(primaryStatus)}
+            className="ms-1"
+            style={{ fontSize: '0.55rem' }}
+            title={leaf.variantCount > 1 ? 'status of the primary variant' : undefined}
+          >
+            {primaryStatus || '?'}
+          </Badge>
+        )}
       </div>
     );
   };
@@ -1672,6 +2220,120 @@ export const SingleRequestPane = ({
     );
   };
 
+  // One recorded variant of the selected endpoint as a selectable row. Clicking it loads that
+  // recording's request AND its recorded response. It carries a NAME (the operator's, or the source
+  // default), a PRIMARY star that makes it the one the sitemap shows, and a rename pencil. Its own
+  // manual edits are the "Edits" section below, not here: a variant is the recording, an edit is a
+  // change to it.
+  const renderVariantRow = (variant, index) => {
+    const active = variant.id === versionCaptureId;
+    const renaming = variantRenamingId === variant.id;
+    const sizeTxt = variant.size != null ? `${Number(variant.size).toLocaleString()} B` : '';
+    // What tells this variant from its siblings: a query string for a GET, otherwise the mime.
+    const detail = variant.query
+      ? variant.query
+      : (variant.mime || 'recorded request');
+    return (
+      <div
+        key={`variant-${variant.id}`}
+        role="button"
+        tabIndex={0}
+        onClick={() => loadVariant(variant)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); loadVariant(variant); } }}
+        className="srp-version-row px-2 py-2 border-bottom border-secondary"
+        title={variant.url}
+        style={{
+          cursor: 'pointer',
+          borderLeft: `3px solid ${active ? '#dc3545' : 'transparent'}`,
+          backgroundColor: active ? '#2b3035' : 'transparent',
+        }}
+      >
+        <div className="d-flex align-items-center mb-1">
+          {/* Primary star: filled and gold when this is the endpoint's primary, hollow otherwise.
+              Clicking a hollow one makes this the primary; the filled one is already it. */}
+          <button
+            type="button"
+            className="btn btn-link p-0 me-2"
+            style={{ lineHeight: 1, color: variant.isPrimary ? '#ffc107' : '#6c757d' }}
+            title={variant.isPrimary
+              ? 'Primary variant. This is the one the sitemap shows and a leaf click opens.'
+              : 'Make this the primary variant (shown in the sitemap).'}
+            onClick={(e) => { e.stopPropagation(); setPrimaryVariant(variant); }}
+          >
+            <i className={`bi ${variant.isPrimary ? 'bi-star-fill' : 'bi-star'}`} style={{ fontSize: '0.72rem' }} />
+          </button>
+          <Badge bg={statusVariant(variant.status)} style={{ fontSize: '0.55rem' }}>
+            {variant.status || '?'}
+          </Badge>
+          {active && (
+            <Badge bg="dark" className="border border-danger text-danger ms-2" style={{ fontSize: '0.55rem' }}>
+              open
+            </Badge>
+          )}
+          <span className="text-white-50 ms-auto" style={{ fontSize: '0.62rem' }}>
+            {formatVersionTime(variant.timestamp)}
+          </span>
+        </div>
+
+        {renaming ? (
+          <Form.Control
+            size="sm"
+            autoFocus
+            value={variantRenameText}
+            onChange={(e) => setVariantRenameText(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={() => commitVariantRename(variant)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Enter') { e.preventDefault(); commitVariantRename(variant); }
+              if (e.key === 'Escape') { e.preventDefault(); setVariantRenamingId(null); }
+            }}
+            placeholder="Empty restores the source name"
+            spellCheck={false}
+            style={{ fontSize: '0.72rem' }}
+            data-bs-theme="dark"
+          />
+        ) : (
+          <div
+            className={active ? 'text-light' : 'text-white'}
+            style={{ fontSize: '0.72rem', wordBreak: 'break-word' }}
+          >
+            {variant.name}
+            {!variant.nameCustom && (
+              <span className="text-white-50 fst-italic ms-1" style={{ fontSize: '0.6rem' }}>default</span>
+            )}
+          </div>
+        )}
+
+        <div
+          className="text-white-50 text-truncate mt-1"
+          style={{ fontSize: '0.65rem', fontFamily: MONO_STYLE.fontFamily }}
+          title={detail}
+        >
+          {detail}
+        </div>
+        <div className="d-flex align-items-center mt-1">
+          <span className="text-white-50" style={{ fontSize: '0.62rem' }}>
+            {sizeTxt}
+            {variant.mime && variant.query ? ` · ${variant.mime}` : ''}
+            {variant.count > 1 ? ` · ×${variant.count} captures` : ''}
+          </span>
+          {!renaming && (
+            <button
+              type="button"
+              className="btn btn-link p-0 ms-auto text-white-50"
+              title="Rename this variant"
+              onClick={(e) => { e.stopPropagation(); beginVariantRename(variant); }}
+              style={{ fontSize: '0.72rem', lineHeight: 1 }}
+            >
+              <i className="bi bi-pencil" />
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderVersionsBody = () => {
     if (!versionsAvailable) {
       return (
@@ -1685,6 +2347,37 @@ export const SingleRequestPane = ({
     if (!targetId) {
       return <div className="text-white-50 p-3" style={{ fontSize: '0.72rem' }}>No target selected.</div>;
     }
+
+    // A selected endpoint: its distinct variants, each nameable and one primary, with the open
+    // variant's own manual edits below them. One row per variant even when there is only one, so the
+    // model reads the same whether an endpoint was recorded once or forty times.
+    if (endpointVariants.length >= 1) {
+      const edits = versions.filter((v) => v && !v.is_original);
+      return (
+        <>
+          <div
+            className="px-2 py-1 border-bottom border-secondary text-white-50"
+            style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}
+            title="One row per distinct recorded request/response for this endpoint. Duplicates were collapsed. The starred one is primary."
+          >
+            Variants ({endpointVariants.length})
+          </div>
+          {endpointVariants.map((v, i) => renderVariantRow(v, i))}
+          {edits.length > 0 && (
+            <>
+              <div
+                className="px-2 py-1 border-bottom border-secondary text-white-50"
+                style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}
+              >
+                Edits of the open variant
+              </div>
+              {edits.map(renderVersionRow)}
+            </>
+          )}
+        </>
+      );
+    }
+
     if (!versionCaptureId) {
       return (
         <div className="text-white-50 p-3" style={{ fontSize: '0.72rem' }}>
@@ -1871,13 +2564,16 @@ export const SingleRequestPane = ({
               </div>
             )}
             <div className="text-white-50 mt-1" style={{ fontSize: '0.7rem' }}>
-              showing {leafCount.toLocaleString()} of {Math.max(total, leafCount).toLocaleString()} matched
+              {leafCount.toLocaleString()} {leafCount === 1 ? 'endpoint' : 'endpoints'}
+              <span className="ms-1">
+                from {Math.max(total, leafCount).toLocaleString()} {total === 1 ? 'capture' : 'captures'} matched
+              </span>
               {corpusTotal != null && (
                 <span className="ms-1">({corpusTotal.toLocaleString()} recorded)</span>
               )}
               {truncated && (
                 <span className="text-warning ms-1">
-                  (truncated at {RESULT_LIMIT.toLocaleString()}, narrow the query to see the rest)
+                  (more than {RESULT_LIMIT.toLocaleString()} matched, the ceiling one search can scan; narrow the query to see the rest)
                 </span>
               )}
             </div>
@@ -1928,23 +2624,24 @@ export const SingleRequestPane = ({
             </div>
 
             <div className="flex-grow-1" style={{ position: 'relative', minHeight: 0, backgroundColor: '#1e1e1e' }}>
-              {showEol && (
-                <pre
-                  ref={mirrorRef}
-                  aria-hidden="true"
-                  style={{
-                    ...MONO_STYLE,
-                    ...(wrapText ? WRAP_ON : WRAP_OFF),
-                    position: 'absolute',
-                    top: 0, left: 0, right: 0, bottom: 0,
-                    overflow: 'hidden',
-                    pointerEvents: 'none',
-                    color: '#d0d0d0',
-                  }}
-                >
-                  {requestMirror}
-                </pre>
-              )}
+              {/* The syntax-coloured rendering, always behind the textarea now. The textarea paints a
+                  transparent glyph layer of its own (caret and selection) over this, so the colour and
+                  the line-ending glyphs come from here and the editing comes from there. They share
+                  MONO_STYLE and the wrap setting, so they lay out identically and stay aligned. */}
+              <pre
+                ref={mirrorRef}
+                aria-hidden="true"
+                style={{
+                  ...MONO_STYLE,
+                  ...(wrapText ? WRAP_ON : WRAP_OFF),
+                  position: 'absolute',
+                  top: 0, left: 0, right: 0, bottom: 0,
+                  overflow: 'hidden',
+                  pointerEvents: 'none',
+                }}
+              >
+                {requestNodes}
+              </pre>
               <textarea
                 ref={textareaRef}
                 value={rawRequest}
@@ -1969,10 +2666,9 @@ export const SingleRequestPane = ({
                   outline: 'none',
                   overflow: 'auto',
                   backgroundColor: 'transparent',
-                  // With the line-ending view on, the glyphs come from the mirror behind this
-                  // element, so the textarea paints only its caret and selection. The value it
-                  // holds is untouched either way.
-                  color: showEol ? 'transparent' : '#d0d0d0',
+                  // The characters come from the coloured mirror behind this element; the textarea
+                  // paints only its caret and selection. The value it holds is untouched.
+                  color: 'transparent',
                   caretColor: '#f8f9fa',
                 }}
               />
@@ -2174,6 +2870,20 @@ export const SingleRequestPane = ({
                   {shownStatus}
                 </Badge>
               )}
+              {/* Says whose response this is. A recorded one is the crawl's, shown on load; once the
+                  operator edits the request it no longer belongs to these bytes, so it says so. */}
+              {responseSource === 'recorded' && (
+                <span
+                  className={`ms-2 ${dirty ? 'text-warning' : 'text-white-50'}`}
+                  style={{ fontSize: '0.68rem' }}
+                  title={dirty
+                    ? 'The response the crawl recorded for this request. You have edited the request since, so it is no longer this request’s answer - replay to get a fresh one.'
+                    : 'The response the crawl recorded for this request. Replay to send it again and get a fresh one.'}
+                >
+                  <i className="bi bi-record-circle me-1" />
+                  {dirty ? 'recorded · request edited since' : 'recorded'}
+                </span>
+              )}
               {activeHop && hops.length > 1 && (
                 <span className="text-info ms-2" style={{ fontSize: '0.68rem' }}>
                   hop {hopIndex + 1} of {hops.length}
@@ -2267,18 +2977,23 @@ export const SingleRequestPane = ({
               {replaying ? (
                 <div className="text-center py-5"><Spinner animation="border" variant="danger" /></div>
               ) : responseText ? (
-                <pre style={{ ...MONO_STYLE, ...(wrapText ? WRAP_ON : WRAP_OFF), color: '#d0d0d0' }}>
-                  {responseText}
+                <pre style={{ ...MONO_STYLE, ...(wrapText ? WRAP_ON : WRAP_OFF), color: HL.plain }}>
+                  {responseNodes}
                 </pre>
+              ) : responseSource === 'unrecorded' ? (
+                <div className="text-white-50 p-3" style={{ fontSize: '0.75rem' }}>
+                  The manual crawl did not store a response for this request. Hit Replay to send it
+                  now and see a fresh one.
+                </div>
               ) : (
                 <div className="text-white-50 p-3" style={{ fontSize: '0.75rem' }}>
-                  No response yet. Pick a request, edit it, and hit Replay.
+                  No response yet. Pick a request from the sitemap, or edit one and hit Replay.
                 </div>
               )}
             </div>
 
             <div className="d-flex align-items-center justify-content-end gap-3 px-2 py-2 border-top border-secondary">
-              {hasReplayed ? (
+              {haveShownResponse ? (
                 <>
                   {hops.length > 1 && (
                     <span className="text-white-50 me-auto" style={{ fontSize: '0.72rem' }}>
@@ -2293,27 +3008,31 @@ export const SingleRequestPane = ({
                   </span>
                 </>
               ) : (
-                <span className="text-muted" style={{ fontSize: '0.72rem' }}>no replay yet</span>
+                <span className="text-muted" style={{ fontSize: '0.72rem' }}>
+                  {responseSource === 'unrecorded' ? 'no response recorded' : 'no response yet'}
+                </span>
               )}
             </div>
           </div>
         </div>
 
-        {/* Far right: every version of the request now loaded, original first. */}
+        {/* Far right: the variants of the selected endpoint, the primary first-class among them, with
+            the open variant's edits below. */}
         <div
           className="d-flex flex-column border border-secondary rounded"
           style={{ width: '19%', minWidth: '215px', minHeight: 0 }}
         >
           <div className="d-flex align-items-center px-2 py-1 border-bottom border-secondary">
-            <span className="text-white-50" style={{ fontSize: '0.72rem' }}>VERSIONS</span>
+            <span className="text-white-50" style={{ fontSize: '0.72rem' }}>VARIANTS</span>
             {versionsLoading && <Spinner animation="border" size="sm" variant="danger" className="ms-2" />}
-            {versions.length > 0 && (
+            {(endpointVariants.length >= 1 ? endpointVariants.length : versions.length) > 0 && (
               <Badge
                 bg="dark"
                 className="border border-secondary text-white-50 ms-2"
                 style={{ fontSize: '0.55rem' }}
+                title={endpointVariants.length >= 1 ? 'variants of this endpoint' : 'edits of this request'}
               >
-                {versions.length}
+                {endpointVariants.length >= 1 ? endpointVariants.length : versions.length}
               </Badge>
             )}
             {versionCaptureId && versionsAvailable && (
@@ -2381,6 +3100,38 @@ export const SingleRequestPane = ({
           )}
         </div>
       </div>
+
+      {/* Stacked on top of the pane and its fullscreen modal, never a window.confirm. Renders through
+          a portal, so it sits above everything and closing it leaves the repeater exactly as it was. */}
+      <Modal
+        show={!!confirmDialog}
+        onHide={() => resolveConfirm(false)}
+        size="sm"
+        centered
+        data-bs-theme="dark"
+        backdrop="static"
+      >
+        <Modal.Header closeButton>
+          <Modal.Title className="text-danger" style={{ fontSize: '1rem' }}>
+            {confirmDialog?.title}
+          </Modal.Title>
+        </Modal.Header>
+        <Modal.Body className="text-white" style={{ fontSize: '0.85rem', whiteSpace: 'pre-wrap' }}>
+          {confirmDialog?.body}
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="outline-secondary" size="sm" onClick={() => resolveConfirm(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant={confirmDialog?.variant || 'danger'}
+            size="sm"
+            onClick={() => resolveConfirm(true)}
+          >
+            {confirmDialog?.confirmLabel}
+          </Button>
+        </Modal.Footer>
+      </Modal>
     </div>
   );
 };

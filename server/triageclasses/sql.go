@@ -1630,12 +1630,75 @@ func sqlUntested(c sqlClassifier, ctx triage.ClassifyCtx, ev *sqlEvidence) []tri
 		}
 		reason := sqlSkipReason(p.ID, ctx.PlanCtx)
 		if reason == "" {
-			reason = "not_run (early_exit): the ladder stopped before this rung because an earlier probe settled the slot. It was not sent and it is not clean"
+			reason = sqlLadderGapReason(ctx, ev)
 		}
 		out = append(out, triage.ProbeSkip{ProbeID: p.ID, Reason: reason})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ProbeID < out[j].ProbeID })
 	return out
+}
+
+// sqlLadderGapReason says why a probe this class DOES plan on this slot has no observation, and
+// it picks a cause only where it has read one.
+//
+// THE SENTENCE IT REPLACES ASSERTED ONE CAUSE AND HAD MEASURED NONE. It read "not_run
+// (early_exit): the ladder stopped before this rung because an earlier probe settled the slot",
+// on every probe that sqlSkipReason had no rule for, whether or not anything had settled
+// anything. Four different things put a probe here and they call for four different next moves:
+// an earlier rung really did settle the slot, the per-slot cap bit, the run's tier is below the
+// probe's, or the run ended before the round that carries it. SSTI's equivalent names the three
+// it cannot separate and picks none of them, and says in its comment that naming one would be
+// inventing a cause. This class asserted the one cause that tells an operator to do nothing.
+//
+// WHAT IT CAN ACTUALLY SEE FROM HERE, and each clause is read at this line:
+//
+//	an exit condition held     one of the FOUR conditions that actually return nil or return
+//	                           early from sqlNextRequests is in evidence, so the early exit is a
+//	                           fact about this slot and not a guess
+//	the budget reads exhausted at classify time, which is worth naming FIRST and is still not
+//	                           proof that the cap is what stopped THIS probe: it says only that
+//	                           the cap had bitten by the end
+//	neither                    three causes, none of them chosen
+//
+// THE FOUR ARE READ OFF sqlNextRequests AND NOT OFF AN IMPRESSION OF IT, and writing this
+// function is what caught the first draft of it asserting a fifth. A CONFIRMED BOOLEAN
+// DIFFERENTIAL DOES NOT STOP THE LADDER: the only boolean short circuit is
+// `booleanPairLooksTrue() && count(A1) < 2`, which stops being true the moment the repeat lands,
+// so after d2Confirmed the rung loop runs on and a probe missing below it was NOT skipped by an
+// early exit. Claiming otherwise would have been this round's own defect, shipped inside its fix.
+func sqlLadderGapReason(ctx triage.ClassifyCtx, ev *sqlEvidence) string {
+	switch {
+	case ev.junkSensitive:
+		return "not_run (early_exit): this class's own junk control already fired on this slot, so the " +
+			"marker-in-parser-error oracle is void here and sqlNextRequests sends nothing further. It was not " +
+			"sent, and it is not clean"
+	case ev.uniformBlock:
+		return "not_run (early_exit): three or more of this class's distinct payloads came back byte-identical " +
+			"and different from the control, so sqlNextRequests stopped. It was not sent, and it is not clean"
+	case ev.castProven():
+		return "not_run (early_exit): the cast detector proved this slot is parsed as an integer and the tail " +
+			"discarded, so sqlNextRequests stopped: the delimiter ladder and the boolean arm cannot add anything " +
+			"through a slot that never reaches the parser as text"
+	}
+	if hit, ok := ev.firstD1Break(); ok {
+		return "not_run (early_exit): " + string(hit) + " produced a marker-bearing parser error and " +
+			"sqlNextRequests then sends only that probe's control and its repeat, so the rungs below it were " +
+			"never reached. That is this class's own plan on this slot and not a budget: it was not sent, and " +
+			"it is not clean"
+	}
+	if ctx.Budget.Exhausted() {
+		return "not_run: this probe is planned on this slot and no response for it came back, and the probe budget " +
+			"reads EXHAUSTED at the end of the run. CHECK THE CAP FIRST, and note what that reading does and does " +
+			"not prove: it says the cap had bitten by the end, not that it bit before this rung. The other two " +
+			"causes this class cannot see from here are a run tier below this probe's and a run that ended before " +
+			"the round carrying it"
+	}
+	return "not_run: this probe is planned on this slot and no response for it came back. THIS CLASS CANNOT SEE " +
+		"WHICH OF THREE APPLIES: the per-slot probe cap bit before the ladder reached it, the run's tier is below " +
+		"this probe's (ProbeSpec.Tier is enforced by the runner and PlanCtx carries no tier field), or the run " +
+		"ended before the round that carries it. None of this class's FOUR ladder-stopping conditions is in " +
+		"evidence here (no junk control fired, no uniform block, no proven cast, no parser break), so an early " +
+		"exit is NOT one of the three: nothing on this slot settled anything"
 }
 
 // Classify is the verdict. It is called once, after Plan returns nil or the budget is exhausted.
@@ -1791,12 +1854,18 @@ func sqlDecide(ctx triage.ClassifyCtx, ev *sqlEvidence, drifted bool) []triage.C
 			ordinals, untested, anno, ev)}
 	}
 	if ev.d3Widened() {
-		out := sqlFill(v(triage.StateSuspicious, ""), ordinals, untested, anno, ev)
-		out.Oracle = "like_widening"
-		out.Grade = triage.GradeLow
-		out.Reason = ""
 		l1, _ := ev.first(sqlL1)
 		l2, _ := ev.first(sqlL2)
+		// THE REASON IS COMPOSED FROM THE SAME TWO READS d3Widened MADE, and from nothing else.
+		// It used to be the empty string, with the whole justification parked in a Label hint
+		// that no aggregate and no audit reads.
+		out := sqlFill(v(triage.StateSuspicious, fmt.Sprintf(
+			"like_widening: %s sent a BARE percent through this slot and the response moved away from this class's own control, while %s sent the same percent ESCAPED and the response stayed on it. "+
+				"Both halves are required and both were read here, so the value reaches a LIKE pattern rather than a parameter comparison. THAT IS NOT A PARSER BREAK and this class will never call it one: "+
+				"rank 5 is the ceiling, the next move is a tool that can widen the pattern and read the extra rows, and if this class had also broken the parser this row would not be the top of the ladder",
+			sqlL1, sqlL2)), ordinals, untested, anno, ev)
+		out.Oracle = "like_widening"
+		out.Grade = triage.GradeLow
 		out.Ordinals = sqlOrdinalsOf(l1, l2)
 		out.Label = sqlLabel(ev.engine)
 		out.Label.Hints["like_context"] = "the bare percent widened the result and the escaped percent did not, so the value reaches a LIKE pattern. That is not a parser break and it is never a finding on its own"
@@ -1827,7 +1896,7 @@ func sqlD1Verdict(v func(triage.TriageState, string) triage.ClassVerdict, hit tr
 			fired = append(fired, s)
 		}
 	}
-	out := sqlFill(v(triage.StateFinding, ""), ordinals, untested, anno, ev)
+	out := sqlFill(v(triage.StateFinding, sqlReasonPending), ordinals, untested, anno, ev)
 	out.Oracle = "parser_error"
 	out.Ordinals = sqlOrdinalsOf(fired...)
 
@@ -1882,13 +1951,84 @@ func sqlD1Verdict(v func(triage.TriageState, string) triage.ClassVerdict, hit tr
 	out.Label = sqlLabel(ev.engine)
 	out.Label.Hints["probe"] = string(hit)
 	out.Label.Hints["technique"] = "error_based"
+
+	// THE REASON IS WRITTEN HERE, AT THE BOTTOM, AND NOT AT THE TOP WHERE THE ROW IS BUILT.
+	//
+	// That is the point of the whole edit and not a style choice. Every clause below names a
+	// fact that the grade switch above has ALREADY read: whether the effect reproduced with a
+	// fresh marker, whether the balanced control went out, what the marker's integrity and form
+	// came back as, and whether the wire record proves the payload left intact. A sentence
+	// composed at the top would be describing the scorecard as it stood BEFORE those reads and
+	// would drift from the grade sitting next to it the first time anyone reorders a case.
+	out.Reason = sqlD1Reason(hit, first, fired, hasControl, reproduced, out.State, out.Grade, ev)
 	return out
+}
+
+// sqlReasonPending is the placeholder a row carries between construction and the line that
+// composes its reason from the same reads the grade was taken from. It is not the empty string,
+// because the empty string is what shipped for five rungs of this ladder and Validate now
+// refuses it: a placeholder that reaches a report is a bug with its own name on it, and
+// TestNoSQLVerdictShipsThePlaceholderReason fails the build if one ever does.
+const sqlReasonPending = "reason_not_composed: this row reached a report before the line that writes its reason ran, which is a bug in sql.go and not a statement about this slot"
+
+// sqlD1Reason says what the marker-in-parser-error oracle actually read, at the strength the
+// grade beside it was taken at. Every clause is one measurement and no clause is a cause.
+func sqlD1Reason(hit triage.ProbeID, first sqlSeen, fired []sqlSeen, hasControl, reproduced bool,
+	state triage.TriageState, grade triage.TriageGrade, ev *sqlEvidence) string {
+
+	engine := "an unidentified engine"
+	if ev.engine != "" {
+		engine = ev.engine
+	}
+	b := fmt.Sprintf("parser_error: %s carried this class's own marker into the reply, and %s's phrase %q came back with the marker in it at offset %d, in %s form. "+
+		"The marker is this run's and this class's, so the phrase is an answer to THIS payload and not a stack trace the endpoint ships to everyone. Engine read off the phrase: %s.",
+		hit, hit, first.d1.Phrase, first.d1.PhraseAt, sqlD1MarkerForm(first), engine)
+
+	if reproduced {
+		b += fmt.Sprintf(" It REPRODUCED: %d sends of %s fired, and the first two carried different markers, so the effect is not one server's one bad minute.", len(fired), hit)
+	} else {
+		b += fmt.Sprintf(" It fired ONCE and was not reproduced with a fresh marker (%d send of %s fired), so a transient server error is not excluded and the grade is capped for it.", len(fired), hit)
+	}
+	if ctl, ok := sqlBreakControls[hit]; ok {
+		if hasControl {
+			b += fmt.Sprintf(" Its balanced control %s was sent and did NOT produce the same phrase, so the delimiter reached the SQL parser rather than something earlier in the request path.", ctl)
+		} else {
+			b += fmt.Sprintf(" Its balanced control %s was NOT sent on this slot, so nothing here rules out a component before the parser erroring on the same bytes, and the grade is capped for that too.", ctl)
+		}
+	}
+	if first.d1.Marker.Integrity() == triage.MarkerCorrupted {
+		b += " The marker came back with a FAILED checksum, so attribution to this probe is unsafe and the row is capped at suspicious for it."
+	}
+	if !first.obs.Payload.Survived.Proven() {
+		b += fmt.Sprintf(" The wire record does not prove the payload went out intact (%s), so the exact bytes the parser saw are not the bytes this class asked for.", first.obs.Payload.Survived)
+	}
+	if ev.weakSeen != "" {
+		b += fmt.Sprintf(" The weak signature catalogue also matched (%s); it may raise a hit this oracle already made and it never makes one.", ev.weakSeen)
+	}
+	b += fmt.Sprintf(" Shipped as %s at grade %s. What it buys the operator is a --dbms and an error-based technique for sqlmap, not an extraction: nothing was read out of the database here.", state, sqlGradeWord(grade))
+	return b
+}
+
+func sqlD1MarkerForm(s sqlSeen) string {
+	if s.d1.MarkerForm == "" {
+		return "an unrecorded"
+	}
+	return s.d1.MarkerForm
+}
+
+// sqlGradeWord renders the grade for a sentence. GradeUnrated is the empty string on the wire and
+// an empty string inside a sentence is a hole a reader fills in with a guess.
+func sqlGradeWord(g triage.TriageGrade) string {
+	if g == triage.GradeUnrated {
+		return "unrated"
+	}
+	return string(g)
 }
 
 func sqlD2Verdict(v func(triage.TriageState, string) triage.ClassVerdict, arm triage.ProbeID, ev *sqlEvidence,
 	ctx triage.ClassifyCtx, ordinals []uint64, untested []triage.ProbeSkip, anno map[string]any) triage.ClassVerdict {
 
-	out := sqlFill(v(triage.StateFinding, ""), ordinals, untested, anno, ev)
+	out := sqlFill(v(triage.StateFinding, sqlReasonPending), ordinals, untested, anno, ev)
 	out.Oracle = "boolean_differential"
 	true1, _ := ev.first(arm)
 	out.Ordinals = sqlOrdinalsOf(true1)
@@ -1914,7 +2054,52 @@ func sqlD2Verdict(v func(triage.TriageState, string) triage.ClassVerdict, arm tr
 	out.Label = sqlLabel(ev.engine)
 	out.Label.Hints["probe"] = string(arm)
 	out.Label.Hints["technique"] = "boolean_blind"
+
+	// COMPOSED AFTER THE SWITCH, from the same ctx.Baseline read the switch took. The stability
+	// of the baseline is the only thing separating this row's finding from its suspicion, so a
+	// sentence written before the switch would name a strength the row does not have.
+	out.Reason = sqlD2Reason(arm, ev, ctx, out.State, out.Grade)
 	return out
+}
+
+// sqlD2Reason states the four readings d2Confirmed required, by name, and then the one fact that
+// set the grade. Nothing here is inferred: every clause is a comparison this class already made
+// against its OWN control.
+func sqlD2Reason(arm triage.ProbeID, ev *sqlEvidence, ctx triage.ClassifyCtx,
+	state triage.TriageState, grade triage.TriageGrade) string {
+
+	falseArm := sqlBooleanFalseArm(arm)
+	b := fmt.Sprintf("boolean_differential: %s, this class's TRUE arm, came back matching this class's own control on %d separate sends, %s, its FALSE arm, did not, and %s, the invalid-syntax control that must not read as true, did not either. "+
+		"All four readings are comparisons against THIS class's control and no other class was consulted. The application's answer therefore depends on a boolean this slot supplies, which is the one oracle here that works on an endpoint that swallows its errors.",
+		arm, len(ev.byProbe[arm]), falseArm, sqlA3)
+
+	switch {
+	case ctx.Baseline.Degraded:
+		b += " The baseline comparison was DEGRADED when these were read, so the differential is a suspicion and not a finding."
+	case ctx.Baseline.Stable:
+		b += fmt.Sprintf(" The stability gate passed on this endpoint over %d baseline samples, so a difference of this shape is the payload's and not the page's.", ctx.Baseline.Samples)
+	default:
+		b += fmt.Sprintf(" The stability gate did NOT pass here (%d baseline samples), so the separation is capped at a suspicion: an endpoint that moves on its own can produce this shape without a query behind it.", ctx.Baseline.Samples)
+	}
+	if arm == sqlA1w {
+		b += " The arm could only be delivered in its /**/ whitespace form, which is verified on PostgreSQL and MariaDB and unverified elsewhere."
+	}
+	b += fmt.Sprintf(" Shipped as %s at grade %s. Nothing was read out of the database: this is a pointer for sqlmap's boolean-blind technique.", state, sqlGradeWord(grade))
+	return b
+}
+
+// sqlBooleanFalseArm names the partner d2Confirmed paired the true arm with, so the sentence
+// cannot name a probe the rule did not read.
+func sqlBooleanFalseArm(arm triage.ProbeID) triage.ProbeID {
+	switch arm {
+	case sqlA1:
+		return sqlA2
+	case sqlA1w:
+		return sqlA2w
+	case sqlA4:
+		return sqlA5
+	}
+	return arm
 }
 
 // sqlNegativeVerdicts is the only path that may produce clean, and it produces MORE THAN ONE row
@@ -2015,10 +2200,17 @@ func sqlNegativeVerdicts(v func(triage.TriageState, string) triage.ClassVerdict,
 		row.Ordinals = errorArmOrdinals
 		out = append(out, row)
 	default:
-		cl := sqlFill(v(triage.StateClean, ""), ordinals, untested, anno, ev)
+		// THE CLEAN NAMES ITS OWN PRECONDITIONS AND ONLY THE ONES IT CAN SEE FROM HERE.
+		//
+		// It shipped with Reason "" until now, which made this class's most consequential row,
+		// the one that says an operator need not look here, invisible to every audit of this
+		// layer, all of which are greps over reason strings. The clauses below are read at this
+		// line and not earlier: whether the junk control was actually SENT decides whether this
+		// row may say a control stayed silent, and claiming a silent control that was never
+		// requested is the same defect one level down.
+		cl := sqlFill(v(triage.StateClean, sqlErrorArmCleanReason(ev, len(errorArmOrdinals))), ordinals, untested, anno, ev)
 		cl.Oracle = "parser_error"
 		cl.Ordinals = errorArmOrdinals
-		cl.Reason = ""
 		out = append(out, cl)
 	}
 
@@ -2040,10 +2232,9 @@ func sqlNegativeVerdicts(v func(triage.TriageState, string) triage.ClassVerdict,
 			fmt.Sprintf("%s: the stability gate did not pass on this endpoint, so the boolean differential cannot be read. The error oracle still ran because it needs no baseline, and these two facts are reported separately because neither stands for the other", reason)),
 			ordinals, untested, anno, ev))
 	default:
-		cl := sqlFill(v(triage.StateClean, ""), ordinals, untested, anno, ev)
+		cl := sqlFill(v(triage.StateClean, sqlBooleanArmCleanReason(ev, ctx, len(boolOrdinals))), ordinals, untested, anno, ev)
 		cl.Oracle = "boolean_differential"
 		cl.Ordinals = boolOrdinals
-		cl.Reason = ""
 		out = append(out, cl)
 	}
 
@@ -2085,6 +2276,48 @@ func sqlNegativeVerdicts(v func(triage.TriageState, string) triage.ClassVerdict,
 		}
 	}
 	return out
+}
+
+// sqlErrorArmCleanReason is the marker-in-parser-error oracle's clean, with its preconditions
+// printed rather than assumed.
+//
+// EVERY CLAUSE IS READ AT THE MOMENT IT IS WRITTEN. The junk-control clause in particular asks
+// whether SQL-NC1 was SENT before it says anything about what it did: a clean that says "and the
+// control stayed silent" on a slot where the control was never requested is an assertion about a
+// request that did not happen, which is the same disease as an empty reason wearing a sentence.
+func sqlErrorArmCleanReason(ev *sqlEvidence, ran int) string {
+	control := fmt.Sprintf("this class's own junk control %s was NOT SENT on this slot, so nothing here watched the detector stay silent on a payload that cannot break a query, and the silence rests on the catalogue alone", sqlNC1)
+	if ev.count(sqlNC1) > 0 {
+		control = fmt.Sprintf("this class's own junk control %s, which is the marker followed by four digits and carries no metacharacter of any kind, produced no catalogue phrase either, so the detector was WATCHED staying silent on a payload that cannot break a query", sqlNC1)
+	}
+	echo := "no probe on this slot echoed anything back, so this class cannot separate a parameterised query from a quote that was stripped before it ever reached one; quote_survival_unproven is carried on this row for that reason"
+	if ev.echoedAny {
+		echo = "at least one probe came back carrying this class's marker, so the value is known to reach the application's output path and the payloads are known to have arrived"
+	}
+	engine := "no engine was identified from any reply"
+	if ev.engine != "" {
+		engine = "the engine read off the replies was " + ev.engine
+	}
+	return fmt.Sprintf("clean (parser_error): %d of this class's own break probes ran on this slot and not one reply carried this class's own marker inside a phrase from its strong DBMS-error catalogue, and %s. %s, and %s. "+
+		"THIS ROW IS ONE ORACLE'S SILENCE AND NOTHING WIDER: the boolean arm is reported on its own row and neither row stands for the other, every probe that did not go out is named in Untested, and a time-based or out-of-band injection has no oracle in this pass at all",
+		ran, control, echo, engine)
+}
+
+// sqlBooleanArmCleanReason is the boolean differential's clean. The stability clause is not a
+// restatement of an earlier measurement: the caller reached this branch only after reading
+// ctx.Baseline.Stable as true two lines above, and the sample count is read here.
+func sqlBooleanArmCleanReason(ev *sqlEvidence, ctx triage.ClassifyCtx, ran int) string {
+	control := fmt.Sprintf("this class's invalid-syntax control %s was NOT SENT here, so the pair was read without the control that tells a real boolean from an endpoint that answers everything the same way", sqlA3)
+	if a3, ok := ev.first(sqlA3); ok {
+		if a3.cmp == sqlCmpSame {
+			control = fmt.Sprintf("this class's invalid-syntax control %s MATCHED the control response, which is why no pair on this slot could be read as true", sqlA3)
+		} else {
+			control = fmt.Sprintf("this class's invalid-syntax control %s did not read as a true arm, so the detector had a working discriminator on this slot", sqlA3)
+		}
+	}
+	return fmt.Sprintf("clean (boolean_differential): %d of this class's own boolean probes ran against a baseline the stability gate passed over %d samples, no true arm separated from its false arm on any pair, and %s. "+
+		"THIS ROW IS ONE ORACLE'S SILENCE AND NOTHING WIDER: it is the only detector in this class that can see an endpoint suppressing its errors, the error oracle is reported on its own row above, and neither stands for the other",
+		ran, ctx.Baseline.Samples, control)
 }
 
 // sqlDecodeUnknownReason separates the three ways decode_depth ends up unknown, because they are

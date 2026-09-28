@@ -114,6 +114,12 @@ type SessionToken struct {
 	LastRefreshedAt      *time.Time `json:"last_refreshed_at"`
 	CreatedAt            time.Time  `json:"created_at"`
 	UpdatedAt            time.Time  `json:"updated_at"`
+
+	// Profile is what the token characterisation engine measured about this credential: its kind,
+	// its lifetime and the provenance of that lifetime, and whether the session can be refreshed.
+	// It is not a column; it is filled in by AttachSessionTokenProfiles on the read path and is
+	// nil when nothing has been measured, which reads as unmeasured rather than as unlimited.
+	Profile *SessionTokenProfile `json:"profile,omitempty"`
 }
 
 // sessionTokenPayload is the write shape for create and update. Every field is a pointer so an
@@ -152,21 +158,139 @@ const sessionTokenCols = `t.id::text, t.scope_target_id::text, COALESCE(t.auth_f
 
 const sessionTokenFrom = ` FROM session_tokens t LEFT JOIN auth_flows f ON f.id = t.auth_flow_id `
 
+// SessionTokenView is the read shape: every field of the row, the credential included, plus three
+// facts about the value that a screen would otherwise have to measure for itself. The fingerprint
+// says WHICH credential a row holds, so two rows carrying the same token can be spotted; the byte
+// length is occasionally the only distinguishing fact about an opaque value; and has_value tells
+// an empty row apart from a stored one, so a working session is not drawn as broken.
+type SessionTokenView struct {
+	ID                   string     `json:"id"`
+	ScopeTargetID        string     `json:"scope_target_id"`
+	AuthFlowID           string     `json:"auth_flow_id"`
+	AuthFlowName         string     `json:"auth_flow_name"`
+	Name                 string     `json:"name"`
+	TokenType            string     `json:"token_type"`
+	TokenRole            string     `json:"token_role"`
+	HeaderName           string     `json:"header_name"`
+	CookieName           string     `json:"cookie_name"`
+	ParamName            string     `json:"param_name"`
+	ValuePrefix          string     `json:"value_prefix"`
+	ScopeDomains         []string   `json:"scope_domains"`
+	CookiePath           string     `json:"cookie_path"`
+	CookieDomain         string     `json:"cookie_domain"`
+	CookieSecure         bool       `json:"cookie_secure"`
+	CookieHTTPOnly       bool       `json:"cookie_httponly"`
+	CookieSameSite       string     `json:"cookie_samesite"`
+	ExpiresAt            *time.Time `json:"expires_at"`
+	IsActive             bool       `json:"is_active"`
+	Notes                string     `json:"notes"`
+	LastValidatedAt      *time.Time `json:"last_validated_at"`
+	LastValidationStatus string     `json:"last_validation_status"`
+	LastValidationDetail string     `json:"last_validation_detail"`
+	LastRefreshedAt      *time.Time `json:"last_refreshed_at"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+
+	// HasValue says whether the row holds a credential at all. An empty row and a stored one are
+	// different states and a screen that cannot tell them apart shows a working session as broken.
+	HasValue bool `json:"has_value"`
+	// ValueFingerprint is eight hex digits of the credential's SHA-256, or the word "none". Two
+	// rows with the same fingerprint carry the same token, and a row whose fingerprint changed was
+	// re-pasted, neither of which a screen can tell at a glance from two long opaque strings.
+	ValueFingerprint string `json:"value_fingerprint"`
+	// ValueLength is the byte length, so a screen does not have to count it.
+	ValueLength int `json:"value_length"`
+
+	// TokenValue is the stored credential, served to every caller. It is the operator's own
+	// database read by the operator's own tool, and a captured credential is the evidence: a list
+	// that hands back anything less cannot prove what was captured.
+	TokenValue string `json:"token_value"`
+
+	Profile *SessionTokenProfile `json:"profile,omitempty"`
+}
+
+// sessionTokenEventView projects one row of the validate and refresh history.
+//
+// The detail sentence and the evidence blob go out exactly as they were stored. The evidence is a
+// recording of what the target answered, Location headers and probe URLs included, and a Location
+// is precisely where a credential lands during an OAuth or SSO redirect, which is the thing an
+// operator needs to see.
+func sessionTokenEventView(id, kind, status, detail string, evidence map[string]interface{}, createdAt time.Time) map[string]interface{} {
+	return map[string]interface{}{
+		"id":     id,
+		"kind":   kind,
+		"status": status,
+		"detail": detail,
+		// A NIL MAP STAYS A NIL MAP. It marshals to null, and an empty object is not the same fact:
+		// RefreshSessionModal.js renders the evidence block on `ev.evidence &&`, and {} is truthy in
+		// JavaScript, so an empty object would draw an evidence panel reading "{}" for every event
+		// that has no evidence behind it.
+		"evidence":   evidence,
+		"created_at": createdAt,
+	}
+}
+
+// sessionTokenView projects one row.
+func sessionTokenView(t SessionToken) SessionTokenView {
+	cred := NewCredential(t.TokenValue)
+	v := SessionTokenView{
+		ID: t.ID, ScopeTargetID: t.ScopeTargetID, AuthFlowID: t.AuthFlowID,
+		AuthFlowName: t.AuthFlowName,
+		Name:         t.Name,
+		TokenType:    t.TokenType,
+		TokenRole:    t.TokenRole,
+		HeaderName:   t.HeaderName,
+		CookieName:   t.CookieName,
+		ParamName:    t.ParamName,
+		ValuePrefix:  t.ValuePrefix,
+		ScopeDomains: t.ScopeDomains,
+		CookiePath:   t.CookiePath, CookieDomain: t.CookieDomain, CookieSecure: t.CookieSecure,
+		CookieHTTPOnly: t.CookieHTTPOnly, CookieSameSite: t.CookieSameSite,
+		ExpiresAt: t.ExpiresAt, IsActive: t.IsActive,
+		Notes:                t.Notes,
+		LastValidatedAt:      t.LastValidatedAt,
+		LastValidationStatus: t.LastValidationStatus,
+		LastValidationDetail: t.LastValidationDetail,
+		LastRefreshedAt:      t.LastRefreshedAt,
+		CreatedAt:            t.CreatedAt, UpdatedAt: t.UpdatedAt,
+		HasValue:         !cred.IsZero(),
+		ValueFingerprint: cred.Fingerprint(),
+		ValueLength:      cred.Len(),
+		TokenValue:       t.TokenValue,
+		Profile:          t.Profile,
+	}
+	if v.ScopeDomains == nil {
+		v.ScopeDomains = []string{}
+	}
+	return v
+}
+
+// sessionTokenViews projects a list.
+func sessionTokenViews(tokens []SessionToken) []SessionTokenView {
+	out := make([]SessionTokenView, 0, len(tokens))
+	for i := range tokens {
+		out = append(out, sessionTokenView(tokens[i]))
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // Read
 // ---------------------------------------------------------------------------
 
-// GetSessionTokens handles GET /session-tokens/target/{scope_target_id}.
-func GetSessionTokens(w http.ResponseWriter, r *http.Request) {
-	scopeTargetID := mux.Vars(r)["scope_target_id"]
+// sessionTokenListLoader is the seam the list handler reads through, so the projection above can be
+// tested against the handler's real response bytes without a database.
+var sessionTokenListLoader = loadSessionTokensForTarget
 
-	rows, err := dbPool.Query(context.Background(),
+func loadSessionTokensForTarget(ctx context.Context, scopeTargetID string) ([]SessionToken, error) {
+	if dbPool == nil {
+		return nil, fmt.Errorf("no database connection")
+	}
+	rows, err := dbPool.Query(ctx,
 		`SELECT `+sessionTokenCols+sessionTokenFrom+
 			`WHERE t.scope_target_id = $1 ORDER BY t.is_active DESC, t.created_at ASC`, scopeTargetID)
 	if err != nil {
-		log.Printf("[SESSION-TOKEN] Failed to list tokens: %v", err)
-		http.Error(w, "Failed to fetch session tokens", http.StatusInternalServerError)
-		return
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -179,8 +303,30 @@ func GetSessionTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		tokens = append(tokens, t)
 	}
+	return tokens, rows.Err()
+}
 
-	writeSessionTokenJSON(w, http.StatusOK, tokens)
+// GetSessionTokens handles GET /session-tokens/target/{scope_target_id}.
+func GetSessionTokens(w http.ResponseWriter, r *http.Request) {
+	scopeTargetID := mux.Vars(r)["scope_target_id"]
+
+	// context.Background() and not r.Context(), which is what this handler always used.
+	// AttachSessionTokenProfiles WRITES the measurements it takes, and a browser that navigates
+	// away mid-request would otherwise cancel that write half done. Changing it is a separate
+	// decision from the projection below and is not made here.
+	ctx := context.Background()
+	tokens, err := sessionTokenListLoader(ctx, scopeTargetID)
+	if err != nil {
+		log.Printf("[SESSION-TOKEN] Failed to list tokens: %v", err)
+		http.Error(w, "Failed to fetch session tokens", http.StatusInternalServerError)
+		return
+	}
+	// What kind of credential each of these is, how long it lives and whether it can be renewed.
+	// Attached here rather than joined in SQL because a profile is a measurement and not a column:
+	// see AttachSessionTokenProfiles for why a stale one is dropped rather than shown.
+	AttachSessionTokenProfiles(ctx, tokens)
+
+	writeSessionTokenJSON(w, http.StatusOK, sessionTokenViews(tokens))
 }
 
 // GetSessionTokenEvents handles GET /session-tokens/{id}/events.
@@ -212,10 +358,7 @@ func GetSessionTokenEvents(w http.ResponseWriter, r *http.Request) {
 		if len(evidenceJSON) > 0 {
 			_ = json.Unmarshal(evidenceJSON, &evidence)
 		}
-		events = append(events, map[string]interface{}{
-			"id": id, "kind": kind, "status": status, "detail": detail,
-			"evidence": evidence, "created_at": createdAt,
-		})
+		events = append(events, sessionTokenEventView(id, kind, status, detail, evidence, createdAt))
 	}
 
 	writeSessionTokenJSON(w, http.StatusOK, events)
@@ -234,7 +377,6 @@ func CreateSessionToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-
 	token := SessionToken{ScopeTargetID: scopeTargetID}
 	applySessionTokenPayload(&token, payload)
 	if strings.TrimSpace(token.Name) == "" {
@@ -254,6 +396,9 @@ func CreateSessionToken(w http.ResponseWriter, r *http.Request) {
 	}
 	recordSessionTokenEvent(id, "created", "manual",
 		fmt.Sprintf("Added by hand as a %s token.", token.TokenType), nil)
+	// Characterised as soon as it exists, so the operator is not looking at UNKNOWN for a token
+	// the engine can read in the time it takes the page to re-render.
+	ReprofileSessionToken(context.Background(), id)
 
 	writeSessionTokenJSON(w, http.StatusCreated, map[string]interface{}{"id": id})
 }
@@ -267,7 +412,6 @@ func UpdateSessionToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-
 	token, err := loadSessionToken(tokenID)
 	if err != nil {
 		http.Error(w, "Session token not found", http.StatusNotFound)
@@ -340,6 +484,9 @@ func UpdateSessionToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Session token not found", http.StatusNotFound)
 		return
 	}
+	// The value may have been replaced, and a profile of the previous credential is worse than no
+	// profile at all, so it is re-measured rather than left to go stale.
+	ReprofileSessionToken(context.Background(), tokenID)
 
 	writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{"updated": result.RowsAffected()})
 }
@@ -613,7 +760,6 @@ func ParseSessionTokens(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "raw is required", http.StatusBadRequest)
 		return
 	}
-
 	parsed := ParseRawSessionTokens(payload.Raw, scopeTargetHost(scopeTargetID))
 	if len(parsed) == 0 {
 		http.Error(w, "Nothing in that paste looked like a cookie, a Cookie header or an "+
@@ -660,7 +806,8 @@ func ParseSessionTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{"tokens": tokens})
+	// The same projection the list uses.
+	writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{"tokens": sessionTokenViews(tokens)})
 }
 
 // upsertParsedSessionToken writes one parsed token, updating the row with the same identity on this
@@ -693,6 +840,7 @@ func upsertParsedSessionToken(token SessionToken, overwriteName bool) (SessionTo
 		}
 		recordSessionTokenEvent(id, "parsed", "created",
 			fmt.Sprintf("Parsed from a raw paste as a %s token.", token.TokenType), nil)
+		ReprofileSessionToken(ctx, id)
 		return loadSessionToken(id)
 	}
 
@@ -731,6 +879,9 @@ func upsertParsedSessionToken(token SessionToken, overwriteName bool) (SessionTo
 
 	recordSessionTokenEvent(existingID, "parsed", "updated",
 		"A fresh value was pasted for this token, replacing the stored one.", nil)
+	// A pasted value is a DIFFERENT credential, so the stored characterisation describes something
+	// that is no longer here. Re-measure before anybody reads it.
+	ReprofileSessionToken(ctx, existingID)
 	return loadSessionToken(existingID)
 }
 
@@ -1967,6 +2118,8 @@ func SessionStillHonoured(ctx context.Context, scopeTargetID string) (alive bool
 			// probe that failed for its own reasons.
 			continue
 		default:
+			// The reason aborts a scan and lands in the run record, so it names the row exactly as
+			// the operator labelled it and quotes the verdict as it was measured.
 			return false, fmt.Sprintf("the stored credential %q validated as %q: %s",
 				token.Name, status, detail)
 		}

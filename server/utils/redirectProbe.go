@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -146,10 +147,16 @@ func ssrfProbeParams(v VectorInput) ([]string, string) {
 // REDIRECTS ARE NOT FOLLOWED, and that is the single most important line in this file. The open
 // redirect half of this section is decided by reading the Location header of the 30x itself;
 // following it replaces that response with whatever the webhook returns, and the finding disappears.
-func ssrfProbeClient() *http.Client {
-	return &http.Client{
-		Timeout:       ssrfProbeTimeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+// AND THE 30x MUST SURVIVE THE CLIENT, which is a separate problem from not following it.
+// net/http parses the Location header before it consults CheckRedirect, so a Location that
+// url.Parse rejects made Client.Do return an error and throw the response away: measured, seven
+// of twelve REcollapse-shaped payloads never reached the detector, and the discarded 302 was
+// counted as out.Failed++ next to ordinary timeouts. The payloads most likely to work were the
+// ones most likely to be discarded. NoFollowClient goes through the transport directly, so there
+// is no Location parse to fail and no way for a caller to fall back into the broken path.
+func ssrfProbeClient() *NoFollowClient {
+	return NewNoFollowClient(&http.Client{
+		Timeout: ssrfProbeTimeout,
 		Transport: &http.Transport{
 			// Scanning targets routinely present an expired, self-signed or hostname-mismatched
 			// certificate, and refusing those turns every request into a transport error that reads
@@ -158,7 +165,7 @@ func ssrfProbeClient() *http.Client {
 			DisableKeepAlives:   false,
 			MaxIdleConnsPerHost: 4,
 		},
-	}
+	})
 }
 
 // buildSSRFProbe renders one request: this vector, this parameter, this payload.
@@ -330,7 +337,13 @@ type ssrfProbeOutcome struct {
 	Why      string
 	Status   int
 	Location string
-	Snippet  string
+	// Snippet is the matched region with a little context, for the one-line evidence column.
+	Snippet string
+	// Response is the WHOLE response, status line, headers and body, as it came back. An SSRF is
+	// proved by what the server-side fetch returned, and the thing that proves it is routinely far
+	// outside a 120 character window: cloud metadata credentials, an /etc/passwd, an internal
+	// admin page. The snippet says where to look; this is what gets written up.
+	Response string
 }
 
 // inspectSSRFResponse decides whether one response proves anything.
@@ -341,6 +354,7 @@ type ssrfProbeOutcome struct {
 // explains.
 func inspectSSRFResponse(resp *http.Response, body, webhookHost string) *ssrfProbeOutcome {
 	location := resp.Header.Get("Location")
+	whole := rawResponseText(resp, body)
 
 	if webhookHost != "" && location != "" {
 		if host := redirectTargetHost(location); host != "" && strings.EqualFold(host, webhookHost) {
@@ -350,6 +364,7 @@ func inspectSSRFResponse(resp *http.Response, body, webhookHost string) *ssrfPro
 					"a user wherever the parameter says",
 				Status:   resp.StatusCode,
 				Location: location,
+				Response: whole,
 			}
 		}
 	}
@@ -362,31 +377,182 @@ func inspectSSRFResponse(resp *http.Response, body, webhookHost string) *ssrfPro
 				Status:   resp.StatusCode,
 				Location: location,
 				Snippet:  ssrfSnippet(body, signal.re),
+				Response: whole,
 			}
 		}
 	}
 	return nil
 }
 
-// redirectTargetHost reads the host out of a Location header.
+// redirectTrimBytes are the bytes a browser strips from both ENDS of a URL before parsing it:
+// the C0 controls and the space. A Location padded with them is the same Location.
+const redirectTrimBytes = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\v\f\r" +
+	"\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f "
+
+// redirectRemoveBytes are the bytes a browser removes from ANYWHERE in a URL, not just the ends.
+//
+// WHATWG basic URL parser, step 2: "Remove all ASCII tab or newline from input", where ASCII tab
+// or newline is U+0009, U+000A and U+000D. It runs over the whole string. So
+// https://evil.exa<TAB>mple/tok navigates to evil.example in every browser, and reading the host
+// as "evil.exa\tmple" reports a working redirect as clean.
+//
+// The set is exactly those three. \v and \f are C0 controls, so they are trimmed at the ends
+// above, but they are NOT removed from the middle by any browser and a host containing one does
+// not resolve. Widening this set past the three would start manufacturing findings.
+//
+// WHAT WAS ACTUALLY MEASURED, over a raw listener writing the response byte for byte, read back
+// through the framework's own client:
+//
+//	tab in the host        Location arrives intact as "https://evil.exa\tmple/tok".
+//	                       THIS IS THE ONE THAT WAS READING CLEAN AND IS NOW REPORTED.
+//	CRLF fold in the host  net/textproto joins the continuation with a SPACE, so the header
+//	                       arrives as "https://evil.exa mple/tok". A space is a forbidden host
+//	                       code point, so no browser resolves it and NOT matching is correct.
+//	bare CR or bare LF     the response never comes back at all: "malformed MIME header: missing
+//	                       colon". Unreachable over HTTP/1.1 through net/http.
+//
+// So over this transport the fix moves exactly the tab case. \n and \r are in the set because
+// they are WHATWG's and because a Location also reaches this function from places that are not
+// an HTTP/1.1 response header, not because either was observed on the wire here.
+const redirectRemoveBytes = "\t\n\r"
+
+// redirectTargetHost reads the host out of a Location header, the way a browser reads it.
 //
 // A RELATIVE Location has no host and is never a finding: /login is the application deciding where
 // its own user goes. Returning empty for it is what stops every ordinary post-then-redirect from
 // being reported.
+//
+// IT DOES NOT GO THROUGH url.Parse, AND THAT IS THE POINT. url.Parse implements RFC 3986; a
+// browser implements the WHATWG URL Standard, and the gap between them is exactly where the
+// open-redirect payloads live. Two consequences, both measured against the shipped payload list:
+//
+//   - A Location url.Parse REJECTS used to yield no host at all, so "Go cannot parse this" was
+//     being recorded as "the target is not vulnerable". //webhook.example%00/p is a host.
+//   - For a special scheme the WHATWG parser treats a backslash as a slash and ignores any number
+//     of leading slashes, so http:/host, http:\host, \/\/host and /\/host all navigate to
+//     host. FrameworkSSRFPayloads emits four of those forms deliberately, and url.Parse returned
+//     an empty Hostname for every one of them: four shipped payloads that could never report a
+//     finding no matter how cleanly the target echoed them.
+//
+// Tolerant is not credulous. The host still has to match the webhook host exactly for a finding,
+// so accepting more shapes here widens what can be PROVEN, not what can be claimed.
 func redirectTargetHost(location string) string {
-	location = strings.TrimSpace(location)
-	if location == "" {
+	// Leading and trailing C0 controls and spaces are stripped by every browser before parsing,
+	// and TAB, LF and CR are then removed from ANYWHERE in what is left. Both steps are WHATWG's,
+	// in that order, and the second one is the one that matters: a tab in the middle of the host
+	// is the oldest filter bypass there is, and trimming only the ends reports it clean.
+	//
+	// The trim runs first and only once. redirectTrimBytes is a SUPERSET of redirectRemoveBytes,
+	// so after the trim neither end can be a tab, an LF or a CR, and removing the interior ones
+	// cannot expose a new trimmable byte at either end. A second trim would be a no-op.
+	rest := strings.Trim(location, redirectTrimBytes)
+	if strings.ContainsAny(rest, redirectRemoveBytes) {
+		rest = strings.Map(func(r rune) rune {
+			if strings.ContainsRune(redirectRemoveBytes, r) {
+				return -1
+			}
+			return r
+		}, rest)
+	}
+	if rest == "" {
 		return ""
 	}
-	// A scheme-relative //host/path is absolute for this purpose: the browser will leave the site.
-	if strings.HasPrefix(location, "//") {
-		location = "http:" + location
+
+	if i := strings.IndexByte(rest, ':'); i > 0 && redirectIsSchemeToken(rest[:i]) {
+		switch strings.ToLower(rest[:i]) {
+		case "http", "https":
+		default:
+			// mailto:, javascript:, data:, file: and the rest are not navigations to a host, and
+			// reporting one as an open redirect to that "host" would be a fabricated finding.
+			return ""
+		}
+		rest = rest[i+1:]
+		for len(rest) > 0 && (rest[0] == '/' || rest[0] == '\\') {
+			rest = rest[1:]
+		}
+	} else {
+		// No scheme. TWO leading slashes (or backslashes, or a mix) is a network-path reference and
+		// leaves the site; one is a path on this site and is not a finding.
+		n := 0
+		for n < len(rest) && (rest[n] == '/' || rest[n] == '\\') {
+			n++
+		}
+		if n < 2 {
+			return ""
+		}
+		rest = rest[n:]
 	}
-	parsed, err := url.Parse(location)
-	if err != nil {
-		return ""
+
+	if j := strings.IndexAny(rest, "/\\?#"); j >= 0 {
+		rest = rest[:j]
 	}
-	return strings.ToLower(parsed.Hostname())
+	// Userinfo. The host is what follows the LAST @, which is the whole point of the
+	// http://allowed.example@webhook.example payload: a validator reading the first token and a
+	// browser reading the last token disagree about where the user is going.
+	if at := strings.LastIndexByte(rest, '@'); at >= 0 {
+		rest = rest[at+1:]
+	}
+	if strings.HasPrefix(rest, "[") {
+		if k := strings.IndexByte(rest, ']'); k >= 0 {
+			rest = rest[:k+1]
+		}
+	} else if k := strings.LastIndexByte(rest, ':'); k >= 0 && redirectAllDigits(rest[k+1:]) {
+		rest = rest[:k]
+	}
+	return strings.ToLower(rest)
+}
+
+// redirectIsSchemeToken reports whether s is a URL scheme per RFC 3986: ALPHA *( ALPHA / DIGIT /
+// "+" / "-" / "." ). It is what keeps the colon in //host:8443/p from being read as a scheme.
+func redirectIsSchemeToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case i > 0 && (c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// redirectAllDigits reports whether s is a non-empty run of digits, which is what makes a trailing
+// :NNNN a port rather than part of the host.
+func redirectAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// rawResponseText renders the response as it came off the wire: status line, headers, blank line,
+// body. Stored whole on the finding, because an SSRF proof is the CONTENT the target fetched on our
+// behalf, and no amount of summarising it substitutes for the bytes in a report.
+func rawResponseText(resp *http.Response, body string) string {
+	var b strings.Builder
+	b.WriteString(resp.Proto + " " + resp.Status + "\n")
+	names := make([]string, 0, len(resp.Header))
+	for name := range resp.Header {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		for _, value := range resp.Header[name] {
+			b.WriteString(name + ": " + value + "\n")
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(body)
+	return b.String()
 }
 
 // ssrfSnippet returns the matched region with a little context, for the finding's evidence.
@@ -610,5 +776,6 @@ func ssrfFindingFrom(v VectorInput, param, payload string, req *http.Request,
 		Evidence:        evidence,
 		DetectionMethod: "framework SSRF probe (" + outcome.Signal + ")",
 		InjectType:      outcome.Signal,
+		RawResponse:     outcome.Response,
 	}
 }

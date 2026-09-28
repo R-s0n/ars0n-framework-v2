@@ -1625,15 +1625,14 @@ func sendFlowStepRequest(rawRequest, baseURL string, jar http.CookieJar,
 	if timeout <= 0 {
 		timeout = time.Duration(engagementDefaultTimeoutS) * time.Second
 	}
-	client := &http.Client{
-		Timeout: timeout,
-		Jar:     jar,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			// Captured, not followed. A 302 is a thing to branch on here, not a thing to chase.
-			return http.ErrUseLastResponse
-		},
+	// Captured, not followed. A 302 is a thing to branch on here, not a thing to chase, and a 302
+	// whose Location will not parse is a thing net/http used to throw away before CheckRedirect
+	// was ever consulted: the branch then took the error path against a host that had answered.
+	client := NewNoFollowClient(&http.Client{
+		Timeout:   timeout,
+		Jar:       jar,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
-	}
+	})
 
 	start := time.Now()
 	resp, err := client.Do(req)

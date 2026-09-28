@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { Modal, Button, Badge, Table, Alert, Spinner, Tabs, Tab, Accordion,
-         ListGroup } from 'react-bootstrap';
+         ListGroup, Row, Col } from 'react-bootstrap';
 
 // Results for the Target Behaviour Probe.
 //
@@ -18,6 +18,9 @@ const POSTURE = {
   DEFENDED:           { variant: 'danger',    text: 'Defended' },
   PARTIALLY_DEFENDED: { variant: 'warning',   text: 'Partially defended' },
   OPEN:               { variant: 'success',   text: 'Open' },
+  // A bot-management / interactive challenge is in front of everything: scripted tooling cannot
+  // pass, so it is its own posture rather than a vague "inconclusive".
+  CHALLENGE_WALL:     { variant: 'danger',    text: 'Challenge wall' },
   INCONCLUSIVE:       { variant: 'secondary', text: 'Inconclusive' },
   UNKNOWN:            { variant: 'secondary', text: 'Unknown' },
   REFUSED:            { variant: 'dark',      text: 'Refused' },
@@ -317,6 +320,15 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
                         note={verdict.time_to_first_block?.phase} />
                 <Metric label="Findings"
                         value={`${verdict.counts?.p0 || 0} critical / ${verdict.counts?.total || 0} total`} />
+                {verdict.edge && (
+                  <Metric label="Edge"
+                          value={verdict.edge.bot_manager
+                            || verdict.edge.vendors?.join(', ')
+                            || 'identified'}
+                          note={verdict.edge.is_challenge_wall
+                            ? 'challenge wall: browser only, no scripted tooling'
+                            : (verdict.edge.markers?.length ? verdict.edge.markers.join(', ') : null)} />
+                )}
               </div>
             </div>
 
@@ -630,33 +642,87 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
               </Tab>
 
               {/* -------------------------------------------------- log */}
-              <Tab eventKey="log" title="Request log">
+              <Tab eventKey="log" title={`Request log (${(probe.probe_log || []).length})`}>
                 <p className="text-white-50 small">
-                  Every request the probe sent, in order. Credentials are redacted at capture time,
-                  so this log is safe to attach to a report.
+                  Every request the probe sent, in order, with the URL it went to. This is the
+                  record of what was put on the target.
                 </p>
-                <Table size="sm" variant="dark" className="small">
-                  <thead>
-                    <tr><th>#</th><th>Phase</th><th>Method</th><th>Path</th><th>Status</th>
-                        <th>Class</th><th>ms</th></tr>
-                  </thead>
-                  <tbody>
-                    {(probe.probe_log || []).slice(0, 500).map((e, i) => (
-                      <tr key={i}>
-                        <td>{e.n}</td><td>{e.phase}</td><td>{e.method}</td>
-                        <td style={{ maxWidth: '280px', overflow: 'hidden',
-                                     textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.path}</td>
-                        <td>{e.status}</td>
-                        <td>{e.class}</td>
-                        <td>{e.ms}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </Table>
-                {(probe.probe_log || []).length > 500 && (
+                {/* No row cap and no shortened URL. A probe run is the evidence that a posture was
+                    measured rather than guessed, and the request that mattered is as likely to be
+                    the nine hundredth as the ninth. The container scrolls. */}
+                <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+                  <Table size="sm" variant="dark" className="small">
+                    <thead>
+                      <tr><th>#</th><th>Phase</th><th>Method</th><th>URL</th><th>Status</th>
+                          <th>Class</th><th>ms</th></tr>
+                    </thead>
+                    <tbody>
+                      {(probe.probe_log || []).map((e, i) => (
+                        <tr key={i}>
+                          <td>{e.n}</td><td>{e.phase}</td><td>{e.method}</td>
+                          <td style={{ wordBreak: 'break-all' }}>{e.url || e.path}</td>
+                          <td>{e.status}</td>
+                          <td>{e.class}</td>
+                          <td>{e.ms}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </Table>
+                </div>
+              </Tab>
+
+              {/* ------------------------------------------- transcript */}
+              {/* The probe records both header sets for every request it sent and, until this tab
+                  existed, none of it reached a screen. A WAF posture is argued from headers: which
+                  edge answered, what it set, what it stripped. Sending them and then not showing
+                  them meant the operator had to take the verdict on trust.
+
+                  The waf-probe container still writes <redacted> over header values it classes as
+                  sensitive (docker/waf-probe/probe/util.py, redact_headers). Where a value reads
+                  that way, the bytes were destroyed before they were stored and no screen can get
+                  them back; that redaction is the container's to remove. */}
+              <Tab eventKey="transcript" title={`Transcript (${(probe.transcript || []).length})`}>
+                {(probe.transcript || []).length === 0 ? (
                   <p className="text-white-50 small">
-                    Showing the first 500 of {probe.probe_log.length} entries.
+                    This run stored no transcript. Turn on the transcript in the probe configuration
+                    to keep the headers of every request.
                   </p>
+                ) : (
+                  <>
+                    <p className="text-white-50 small">
+                      The request and response headers of every request the probe sent.
+                    </p>
+                    <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+                      {(probe.transcript || []).map((t, i) => (
+                        <div key={i} className="border border-secondary rounded p-2 mb-2">
+                          <div className="small text-white-50 mb-1" style={{ wordBreak: 'break-all' }}>
+                            <Badge bg="dark" className="border border-secondary text-white-50 me-2"
+                                   style={{ fontSize: '0.62rem' }}>{t.n}</Badge>
+                            <strong className="text-light">{t.method}</strong>{' '}{t.url}
+                            {' '}<span className="text-danger">{t.status}</span>
+                            {t.class && <span className="ms-2">{t.class}</span>}
+                            {t.error && <span className="ms-2 text-warning">{t.error}</span>}
+                          </div>
+                          <Row>
+                            <Col md={6}>
+                              <div className="text-white-50" style={{ fontSize: '0.68rem' }}>REQUEST HEADERS</div>
+                              <pre className="small text-light mb-0"
+                                   style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                {headerLines(t.request_headers)}
+                              </pre>
+                            </Col>
+                            <Col md={6}>
+                              <div className="text-white-50" style={{ fontSize: '0.68rem' }}>RESPONSE HEADERS</div>
+                              <pre className="small text-light mb-0"
+                                   style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                {headerLines(t.response_headers)}
+                              </pre>
+                            </Col>
+                          </Row>
+                        </div>
+                      ))}
+                    </div>
+                  </>
                 )}
               </Tab>
             </Tabs>
@@ -685,6 +751,22 @@ export const WAFProbeResultsModal = ({ show, handleClose, activeTarget,
 };
 
 /* ------------------------------------------------------------------ pieces */
+
+// Renders one header map as it came off the wire. The probe stores a value as a string or, when a
+// header repeated, as a list, and a repeated Set-Cookie is exactly the case worth reading, so each
+// occurrence gets its own line rather than being collapsed into one.
+const headerLines = (headers) => {
+  if (!headers || typeof headers !== 'object') return '(none recorded)';
+  const keys = Object.keys(headers);
+  if (keys.length === 0) return '(none recorded)';
+  return keys.map((k) => {
+    const v = headers[k];
+    return Array.isArray(v)
+      ? v.map((one) => `${k}: ${one}`).join('\n')
+      : `${k}: ${v}`;
+  }).join('\n');
+};
+
 
 const Metric = ({ label, value, note }) => (
   <div>

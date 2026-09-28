@@ -231,7 +231,9 @@ const replayRequestSchema = z.object({
   max_body_chars: z.number().optional().describe(
     `How much of a response body to return (default ${DEFAULTS.record}). The true length is ` +
     'always reported alongside, so a clipped body is never mistaken for a short one. Raise this ' +
-    'only when you know the thing you are looking for is deep in the page; body_match is cheaper.'),
+    'only when you know the thing you are looking for is deep in the page; body_match is cheaper. ' +
+    'It also governs the evidence string on load_finding, which is the scanner\'s own proof ' +
+    'and the part a report is written from.'),
   body_match: z.string().optional().describe(
     'Return the WINDOW around the first case-insensitive occurrence of this text instead of the ' +
     'first N characters. This is how you read a CSRF token at character 3500 of a 7kB form ' +
@@ -1240,6 +1242,8 @@ function sendableBytesOf(f) {
 }
 
 // findingIndexRow is one row of the cheap index: enough to choose a finding, nothing to read.
+// The evidence preview here is a preview on purpose: load_finding returns the whole string, on a
+// budget the caller sets, so nothing is only ever available in this shortened form.
 function findingIndexRow(f, category, tool) {
   const send = sendableBytesOf(f);
   return {
@@ -1270,6 +1274,8 @@ function projectLoadedFinding(f, read, params, isCanary) {
   const send = sendableBytesOf(f);
   const repro = f.reproduction || {};
   const req = clipField(send.bytes, resolveLimit(params.max_request_chars, REQUEST_CHARS));
+  const ebopts = bodyOpts(params, DEFAULTS.record);
+  const ev = clipField(f.evidence, ebopts.limit, ebopts);
   const targetURL = repro.url || f.url || '';
   const baseURL = originOf(targetURL);
   const hostHeader = hostHeaderOf(send.bytes);
@@ -1301,7 +1307,13 @@ function projectLoadedFinding(f, read, params, isCanary) {
     raw_request_origin: f.raw_request_origin,
     raw_response_origin: f.raw_response_origin,
     bytes_source: send.source,
-    evidence: clip(f.evidence || '', DEFAULTS.record) || undefined,
+    // The scanner's proof, on the same budget as a body and under the same knob. It is routinely
+    // the whole matched region of the response: the reflected payload in its surrounding markup,
+    // the database error, the file the traversal read. A finding whose evidence is cut at a
+    // constant nobody can raise is a finding that cannot be written up from this tool.
+    evidence: ev.text || undefined,
+    evidence_chars: ev.chars || undefined,
+    evidence_truncated: ev.clipped || undefined,
     evidence_note: f.evidence_note,
     reproduction_caveat: repro.caveat,
     reproduction_steps: repro.steps,
@@ -1813,8 +1825,98 @@ function apiFailure(err, ctx = {}) {
   return out;
 }
 
+// === manage_request_variants ===================================================================
+
+const manageRequestVariantsSchema = z.object({
+  action: z.enum(['list', 'rename', 'set_primary']).describe(
+    'list: the endpoints of a target with their VARIANTS. A variant is one distinct recorded ' +
+    'request/response of an endpoint; the captures the crawl recorded are collapsed into variants by ' +
+    'a coarse request/response signature. Each variant carries its name (yours if you set one, ' +
+    'otherwise the source it came from - "Active detection", "Manual crawl"), whether it is the ' +
+    'endpoint PRIMARY (the one the sitemap shows and a leaf click opens), its status, and the ' +
+    'request_sig / response_sig that identify it. Narrow with method / host / path. ' +
+    'rename: give a variant your own name. An EMPTY name reverts it to the source default. ' +
+    'set_primary: make a variant the endpoint\'s one primary; the previous primary is cleared. ' +
+    'Names and the primary are overlay state - they never touch the captures, so a new recording ' +
+    'that joins a variant keeps your choices.'),
+
+  target_id: z.string().uuid().describe('The URL scope target UUID. Required for every action.'),
+  method: z.string().optional().describe(
+    'list: restrict to this verb. rename / set_primary: the variant\'s method, from list. Required there.'),
+  host: z.string().optional().describe(
+    'list: restrict to this host. rename / set_primary: the variant\'s host, from list. Required there.'),
+  path: z.string().optional().describe(
+    'list: restrict to this exact path (query excluded, as the sitemap groups it). ' +
+    'rename / set_primary: the variant\'s path, from list. Required there.'),
+  request_sig: z.string().optional().describe(
+    'rename / set_primary: the variant\'s request signature, taken from action:"list". Required.'),
+  response_sig: z.string().optional().describe(
+    'rename / set_primary: the variant\'s response signature, taken from action:"list". Required.'),
+  name: z.string().optional().describe(
+    'rename: the new name. An empty string reverts the variant to its source default name.'),
+  max_results: z.number().optional().describe('list: endpoints to return (default 200).'),
+});
+
+async function manageRequestVariants(params) {
+  if (!params.target_id) return { error: 'target_id is required' };
+  switch (params.action) {
+    case 'list': {
+      const qs = [];
+      if (params.method) qs.push(`method=${encodeURIComponent(params.method)}`);
+      if (params.host) qs.push(`host=${encodeURIComponent(params.host)}`);
+      if (params.path) qs.push(`path=${encodeURIComponent(params.path)}`);
+      let body;
+      try {
+        body = await apiGet(
+          `/replay-request/${params.target_id}/variants${qs.length ? `?${qs.join('&')}` : ''}`);
+      } catch (err) {
+        return apiFailure(err);
+      }
+      const eps = Array.isArray(body.endpoints) ? body.endpoints : [];
+      return {
+        ...limitResults(eps, clampLimit(params.max_results, 200)),
+        note: 'To rename a variant or make it primary, pass its request_sig and response_sig together ' +
+          'with the endpoint\'s method, host and path. The variant marked is_primary is the one the ' +
+          'sitemap shows.',
+      };
+    }
+
+    case 'rename':
+    case 'set_primary': {
+      for (const f of ['method', 'host', 'path', 'request_sig', 'response_sig']) {
+        if (!params[f]) {
+          return { error: `${params.action} needs ${f}. Get it from action:"list".` };
+        }
+      }
+      if (params.action === 'rename' && params.name === undefined) {
+        return { error: 'rename needs name (pass an empty string to revert to the source default).' };
+      }
+      const payload = {
+        method: params.method,
+        host: params.host,
+        path: params.path,
+        request_sig: params.request_sig,
+        response_sig: params.response_sig,
+      };
+      if (params.action === 'rename') payload.name = params.name;
+      else payload.set_primary = true;
+      let res;
+      try {
+        res = await apiPost(`/replay-request/${params.target_id}/variant-meta`, payload);
+      } catch (err) {
+        return apiFailure(err);
+      }
+      return { success: true, ...res };
+    }
+
+    default:
+      return { error: `unknown action ${params.action}` };
+  }
+}
+
 module.exports = {
   replayRequestSchema, replayRequest,
   manageRequestVersionsSchema, manageRequestVersions,
+  manageRequestVariantsSchema, manageRequestVariants,
   manageDetectedFlowsSchema, manageDetectedFlows,
 };

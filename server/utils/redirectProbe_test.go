@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -420,14 +421,35 @@ func TestPathProbeDoesNotEncodeTheSchemeSeparator(t *testing.T) {
 
 // The prober must not follow a redirect: the open redirect half of this section is decided by
 // reading the Location header of the 30x itself.
+//
+// This used to be asserted by reading client.CheckRedirect, which turned out to assert nothing
+// about the case that matters: net/http parses Location before it consults CheckRedirect, so a
+// client with CheckRedirect set to ErrUseLastResponse still threw away the 302s that prove the
+// finding. The assertion is now behavioural, against a server that really redirects.
 func TestProbeClientDoesNotFollowRedirects(t *testing.T) {
-	client := ssrfProbeClient()
-	if client.CheckRedirect == nil {
-		t.Fatal("following redirects replaces the 30x with whatever the webhook returns, and the " +
-			"finding disappears")
+	reached := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached[r.URL.Path]++
+		if r.URL.Path == "/hop" {
+			w.Header().Set("Location", "/landed")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte("the webhook inbox, which must never be what the probe measures"))
+	}))
+	defer srv.Close()
+
+	resp, err := ssrfProbeClient().Get(srv.URL + "/hop")
+	if err != nil {
+		t.Fatalf("the 30x must come back, not an error: %v", err)
 	}
-	if err := client.CheckRedirect(nil, nil); err != http.ErrUseLastResponse {
-		t.Errorf("the 30x itself must be returned, got %v", err)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("the 30x itself must be returned, got %d", resp.StatusCode)
+	}
+	if reached["/landed"] != 0 {
+		t.Error("following redirects replaces the 30x with whatever the webhook returns, and the " +
+			"finding disappears")
 	}
 }
 
@@ -531,5 +553,175 @@ func TestOneProofPerSignalNotOneProofPerParameter(t *testing.T) {
 	if !record(fileHit) {
 		t.Fatal("a DIFFERENT signal on the same parameter must still be recorded: an open redirect " +
 			"and a server-side file read are different bugs at different severities")
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// A PROVEN OPEN REDIRECT MUST NOT READ AS NOT VULNERABLE.
+//
+// Two independent defects used to lose one. First the transport: net/http parses the Location
+// header before it consults CheckRedirect, so a 302 whose Location will not parse as a URL is
+// discarded by Client.Do and filed as out.Failed++, next to ordinary timeouts. Second the
+// detector: redirectTargetHost asked url.Parse for the host, so the four shipped payloads that
+// exist precisely because browsers normalise backslashes and short scheme separators could never
+// produce a finding, even when the target echoed them perfectly.
+// ---------------------------------------------------------------------------------------------
+
+const probeBackslash = "\x5c"
+
+// locationEcho answers 302 with the ?l= value verbatim: a target that is open-redirecting.
+func locationEcho(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", r.URL.Query().Get("l"))
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestTheProbeFindsAnOpenRedirectItUsedToFileAsAFailure(t *testing.T) {
+	srv := locationEcho(t)
+	const webhookHost = "webhook.example"
+
+	// Every one of these is a Location that sends a browser to webhook.example. The first six come
+	// straight out of FrameworkSSRFPayloads. The last is the shape that used to be lost in the
+	// TRANSPORT rather than in the detector: a stray percent in the path makes the whole Location
+	// unparseable, so Client.Do returned an error and out.Failed++ counted a proven open redirect
+	// as a network problem.
+	proven := []string{
+		"https://" + webhookHost + "/tok",
+		"//" + webhookHost + "/tok",
+		probeBackslash + "/" + probeBackslash + "/" + webhookHost + "/tok",
+		"http:" + probeBackslash + probeBackslash + webhookHost + "/tok",
+		"http:/" + webhookHost + "/tok",
+		"/" + probeBackslash + "/" + webhookHost + "/tok",
+		"//" + webhookHost + "/tok%",
+		// And the shape that was lost in the DETECTOR: a browser removes TAB from anywhere in a
+		// URL, so this navigates to webhook.example, but trimming only the ends read the host as
+		// "webhook.exa	mple" and reported it clean. Measured over a raw listener, a tab in a
+		// Location survives the wire intact; a bare CR or LF does not survive at all and a CRLF
+		// fold arrives as a space, so the tab is the only one of the three that is reachable here.
+		"https://webhook.exa	mple/tok",
+	}
+
+	client := ssrfProbeClient()
+	found := 0
+	for _, payload := range proven {
+		resp, err := client.Get(srv.URL + "/?l=" + url.QueryEscape(payload))
+		if err != nil {
+			t.Errorf("payload %q: the 302 proving the redirect was discarded by the client and "+
+				"would have been counted as a transport failure: %v", payload, err)
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		outcome := inspectSSRFResponse(resp, string(body), webhookHost)
+		if outcome == nil || outcome.Signal != "open-redirect" {
+			t.Errorf("payload %q: Location %q sends the user to %s and was reported clean",
+				payload, resp.Header.Get("Location"), webhookHost)
+			continue
+		}
+		found++
+	}
+	t.Logf("open redirects proven and reported: %d of %d", found, len(proven))
+}
+
+// A relative Location is the application deciding where its own user goes, and must never be a
+// finding. This is the guard on the tolerant host reader: tolerant is not the same as credulous.
+func TestARelativeLocationIsStillNotAFinding(t *testing.T) {
+	for _, loc := range []string{
+		"/login", "/account/reset", "login", "?next=/x", "#frag", "",
+		"/webhook.example/tok", "./x", "../x", "x/y",
+		// Not navigations to a host at all, and reporting one as a redirect to that "host"
+		// would be a fabricated finding.
+		"mailto:x@webhook.example", "javascript:alert(1)", "data:text/html,x",
+	} {
+		if host := redirectTargetHost(loc); host != "" {
+			t.Errorf("Location %q is relative, but a host %q was read out of it", loc, host)
+		}
+	}
+}
+
+// The host must be read the way a browser reads it, or a payload that defeats a validator is
+// reported against the wrong host.
+func TestRedirectTargetHostReadsTheHostABrowserWouldUse(t *testing.T) {
+	cases := map[string]string{
+		"https://evil.example/p": "evil.example",
+		"//evil.example/p":       "evil.example",
+		"http:/evil.example/p":   "evil.example",
+		"http:" + probeBackslash + probeBackslash + "evil.example/p": "evil.example",
+		probeBackslash + "/" + probeBackslash + "/evil.example/p":    "evil.example",
+		"/" + probeBackslash + "/evil.example/p":                     "evil.example",
+		"HTTPS://EVIL.EXAMPLE/p":                                     "evil.example",
+		// WHATWG relative-slash state: for a special scheme a backslash behaves as a slash, so a
+		// single leading slash followed by one is a network-path reference and leaves the site.
+		// This is why /\evil.example is on every open-redirect payload list.
+		"/" + probeBackslash + "evil.example/p": "evil.example",
+		"https://evil.example:8443/p":           "evil.example",
+		// Userinfo: the host is what comes after the last @ inside the authority.
+		"http://allowed.example@evil.example/p": "evil.example",
+		// and the reverse form, where the authority ends at the slash before the @
+		"http://evil.example/p@allowed.example": "evil.example",
+		// A Location url.Parse rejects outright is still a Location with a host in it.
+		"https://evil.example%/p":  "evil.example%",
+		"http://evil.example%zz/p": "evil.example%zz",
+		"//evil.example%00/p":      "evil.example%00",
+	}
+	for loc, want := range cases {
+		if got := redirectTargetHost(loc); got != want {
+			t.Errorf("Location %q: host %q, want %q", loc, got, want)
+		}
+	}
+}
+
+// BROWSERS STRIP TAB, LF AND CR FROM ANYWHERE IN A URL, not just from the ends.
+//
+// The WHATWG basic URL parser's second step is "remove all ASCII tab or newline from input",
+// and it runs over the whole string, after the leading/trailing C0-control-and-space strip.
+// So https://evil.exa<TAB>mple/tok navigates to evil.example, in every browser. Reading the host
+// as evil.exa\tmple and returning "no match" is the same false clean the transport round was
+// about, one layer up: a redirect a real user would follow, reported as not vulnerable.
+//
+// Note what is NOT in the removal set. \v and \f are C0 controls and are trimmed at the ends, as
+// WHATWG trims them, but they are NOT removed from the middle: no browser does that, and a host
+// containing one does not resolve.
+func TestRedirectTargetHostStripsTabAndNewlineFromAnywhere(t *testing.T) {
+	cases := map[string]string{
+		"https://evil.exa\tmple/tok":        "evil.example",
+		"https://evil.exa\nmple/tok":        "evil.example",
+		"https://evil.exa\rmple/tok":        "evil.example",
+		"https://evil.example\t/tok":        "evil.example",
+		"htt\tps://evil.example/tok":        "evil.example",
+		"/\t/evil.example/tok":              "evil.example",
+		"//evil.exa\r\nmple/tok":            "evil.example",
+		"https://ev\til.ex\nample:8443/tok": "evil.example",
+	}
+	for loc, want := range cases {
+		if got := redirectTargetHost(loc); got != want {
+			t.Errorf("Location %q: host %q, want %q (a browser navigates to %q)", loc, got, want, want)
+		}
+	}
+}
+
+// The deliberate exclusions. Each of these reads as a host a browser does NOT resolve, so
+// reporting it would be a fabricated finding, and each is one "improvement" away from being
+// reported by accident.
+func TestRedirectTargetHostStillRefusesTheHostsNoBrowserResolves(t *testing.T) {
+	for _, loc := range []string{
+		// The %00 family: percent-encoded, not a raw NUL, so nothing strips it. A parser that
+		// truncates at NUL would send the user to evil.example, but that IF is unproven and
+		// belongs in a browser PoC, not in a detector rule.
+		"//evil.example%00/tok",
+		"https://evil.example%00/tok",
+		// Vertical tab and form feed inside the host. Trimmed at the ends by WHATWG, never
+		// removed from the middle.
+		"https://evil.exa\vmple/tok",
+		"https://evil.exa\fmple/tok",
+	} {
+		if got := redirectTargetHost(loc); got == "evil.example" {
+			t.Errorf("Location %q now reads as %q, which is a finding no browser would confirm",
+				loc, got)
+		}
 	}
 }

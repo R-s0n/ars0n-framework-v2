@@ -3494,6 +3494,63 @@ func createTables() {
 		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_source
 		   ON manual_crawl_captures(scope_target_id, capture_source);`,
 
+		// Response bodies that have no text form, stored CONTENT ADDRESSED.
+		//
+		// A rendered-media response (image, video, audio, font) used to be skipped outright, so an
+		// IDOR that returned another user's uploaded photo could not be proved from the capture
+		// table at all: the operator had to re-request it by hand. The bytes live here instead of
+		// on the capture row because a page load pulls the same logo, sprite and font on every
+		// navigation. Measured against the operator's own 8,411 captures: 708 media responses, 163
+		// distinct objects. Keying on the digest turns 157 MB of naive copies into 54 MB, and a
+		// 2 MB cap brings it to 23 MB, which is roughly 1.4 MB per recorded session.
+		//
+		// sha256 is the digest of `content`, recomputed by the framework from the bytes that
+		// arrived, so a stored blob always hashes to the name it is filed under. byte_size is the
+		// size ON THE WIRE: larger than stored_bytes exactly when `capped` is set, and a capped
+		// body must never be mistaken for a complete one.
+		`CREATE TABLE IF NOT EXISTS manual_crawl_body_blobs (
+		    sha256 TEXT PRIMARY KEY,
+		    byte_size BIGINT NOT NULL DEFAULT 0,
+		    stored_bytes BIGINT NOT NULL DEFAULT 0,
+		    capped BOOLEAN NOT NULL DEFAULT FALSE,
+		    mime_type TEXT NOT NULL DEFAULT '',
+		    content BYTEA NOT NULL,
+		    first_seen_at TIMESTAMP DEFAULT NOW()
+		 );`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS response_body_sha256 TEXT DEFAULT '';`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS response_body_bytes BIGINT DEFAULT 0;`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS response_body_capped BOOLEAN DEFAULT FALSE;`,
+		// Set when the row names a digest the framework does not hold. The extension sends a body's
+		// bytes once per session and the reference alone afterwards; if those bytes never landed,
+		// that has to be visible rather than leaving a digest that silently resolves to nothing.
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS response_body_blob_missing BOOLEAN DEFAULT FALSE;`,
+		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_body_sha
+		   ON manual_crawl_captures(response_body_sha256)
+		   WHERE response_body_sha256 <> '';`,
+
+		// What storing a capture changed about the bytes the target sent.
+		//
+		// sanitizeForPostgres has to strip NUL bytes and replace invalid UTF-8, because a Postgres
+		// text column cannot hold either and one such byte used to fail a whole multi-row INSERT.
+		// That stays. What was missing is the record: an operator reading a body with a replacement
+		// character in it could not tell whether the target sent that character or whether we put
+		// it there, and on a binary payload behind a texty content-type that is the difference
+		// between a finding and a rendering artefact.
+		//
+		// storage_originals maps an altered field name to the digest of its pre-sanitiser bytes,
+		// kept in manual_crawl_body_blobs. Measured on the operator's own corpus: 8 of 8,411 rows
+		// carry a replacement character, so keeping the original of an altered row costs almost
+		// nothing and covers exactly the case where the wire truth matters most. jsonb columns are
+		// named in storage_altered_fields but get no original: encoding/json rewrites invalid UTF-8
+		// on the way out, so there is no lossless byte form of the original map to point at.
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS storage_altered BOOLEAN DEFAULT FALSE;`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS storage_altered_fields TEXT[] DEFAULT '{}';`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS storage_altered_bytes BIGINT DEFAULT 0;`,
+		`ALTER TABLE manual_crawl_captures ADD COLUMN IF NOT EXISTS storage_originals JSONB DEFAULT '{}'::jsonb;`,
+		`CREATE INDEX IF NOT EXISTS idx_manual_crawl_captures_altered
+		   ON manual_crawl_captures(scope_target_id)
+		   WHERE storage_altered;`,
+
 		// A run left mid-flight by a restart is not running any more, whatever its row says. Marked
 		// aborted rather than deleted: it sent real requests and wrote real captures, and the operator
 		// is entitled to see that it stopped and why.

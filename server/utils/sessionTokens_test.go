@@ -1,12 +1,19 @@
 package utils
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/mux"
 )
 
 // These cover the two things that made a working session read as a dead one on a real target
@@ -297,5 +304,485 @@ func TestTheSessionValidatorBuildsAScopedClient(t *testing.T) {
 			"corpus with no host filter, so it can and did send requests to a host the programme " +
 			"excludes. Every caller inherits this, and SessionStillHonoured is now called from the " +
 			"reflection probe loop as well as the vector runner.")
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// The read path carries the characterisation
+// ---------------------------------------------------------------------------------------------
+
+// A token the operator is looking at has to say what kind of thing it is and how long it lives,
+// or the Session Manager is a place to paste a value and nothing else.
+func TestTheReadPathAttachesAProfile(t *testing.T) {
+	ctx := triageTestDB(t)
+	issued := time.Now().UTC()
+	value := makeJWT(t, map[string]interface{}{"alg": "ES256"},
+		map[string]interface{}{"nbf": issued.Unix(), "exp": issued.Add(900 * time.Second).Unix()})
+	_, tokenID := sessionTokenProfileTestToken(t, ctx, SessionToken{
+		Name: "bearer", TokenType: tokenTypeBearer, HeaderName: "Authorization",
+		ValuePrefix: "Bearer ", TokenValue: value, IsActive: true,
+	})
+
+	tok, err := loadSessionToken(tokenID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	tokens := []SessionToken{tok}
+	AttachSessionTokenProfiles(ctx, tokens)
+
+	if tokens[0].Profile == nil {
+		t.Fatal("no profile was attached, so the read path still shows a credential with no lifetime")
+	}
+	p := tokens[0].Profile
+	if p.Kind != CredentialKindJWT || !p.TTLKnown || p.TTL != 900*time.Second {
+		t.Fatalf("profile = %+v", p)
+	}
+	// The endpoint already returns token_value, which is existing behaviour and not this change's
+	// to alter. What must be true is that the PROFILE adds no second copy of it.
+	blob, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal profile: %v", err)
+	}
+	if strings.Contains(string(blob), value) {
+		t.Fatalf("the profile carries the credential: %s", blob)
+	}
+}
+
+// A profile measured against a value that has since been replaced describes a credential that is
+// no longer there. Showing it is worse than showing nothing, because it reads as current.
+func TestAStaleProfileIsDiscardedRatherThanShown(t *testing.T) {
+	ctx := triageTestDB(t)
+	issued := time.Now().UTC()
+	first := makeJWT(t, map[string]interface{}{"alg": "ES256"},
+		map[string]interface{}{"nbf": issued.Unix(), "exp": issued.Add(900 * time.Second).Unix()})
+	_, tokenID := sessionTokenProfileTestToken(t, ctx, SessionToken{
+		Name: "bearer", TokenType: tokenTypeBearer, HeaderName: "Authorization",
+		ValuePrefix: "Bearer ", TokenValue: first, IsActive: true,
+	})
+	ReprofileSessionToken(ctx, tokenID)
+
+	// The operator pastes a fresh one with a very different lifetime and nothing re-measures.
+	second := makeJWT(t, map[string]interface{}{"alg": "ES256"},
+		map[string]interface{}{"nbf": issued.Unix(), "exp": issued.Add(8 * time.Hour).Unix()})
+	if _, err := dbPool.Exec(ctx, `UPDATE session_tokens SET token_value = $2 WHERE id = $1`, tokenID, second); err != nil {
+		t.Fatalf("replace value: %v", err)
+	}
+
+	tok, err := loadSessionToken(tokenID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	tokens := []SessionToken{tok}
+	AttachSessionTokenProfiles(ctx, tokens)
+
+	if tokens[0].Profile == nil {
+		t.Fatal("no profile was attached")
+	}
+	if tokens[0].Profile.TTL != 8*time.Hour {
+		t.Fatalf("TTL = %v, want 8h; the stored profile of the PREVIOUS value was shown for the new one",
+			tokens[0].Profile.TTL)
+	}
+	if tokens[0].Profile.Fingerprint != NewCredential(second).Fingerprint() {
+		t.Fatalf("the attached profile does not describe the stored value")
+	}
+}
+
+// ===============================================================================================
+// THE READ PATH SERVES WHAT IT CAPTURED
+// ===============================================================================================
+//
+// This is a bug bounty framework reading the operator's own database, in a tool whose API is not
+// published to the host. A credential value, an address in a row label, a subject id in a note and
+// a Location header carrying an access token are THE FINDING, not a leak: an IDOR is proved by
+// showing the other account's data, a leaked token by showing the token. A list that withheld any
+// of them would have destroyed the evidence it was built to collect.
+//
+// These tests pin that every one of them comes through, byte for byte.
+
+// listTokensVia drives the real handler through its own router and returns the response, with the
+// loader seam standing in for the database.
+func listTokensVia(t *testing.T, tokens []SessionToken, url string) *httptest.ResponseRecorder {
+	t.Helper()
+	restore := sessionTokenListLoader
+	t.Cleanup(func() { sessionTokenListLoader = restore })
+	sessionTokenListLoader = func(ctx context.Context, id string) ([]SessionToken, error) {
+		return tokens, nil
+	}
+	r := mux.NewRouter()
+	r.HandleFunc("/session-tokens/target/{scope_target_id}", GetSessionTokens).Methods("GET")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, url, nil))
+	return rec
+}
+
+// The two shapes that mattered: a 20 character opaque bearer and a JWT.
+func listFixtureTokens() (short, long string, tokens []SessionToken) {
+	short = "gho_16C7e42F292c6912"
+	long = "eyJhbGciOiJFUzI1NiJ9.eyJleHAiOjk5OTk5OTk5OTl9.c2lnbmF0dXJlLWJ5dGVz"
+	tokens = []SessionToken{
+		{ID: "tok-1", Name: "oauth access", TokenType: "bearer", HeaderName: "Authorization",
+			ValuePrefix: "Bearer ", TokenValue: short, IsActive: true},
+		{ID: "tok-2", Name: "app bearer", TokenType: "bearer", HeaderName: "Authorization",
+			TokenValue: long, IsActive: true},
+		{ID: "tok-3", Name: "empty row", TokenType: "cookie", CookieName: "sid"},
+	}
+	return
+}
+
+// Every caller, every time, with no flag to pass and no opt-in to discover.
+func TestTheTokenListServesTheCredential(t *testing.T) {
+	short, long, tokens := listFixtureTokens()
+	rec := listTokensVia(t, tokens, "/session-tokens/target/target-1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{short, long} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("the token list withholds the stored credential %q:\n%s", want, body)
+		}
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(body), &rows); err != nil {
+		t.Fatalf("the list is not an array of objects: %v\n%s", err, body)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("%d rows, want 3", len(rows))
+	}
+	if got, _ := rows[0]["token_value"].(string); got != short {
+		t.Errorf("token_value is %q, want the stored value %q", got, short)
+	}
+	// The three measured facts stand beside the value rather than in place of it: they save a
+	// screen doing the arithmetic itself and they tell an empty row from a stored one.
+	if rows[0]["has_value"] != true {
+		t.Errorf("a row holding a credential reports has_value %v", rows[0]["has_value"])
+	}
+	if rows[2]["has_value"] != false {
+		t.Errorf("a row holding nothing reports has_value %v", rows[2]["has_value"])
+	}
+	if fp, _ := rows[0]["value_fingerprint"].(string); fp != NewCredential(short).Fingerprint() {
+		t.Errorf("the fingerprint does not identify the credential: %q", fp)
+	}
+	if n, _ := rows[0]["value_length"].(float64); int(n) != len(short) {
+		t.Errorf("value_length is %v, want %d", rows[0]["value_length"], len(short))
+	}
+}
+
+// An unknown query parameter is not an error. There is no reveal flag to spell wrong any more.
+func TestTheTokenListIgnoresAnIncludeValuesQueryParameter(t *testing.T) {
+	short, _, tokens := listFixtureTokens()
+	for _, url := range []string{
+		"/session-tokens/target/target-1?include_values=false",
+		"/session-tokens/target/target-1?include_values=yes",
+	} {
+		rec := listTokensVia(t, tokens, url)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s answered %d: %s", url, rec.Code, rec.Body.String())
+			continue
+		}
+		if !strings.Contains(rec.Body.String(), short) {
+			t.Errorf("%s withheld the credential", url)
+		}
+	}
+}
+
+// The paste response is the same projection, so it hands the credential back to the browser that
+// just sent it, which is what the operator pasted it for.
+func TestTheParseResponseCarriesTheCredentialToo(t *testing.T) {
+	short, _, tokens := listFixtureTokens()
+	raw, err := json.Marshal(map[string]interface{}{"tokens": sessionTokenViews(tokens)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), short) {
+		t.Fatalf("the paste response withholds the credential:\n%s", raw)
+	}
+}
+
+// Every column a screen reads survives the projection, the credential among them.
+func TestTheProjectionKeepsEveryFieldIncludingTheCredential(t *testing.T) {
+	when := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	tok := SessionToken{
+		ID: "tok-1", ScopeTargetID: "target-1", AuthFlowID: "flow-1", AuthFlowName: "login",
+		Name: "app bearer", TokenType: "bearer", TokenRole: "credential",
+		HeaderName: "Authorization", ValuePrefix: "Bearer ", TokenValue: "abc123",
+		ScopeDomains: []string{"app.example.test"}, CookiePath: "/", CookieDomain: ".example.test",
+		CookieSecure: true, CookieHTTPOnly: true, CookieSameSite: "Lax",
+		ExpiresAt: &when, IsActive: true, Notes: "the one that works",
+		LastValidatedAt: &when, LastValidationStatus: "valid", LastValidationDetail: "200 vs 401",
+		LastRefreshedAt: &when, CreatedAt: when, UpdatedAt: when,
+	}
+	raw, err := json.Marshal(sessionTokenView(tok))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"id", "scope_target_id", "auth_flow_id", "auth_flow_name", "name", "token_type",
+		"token_role", "header_name", "cookie_name", "param_name", "value_prefix",
+		"scope_domains", "cookie_path", "cookie_domain", "cookie_secure", "cookie_httponly",
+		"cookie_samesite", "expires_at", "is_active", "notes", "last_validated_at",
+		"last_validation_status", "last_validation_detail", "last_refreshed_at",
+		"created_at", "updated_at", "has_value", "value_fingerprint", "value_length",
+		"token_value",
+	} {
+		if _, ok := m[want]; !ok {
+			t.Errorf("the projection dropped %q", want)
+		}
+	}
+	if got := string(m["token_value"]); got != strconv.Quote("abc123") {
+		t.Errorf("token_value serialises as %s, want the stored value", got)
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// A LOCATION IS WHERE A CREDENTIAL LANDS, WHICH IS WHY THE OPERATOR HAS TO SEE IT
+// ---------------------------------------------------------------------------------------------
+
+// runSessionTokenValidation puts three URLs into the evidence map: the two arms' Location headers
+// and probe_url. That map is stored on the event, served by /session-tokens/{id}/events, returned
+// by the MCP session tools and rendered by RefreshSessionModal.js.
+//
+// An OAuth implicit response is a fragment carrying access_token, an authorization code response
+// is a query carrying code, an OIDC form_post fallback carries id_token, a SAML redirect binding
+// carries SAMLResponse and a magic link carries token. Every one of those is a finding when it
+// turns up where it should not, and every one is unprovable if the value is replaced by its length.
+func TestTheValidationEvidenceCarriesTheURLAsItWas(t *testing.T) {
+	when := time.Date(2026, 9, 21, 8, 0, 0, 0, time.UTC)
+	token := strings.Repeat("A", 48)
+	for _, raw := range []string{
+		"https://app.test/cb#access_token=" + token,
+		"https://app.test/callback?code=" + token,
+		"https://idp.test/sso?SAMLResponse=" + token,
+		"https://admin:hunter2@app.test/dashboard",
+		"https://app.test/session/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.c2lnbmF0dXJl/resume",
+	} {
+		ev := sessionTokenEventView("ev-1", "validate", "active", "HTTP 200 vs 401",
+			map[string]interface{}{
+				"probe_url":     raw,
+				"authenticated": map[string]interface{}{"status": 302, "location": raw},
+			}, when)
+		body, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), raw) {
+			t.Errorf("the evidence no longer carries %q as it was measured: %s", raw, body)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE ROW NAMES A PRINCIPAL, AND THAT IS WHAT THE ROW IS FOR
+// ---------------------------------------------------------------------------------------------
+//
+// What is on the estate today, read out of the live database:
+//
+//	session_tokens.name  = "authx bearer, account A (rs0n.evolv3@gmail.com)"
+//	session_tokens.notes = "party party:d0a570f6-..., uid d4189418-5001-7019-d7ee-ce3897389622. ..."
+//
+// The operator typed both, to tell two accounts apart before activating one for a scan. A subject
+// id in a note is how they know WHICH account a credential is for, and a Cognito cookie name
+// carries the same subject id in the middle of it. All of it is served as stored.
+const (
+	r17LabelA = "authx bearer, account A (rs0n.evolv3@gmail.com)"
+	r17LabelB = "authx bearer, account B (hrichardson25b@gmail.com)"
+	r17SubA   = "d4887448-50b1-7015-03be-6b285cf9fb5e"
+	r17SubB   = "d4189418-5001-7019-d7ee-ce3897389622"
+	r17NotesA = "party party:b15b483a-3f0b-4896-8bb4-73ddfd0b4f27, uid " + r17SubA +
+		". Minted via password at 13:27:30Z. 900s lifetime and authx issues no refresh token."
+	r17NotesB = "party party:d0a570f6-147d-4cf5-9801-588b9500a9d6, uid " + r17SubB +
+		". Minted via password at 13:27:31Z. 900s lifetime and authx issues no refresh token."
+	r17EventDetail = r17LabelA + " is not tied to an auth flow, so there is no recorded sequence " +
+		"to replay and nothing that could mint another one."
+	r17CognitoSub    = "d4189418-5001-7019-d7ee-ce3897389622"
+	r17CognitoCookie = "CognitoIdentityServiceProvider.7cd3keuknr18mv2boiaesbgce3." +
+		r17CognitoSub + ".refreshToken"
+)
+
+// r17EstateTokens is the two stored rows as they stand, plus the Cognito cookie row a raw paste
+// produces. parseCookieHeaderTokens sets Name to the cookie name, which is how the namespaced
+// subject id reaches the label as well as the carrier.
+func r17EstateTokens() []SessionToken {
+	return []SessionToken{
+		{ID: "tok-a", ScopeTargetID: "target-1", Name: r17LabelA, TokenType: "bearer",
+			HeaderName: "Authorization", ValuePrefix: "Bearer ", TokenValue: "eyJhbGciOiJIUzI1NiJ9.e30.x",
+			IsActive: true, Notes: r17NotesA, AuthFlowName: "login"},
+		{ID: "tok-b", ScopeTargetID: "target-1", Name: r17LabelB, TokenType: "bearer",
+			HeaderName: "Authorization", ValuePrefix: "Bearer ", TokenValue: "eyJhbGciOiJIUzI1NiJ9.e31.y",
+			IsActive: false, Notes: r17NotesB},
+		{ID: "tok-c", ScopeTargetID: "target-1", Name: r17CognitoCookie, TokenType: "cookie",
+			CookieName: r17CognitoCookie, TokenValue: "n1BJoeT0zWc0oPaR", IsActive: true},
+	}
+}
+
+// r17Identifying is every string in those rows that names the principal a credential is for.
+func r17Identifying() []string {
+	return []string{
+		"rs0n.evolv3@gmail.com", "hrichardson25b@gmail.com", r17SubA, r17SubB,
+	}
+}
+
+func TestTheTokenListServesTheLabelAndTheNotesAsStored(t *testing.T) {
+	body := listTokensVia(t, r17EstateTokens(), "/session-tokens/target/target-1").Body.String()
+	for _, want := range r17Identifying() {
+		if !strings.Contains(body, want) {
+			t.Errorf("the token list no longer serves %q, which is how the operator tells their "+
+				"two accounts apart", want)
+		}
+	}
+
+	var rows []map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := rows[0]["name"].(string); got != r17LabelA {
+		t.Errorf("name is %q, want the stored label %q", got, r17LabelA)
+	}
+	if got, _ := rows[1]["notes"].(string); got != r17NotesB {
+		t.Errorf("notes are %q, want the stored notes %q", got, r17NotesB)
+	}
+	if got, _ := rows[2]["cookie_name"].(string); got != r17CognitoCookie {
+		t.Errorf("cookie_name is %q, want the stored name %q", got, r17CognitoCookie)
+	}
+	// AND THE ROW ROUND-TRIPS. Manage Sessions loads these into an edit form and PUTs them back,
+	// and with nothing rendered there is nothing for a save to overwrite: what the list serves is
+	// exactly what the editor may send.
+	if got, _ := rows[2]["token_value"].(string); got != "n1BJoeT0zWc0oPaR" {
+		t.Errorf("token_value is %q, want the stored value", got)
+	}
+}
+
+// The profile is attached to the row on the read path, and its carrier name is the cookie name
+// with the subject id in the middle of it. It is the same string the cookie jar is searched by.
+func TestTheTokenListProfileCarriesTheWholeCarrierName(t *testing.T) {
+	now := time.Date(2026, 9, 21, 8, 58, 3, 0, time.UTC)
+	carrier := CredentialCarrier{Kind: "cookie", Name: r17CognitoCookie}
+	p := ProfileCredential(NewCredential("n1BJoeT0zWc0oPaR"), carrier, now)
+	p.TokenID = "tok-1"
+	tok := SessionToken{
+		ID: "tok-1", ScopeTargetID: "target-1", Name: r17CognitoCookie, TokenType: "cookie",
+		CookieName: r17CognitoCookie, TokenValue: "n1BJoeT0zWc0oPaR", IsActive: true, Profile: &p,
+	}
+	raw, err := json.Marshal(sessionTokenView(tok))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &row); err != nil {
+		t.Fatal(err)
+	}
+	if profile := string(row["profile"]); !strings.Contains(profile, r17CognitoSub) {
+		t.Errorf("the profile no longer carries the carrier name as measured: %s", profile)
+	}
+	// AND THE STORED PROFILE IS THE ONE SERVED. Nothing is copied in order to be rewritten.
+	if p.Carrier.Name != r17CognitoCookie {
+		t.Errorf("the projection rewrote the profile it was handed: %q", p.Carrier.Name)
+	}
+}
+
+func TestTheEventListServesTheDetailAsStored(t *testing.T) {
+	ev := sessionTokenEventView("ev-1", "refresh_proof", "not_attempted", r17EventDetail,
+		map[string]interface{}{"not_attempted_because": "no_flow", "operator": r17LabelB},
+		time.Date(2026, 9, 21, 8, 0, 0, 0, time.UTC))
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{r17EventDetail, r17LabelB} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("GET /session-tokens/{id}/events no longer serves %q", want)
+		}
+	}
+}
+
+// AN EVENT WITH NO EVIDENCE STILL HAS NO EVIDENCE.
+//
+// RefreshSessionModal.js renders the evidence block on a truthiness check of ev.evidence, and an
+// empty object is truthy in JavaScript, so returning one would draw an evidence panel reading "{}"
+// for every event that never had any. Its own comment says a verdict with no evidence behind it is
+// the thing worth seeing.
+func TestAnEventWithNoEvidenceStillMarshalsAsNone(t *testing.T) {
+	when := time.Date(2026, 9, 21, 8, 0, 0, 0, time.UTC)
+	raw, err := json.Marshal(sessionTokenEventView("ev-1", "activate", "", "Set to activated by the operator.", nil, when))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(m["evidence"]); got != "null" {
+		t.Errorf("an event with no evidence serves %s, which a client reads as evidence", got)
+	}
+
+	// AND AN EVENT THAT HAS EVIDENCE KEEPS ALL OF IT, the URLs and the resource ids in them
+	// included, which is the whole reason the evidence is recorded.
+	raw, err = json.Marshal(sessionTokenEventView("ev-2", "validate", "honoured", "HTTP 200 vs 401",
+		map[string]interface{}{
+			"probe_url":          "https://api-wallet-alpacax.staging-v2.tradetalk.us/v1/accounts/edd0edb9-7562-4c9f-a5cb-5c70d5996c08",
+			"before_fingerprint": "e246a192",
+			"expired_by_clock":   true,
+		}, when))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	for _, want := range []string{
+		"edd0edb9-7562-4c9f-a5cb-5c70d5996c08", "api-wallet-alpacax.staging-v2.tradetalk.us",
+		"e246a192", "true",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the evidence lost %q, which is a fact about the application: %s", want, body)
+		}
+	}
+}
+
+// THE SENTENCES THAT NAME A CREDENTIAL name it by the string that identifies it: the carrier the
+// jar is searched by, or the label the operator typed.
+func TestTheSentenceThatNamesACredentialNamesItExactly(t *testing.T) {
+	for _, c := range []struct {
+		what  string
+		token SessionToken
+		want  string
+	}{
+		{
+			what:  "a Cognito cookie row, where the carrier name holds the subject id",
+			token: SessionToken{Name: "cognito refresh", TokenType: "cookie", CookieName: r17CognitoCookie},
+			want:  "the " + r17CognitoCookie + " cookie",
+		},
+		{
+			// Nothing to fall back on but the label. This is the shape a row gets when it is
+			// pasted as a bare value rather than wired to a carrier.
+			what:  "a row with no carrier name at all",
+			token: SessionToken{Name: r17LabelA},
+			want:  r17LabelA,
+		},
+		{
+			what:  "an ordinary bearer",
+			token: SessionToken{Name: r17LabelA, TokenType: "bearer", HeaderName: "Authorization"},
+			want:  "the Authorization header",
+		},
+	} {
+		if got := sessionTokenIdentity(c.token); got != c.want {
+			t.Errorf("%s: the sentence reads %q, want %q", c.what, got, c.want)
+		}
+	}
+}
+
+// SessionStillHonoured aborts a running scan and its reason lands in the run record, so it has to
+// name the row the way the operator labelled it or they cannot tell which credential died.
+func TestTheScanAbortReasonQuotesTheLabelAsStored(t *testing.T) {
+	detail := r17LabelA + " answered 200 where an anonymous request answered 401"
+	reason := fmt.Sprintf("the stored credential %q validated as %q: %s",
+		r17LabelA, tokenStatusNotHonoured, detail)
+	for _, want := range []string{r17LabelA, detail, tokenStatusNotHonoured} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the scan abort reason lost %q: %s", want, reason)
+		}
 	}
 }

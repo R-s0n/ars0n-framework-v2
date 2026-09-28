@@ -1074,8 +1074,14 @@ func buildAuthRecordedRequestArgs(recordingID string, seq int, input AuthRecorde
 	if len(setCookies) == 0 {
 		// Session token extraction reads set_cookies, so derive it from the response headers when the
 		// extension did not split them out. Without this a recorded login looks like it set nothing.
-		if joined := headerString(responseHeaders, "set-cookie"); joined != "" {
-			setCookies = []string{joined}
+		//
+		// Taken as a LIST, not as one joined string: a response that sets several cookies stores
+		// them as a jsonb array, and comma-joining them produces a single value that parses as one
+		// cookie, losing every one after the first. The session is rarely the first.
+		for key, value := range responseHeaders {
+			if strings.EqualFold(key, "set-cookie") {
+				setCookies = append(setCookies, headerValueList(value)...)
+			}
 		}
 	}
 	setCookiesJSON, _ := json.Marshal(setCookies)

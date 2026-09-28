@@ -1475,6 +1475,10 @@ type cstiSummary struct {
 	suppressedOnly       bool
 	outsideOnly          bool
 	resolvedMount        bool
+	// speculativeCompiled is a compiled landing of a delimiter pair the corpus never named, and
+	// speculativeProbe is the first probe that produced one.
+	speculativeCompiled bool
+	speculativeProbe    triage.ProbeID
 	// fidelityWhy and fidelityProbe are cstiFidelity's answer. Non-empty means one of this
 	// class's own probes cannot be read as a silence at all, whatever the response looked like.
 	fidelityWhy   string
@@ -1644,11 +1648,20 @@ func cstiSummarise(reads []cstiProbeRead, el cstiEligibility, productInControl m
 				s.pctLiteral = true
 			}
 			if c.Compiled > 0 {
-				s.httpFlagged = true
-				if s.httpOracle == "" {
-					s.httpOracle = "delimiter_placement"
+				if cstiSpeculativeRun(r.ProbeID, el) {
+					// A pair nobody showed this engine using. It bars a clean and it does not
+					// make a pointer: see cstiSpeculativeRun.
+					s.speculativeCompiled = true
+					if s.speculativeProbe == "" {
+						s.speculativeProbe = r.ProbeID
+					}
+				} else {
+					s.httpFlagged = true
+					if s.httpOracle == "" {
+						s.httpOracle = "delimiter_placement"
+					}
+					sawCompiled = true
 				}
-				sawCompiled = true
 			}
 			if c.Suppressed > 0 {
 				sawSuppressed = true
@@ -1702,6 +1715,49 @@ var cstiRunByProbe = map[triage.ProbeID][]byte{
 }
 
 func cstiRunFor(id triage.ProbeID) []byte { return cstiRunByProbe[id] }
+
+// cstiSpeculativeRun reports that this probe carries a delimiter pair NOBODY SHOWED THIS ENGINE
+// USING, sent because the corpus could not prove the defaults are in use.
+//
+// WHY A COMPILED LANDING FROM ONE OF THESE MAY NOT BE A POINTER. CS-1B ([[ ]]), CS-1C (<% %>)
+// and CS-1D (${ }) exist for the reconfigured engine, which is this class's largest false
+// negative, and their sending rule is "when the corpus NAMED the pair, or unconditionally when
+// the corpus is INCOMPLETE". In this build the corpus is never populated at all: PlanCtx.Assets
+// has no writer, the runner names served_js_corpus as a missing facility, so CorpusComplete is
+// false on every slot of every target and the alternates always go out.
+//
+// MEASURED on /csti/escaped, the route whose whole defence is a regexp that deletes every brace:
+// the default {{ }} run was stripped, CS-1B's [[ ]] survived into the ng-app subtree, and this
+// class reported suspicious with the sentence "this class's delimiter run came back inside a
+// region the detected engine compiles". The detected engine is AngularJS, which interpolates
+// {{ }}; nothing anywhere showed it interpolating [[ ]], and nothing could, because the corpus
+// that would say so was never fetched. The route's own declaration says clean.
+//
+// So a speculative run keeps the job it was bought for, which is to REFUSE A CLEAN when a pair
+// this battery cannot verify survived into a compiled region, and it loses the job it was never
+// bought for, which is to manufacture a pointer. Once the corpus names the pair, the same
+// landing is evidence and the same rung fires.
+func cstiSpeculativeRun(id triage.ProbeID, el cstiEligibility) bool {
+	var want string
+	switch id {
+	case cstiProbeCS1B:
+		want = "[["
+	case cstiProbeCS1C:
+		want = "<%"
+	case cstiProbeCS1D:
+		want = "${"
+	default:
+		// CS-1 is the default pair every interpolating engine in this class's table shares, and
+		// the directive probes are sent only for the engine that was actually detected.
+		return false
+	}
+	for _, d := range el.CustomDelims {
+		if strings.Contains(d[0], want) {
+			return false
+		}
+	}
+	return true
+}
 
 func cstiProductFor(id triage.ProbeID) string {
 	switch id {
@@ -1985,6 +2041,27 @@ func cstiVerdict(env cstiScoreEnv, in cstiPlanInput, sum cstiSummary) triage.Cla
 			oracle = "delimiter_placement"
 		}
 		return set(cstiHTTPCeiling(triage.StateSuspicious), oracle, reason)
+	}
+
+	// 6b. A DELIMITER PAIR NOBODY SHOWED THIS ENGINE USING, LANDING WHERE IT WOULD BE COMPILED.
+	//
+	// It sits under the HTTP tier because a default-pair landing is better evidence and has
+	// already answered, and over every negative because it is the one thing that stops the
+	// reconfigured engine being written off as clean. The state is cannot_determine and not
+	// suspicious: what the run established is that a pair ARRIVED, not that this engine reads
+	// it, and this build cannot fetch the corpus that would settle it.
+	if sum.speculativeCompiled {
+		v.Annotations["speculative_delimiters_compiled"] = string(sum.speculativeProbe)
+		reason := "alternate_delimiters_unverified: " + string(sum.speculativeProbe) + " carries a delimiter pair this class sends " +
+			"only because the served-JavaScript corpus could not prove the defaults are in use, and that pair came back inside a " +
+			"region the detected engine compiles. Nothing here shows the engine INTERPOLATING that pair"
+		if !in.El.CorpusComplete {
+			reason += ", and the corpus that would say so was not fetched (corpus_capped)"
+		}
+		if sum.bracesStripped {
+			reason += ". The engine's own default pair was stripped from this response, so the only survivor is the unverified one"
+		}
+		return set(triage.StateCannotDetermine, "delimiter_placement", reason)
 	}
 
 	// 7. The negatives. Each one names the defence or the measurement it rests on.
@@ -2369,7 +2446,14 @@ func (cstiClassifier) OracleCases() []cstiOracleCase {
 		{Path: "/csti/inscript", Expect: cstiExpectNegative, State: triage.StateClean,
 			Note: "AngularJS with ng-app resolved, reflection inside <script>. The engine does not compile script content, so the site is not a candidate"},
 		{Path: "/csti/escaped", Expect: cstiExpectNegative, State: triage.StateClean,
-			Note: "AngularJS, the marker returns and the braces are stripped with nothing in their place. clean (delimiters_stripped), and only with a stable baseline"},
+			Note: "AngularJS, the marker returns and the braces are stripped with nothing in their place. clean (delimiters_stripped), " +
+				"and only with a stable baseline AND a complete corpus. THE CLASS WAS WRONG HERE AND THE DECLARATION WAS RIGHT: " +
+				"measured on the 80-route exam it reported suspicious, because the brace regexp leaves CS-1B's [[ ]] intact and a " +
+				"compiled landing of ANY pair flagged the HTTP tier. That is now cannot_determine (alternate_delimiters_unverified) " +
+				"and no longer a pointer. It is cannot_determine rather than the declared clean in THIS build for one named reason: " +
+				"the runner lists served_js_corpus as a missing facility, so no run can show the engine using {{ }} and only {{ }}, " +
+				"and cstiCleanPreconditions refuses a clean on an incomplete corpus. The declared clean is what this route owes once " +
+				"the corpus is fetched, and the gap between the two is a facility and not a detector"},
 		{Path: "/csti/jinja", Expect: cstiExpectNegative, State: triage.StateCannotDetermine,
 			Note: "SERVER-rendered Jinja2 that evaluates {{ }} itself. CS-D2 must fire: cannot_determine (server_side_evaluation) with the SSTI hand-off, never a CSTI finding"},
 		{Path: "/csti/calculator", Expect: cstiExpectNegative, State: triage.StateCannotDetermine,
@@ -2378,7 +2462,17 @@ func (cstiClassifier) OracleCases() []cstiOracleCase {
 			Note: "a page whose only script src 403s. Must be cannot_determine (framework_undetermined) and must NOT be not_applicable: this is the rule that keeps a failed detection from reading as clean"},
 		{Path: "/csti/pct-literal", Expect: cstiExpectNegative, State: triage.StateCannotDetermine,
 			Note: "AngularJS, and the app echoes the query value WITHOUT percent-decoding. The braces come back as %7B, so cannot_determine (delimiters_not_delivered), never clean"},
-		{Path: "/csti/product-in-baseline", Expect: cstiExpectNegative, State: triage.StateCannotDetermine,
-			Note: "AngularJS, and the unperturbed page already prints 49088107. The browser probe must switch to the fallback pair rather than report a finding on digits that were already there"},
+		{Path: "/csti/product-in-baseline", Expect: cstiExpectPositive, State: triage.StateSuspicious,
+			Note: "AngularJS, and the unperturbed page already prints 49088107. THE DECLARATION WAS WRONG AND THE CLASS WAS " +
+				"RIGHT, decided from the handler: cstiProductInBaselineHandler is cstiAngularShell with the value HTML-escaped " +
+				"into a div inside <body ng-app>, plus a footer carrying the product. Escaping does not touch braces, so this " +
+				"page is /csti/angular with one extra line, and the delimiters demonstrably reach the compiler. The " +
+				"contamination is confined to the BROWSER pair, which reads digits; the HTTP tier reads placement and never " +
+				"the product, so it owes the same suspicious (template_delimiters_reach_compiler) it owes on /csti/angular. " +
+				"Declaring cannot_determine here recorded a browser-tier verdict in the column the corpus reads as this " +
+				"class's, and it asked the class to under-call a route that is genuinely a candidate. " +
+				"WHAT IS STILL UNTESTED, SAID PLAINLY: the fallback-pair switch this route exists to exercise needs a " +
+				"browser, and this build declares browser_navigation missing, so NAV1 and NAV2 never run here and the " +
+				"contamination rule itself is exercised only in csti_test.go"},
 	}
 }

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Tests for the marker mechanism.
@@ -58,12 +60,16 @@ func TestAMintedMarkerIsWellFormedAndAttributesToItsOwner(t *testing.T) {
 // the answer is never yes.
 func TestAForeignMarkerIsAHitForNobodyAcrossEveryClassStripe(t *testing.T) {
 	classes := triage.AllClassIDs()
-	// 27 real classes plus ClassExample, the id reserved for the placeholder classifier so that it
+	// 29 real classes plus ClassExample, the id reserved for the placeholder classifier so that it
 	// does not squat on a real one. The count is asserted because this test's coverage claim is
 	// "every declared stripe", and a class quietly added or removed would shrink that claim
 	// without shrinking the passing result.
-	if len(classes) != 28 {
-		t.Fatalf("expected the 27 declared classes plus the reserved example id, got %d; this test's coverage claim depends on that count", len(classes))
+	//
+	// It was 28 while the register held the original 27. CORS took id 28 and ORM-LEAK took 29,
+	// both after CATALOGUE 1.0 was written and both with their reasoning in the const block in
+	// triage/types.go. Updating this number is the deliberate act the assertion is asking for.
+	if len(classes) != 30 {
+		t.Fatalf("expected the 29 declared classes plus the reserved example id, got %d; this test's coverage claim depends on that count", len(classes))
 	}
 
 	minted := map[triage.ClassID]triage.Marker{}
@@ -674,4 +680,387 @@ func triageLayerSources(t *testing.T) ([]string, error) {
 		out = append(out, m...)
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE TWO BUFFERS: a byte offset measured in one string and used to index another
+// ---------------------------------------------------------------------------------------------
+//
+// triageScanOnePass used to build lower := strings.ToLower(string(p.text)) and then run one loop
+// that bounded itself on len(lower), sliced lower, and indexed p.text. Unicode case mapping is not
+// length preserving, so the two buffers are not the same length on every input, and every index in
+// that loop was therefore valid in at most one of them.
+//
+// THE TWO FAILURES THAT CAME OUT OF IT ARE OPPOSITE AND BOTH FATAL.
+//
+//  1. A rune that GROWS under lowering makes lower longer than text, so the loop walks off the end
+//     of p.text and panics. runTriage recovers the panic and marks the WHOLE RUN status=error, so
+//     one such byte anywhere in any response kills every pair the run had not reached yet.
+//
+//  2. A rune that SHRINKS under lowering makes lower shorter than text, so the anchor is found at a
+//     lower index than the position it actually occupies in p.text, and the run is then read from
+//     the wrong bytes. There is no panic and no error row: the marker is simply not seen. For a
+//     truncated marker, which the squeeze pass is not allowed to report, the whole scan then comes
+//     back empty and the attribution is ABSENT, which IS a measurement and reads as clean.
+//
+// The fix is not a clamp. A clamp would keep the second failure, which is the expensive one. The
+// fold is length preserving by construction now, and there is only one buffer left to index.
+
+// The premise, checked rather than asserted. If Go's Unicode tables ever add a third growing rune,
+// this test says so on the next run instead of on the next panic.
+func TestExactlyTwoRunesGrowUnderLoweringAndNeitherKillsAScan(t *testing.T) {
+	var grow []rune
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if utf8.RuneLen(r) < 0 {
+			continue
+		}
+		if len(string(unicode.ToLower(r))) > len(string(r)) {
+			grow = append(grow, r)
+		}
+	}
+	if len(grow) != 2 || grow[0] != 0x023A || grow[1] != 0x023E {
+		t.Fatalf("the growing set is %U; this test was written for exactly U+023A and U+023E", grow)
+	}
+	for _, r := range grow {
+		t.Run(fmt.Sprintf("%U", r), func(t *testing.T) {
+			// The anchor and the run sit at the very END of the body, which is where the old
+			// loop's extra byte of slack turned into an index past the end of p.text.
+			body := []byte(string(r) + triage.DefaultMarkerAnchor + markerTestRunID)
+			if len(body) >= len(strings.ToLower(string(body))) {
+				t.Fatalf("this body does not grow under lowering, so it cannot exercise the defect: text=%d lower=%d",
+					len(body), len(strings.ToLower(string(body))))
+			}
+			got := ScanMarkers(body)
+			// Surviving is the assertion here. What it reports is the next test's business.
+			for _, s := range got {
+				if s.Hit.Offset < 0 || s.Hit.Offset+s.Hit.Length > len(body) {
+					t.Errorf("sighting reports %d+%d into a %d byte body", s.Hit.Offset, s.Hit.Length, len(body))
+				}
+			}
+		})
+	}
+}
+
+// A REALISTIC BODY with both growing runes in it, and a real marker that still has to come back. A
+// scan that survives by finding nothing has not been fixed, it has been disabled.
+func TestAMarkerIsStillFoundInABodyCarryingTheGrowingRunes(t *testing.T) {
+	m, err := triage.MintMarkerAt(triageRunnerCapability(), markerTestRunID, triage.ClassXSSReflected, uint64(triage.ClassXSSReflected))
+	if err != nil {
+		t.Fatalf("MintMarkerAt: %v", err)
+	}
+	body := []byte(`{"ok":true,"display_name":"Ⱥsh Ⱦorvald","note":"Ⱥ Ⱦ Ⱥ Ⱦ","echo":"` +
+		string(m) + `","trailing":"Ⱦ"}`)
+	if len(body) >= len(strings.ToLower(string(body))) {
+		t.Fatalf("this body does not grow under lowering, so it does not exercise the defect")
+	}
+
+	sightings := ScanMarkers(body)
+	var found *MarkerSighting
+	for i := range sightings {
+		if sightings[i].Hit.Marker == m {
+			found = &sightings[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("marker %q not recovered from a body containing U+023A and U+023E; sightings=%+v", m, sightings)
+	}
+	if found.Completeness != MarkerComplete {
+		t.Errorf("recovered as %q, want complete", found.Completeness)
+	}
+	if found.Integrity != triage.MarkerValid {
+		t.Errorf("recovered with integrity %q, want valid", found.Integrity)
+	}
+	if got := string(body[found.Hit.Offset : found.Hit.Offset+found.Hit.Length]); got != string(m) {
+		t.Errorf("the reported offset/length %d+%d cuts %q out of the body, not the marker %q",
+			found.Hit.Offset, found.Hit.Length, got, m)
+	}
+	if a := AttributeMarkers(sightings, triage.ClassXSSReflected, markerTestRunID); a.Verdict != MarkerVerdictMine {
+		t.Errorf("attribution says %q for the class that minted it", a.Verdict)
+	}
+}
+
+// THE SHRINKING HALF, which is the false clean. No panic, no error row, just a marker the scan
+// walks straight past because the anchor's index in the lowered copy is not its index in the body.
+//
+// The case chosen is a TRUNCATED marker, because that is where the miss is unrecoverable: the
+// squeeze pass reports complete tokens only, so it cannot cover for the raw pass, and an empty scan
+// attributes as MarkerVerdictAbsent, whose IsUnknown() is false. A field that ate four bytes of the
+// payload would be recorded as a clean measurement that the payload did not reflect.
+func TestAShrinkingRuneBeforeAMarkerDoesNotTurnATruncationIntoAnAbsence(t *testing.T) {
+	m, err := triage.MintMarkerAt(triageRunnerCapability(), markerTestRunID, triage.ClassXSSReflected, uint64(triage.ClassXSSReflected))
+	if err != nil {
+		t.Fatalf("MintMarkerAt: %v", err)
+	}
+	// U+212B ANGSTROM SIGN is three bytes and lowers to U+00E5, which is two.
+	const shrink = "Å"
+	if len(strings.ToLower(shrink)) >= len(shrink) {
+		t.Fatalf("%q no longer shrinks under lowering, so this test needs another rune", shrink)
+	}
+	cut := 12
+	body := []byte(`{"temperature":"300 ` + shrink + `","echo":"` + string(m)[:cut] + `"}`)
+
+	sightings := ScanMarkers(body)
+	a := AttributeMarkers(sightings, triage.ClassXSSReflected, markerTestRunID)
+	if a.Verdict == MarkerVerdictAbsent {
+		t.Fatalf("a body carrying %d of the 16 bytes of our own marker attributed as %q, whose IsUnknown() is %v. A truncation read as an absence is a measurement made out of a miss; sightings=%+v",
+			cut, a.Verdict, a.Verdict.IsUnknown(), sightings)
+	}
+	if a.Verdict != MarkerVerdictTruncated {
+		t.Errorf("attribution says %q, want %q", a.Verdict, MarkerVerdictTruncated)
+	}
+	if len(a.Truncated) != 1 {
+		t.Fatalf("want exactly one truncated sighting, got %d: %+v", len(a.Truncated), a.Truncated)
+	}
+	s := a.Truncated[0]
+	if s.Text != string(m)[:cut] {
+		t.Errorf("the truncated run reads %q, want %q, so len(Text) cannot be used to measure where the field cut", s.Text, string(m)[:cut])
+	}
+	if got := string(body[s.Hit.Offset : s.Hit.Offset+s.Hit.Length]); got != string(m)[:cut] {
+		t.Errorf("the reported offset/length %d+%d cuts %q out of the body, not the remnant %q",
+			s.Hit.Offset, s.Hit.Length, got, string(m)[:cut])
+	}
+}
+
+// The structural half of the fix, asserted directly: every pass hands the scanner one text and one
+// offset table of the SAME length, and the fold the scanner applies to that text does not change
+// its length. Those two facts together are what make an index valid in every buffer the scanner
+// touches, so they are pinned rather than left as a property of the current code.
+func TestEveryPassKeepsTextOffsetsAndFoldTheSameLength(t *testing.T) {
+	bodies := [][]byte{
+		nil,
+		[]byte(""),
+		[]byte("zqj"),
+		[]byte("Ⱥ Ⱦ Å İ ẞ K"),
+		[]byte("&#122;&#113;&#106;&#x31;&#x66; %7a%71%6a %zz % "),
+		[]byte(`{"a":"` + strings.Repeat("Ⱦ", 40) + `","b":"ZQJ1F3Q000041ABC"}`),
+	}
+	for _, body := range bodies {
+		for _, p := range []triageDecodedPass{triagePassRaw(body), triagePassNCR(body), triagePassPercent(body), triagePassSqueeze(body)} {
+			if len(p.text) != len(p.orig) {
+				t.Errorf("pass %q on %q produced %d bytes of text and %d offsets", p.form, body, len(p.text), len(p.orig))
+			}
+			if got := triageFoldASCII(p.text); len(got) != len(p.text) {
+				t.Errorf("pass %q on %q: the fold turned %d bytes into %d, so an index into one is not an index into the other",
+					p.form, body, len(p.text), len(got))
+			}
+			for i, o := range p.orig {
+				if o < 0 || o >= len(body) {
+					t.Errorf("pass %q on %q maps its byte %d to original offset %d, outside a %d byte body", p.form, body, i, o, len(body))
+				}
+			}
+		}
+	}
+}
+
+// The fold still has to be a fold: it must recover an upper-cased marker, which is the whole reason
+// the scanner folds case at all.
+func TestTheASCIIFoldStillRecoversAnUpperCasedMarker(t *testing.T) {
+	m, err := triage.MintMarkerAt(triageRunnerCapability(), markerTestRunID, triage.ClassSQL, uint64(triage.ClassSQL))
+	if err != nil {
+		t.Fatalf("MintMarkerAt: %v", err)
+	}
+	for _, tc := range []struct{ name, body string }{
+		{"upper", "<p>" + strings.ToUpper(string(m)) + "</p>"},
+		{"upper after a growing rune", "<p>Ⱥ " + strings.ToUpper(string(m)) + "</p>"},
+		{"upper after a shrinking rune", "<p>Å " + strings.ToUpper(string(m)) + "</p>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := AttributeMarkers(ScanMarkers([]byte(tc.body)), triage.ClassSQL, markerTestRunID)
+			if a.Verdict != MarkerVerdictMine {
+				t.Fatalf("an upper-cased copy of our own marker attributed as %q", a.Verdict)
+			}
+			if a.Mine[0].Hit.CaseTransform != "upper" {
+				t.Errorf("case transform recorded as %q, want upper", a.Mine[0].Hit.CaseTransform)
+			}
+		})
+	}
+}
+
+// NO OTHER FUNCTION IN THE LAYER MAY MEASURE ONE STRING AND INDEX ANOTHER.
+//
+// The defect above is a SHAPE, not an incident, and the shape has a precise definition: one
+// function binds a case-folded COPY of some value to a name, and then uses byte indexes or slices
+// on BOTH the copy and the value it was folded from. Case mapping is not length preserving, so the
+// two are not the same length on every input, and an index computed against one of them is only
+// coincidentally valid in the other.
+//
+// A folded copy that is the ONLY thing indexed is fine, and there are several of those in the
+// layer (xssrTemplateSurvived reads its whole scan off the lowered payload and never touches the
+// original). The guard is therefore written against the AST and not a grep: a grep for
+// strings.ToLower reports about thirty header and parameter names in this layer, which would make
+// it noise nobody reads. This finds the pair.
+func TestNoTriageFunctionIndexesBothACaseFoldedCopyAndItsSource(t *testing.T) {
+	files, err := triageLayerSources(t)
+	if err != nil {
+		t.Fatalf("list the layer: %v", err)
+	}
+
+	// rootIdents collects the plain identifiers an expression reads, so string(p.text) yields
+	// {string, p} and payload yields {payload}. The conversion names are harmless: nothing is ever
+	// indexed through them.
+	rootIdents := func(e ast.Expr) map[string]bool {
+		out := map[string]bool{}
+		ast.Inspect(e, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok {
+				out[id.Name] = true
+			}
+			return true
+		})
+		return out
+	}
+	// rootOf names the variable an index or slice expression walks through: lower[i] and p.text[i]
+	// give lower and p.
+	var rootOf func(e ast.Expr) string
+	rootOf = func(e ast.Expr) string {
+		switch v := e.(type) {
+		case *ast.Ident:
+			return v.Name
+		case *ast.SelectorExpr:
+			return rootOf(v.X)
+		case *ast.IndexExpr:
+			return rootOf(v.X)
+		case *ast.SliceExpr:
+			return rootOf(v.X)
+		case *ast.ParenExpr:
+			return rootOf(v.X)
+		}
+		return ""
+	}
+
+	fset := token.NewFileSet()
+	var offenders []string
+	for _, f := range files {
+		file, err := parser.ParseFile(fset, f, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse %s: %v", f, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			var body *ast.BlockStmt
+			switch v := n.(type) {
+			case *ast.FuncDecl:
+				body = v.Body
+			case *ast.FuncLit:
+				body = v.Body
+			default:
+				return true
+			}
+			if body == nil {
+				return true
+			}
+			type fold struct {
+				dst   string
+				srcs  map[string]bool
+				where token.Position
+				fn    string
+			}
+			var folds []fold
+			indexed := map[string]bool{}
+			ast.Inspect(body, func(m ast.Node) bool {
+				switch v := m.(type) {
+				case *ast.IndexExpr:
+					if r := rootOf(v.X); r != "" {
+						indexed[r] = true
+					}
+				case *ast.SliceExpr:
+					if r := rootOf(v.X); r != "" {
+						indexed[r] = true
+					}
+				case *ast.AssignStmt:
+					for i, rhs := range v.Rhs {
+						call, ok := rhs.(*ast.CallExpr)
+						if !ok || len(call.Args) != 1 {
+							continue
+						}
+						sel, ok := call.Fun.(*ast.SelectorExpr)
+						if !ok {
+							continue
+						}
+						pkg, ok := sel.X.(*ast.Ident)
+						if !ok || pkg.Name != "strings" {
+							continue
+						}
+						if sel.Sel.Name != "ToLower" && sel.Sel.Name != "ToUpper" {
+							continue
+						}
+						if i >= len(v.Lhs) {
+							continue
+						}
+						dst, ok := v.Lhs[i].(*ast.Ident)
+						if !ok {
+							continue
+						}
+						folds = append(folds, fold{
+							dst:   dst.Name,
+							srcs:  rootIdents(call.Args[0]),
+							where: fset.Position(v.Pos()),
+							fn:    sel.Sel.Name,
+						})
+					}
+				}
+				return true
+			})
+			for _, fl := range folds {
+				if !indexed[fl.dst] {
+					continue
+				}
+				for src := range fl.srcs {
+					if src == fl.dst || !indexed[src] {
+						continue
+					}
+					offenders = append(offenders, fmt.Sprintf(
+						"%s:%d: %s := strings.%s(... %s ...) and the same function indexes both %s and %s",
+						filepath.Base(fl.where.Filename), fl.where.Line, fl.dst, fl.fn, src, fl.dst, src))
+				}
+			}
+			return true
+		})
+	}
+	if len(offenders) != 0 {
+		t.Errorf("%d function(s) index both a case-folded copy and the value it was folded from:\n  %s\n"+
+			"This is the shape that panicked triageScanOnePass on U+023A and silently lost markers after U+212B. "+
+			"Index the folded copy throughout, or fold with a length-preserving byte fold like triageFoldASCII.",
+			len(offenders), strings.Join(offenders, "\n  "))
+	}
+}
+
+// A FUZZ TARGET, because the defect above was a class of input and not an input. Under a plain
+// `go test` this runs the seed corpus only, which costs nothing; `go test -fuzz` on this name
+// will hunt for the next byte sequence that walks the scanner out of its own buffer.
+//
+// The properties are the two the fix is supposed to guarantee, and nothing about what the scanner
+// FINDS: it must not panic, and every offset and length it reports must name real bytes of the
+// body the caller handed it, because a sighting that points outside the body is evidence of the
+// two-buffer defect even when it does not crash.
+func FuzzScanMarkersStaysInsideTheBodyItWasGiven(f *testing.F) {
+	m, err := triage.MintMarkerAt(triageRunnerCapability(), markerTestRunID, triage.ClassXSSReflected, uint64(triage.ClassXSSReflected))
+	if err != nil {
+		f.Fatalf("MintMarkerAt: %v", err)
+	}
+	for _, s := range []string{
+		"",
+		"zqj",
+		string(m),
+		"Ⱥ" + triage.DefaultMarkerAnchor + markerTestRunID,
+		"Ⱦ" + triage.DefaultMarkerAnchor + markerTestRunID,
+		"Å" + string(m)[:12],
+		`{"echo":"` + string(m) + `","n":"ȺȾKİ"}`,
+		"&#122;&#113;&#106;" + string(m)[3:],
+		"%7a%71%6a" + string(m)[3:],
+		strings.ToUpper(string(m)),
+		strings.Repeat("Ⱥ", 64) + "zqj",
+		"\xff\xfe\x00zqj1f3q\x00\xff",
+	} {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, body []byte) {
+		for _, s := range ScanMarkers(body) {
+			if s.Hit.Offset < 0 || s.Hit.Length < 0 || s.Hit.Offset+s.Hit.Length > len(body) {
+				t.Fatalf("sighting reports %d+%d in a %d byte body: %+v", s.Hit.Offset, s.Hit.Length, len(body), s)
+			}
+			if s.Completeness != MarkerComplete && s.Completeness != MarkerTruncated {
+				t.Fatalf("sighting reports completeness %q, which is neither of the two answers", s.Completeness)
+			}
+		}
+	})
 }

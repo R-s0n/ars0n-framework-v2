@@ -641,14 +641,24 @@ func vectorScanCancelled(ctx context.Context, scanID string) bool {
 	return requested
 }
 
-// vectorTraceStdoutLimit is the per-run cap on stored output.
+// vectorTraceStdoutLimit is the per-run backstop on stored output. It is NOT an evidence policy.
 //
-// 64 KB is chosen against what these tools actually print. sqlmap at high verbosity and WCVS on a
-// large wordlist run to megabytes, almost all of it progress lines; the diagnostic content, the
-// argument-parser complaint, the usage banner, the "cannot scan offline" refusal, is at one end or
-// the other. Keeping both ends and dropping the middle preserves what a diagnosis needs at a size the
-// row can hold.
-const vectorTraceStdoutLimit = 64 * 1024
+// This column is the only copy of what a tool printed. Some of what it prints is the target's own
+// bytes: nuclei with -irr writes whole request and response pairs, the sensitive-leak tools print
+// recovered file contents, sqlmap prints the rows it dumped. Cutting any of that out is cutting the
+// proof out of a finding, so the ceiling is set high enough that no ordinary run reaches it.
+//
+// It used to be 64 KB, chosen against sqlmap at high verbosity and WCVS on a large wordlist, which
+// run to megabytes of progress lines. That reasoning was right about the progress lines and wrong
+// about everything else in the buffer: a run whose output is mostly noise is not a reason to throw
+// away the runs whose output is the finding. 4 MB holds every measured run in this tree whole and
+// still bounds a tool stuck in a print loop.
+//
+// When it does fire, both ends are kept and the middle is dropped, because the diagnostic content
+// (the argument-parser complaint, the usage banner, the "cannot scan offline" refusal, the summary
+// line, the crash) sits at one end or the other. stdout_bytes records the FULL length either way
+// and stdout_truncated says it happened, so the row never pretends to be complete.
+const vectorTraceStdoutLimit = 4 * 1024 * 1024
 
 // recordVectorTrace stores one docker exec verbatim: what was run, what came back, how long it took.
 //

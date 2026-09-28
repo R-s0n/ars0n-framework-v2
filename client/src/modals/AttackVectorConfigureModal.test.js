@@ -1,6 +1,7 @@
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import AttackVectorConfigureModal, {
   assertSelectionShape, domainOf, groupByDomain, problemsByField, riskChoicesFor,
+  renewalProofAction, renewalProofSentence,
 } from './AttackVectorConfigureModal';
 
 // These render for real, in jsdom. Two modals added to this app before compiled cleanly and threw
@@ -454,7 +455,11 @@ test('save PUTs the whole document and reports what would run', async () => {
 
   await waitFor(() => expect(sent).toBeTruthy());
   // Whole document, not a diff: a partial write to a full-document endpoint wipes what it omits.
-  expect(Object.keys(sent.settings).sort()).toEqual(['classes', 'custom_payloads', 'oob', 'pacing', 'tier']);
+  // session_renewal joins the document here: the PUT is a REPLACE, so a field the form does not
+  // send is a field the server stores at its zero value.
+  expect(Object.keys(sent.settings).sort()).toEqual(
+    ['classes', 'custom_payloads', 'oob', 'pacing', 'session_renewal', 'tier'],
+  );
   expect(sent.settings.classes.newclass).toEqual({ enabled: false, tier: 'reduced', max_risk: 'R1' });
   // A class whose ceiling control is not rendered still travels in the document at its stored
   // value. Dropping it would be a partial write to a full-document endpoint.
@@ -608,4 +613,553 @@ test('a retired class is named rather than silently dropped', async () => {
     screen.getByText(/Removed from this document because nothing would run them/),
   ).toBeInTheDocument());
   expect(screen.getByText(/example, ldap/)).toBeInTheDocument();
+});
+
+// ---------------------------------------------------------------------------------------------
+// AUTOMATIC SESSION RENEWAL
+// ---------------------------------------------------------------------------------------------
+//
+// The measurement behind this section: the bearer on the estate this form was built against is a
+// fifteen minute JWT and a full Investigate run takes twenty nine minutes, so more than half of
+// every authenticated run went out with a credential that had already died.
+//
+// The whole point of the control is that it may not be offered until the framework has PERFORMED
+// a refresh and watched a different working credential come back, so most of these tests are
+// about what the screen does when it may not offer it. A greyed switch with no sentence is the
+// same failure as no switch at all: the operator cannot tell whether the feature is broken, not
+// applicable, or one action away.
+
+// A gate that refuses, with the shape the server actually serves.
+const GATE_UNPROVEN = {
+  evaluated: true,
+  offerable: false,
+  code: 'no_credential_proven',
+  reason: 'Automatic renewal cannot be turned on: the framework has never performed a refresh of any credential on this target and watched a new working credential come back. Until it has, renewal would be a promise nothing measured supports. A refresh mechanism was found but has never been exercised: refresh once from the Session Manager, which records the proof if a different working credential comes back.',
+  run_estimate_seconds: 1201,
+  run_estimate_basis: 'an estimated 20m1s: 4000 probes at 3.33 per second',
+  evaluated_at: '2026-09-20T12:30:00Z',
+  options: [{
+    token_id: 'tok-1',
+    name: 'app bearer',
+    carrier: 'Authorization header',
+    kind: 'jwt',
+    fingerprint: 'aaaa1111',
+    is_active: true,
+    usable: false,
+    code: 'never_proven',
+    reason: 'A refresh mechanism exists (oauth_refresh_token at login.example.test) but it has NEVER been exercised, so nothing here shows it yields a working credential. Refresh once from the Session Manager: if a different credential comes back the proof is recorded and this control becomes available.',
+    ttl_known: true,
+    ttl_seconds: 900,
+    ttl_display: '15m (parsed: exp minus iat)',
+    ttl_provenance: 'parsed',
+    ttl_evidence: 'exp minus iat',
+    ttl_is_upper_bound: false,
+    expiry_display: '2026-09-20T12:39:00Z (parsed)',
+    expiry_style: 'absolute',
+    survives_run: false,
+    survives_known: true,
+    survives_why: '9m of life left against a 20m1s run',
+    interval_seconds: 450,
+    interval_known: true,
+    interval_basis: 'half of the measured 15m lifetime (parsed: exp minus iat), which leaves one full retry window before it expires',
+    refresh_status: 'available',
+    refresh_mechanism: 'oauth_refresh_token',
+    mint_host: 'login.example.test',
+    mint_in_scope: true,
+    proven_at: '0001-01-01T00:00:00Z',
+    proof_age_seconds: 0,
+    proof_window_seconds: 900,
+    proof_window_basis: 'the measured 15m lifetime (parsed)',
+    refresh_evidence: ['3 captured response(s) carry a refresh_token field'],
+    warnings: [],
+  }],
+};
+
+// The same gate once a refresh was actually performed.
+const GATE_PROVEN = {
+  ...GATE_UNPROVEN,
+  offerable: true,
+  code: 'offerable',
+  reason: '1 of 1 credential(s) have a refresh the framework has performed and watched return a different working credential.',
+  options: [{
+    ...GATE_UNPROVEN.options[0],
+    usable: true,
+    code: 'proven',
+    reason: 'A refresh was performed 2m ago and a DIFFERENT working credential came back. The proof is held to the measured 15m lifetime (parsed).',
+    refresh_status: 'proven',
+    proven_at: '2026-09-20T12:28:00Z',
+    proof_age_seconds: 120,
+  }],
+};
+
+const renewalBody = (gate, renewal) => ({
+  ...SETTINGS_BODY,
+  settings: { ...SETTINGS, session_renewal: renewal || { enabled: false, token_id: '', interval_seconds: 0 } },
+  renewal_gate: gate,
+});
+
+test('the renewal control is not offerable until a refresh has been proven, and it says why', async () => {
+  settingsBody = renewalBody(GATE_UNPROVEN);
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+
+  const toggle = screen.getByLabelText('Renew the session automatically during a run');
+  expect(toggle).toBeDisabled();
+  expect(toggle).not.toBeChecked();
+
+  // The refusal has to be on the screen and has to name the action that lifts it. A greyed
+  // control with no sentence sends the operator looking for a bug that is not there.
+  expect(screen.getByText(/has NEVER been exercised/)).toBeInTheDocument();
+  expect(screen.getByText(/Refresh once from the Session Manager/)).toBeInTheDocument();
+});
+
+test('the control becomes available once the framework has actually refreshed the session', async () => {
+  settingsBody = renewalBody(GATE_PROVEN);
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+
+  const toggle = screen.getByLabelText('Renew the session automatically during a run');
+  expect(toggle).not.toBeDisabled();
+  expect(screen.getByText(/DIFFERENT working credential came back/)).toBeInTheDocument();
+});
+
+test('a gate the server did not evaluate leaves the control off rather than assuming it is fine', async () => {
+  settingsBody = { ...SETTINGS_BODY, renewal_gate: undefined };
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+
+  expect(screen.getByLabelText('Renew the session automatically during a run')).toBeDisabled();
+  expect(screen.getByText(/could not be checked/)).toBeInTheDocument();
+});
+
+test('the interval shown is the measured one, with the measurement it came from', async () => {
+  settingsBody = renewalBody(GATE_PROVEN, { enabled: true, token_id: 'tok-1', interval_seconds: 0 });
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+
+  // The number, the lifetime it was halved from, and where that lifetime came from.
+  expect(screen.getByText(/every 450s/)).toBeInTheDocument();
+  expect(screen.getByText(/half of the measured 15m lifetime/)).toBeInTheDocument();
+  expect(screen.getByText(/15m \(parsed: exp minus iat\)/)).toBeInTheDocument();
+  // And the measurement the whole feature exists for.
+  expect(screen.getByText(/9m of life left against a 20m1s run/)).toBeInTheDocument();
+});
+
+test('an unmeasured lifetime says so where the interval is chosen, and offers no number', async () => {
+  const gate = {
+    ...GATE_PROVEN,
+    options: [{
+      ...GATE_PROVEN.options[0],
+      ttl_known: false,
+      ttl_seconds: 0,
+      ttl_display: 'UNKNOWN',
+      ttl_provenance: 'unknown',
+      ttl_evidence: '',
+      interval_known: false,
+      interval_seconds: 0,
+      interval_basis: 'neither a lifetime nor an observed lower bound has ever been measured for this credential, so no interval can be derived from a measurement',
+      warnings: ['The lifetime of this credential has never been measured, so no interval can be derived from one; any interval used is a figure you supplied.'],
+    }],
+  };
+  settingsBody = renewalBody(gate, { enabled: true, token_id: 'tok-1', interval_seconds: 0 });
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+
+  expect(screen.getByText('UNKNOWN')).toBeInTheDocument();
+  expect(screen.getByText(/no interval can be derived from a measurement/)).toBeInTheDocument();
+  expect(screen.queryByText(/every 450s/)).not.toBeInTheDocument();
+  expect(screen.getByText(/a figure you supplied/)).toBeInTheDocument();
+});
+
+test('an upper-bound lifetime is flagged at the point the interval is chosen', async () => {
+  const gate = {
+    ...GATE_PROVEN,
+    options: [{
+      ...GATE_PROVEN.options[0],
+      ttl_is_upper_bound: true,
+      ttl_evidence: 'exp minus nbf; the token carries no iat, and nbf is an upper bound on the lifetime',
+      warnings: ['The measured lifetime is an UPPER BOUND, so the real one may be shorter and a schedule derived from it may fire after the credential is already dead.'],
+    }],
+  };
+  settingsBody = renewalBody(gate, { enabled: true, token_id: 'tok-1', interval_seconds: 0 });
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+  expect(screen.getByText(/UPPER BOUND/)).toBeInTheDocument();
+});
+
+test('a proof that broke since takes the control away and says what failed', async () => {
+  const gate = {
+    ...GATE_UNPROVEN,
+    reason: 'Automatic renewal cannot be turned on: One credential WAS proven and a refresh has failed since.',
+    options: [{
+      ...GATE_UNPROVEN.options[0],
+      usable: false,
+      code: 'proof_broken',
+      refresh_status: 'proven',
+      proven_at: '2026-09-20T12:26:00Z',
+      proof_age_seconds: 240,
+      reason: 'A refresh WAS proven 4m ago, and a refresh has FAILED since (replay_failed, 1m30s ago: the linked auth flow returned 401 at step 2). The proof describes what used to happen, so renewal is not offered until a refresh succeeds again.',
+    }],
+  };
+  // Stored as ON. The proof has since broken, so the screen must show it as unavailable rather
+  // than as on: a setting that was true once and stays true forever is the stale proof itself.
+  settingsBody = renewalBody(gate, { enabled: true, token_id: 'tok-1', interval_seconds: 0 });
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+
+  const toggle = screen.getByLabelText('Renew the session automatically during a run');
+  expect(toggle).toBeDisabled();
+  expect(toggle).not.toBeChecked();
+  expect(screen.getByText(/replay_failed/)).toBeInTheDocument();
+  expect(screen.getByText(/returned 401 at step 2/)).toBeInTheDocument();
+});
+
+test('a credential the gate refuses cannot be picked, and its reason is shown beside it', async () => {
+  const gate = {
+    ...GATE_PROVEN,
+    reason: '1 of 2 credential(s) have a refresh the framework has performed and watched return a different working credential.',
+    options: [
+      GATE_PROVEN.options[0],
+      {
+        ...GATE_UNPROVEN.options[0],
+        token_id: 'tok-2',
+        name: 'sso bearer',
+        usable: false,
+        code: 'mint_out_of_scope',
+        reason: "A refresh mechanism was found (oauth_refresh_token at sso.vendor.test) but that host is outside this engagement's scope, so the framework must not mint from it.",
+      },
+    ],
+  };
+  settingsBody = renewalBody(gate, { enabled: true, token_id: 'tok-1', interval_seconds: 0 });
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+
+  const picker = screen.getByLabelText('Credential to renew');
+  const values = Array.from(picker.querySelectorAll('option')).map((o) => o.value);
+  expect(values).toContain('tok-1');
+  expect(values).not.toContain('tok-2');
+  // Refused, not hidden: the operator has to be able to see that sso bearer exists and why it is
+  // not on the list.
+  expect(screen.getByText(/sso bearer/)).toBeInTheDocument();
+  expect(screen.getByText(/outside this engagement/)).toBeInTheDocument();
+});
+
+test('the renewal settings go out in the same whole-document PUT as everything else', async () => {
+  settingsBody = renewalBody(GATE_PROVEN);
+  let sent = null;
+  putHandler = (body) => { sent = body; return jsonResponse({ ...renewalBody(GATE_PROVEN), saved: true }); };
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText('Renew the session automatically during a run'));
+  fireEvent.click(screen.getByText('Save'));
+  await waitFor(() => expect(sent).not.toBeNull());
+
+  expect(sent.settings.session_renewal).toEqual({ enabled: true, token_id: 'tok-1', interval_seconds: 0 });
+  // And the rest of the document is still there: a partial PUT to a whole-document endpoint is
+  // how seven columns got wiped on fifty-eight rows in this codebase once already.
+  expect(sent.settings.classes).toBeTruthy();
+  expect(sent.settings.pacing).toBeTruthy();
+});
+
+test('a refusal from the server lands on the renewal control itself', async () => {
+  settingsBody = renewalBody(GATE_UNPROVEN, { enabled: true, token_id: 'tok-1', interval_seconds: 0 });
+  settingsBody = {
+    ...settingsBody,
+    validation: {
+      ...VALIDATION,
+      ok: false,
+      errors: [{
+        field: 'session_renewal.enabled',
+        code: 'renewal_never_proven',
+        message: 'Automatic renewal cannot be switched on for app bearer. A refresh mechanism exists but it has NEVER been exercised.',
+      }],
+    },
+  };
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+  expect(screen.getByText(/cannot be switched on for app bearer/)).toBeInTheDocument();
+});
+
+// A select whose value matches no option renders BLANK, and a blank credential picker beside an
+// enabled switch is a screen that says renewal is configured for nothing. The stored credential
+// going unavailable must not produce that, and must not quietly re-point the switch either.
+test('a stored credential the gate now refuses leaves the picker valid and the switch off', async () => {
+  const gate = {
+    ...GATE_PROVEN,
+    options: [
+      GATE_PROVEN.options[0],
+      {
+        ...GATE_UNPROVEN.options[0],
+        token_id: 'tok-2',
+        name: 'old bearer',
+        usable: false,
+        code: 'proof_stale',
+        reason: 'The refresh was proven 20m ago, which is older than the measured 15m lifetime (parsed).',
+      },
+    ],
+  };
+  settingsBody = renewalBody(gate, { enabled: true, token_id: 'tok-2', interval_seconds: 0 });
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+
+  const picker = screen.getByLabelText('Credential to renew');
+  expect(picker.value).toBe('tok-1');
+  expect(screen.getByLabelText('Renew the session automatically during a run')).not.toBeChecked();
+  expect(screen.getByText(/no longer available for renewal/)).toBeInTheDocument();
+  expect(screen.getByText(/older than the measured 15m lifetime/)).toBeInTheDocument();
+});
+
+// A document stored with renewal ON whose proof has since broken renders with the switch OFF and
+// DISABLED, and the server refuses the whole document while it still says on. If the PUT carried
+// the stored value the form would be wedged: every save 400s on a control the operator cannot
+// reach. What goes out is what is on the screen, and the screen says so in words.
+test('a renewal the gate has revoked is sent as off rather than wedging every save', async () => {
+  const gate = {
+    ...GATE_UNPROVEN,
+    options: [{
+      ...GATE_UNPROVEN.options[0],
+      usable: false,
+      code: 'proof_broken',
+      reason: 'A refresh WAS proven 4m ago, and a refresh has FAILED since (replay_failed).',
+    }],
+  };
+  settingsBody = renewalBody(gate, { enabled: true, token_id: 'tok-1', interval_seconds: 0 });
+  let sent = null;
+  putHandler = (body) => { sent = body; return jsonResponse({ ...renewalBody(gate), saved: true }); };
+
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+  expect(screen.getByText(/no longer permitted, so it is shown off/)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByText('Save'));
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent.settings.session_renewal.enabled).toBe(false);
+  expect(sent.settings.session_renewal.token_id).toBe('tok-1');
+});
+
+// ---------------------------------------------------------------------------------------------
+// TAKING THE PROOF THE GATE DEMANDS
+// ---------------------------------------------------------------------------------------------
+//
+// THE DEFECT THESE PIN. The gate refuses until the framework has performed a refresh and watched a
+// different working credential come back, and nothing in the framework wrote that proof:
+// RecordRefreshProof had no production caller at all. The refusal's own advice, "refresh once from
+// the Session Manager", could not lift it on ANY application, because the Session Manager's
+// refresh records a different event that is not a proof. The control was correct and permanently
+// unreachable.
+
+test('only a refusal a refresh could lift is offered a prove button', () => {
+  const base = GATE_UNPROVEN.options[0];
+
+  // The three a refresh answers.
+  ['never_proven', 'proof_stale', 'proof_broken'].forEach((code) => {
+    const action = renewalProofAction({ ...base, usable: false, code });
+    expect(action).not.toBeNull();
+    expect(action.tokenId).toBe('tok-1');
+    expect(action.what).toMatch(/Replays the recorded login/);
+  });
+
+  // An out-of-scope mint gets NO button. Offering one is offering to do what the engagement
+  // forbids, and the gate's reason stays on screen in its place.
+  expect(renewalProofAction({ ...base, usable: false, code: 'mint_out_of_scope' })).toBeNull();
+  // And the ones a refresh cannot help with.
+  ['no_mechanism_found', 'non_expiring', 'no_credential_value'].forEach((code) => {
+    expect(renewalProofAction({ ...base, usable: false, code })).toBeNull();
+  });
+  // A credential that is already usable is not offered one either.
+  expect(renewalProofAction({ ...base, usable: true, code: 'proven' })).toBeNull();
+  expect(renewalProofAction(null)).toBeNull();
+});
+
+test('the proof sentence is the server answer, and says plainly when nothing was sent', () => {
+  expect(renewalProofSentence(null)).toBe('');
+  const refused = renewalProofSentence({
+    attempted: false,
+    code: 'mint_out_of_scope',
+    detail: 'The linked auth flow would send to sso.vendor.test, which is outside this engagement.',
+  });
+  expect(refused).toContain('NOTHING WAS SENT.');
+  expect(refused).toContain('sso.vendor.test');
+
+  const proven = renewalProofSentence({
+    attempted: true,
+    proven: true,
+    code: 'proven',
+    detail: 'A refresh was performed: a DIFFERENT credential came back (aaaa1111 became bbbb2222).',
+  });
+  expect(proven).toContain('A refresh was performed.');
+  expect(proven).toContain('aaaa1111 became bbbb2222');
+});
+
+test('pressing prove asks the server to take one, and the gate it answers with is what the screen then shows', async () => {
+  settingsBody = renewalBody(GATE_UNPROVEN);
+  let sentBody = null;
+  putHandler = (body) => {
+    sentBody = body;
+    return jsonResponse({
+      ...renewalBody(GATE_PROVEN),
+      saved: true,
+      refresh_proof: {
+        token_id: 'tok-1',
+        code: 'proven',
+        attempted: true,
+        proven: true,
+        mint_hosts: ['login.example.test'],
+        mint_in_scope: true,
+        before_fingerprint: 'aaaa1111',
+        after_fingerprint: 'bbbb2222',
+        detail: 'A refresh was performed: the flow was replayed, a DIFFERENT credential came back (aaaa1111 became bbbb2222), and the target answered differently with it than without it.',
+      },
+    });
+  };
+
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+
+  // Before: refused, and the action that would lift it is on screen beside the reason.
+  expect(screen.getByLabelText('Renew the session automatically during a run')).toBeDisabled();
+  fireEvent.click(screen.getByText('Prove the refresh now'));
+
+  await waitFor(() => expect(document.querySelector('[data-testid="refresh-proof-tok-1"]')).not.toBeNull());
+
+  // The request asked for the proof, named the credential, and carried the document being edited.
+  expect(sentBody.prove_refresh).toEqual({ token_id: 'tok-1' });
+  expect(sentBody.settings).toBeTruthy();
+  expect(sentBody.settings.pacing).toBeTruthy();
+
+  // The outcome is the server sentence, verbatim, with the mint host named.
+  const panel = document.querySelector('[data-testid="refresh-proof-tok-1"]');
+  expect(panel.getAttribute('data-proof-code')).toBe('proven');
+  expect(panel.textContent).toContain('aaaa1111 became bbbb2222');
+  expect(panel.textContent).toContain('login.example.test');
+
+  // And the control the server now permits is available, while the SWITCH IS STILL OFF: a proof
+  // makes renewal available, it does not decide to use it.
+  const toggle = screen.getByLabelText('Renew the session automatically during a run');
+  expect(toggle).not.toBeDisabled();
+  expect(toggle).not.toBeChecked();
+});
+
+test('a refusal to send is reported as a refusal and the control stays unavailable', async () => {
+  settingsBody = renewalBody({
+    ...GATE_UNPROVEN,
+    options: [{ ...GATE_UNPROVEN.options[0], code: 'proof_stale' }],
+  });
+  putHandler = () => jsonResponse({
+    ...renewalBody(GATE_UNPROVEN),
+    saved: true,
+    refresh_proof: {
+      token_id: 'tok-1',
+      code: 'mint_out_of_scope',
+      attempted: false,
+      proven: false,
+      mint_hosts: ['sso.vendor.test'],
+      mint_in_scope: false,
+      detail: 'The linked auth flow "sso login" would send to sso.vendor.test, which is outside this engagement scope, so NOTHING WAS SENT.',
+    },
+  });
+
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Take a fresh proof now'));
+
+  await waitFor(() => expect(document.querySelector('[data-testid="refresh-proof-tok-1"]')).not.toBeNull());
+  const panel = document.querySelector('[data-testid="refresh-proof-tok-1"]');
+  expect(panel.getAttribute('data-proof-code')).toBe('mint_out_of_scope');
+  expect(panel.textContent).toContain('NOTHING WAS SENT');
+  expect(panel.textContent).toContain('OUTSIDE this engagement');
+  expect(screen.getByLabelText('Renew the session automatically during a run')).toBeDisabled();
+});
+
+test('an ordinary save does not ask for a refresh proof', async () => {
+  settingsBody = renewalBody(GATE_PROVEN, { enabled: false, token_id: '', interval_seconds: 0 });
+  let sentBody = null;
+  putHandler = (body) => {
+    sentBody = body;
+    return jsonResponse({ ...renewalBody(GATE_PROVEN), saved: true });
+  };
+
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Save'));
+  await waitFor(() => expect(sentBody).not.toBeNull());
+  expect(sentBody.prove_refresh).toBeUndefined();
+});
+
+// ---------------------------------------------------------------------------------------------
+// FAIL FIRST: round 13
+// ---------------------------------------------------------------------------------------------
+//
+// Measured end to end by the round 12 verifier: pressing the button DOES perform the refresh, a
+// different credential DOES come back and is stored, and the gate still refuses because nothing
+// wrote ProvenAt. The sentence beside the button told the operator the opposite. A button
+// description may say what pressing it DOES; it may not promise what the server will then decide.
+
+test('FAILFIRST D: the prove button does not promise a proof this screen cannot record', () => {
+  const base = GATE_UNPROVEN.options[0];
+  ['never_proven', 'proof_stale', 'proof_broken'].forEach((code) => {
+    const action = renewalProofAction({ ...base, usable: false, code });
+    expect(action.what).toMatch(/Replays the recorded login/);
+    expect(action.what).not.toMatch(/the proof is recorded and this control becomes available/);
+    expect(action.what).not.toMatch(/proof is recorded/);
+  });
+});
+
+test('FAILFIRST D2: an attempt that changed the credential without lifting the gate says so', async () => {
+  settingsBody = renewalBody(GATE_UNPROVEN);
+  putHandler = () => jsonResponse({
+    // The gate comes back UNCHANGED: still refusing, still never_proven.
+    ...renewalBody(GATE_UNPROVEN),
+    saved: true,
+    refresh_proof: {
+      token_id: 'tok-1',
+      code: 'not_proven',
+      attempted: true,
+      proven: false,
+      mint_hosts: ['login.example.test'],
+      mint_in_scope: true,
+      before_fingerprint: 'aaaa1111',
+      after_fingerprint: 'bbbb2222',
+      detail: 'A refresh was performed: the flow was replayed and a DIFFERENT credential came back (aaaa1111 became bbbb2222).',
+    },
+  });
+
+  await openTab('Investigate settings');
+  await waitFor(() => expect(screen.getByText('Session renewal')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Prove the refresh now'));
+  await waitFor(() => expect(document.querySelector('[data-testid="refresh-proof-tok-1"]')).not.toBeNull());
+
+  const panel = document.querySelector('[data-testid="refresh-proof-tok-1"]');
+  expect(panel.getAttribute('data-proof-code')).toBe('not_proven');
+  // The screen must not leave the operator to work out that nothing changed.
+  expect(panel.textContent).toMatch(/NO PROOF WAS RECORDED/);
+  expect(screen.getByLabelText('Renew the session automatically during a run')).toBeDisabled();
+});
+
+test('the button says what it does and does not restate the refusal above it', () => {
+  const action = renewalProofAction({ ...GATE_UNPROVEN.options[0], usable: false, code: 'never_proven' });
+  // What pressing it does, and where the answer lands. Both are facts about this component.
+  expect(action.what).toMatch(/Replays the recorded login/);
+  expect(action.what).toMatch(/asks the server to judge what came back/);
+  expect(action.what).toMatch(/whether or not it counts as a proof/);
+
+  // AND NOT A SECOND COPY OF THE SERVER'S SENTENCE. The gate's refusal is rendered verbatim a few
+  // lines above this button and now names the Session Manager itself; saying it again here put the
+  // same sentence on the screen twice.
+  expect(action.what).not.toMatch(/Session Manager/);
+});
+
+test('a refresh that was performed and not proven does not open with the words of a success', () => {
+  const notProven = renewalProofSentence({
+    attempted: true,
+    proven: false,
+    code: 'not_honoured',
+    detail: 'A DIFFERENT credential came back (aaaa1111 became bbbb2222), but the target did not honour it.',
+  });
+  expect(notProven.startsWith('A refresh was performed.')).toBe(false);
+  expect(notProven).toContain('NO PROOF WAS RECORDED');
+  expect(notProven).toContain('automatic renewal is still refused');
+  // The server's own detail is still there, verbatim and unedited.
+  expect(notProven).toContain('did not honour it');
 });

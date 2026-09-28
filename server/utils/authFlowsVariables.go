@@ -48,11 +48,10 @@ type AuthFlowExtraction struct {
 type ExtractionOutcome struct {
 	Name    string `json:"name"`
 	Matched bool   `json:"matched"`
+	// The captured value in full. A truncated token is a wrong token, so nothing clips this.
 	Value   string `json:"value,omitempty"`
 	Problem string `json:"problem,omitempty"`
 }
-
-const extractionValuePreview = 512
 
 // validateAuthFlowExtraction rejects a rule at save time rather than at replay time, because a rule
 // that cannot work is far cheaper to explain while the operator is still looking at it.
@@ -177,7 +176,11 @@ func runAuthFlowExtractions(rules []AuthFlowExtraction, headers map[string][]str
 		value := decodeExtracted(matched, rule.Decode)
 		values[rule.Name] = value
 		outcome.Matched = true
-		outcome.Value = truncateForPreview(value, extractionValuePreview)
+		// THE WHOLE VALUE, never a preview. This is a token, a CSRF nonce or a session id the
+		// target handed over, and a token reported with its tail cut off is not a shorter
+		// credential, it is a wrong one: it cannot be pasted into a repeater, quoted in a report,
+		// or compared against the one a second account got.
+		outcome.Value = value
 		outcomes = append(outcomes, outcome)
 	}
 

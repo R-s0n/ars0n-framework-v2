@@ -634,15 +634,380 @@ const PayloadEditor = ({ payload, index, vocabulary, check, fieldIndex, onChange
   );
 };
 
+// ---------------------------------------------------------------------------------------------
+// AUTOMATIC SESSION RENEWAL
+// ---------------------------------------------------------------------------------------------
+//
+// THE MEASUREMENT. On the estate this form was built against the bearer is a fifteen minute JWT
+// and a full Investigate run takes twenty nine minutes, so more than half of every authenticated
+// run went out with a credential that had already died. Same endpoint, same minute: the value
+// frozen in attack_vectors.raw_request returned 401 while the one in manual_crawl_captures
+// returned 200.
+//
+// THE RULE THIS SCREEN ENFORCES, WHICH IS THE POINT OF THE FEATURE. The switch may only be
+// offered once the framework has PERFORMED a refresh and watched a different working credential
+// come back. Not a refresh_token field, not a recorded auth flow, not a mint endpoint in the
+// corpus. The server decides that (EvaluateTriageRenewalGate) and sends the answer as
+// renewal_gate; this component never decides it, because a client that computed its own
+// availability would be a second copy of the rule to drift from the one the save endpoint
+// enforces.
+//
+// AND WHY THE REFUSED CONTROL IS STILL DRAWN. A greyed switch with no sentence is the same as no
+// switch: the operator cannot tell whether the feature is broken, not applicable to this target,
+// or one action away. Every refusal here carries the gate's own sentence, which names what would
+// lift it, and every credential the gate refused is listed with its reason rather than dropped
+// off the picker in silence.
+
+// renewalSeconds renders a whole number of seconds the way the gate's own sentences do, so the
+// number beside the switch and the number inside the basis sentence cannot disagree.
+export const renewalSeconds = (n) => `${Math.round(Number(n) || 0)}s`;
+
+// renewalUsableOptions is the subset a credential may be picked from. It is derived from the
+// server's per-credential usable flag and never from a status string read here.
+export const renewalUsableOptions = (gate) => ((gate && gate.options) || []).filter((o) => o.usable);
+
+// renewalGateSentence is what the section says about the target as a whole. An ABSENT gate is its
+// own case and is not folded into "not proven": the server did not answer, which the operator
+// fixes differently from a session that has never been refreshed.
+export const renewalGateSentence = (gate) => {
+  if (!gate || !gate.evaluated) {
+    return 'Whether this session can actually be refreshed could not be checked, so automatic renewal is not offered. An unchecked gate has proven nothing.';
+  }
+  return gate.reason || '';
+};
+
+// renewalForSave is what the PUT must carry, and it exists because THE SCREEN AND THE DOCUMENT
+// HAVE TO AGREE.
+//
+// A document stored with the switch on, whose proof has since broken, renders with the switch OFF
+// and DISABLED, and the server refuses the whole document while it still says on. Sending the
+// stored value back would then wedge the form: every save 400s on a control the operator cannot
+// reach to turn off. So the value that goes out is the one that is on the screen. It is not a
+// silent rewrite: the section says in words that the setting was configured on, is no longer
+// permitted, and will be recorded as off.
+export const renewalForSave = (renewal, gate) => {
+  const r = renewal || {};
+  const stillAllowed = !!renewalUsableOptions(gate).find((o) => o.token_id === r.token_id);
+  return {
+    enabled: !!r.enabled && !!(gate && gate.evaluated && gate.offerable) && stillAllowed,
+    token_id: r.token_id || '',
+    interval_seconds: Number(r.interval_seconds) || 0,
+  };
+};
+
+// renewalWasRevoked is true when the stored document says on and the gate no longer permits it.
+export const renewalWasRevoked = (renewal, gate) => !!(renewal && renewal.enabled)
+  && !renewalForSave(renewal, gate).enabled;
+
+// ---------------------------------------------------------------------------------------------
+// TAKING THE PROOF THE GATE DEMANDS
+// ---------------------------------------------------------------------------------------------
+//
+// THE GATE WAS UNSATISFIABLE. It refuses until the framework has PERFORMED a refresh and watched a
+// different working credential come back, and until this round nothing anywhere in the framework
+// wrote that proof: RecordRefreshProof had no caller at all. So the sentence beside the greyed
+// switch said "refresh once from the Session Manager", and the Session Manager's refresh button
+// records a different event that is not a proof. Following the instruction could not lift the
+// refusal on any application.
+//
+// So the action that lifts it lives here, next to the refusal, and the server takes the proof as
+// part of the same save. It is still the SERVER that decides whether the proof counts; this
+// button only asks.
+//
+// WHICH REFUSALS AN ATTEMPT COULD LIFT. Only the ones a refresh would answer. Offering it against
+// an out-of-scope mint would be offering to do the thing the engagement forbids, and offering it
+// where no mechanism was found, or where the credential has no value, or where it does not expire,
+// would be a button that cannot work with no sentence saying why.
+const RENEWAL_PROVABLE_CODES = new Set(['never_proven', 'proof_stale', 'proof_broken']);
+
+// renewalProofAction says whether a credential may be offered a "prove it now" button, and what
+// the button would do. Null means no button, which is never the same as a disabled one: a control
+// that cannot work is removed and the gate's own reason stays on screen in its place.
+export const renewalProofAction = (option) => {
+  if (!option || option.usable) return null;
+  if (!RENEWAL_PROVABLE_CODES.has(option.code)) return null;
+  return {
+    tokenId: option.token_id,
+    label: option.code === 'never_proven' ? 'Prove the refresh now' : 'Take a fresh proof now',
+    // WHAT IT SAYS IS WHAT PRESSING IT DOES, AND NOTHING ABOUT WHAT THE SERVER WILL THEN DECIDE.
+    //
+    // It used to say "if a DIFFERENT credential comes back and the target honours it, the proof is
+    // recorded and this control becomes available", and the round 12 verifier measured the whole
+    // sequence end to end: the flow was replayed, a different credential DID come back and WAS
+    // stored, the timeline gained a refresh/refreshed row, and the gate still refused because no
+    // proof had been written. The operator was told to press a button to get an outcome that
+    // pressing it did not produce.
+    //
+    // Only the server decides whether a refresh counts as a proof, and it has at least two
+    // outcomes in which a new working-looking credential comes back and no proof is recorded. So
+    // this sentence describes the ACTION and points at where the ANSWER appears. The answer is the
+    // server's own, rendered by renewalProofSentence below, and the gate that comes back with it
+    // is what the switch then obeys.
+    //
+    // IT DELIBERATELY DOES NOT REPEAT THE GATE'S REFUSAL. This file carried a clause saying that
+    // refreshing from the Session Manager takes no proof, because the gate's own refusal, rendered
+    // verbatim above it, used to tell the operator to do exactly that. The refusal now says it
+    // itself (triageSettingsAPI.go:2058: "The Session Manager's Refresh button is not that
+    // control: it replaces the stored value and records no proof"), so the clause here became the
+    // same sentence twice on one screen. The wording belongs to the server and there is one copy
+    // of it.
+    //
+    // IF THAT SERVER STRING EVER STOPS SAYING SO, THIS MUST SAY IT AGAIN, because the instruction
+    // it replaced could not be followed: POST /session-tokens/{id}/refresh writes a refresh event
+    // and calls nothing that takes a proof, and the only caller of the proof recorder outside the
+    // tests is the path this button uses. The clause to restore is: "Refreshing from the Session
+    // Manager does not take this proof: that button replaces the credential and nothing judges the
+    // result."
+    what: option.code === 'never_proven'
+      ? `Replays the recorded login for ${option.name || option.token_id} once and asks the server to judge what came back. What it observed is shown here, whether or not it counts as a proof.`
+      : `Replays the recorded login for ${option.name || option.token_id} once and asks the server to judge what came back, to replace the standing proof with a current one. The old one is on record and no longer describes what happens now.`,
+  };
+};
+
+// renewalProofSentence renders what the server observed. It reads the server's own detail rather
+// than composing one here: a second copy of the wording would drift from the one the gate uses,
+// and this file has no business deciding what counts as proven.
+// THE THREE OUTCOMES ARE THREE, AND THE MIDDLE ONE USED TO LOOK LIKE THE GOOD ONE.
+//
+// attempted and proven      a refresh ran and the server recorded the proof
+// attempted and NOT proven  a refresh ran, real requests were sent, the credential may well have
+//                           been replaced, and NO PROOF EXISTS. The gate still refuses.
+// not attempted             nothing was sent at all
+//
+// The middle one opened with "A refresh was performed." and then the server's detail, and an
+// operator who had just pressed a button labelled "Prove the refresh now" read that as success.
+// The consequence is stated first now, because it is the part that decides what they do next.
+export const renewalProofSentence = (proof) => {
+  if (!proof) return '';
+  const detail = proof.detail || '';
+  if (!proof.attempted) return `NOTHING WAS SENT. ${detail}`.trim();
+  if (proof.proven) return `A refresh was performed. ${detail}`.trim();
+  return `A refresh was performed and NO PROOF WAS RECORDED, so automatic renewal is still refused. ${detail}`.trim();
+};
+
+const SessionRenewalSection = ({ gate, value, onChange, fieldIndex, onProve, proving, proof }) => {
+  const renewal = value || {};
+  const usable = renewalUsableOptions(gate);
+  const offerable = !!(gate && gate.evaluated && gate.offerable && usable.length > 0);
+  const refused = ((gate && gate.options) || []).filter((o) => !o.usable);
+
+  // The credential the controls describe: the stored one while the gate still allows it, and
+  // otherwise the first one it does allow.
+  //
+  // THE PICKER MUST NEVER SHOW A VALUE THAT IS NOT ONE OF ITS OPTIONS. A select whose value
+  // matches no option renders BLANK, and a blank credential picker beside an enabled switch is a
+  // screen that says renewal is configured for nothing. So the picker falls back, the switch does
+  // NOT come on by itself, and the stored credential's refusal is shown in the refused list below
+  // with its own reason.
+  const storedId = renewal.token_id || '';
+  const storedIsUsable = !!usable.find((o) => o.token_id === storedId);
+  const selectedId = storedIsUsable ? storedId : ((usable[0] && usable[0].token_id) || storedId);
+  const selected = ((gate && gate.options) || []).find((o) => o.token_id === selectedId) || null;
+
+  // Stored ON is not ON. The switch only reads as on while the gate still allows the credential
+  // it names, so a proof that broke since takes the control back rather than the setting
+  // outliving the proof.
+  const enabled = offerable && !!renewal.enabled && storedIsUsable;
+
+  return (
+    <div className="mb-3">
+      <div className="text-white mb-2" style={{ fontSize: '0.85rem', fontWeight: 600 }}>Session renewal</div>
+
+      <Form.Check
+        type="switch"
+        id="session-renewal-enabled"
+        className="text-white-50"
+        style={{ fontSize: '0.78rem' }}
+        label="Renew the session automatically during a run"
+        disabled={!offerable}
+        checked={enabled}
+        onChange={(e) => onChange({
+          enabled: e.target.checked,
+          token_id: e.target.checked ? selectedId : (renewal.token_id || ''),
+          interval_seconds: renewal.interval_seconds || 0,
+        })}
+        aria-label="Renew the session automatically during a run"
+      />
+
+      {renewalWasRevoked(renewal, gate) && (
+        <div style={{ fontSize: '0.72rem', color: '#ffc107' }}>
+          This was configured ON and is no longer permitted, so it is shown off and will be
+          recorded off when you next save. Nothing renewed in the meantime: the runner asks the
+          same gate.
+        </div>
+      )}
+
+      {/* What the gate says about the target, refusal or not. */}
+      <div className="text-white-50 mt-1" style={{ fontSize: '0.72rem' }}>
+        {renewalGateSentence(gate)}
+      </div>
+      {gate && gate.run_estimate_basis && (
+        <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
+          Run length used for these comparisons: {gate.run_estimate_basis}.
+        </div>
+      )}
+
+      {/* WHAT THE LAST ATTEMPT OBSERVED. At section level rather than in the refused row, because
+          a successful proof moves the credential OUT of that row and the operator would watch the
+          answer to what they just pressed disappear. */}
+      {proof && (
+        <div
+          data-testid={`refresh-proof-${proof.token_id}`}
+          data-proof-code={proof.code}
+          className="mt-1 px-2 py-1"
+          style={{
+            fontSize: '0.72rem',
+            color: proof.proven ? '#7bc47f' : '#ffc107',
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: '0.25rem',
+          }}
+        >
+          {renewalProofSentence(proof)}
+          {proof.mint_hosts && proof.mint_hosts.length > 0 && (
+            <div className="text-white-50">
+              Mint host(s): {proof.mint_hosts.join(', ')}
+              {proof.mint_in_scope ? ', inside this engagement' : ', OUTSIDE this engagement'}.
+            </div>
+          )}
+        </div>
+      )}
+      <Problems index={fieldIndex} field="session_renewal.enabled" />
+
+      {offerable && (
+        <div className="d-flex gap-3 flex-wrap align-items-start mt-2">
+          <Form.Group style={{ minWidth: '13rem' }}>
+            <Form.Label className="text-white-50 mb-1" style={{ fontSize: '0.78rem' }}>Credential to renew</Form.Label>
+            <Form.Select size="sm" value={selectedId} aria-label="Credential to renew"
+                         onChange={(e) => onChange({ ...renewal, token_id: e.target.value })}>
+              {usable.map((o) => (
+                <option key={o.token_id} value={o.token_id}>
+                  {o.name || o.token_id} ({o.carrier})
+                </option>
+              ))}
+            </Form.Select>
+            {storedId && !storedIsUsable && (
+              <div style={{ fontSize: '0.7rem', color: '#ffc107' }}>
+                The credential this was configured for is no longer available for renewal, so it
+                is listed below with the reason instead of being selected here.
+              </div>
+            )}
+            <Problems index={fieldIndex} field="session_renewal.token_id" />
+          </Form.Group>
+          <div style={{ minWidth: '11rem' }}>
+            <NumberField
+              label="Renew every (seconds)"
+              field="session_renewal.interval_seconds"
+              value={renewal.interval_seconds || 0}
+              index={fieldIndex}
+              onChange={(v) => onChange({ ...renewal, interval_seconds: v })}
+              help="Zero uses the interval derived from the measured lifetime."
+            />
+          </div>
+        </div>
+      )}
+
+      {/* THE MEASUREMENT, AT THE POINT OF CONFIGURATION. The lifetime, where it came from, the
+          interval derived from it, and whether the credential would have lasted the run without
+          any of this. A number with no provenance beside it is the defect this whole layer was
+          built to stop. */}
+      {selected && selected.usable && (
+        <div className="mt-2 px-2 py-2" style={{ border: '1px solid rgba(255,255,255,0.08)', borderRadius: '0.25rem' }}>
+          <div className="text-white" style={{ fontSize: '0.78rem' }}>
+            {selected.name || selected.token_id}
+            <span className="text-white-50"> ({selected.carrier}{selected.kind ? `, ${selected.kind}` : ''})</span>
+          </div>
+          <div style={{ fontSize: '0.72rem' }}>
+            <span className="text-white-50">Measured lifetime: </span>
+            <span style={{ color: selected.ttl_known ? '#7bc47f' : '#ffc107' }}>{selected.ttl_display}</span>
+          </div>
+          {selected.survives_why && (
+            <div className="text-white-50" style={{ fontSize: '0.72rem' }}>
+              {selected.survives_known
+                ? `Without renewal: ${selected.survives_why}.`
+                : `Whether it would last the run is UNKNOWN: ${selected.survives_why}.`}
+            </div>
+          )}
+          <div style={{ fontSize: '0.72rem' }}>
+            {(renewal.interval_seconds || 0) > 0 ? (
+              <span className="text-white-50">
+                Renewing every {renewalSeconds(renewal.interval_seconds)}, the interval you set rather than one derived from a measurement.
+              </span>
+            ) : selected.interval_known ? (
+              <span className="text-white-50">
+                Renewing every {renewalSeconds(selected.interval_seconds)}: {selected.interval_basis}.
+              </span>
+            ) : (
+              <span style={{ color: '#ffc107' }}>
+                No interval can be derived: {selected.interval_basis}. Type one above and it is recorded as your figure.
+              </span>
+            )}
+          </div>
+          {selected.proof_window_basis && (
+            <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
+              Refresh proof: {selected.reason}
+            </div>
+          )}
+          {(selected.warnings || []).map((wmsg, i) => (
+            <div key={`renewal-warn-${i}`} style={{ fontSize: '0.7rem', color: '#ffc107' }}>{wmsg}</div>
+          ))}
+        </div>
+      )}
+
+      {/* The credentials the gate refused. Listed, not hidden: a credential missing from the
+          picker with no reason reads as an oversight, and the two are the same pixel. */}
+      {refused.length > 0 && (
+        <div className="mt-2">
+          <div className="text-white-50" style={{ fontSize: '0.72rem' }}>
+            Not available for renewal:
+          </div>
+          {refused.map((o) => (
+            <div key={o.token_id} className="px-2 py-1" style={{ fontSize: '0.7rem', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+              <span className="text-white">{o.name || o.token_id}</span>{' '}
+              <span className="text-white-50">({o.carrier}) lifetime {o.ttl_display}</span>
+              <div style={{ color: '#ffc107' }}>{o.reason}</div>
+              {/* THE ACTION THAT LIFTS THE REFUSAL, beside the refusal. Only where a refresh is
+                  the thing that would lift it: an out-of-scope mint gets the reason and no
+                  button, because the button would be an offer to do what scope forbids. */}
+              {renewalProofAction(o) && (
+                <div className="mt-1">
+                  <Button
+                    size="sm"
+                    variant="outline-danger"
+                    style={{ fontSize: '0.7rem', padding: '0.1rem 0.5rem' }}
+                    disabled={!!proving}
+                    onClick={() => onProve && onProve(o.token_id)}
+                  >
+                    {proving === o.token_id ? 'Refreshing...' : renewalProofAction(o).label}
+                  </Button>
+                  <div className="text-white-50 mt-1">{renewalProofAction(o).what}</div>
+                </div>
+              )}
+              {(o.warnings || []).map((wmsg, i) => (
+                <div key={`refused-warn-${o.token_id}-${i}`} className="text-white-50">{wmsg}</div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const InvestigateSettings = ({ targetId, onEnabledCount, registerSave }) => {
   const [cfg, setCfg] = useState(null);
   const [vocabulary, setVocabulary] = useState(null);
   const [validation, setValidation] = useState(null);
   const [retired, setRetired] = useState([]);
+  const [renewalGate, setRenewalGate] = useState(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
+  // Which credential a refresh is being performed for right now, and what the last one observed.
+  // The outcome is the SERVER's, rendered verbatim: this file does not decide what counts as
+  // proven, and a second copy of that rule here would be a second rule to drift.
+  const [proving, setProving] = useState('');
+  const [refreshProof, setRefreshProof] = useState(null);
 
   const load = useCallback(async () => {
     if (!targetId) return;
@@ -659,6 +1024,11 @@ export const InvestigateSettings = ({ targetId, onEnabledCount, registerSave }) 
       setVocabulary(body.vocabulary || null);
       setValidation(body.validation || null);
       setRetired(body.retired_classes || []);
+      // The gate is the server's answer to "has this session ever actually been refreshed". It
+      // is re-read on every load and never cached across targets: a proof that has since broken
+      // has to take the control away by itself, and a stale copy here would be the very thing
+      // the gate refuses.
+      setRenewalGate(body.renewal_gate || null);
     } catch (err) {
       setError(`Could not load the Investigate settings: ${err.message}`);
     } finally {
@@ -667,6 +1037,44 @@ export const InvestigateSettings = ({ targetId, onEnabledCount, registerSave }) 
   }, [targetId]);
 
   useEffect(() => { load(); }, [load]);
+
+  // THE ONE ACTION THAT CAN MAKE RENEWAL AVAILABLE. It sends the document the form is holding
+  // along with the request for a proof, because the server evaluates the gate against the stored
+  // pacing and the proof in the same request: two calls would grade the proof against a run
+  // length that was not the one on screen.
+  //
+  // THE SWITCH IS NOT TURNED ON BY THIS. A proof makes the control available; whether to use it is
+  // still the operator's decision and still a separate save. A button that armed a renewal because
+  // the operator pressed "prove it" would be the screen deciding for them.
+  const proveRefresh = useCallback(async (tokenId) => {
+    if (!cfg || !tokenId) return;
+    setProving(tokenId);
+    setError('');
+    setRefreshProof(null);
+    try {
+      const res = await fetch(`/api/triage/${targetId}/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          settings: { ...cfg, session_renewal: renewalForSave(cfg.session_renewal, renewalGate) },
+          prove_refresh: { token_id: tokenId },
+        }),
+      });
+      const body = await res.json().catch(() => null);
+      // A proof that was taken is reported whether or not the document saved: the refresh really
+      // happened and the operator has to be told what it observed either way.
+      if (body && body.refresh_proof) setRefreshProof(body.refresh_proof);
+      if (body && body.renewal_gate) setRenewalGate(body.renewal_gate);
+      if (body && body.validation) setValidation(body.validation);
+      if (!res.ok && !(body && body.refresh_proof)) {
+        setError((body && (body.message || body.error)) || `The refresh could not be attempted (HTTP ${res.status}).`);
+      }
+    } catch (err) {
+      setError(`The refresh could not be attempted: ${err.message}`);
+    } finally {
+      setProving('');
+    }
+  }, [cfg, targetId, renewalGate]);
 
   const save = useCallback(async () => {
     if (!cfg) return;
@@ -677,26 +1085,32 @@ export const InvestigateSettings = ({ targetId, onEnabledCount, registerSave }) 
       const res = await fetch(`/api/triage/${targetId}/settings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings: cfg }),
+        // The renewal setting goes out as it is RENDERED, not as it was stored. See
+        // renewalForSave: a proof that broke since would otherwise wedge the form.
+        body: JSON.stringify({
+          settings: { ...cfg, session_renewal: renewalForSave(cfg.session_renewal, renewalGate) },
+        }),
       });
       const body = await res.json().catch(() => null);
       if (!res.ok) {
         // Nothing was written. The typed document is kept so the operator can fix the field the
         // server named rather than losing the edit and starting again.
         setValidation((body && body.validation) || null);
+        if (body && body.renewal_gate) setRenewalGate(body.renewal_gate);
         setError((body && (body.message || body.error)) || `The settings were refused (HTTP ${res.status}).`);
         return;
       }
       setCfg(body.settings || cfg);
       setValidation(body.validation || null);
       setRetired(body.retired_classes || []);
+      setRenewalGate(body.renewal_gate || null);
       setSaved(true);
     } catch (err) {
       setError(`Could not save the Investigate settings: ${err.message}`);
     } finally {
       setSaving(false);
     }
-  }, [cfg, targetId]);
+  }, [cfg, targetId, renewalGate]);
 
   useEffect(() => { if (registerSave) registerSave({ save, saving, ready: !!cfg }); }, [registerSave, save, saving, cfg]);
 
@@ -724,6 +1138,14 @@ export const InvestigateSettings = ({ targetId, onEnabledCount, registerSave }) 
   });
   const setPacing = (patch) => setCfg({ ...cfg, pacing: { ...cfg.pacing, ...patch } });
   const setOOB = (patch) => setCfg({ ...cfg, oob: { ...cfg.oob, ...patch } });
+  const setRenewal = (next) => setCfg({
+    ...cfg,
+    session_renewal: {
+      enabled: !!next.enabled,
+      token_id: next.token_id || '',
+      interval_seconds: Number(next.interval_seconds) || 0,
+    },
+  });
   const payloads = cfg.custom_payloads || [];
   const setPayloads = (next) => setCfg({ ...cfg, custom_payloads: next });
 
@@ -880,6 +1302,16 @@ export const InvestigateSettings = ({ targetId, onEnabledCount, registerSave }) 
         />
         <Problems index={fieldIndex} field="pacing.respect_target_budget" />
       </div>
+
+      <SessionRenewalSection
+        gate={renewalGate}
+        value={cfg.session_renewal}
+        onChange={setRenewal}
+        fieldIndex={fieldIndex}
+        onProve={proveRefresh}
+        proving={proving}
+        proof={refreshProof}
+      />
 
       <div className="mb-3">
         <div className="text-white mb-2" style={{ fontSize: '0.85rem', fontWeight: 600 }}>Out-of-band callbacks</div>

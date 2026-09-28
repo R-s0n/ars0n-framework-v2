@@ -553,28 +553,17 @@ const ExploreAttackSurfaceModal = ({
 
         if (dnsRecords.length > 0) {
           const maxWidth = asset.asset_type === 'fqdn' ? '400px' : (asset.asset_type === 'cloud_asset' ? '350px' : '300px');
-          const maxRecords = asset.asset_type === 'fqdn' ? 8 : (asset.asset_type === 'cloud_asset' ? 3 : 5);
-          
+
+          // Every record, whole. An SPF or DKIM record is long precisely where it is interesting:
+          // the include: chain that names a forgotten third party sits at the end of the string,
+          // and a row cap drops whole record types without saying which. The cell scrolls instead.
           return (
-            <div style={{ maxWidth }}>
-              {dnsRecords.slice(0, maxRecords).map((record, index) => {
-                // Truncate long values (especially for SPF, DMARC, DKIM)
-                const isLongRecord = ['SPF', 'DMARC', 'DKIM', 'TXT'].includes(record.type);
-                const displayValue = isLongRecord && record.value.length > 50 
-                  ? record.value.substring(0, 50) + '...' 
-                  : record.value;
-                
-                return (
-                  <div key={index} className={`small ${record.color}`} title={record.value}>
-                    <strong>{record.type}:</strong> {displayValue}
-                  </div>
-                );
-              })}
-              {dnsRecords.length > maxRecords && (
-                <div className="small text-muted">
-                  +{dnsRecords.length - maxRecords} more records
+            <div style={{ maxWidth, maxHeight: '220px', overflowY: 'auto' }}>
+              {dnsRecords.map((record, index) => (
+                <div key={index} className={`small ${record.color}`} style={{ wordBreak: 'break-all' }}>
+                  <strong>{record.type}:</strong> {record.value}
                 </div>
-              )}
+              ))}
             </div>
           );
         }

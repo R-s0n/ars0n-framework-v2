@@ -653,7 +653,7 @@ const EndpointAccordion = ({ endpoints, getMethodBadgeColor, getStatusBadgeColor
               </div>
               <div style={{ flex: '0 0 120px' }} className="text-end">
                 {endpoint.status_codes && endpoint.status_codes.length > 0 ? (
-                  endpoint.status_codes.slice(0, 2).map((code, idx) => (
+                  endpoint.status_codes.map((code, idx) => (
                     <Badge key={idx} bg={getStatusBadgeColor(code)} className="me-1">
                       {code}
                     </Badge>
@@ -802,17 +802,19 @@ const EndpointAccordion = ({ endpoints, getMethodBadgeColor, getStatusBadgeColor
                           <td><code className="text-white">{param.param_name}</code></td>
                           <td>
                             <small>
+                              {/* Every observed value, whole. These are what the target actually
+                                  accepted for this parameter, so they are the material a test is
+                                  built from: an id to swap, a token to replay, a path to traverse.
+                                  A shortened value is a value that cannot be pasted anywhere. */}
                               {param.example_values && param.example_values.length > 0 ? (
-                                param.example_values.slice(0, 3).map((val, vidx) => (
-                                  <Badge key={vidx} bg="secondary" className="me-1 mb-1">
-                                    {val.length > 30 ? val.substring(0, 30) + '...' : val}
+                                param.example_values.map((val, vidx) => (
+                                  <Badge key={vidx} bg="secondary" className="me-1 mb-1 text-break"
+                                         style={{ whiteSpace: 'normal', textAlign: 'left' }}>
+                                    {val}
                                   </Badge>
                                 ))
                               ) : (
                                 <span className="text-muted">No examples</span>
-                              )}
-                              {param.example_values && param.example_values.length > 3 && (
-                                <Badge bg="danger" className="ms-1">+{param.example_values.length - 3} more</Badge>
                               )}
                             </small>
                           </td>
@@ -850,7 +852,9 @@ const EndpointAccordion = ({ endpoints, getMethodBadgeColor, getStatusBadgeColor
                         <div className="mb-1"><small><strong>HSTS:</strong> {investigation.security_headers.strict_transport_security}</small></div>
                       )}
                       {investigation.security_headers.content_security_policy && (
-                        <div className="mb-1"><small><strong>CSP:</strong> {investigation.security_headers.content_security_policy.substring(0, 100)}...</small></div>
+                        <div className="mb-1" style={{ wordBreak: 'break-all' }}>
+                          <small><strong>CSP:</strong> {investigation.security_headers.content_security_policy}</small>
+                        </div>
                       )}
                       {investigation.security_headers.x_frame_options && (
                         <div className="mb-1"><small><strong>X-Frame-Options:</strong> {investigation.security_headers.x_frame_options}</small></div>
@@ -965,14 +969,11 @@ const EndpointAccordion = ({ endpoints, getMethodBadgeColor, getStatusBadgeColor
                   <div className="mb-3">
                     <strong className="text-danger">Input Fields ({investigation.input_fields.length}):</strong>
                     <div className="mt-2" style={{ maxHeight: '150px', overflowY: 'auto' }}>
-                      {investigation.input_fields.slice(0, 10).map((field, idx) => (
+                      {investigation.input_fields.map((field, idx) => (
                         <Badge key={idx} bg="secondary" className="me-1 mb-1">
                           {field.name} ({field.type})
                         </Badge>
                       ))}
-                      {investigation.input_fields.length > 10 && (
-                        <Badge bg="danger">+{investigation.input_fields.length - 10} more</Badge>
-                      )}
                     </div>
                   </div>
                 )}
@@ -981,14 +982,14 @@ const EndpointAccordion = ({ endpoints, getMethodBadgeColor, getStatusBadgeColor
                   <div className="mb-3">
                     <strong className="text-danger">Comments Found ({investigation.comments.length}):</strong>
                     <div className="mt-2" style={{ maxHeight: '150px', overflowY: 'auto' }}>
-                      {investigation.comments.slice(0, 5).map((comment, idx) => (
+                      {/* All of them. A source comment is where a developer names an internal
+                          host, a disabled check or a credential, and the one worth reading is as
+                          likely to be the fortieth as the first. */}
+                      {investigation.comments.map((comment, idx) => (
                         <div key={idx} className="mb-1">
-                          <small className="text-muted">{comment}</small>
+                          <small className="text-muted" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{comment}</small>
                         </div>
                       ))}
-                      {investigation.comments.length > 5 && (
-                        <Badge bg="danger">+{investigation.comments.length - 5} more</Badge>
-                      )}
                     </div>
                   </div>
                 )}

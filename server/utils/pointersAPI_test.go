@@ -135,7 +135,7 @@ func TestAnUnmappedToolStillGetsAClass(t *testing.T) {
 		t.Error("UNCLASSIFIED has no label, so the operator sees a bare token")
 	}
 	// And it still names a next step, even if that step is a hand review.
-	_, reason := pointerNextTool(got)
+	_, reason := pointerNextTool(got, nil)
 	if strings.TrimSpace(reason) == "" {
 		t.Error("an unclassified pointer names no next move at all")
 	}
@@ -150,7 +150,7 @@ func TestDalfoxIsSplitByKind(t *testing.T) {
 	if got := pointerClassForFinding("dalfox", "V"); got != triage.ClassXSSReflected.String() {
 		t.Errorf("dalfox V should be reflected XSS, got %q", got)
 	}
-	if tool, _ := pointerNextTool(triage.ClassXSSDOM.String()); tool != "domdig" {
+	if tool, _ := pointerNextTool(triage.ClassXSSDOM.String(), nil); tool != "domdig" {
 		t.Errorf("a DOM pointer should point at the browser tool, got %q", tool)
 	}
 }
@@ -166,7 +166,7 @@ func TestEveryMappedClassHasALabelAndANextStep(t *testing.T) {
 		if strings.TrimSpace(pointerClassLabels[class]) == "" {
 			t.Errorf("class %s has no label", class)
 		}
-		tool, reason := pointerNextTool(class)
+		tool, reason := pointerNextTool(class, nil)
 		if strings.TrimSpace(reason) == "" {
 			t.Errorf("class %s names no next step", class)
 		}
@@ -623,7 +623,7 @@ func TestNoEmdashesInTheOperatorFacingText(t *testing.T) {
 		text = append(text, pointerStrengthWhy(rank))
 	}
 	for class := range pointerClassLabels {
-		_, reason := pointerNextTool(class)
+		_, reason := pointerNextTool(class, nil)
 		text = append(text, reason)
 		text = append(text, pointerPossibleAttacks(class, false)...)
 		text = append(text, pointerPossibleAttacks(class, true)...)
@@ -921,4 +921,94 @@ func TestTriageVerdictsBecomePointersOnTheOracle(t *testing.T) {
 		t.Logf("pointers by source: %v", counts["by_source"])
 	}
 	t.Logf("headline: %v", body["coverage"].(map[string]any)["headline"])
+}
+
+// ---------------------------------------------------------------------------------------------
+// A POINTER FROM A CLASS NOBODY ADDED TO THE SWITCH
+// ---------------------------------------------------------------------------------------------
+
+// EVERY CLASS THAT CAN FIRE HAS TO NAME A LABEL AND A NEXT STEP, AND THE LIST OF THEM IS THE
+// REGISTRY, NOT A LIST IN THIS FILE.
+//
+// pointerNextTool was a hardcoded switch written when the triage layer shipped ten classes. It
+// now ships nineteen, and CRLF, DESER, CORS, HOSTHDR, HPP and ORM-LEAK were none of the ten. Each
+// of them reaches the default arm, so the first positive any of them produces renders a pointer
+// card with no next step on it at all, and pointerClassLabel falls through to the bare token, so
+// the operator reads "ORM-LEAK" with nothing under it.
+//
+// The registry is the only list that cannot go stale, so the test walks it.
+func TestEveryRegisteredTriageClassNamesALabelAndANextStep(t *testing.T) {
+	for id := range triage.RegisteredClassifiers() {
+		if TriageClassIsReserved(id) {
+			continue
+		}
+		class := id.String()
+		if pointerClassLabel(class) == class {
+			t.Errorf("class %s has no label, so its pointer card shows a bare token", class)
+		}
+		tool, reason := pointerNextTool(class, nil)
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("class %s names no next step, so its pointer card is a sentence and not an instruction", class)
+		}
+		if tool == "" && !strings.Contains(strings.ToLower(reason), "hand review") &&
+			!strings.Contains(strings.ToLower(reason), "reading it") {
+			t.Errorf("class %s names no tool and does not say why: %q", class, reason)
+		}
+	}
+}
+
+// ORM-LEAK'S HONEST ANSWER IS THAT THERE IS NO TOOL, and the answer has to survive the rule that a
+// next step is never blank. No container in this framework detects an ORM keyword leak; the class
+// says so itself, in its own label hints. A card that invented a scanner here would send the
+// operator to spend an hour on a tool that cannot see the bug.
+func TestORMLeakSaysThereIsNoToolRatherThanNamingOne(t *testing.T) {
+	tool, reason := pointerNextTool(triage.ClassORMLeak.String(), nil)
+	if tool != "" {
+		t.Errorf("ORM-LEAK was pointed at %q; no container in this framework detects an ORM keyword leak", tool)
+	}
+	if !strings.Contains(strings.ToLower(reason), "hand review") {
+		t.Errorf("ORM-LEAK's next step does not say it is manual: %q", reason)
+	}
+	if strings.TrimSpace(reason) == pointerNoToolReason {
+		t.Error("ORM-LEAK fell through to the generic no-tool sentence, which says nothing about what to actually do with the leak")
+	}
+}
+
+// THE CLASS'S OWN LABEL OUTRANKS THE SWITCH. TriageLabel.Tools is what the classifier hands to the
+// expensive scanner, decided per verdict from what that verdict actually saw, and the switch is a
+// static guess made once per class. When the verdict names a tool, that is the tool.
+func TestTheVerdictsOwnLabelNamesTheNextTool(t *testing.T) {
+	tool, reason := pointerNextTool(triage.ClassSSTI.String(), []string{"tinja", "sstimap"})
+	if tool != "tinja" {
+		t.Errorf("the verdict named tinja first and the card pointed at %q instead", tool)
+	}
+	if !strings.Contains(reason, "sstimap") {
+		t.Errorf("the rest of the verdict's own tool list was dropped: %q", reason)
+	}
+
+	// AN EMPTY LIST IS NOT AN ANSWER, it is a class that declared nothing, so the switch still
+	// answers. HPP and DESER both declare an empty or nil Tools on every verdict they emit.
+	if tool, _ := pointerNextTool(triage.ClassXSSDOM.String(), []string{}); tool != "domdig" {
+		t.Errorf("an empty tool list overrode the switch and produced %q", tool)
+	}
+	if tool, _ := pointerNextTool(triage.ClassXSSDOM.String(), []string{"  "}); tool != "domdig" {
+		t.Errorf("a blank tool name overrode the switch and produced %q", tool)
+	}
+}
+
+// The label comes out of a JSONB column and is decoded on the path that renders every pointer of
+// every run, so a row nobody can parse must cost that row's nuance and nothing else.
+func TestAMalformedVerdictLabelCostsTheNuanceAndNotThePointer(t *testing.T) {
+	if got := triagePointerLabelTools(`{"Tools":["ghauri","sqlmap"]}`); len(got) != 2 || got[0] != "ghauri" {
+		t.Errorf("a well formed label did not yield its tools: %v", got)
+	}
+	for _, bad := range []string{"", "   ", "{", "null", "[]", `{"Tools":"sqlmap"}`} {
+		if got := triagePointerLabelTools(bad); len(got) != 0 {
+			t.Errorf("label %q yielded %v, want nothing", bad, got)
+		}
+		tool, reason := pointerNextTool(triage.ClassSQL.String(), triagePointerLabelTools(bad))
+		if tool != "sqlmap" || strings.TrimSpace(reason) == "" {
+			t.Errorf("label %q lost the pointer's next step entirely: tool %q reason %q", bad, tool, reason)
+		}
+	}
 }

@@ -1176,6 +1176,14 @@ func eliSpecs(reqs []triage.ProbeRequest) []triage.ProbeID {
 // to name the routes that would fix it.
 func TestTheOracleCasesDeclareAPositiveAndANegativeAndNameWhatIsMissing(t *testing.T) {
 	cases := (eliClassifier{}).OracleCases()
+	// built is every route this class declares that the canary oracle actually serves, read off
+	// docker/oracle/main.go's registerELIControls and confirmed by the 80-route exam answering on
+	// each one. It is a pinned list because this package cannot reach the oracle.
+	built := map[string]bool{
+		"/eli": true, "/eli/spel": true, "/eli/ognl": true, "/eli/longmath": true,
+		"/eli/hardened": true, "/eli/echo": true, "/eli/devmode": true, "/eli/blind": true,
+		"/ssti": true, "/clean/echo": true, "/clean/dberror": true, "/clean/waf": true,
+	}
 	var pos, neg, missing int
 	for _, c := range cases {
 		switch c.Expect {
@@ -1202,10 +1210,26 @@ func TestTheOracleCasesDeclareAPositiveAndANegativeAndNameWhatIsMissing(t *testi
 	if neg == 0 {
 		t.Error("no negative oracle route is declared, and the silent route is the one that actually tests a detector")
 	}
-	if missing == 0 {
-		t.Error("nothing is marked MISSING, but CATALOGUE 6.1 records that this class has no positive control in the rig today. Hiding that makes the gap invisible to the oracle pass")
+	// THE OLD ASSERTION WAS "at least one route must be marked MISSING", on the premise that this
+	// class has no positive control in the rig. THAT PREMISE EXPIRED. /eli, /eli/spel, /eli/ognl,
+	// /eli/blind, /eli/longmath, /eli/hardened, /eli/echo and /eli/devmode are all served by the
+	// canary oracle and all of them answered on the 80-route exam, and four of the notes above
+	// went on reading "MISSING AND REQUIRED" for a round after the routes were built. A test that
+	// demands a gap be declared keeps the stale declaration alive, which is the opposite of what
+	// it was for.
+	//
+	// So the assertion inverts: a route this rig HAS is not allowed to be advertised as a gap. A
+	// genuine gap is still welcome and still counted, and the log still prints it.
+	for route := range built {
+		for _, c := range cases {
+			if c.Route == route && strings.Contains(c.Why, "MISSING") {
+				t.Errorf("route %s is served by the canary oracle and answered on the 80-route exam, and its note still "+
+					"advertises it as MISSING. A declaration that names a built route as a gap sends the oracle pass to "+
+					"build something that is already there, and hides that the route was measured", route)
+			}
+		}
 	}
-	t.Logf("declared %d positive and %d negative oracle routes, %d of which do not exist yet", pos, neg, missing)
+	t.Logf("declared %d positive and %d negative oracle routes, %d of them still marked as gaps", pos, neg, missing)
 }
 
 // TestEveryConfirmerAndEvidencerPointsAtADeclaredProbeAndANamedOracle.
@@ -1285,5 +1309,458 @@ func TestNoPayloadInThisClassIsDestructive(t *testing.T) {
 		if p.ID == eliProbeJVM && p.Tier != triage.TierOptIn {
 			t.Errorf("the java.version read is tier %q; it reads a system property and belongs behind the operator's choice", p.Tier)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE PARSE DIFFERENTIAL: THE ARM THAT CONCLUDES WITHOUT GETTING ANYTHING BACK
+// ---------------------------------------------------------------------------------------------
+
+// eliParseObs builds one of this class's own responses in the shape the parse arm reads. The arm
+// reads Proj.NormBody and nothing else, so a fixture that leaves it nil is one the arm correctly
+// refuses, and every case below fills it on purpose.
+func eliParseObs(id triage.ProbeID, status int, norm string) eliOwn {
+	return eliOwn{
+		Probe: id, Ordinal: 2, Marker: "zqjt1a2000002je2",
+		Obs: triage.Observation{
+			ObsID: string(id), RunID: "eli-parse", Status: status, Kind: triage.ObsProbe,
+			Class: triage.ClassELI, Body: []byte(norm), BodyLen: len(norm),
+			Proj:    triage.Projections{NormBody: []byte(norm)},
+			Payload: triage.PayloadWire{Wire: []byte(id), Survived: triage.WireSurvivalEncoded},
+		},
+	}
+}
+
+// eliParseSet is a whole arm's worth of responses, all identical, which is what a route with no
+// EL container returns. Cases move only the probes they mean to.
+func eliParseSet(body string) []eliOwn {
+	var out []eliOwn
+	for _, id := range []triage.ProbeID{
+		eliProbeEBN1, eliProbeEBN2, eliProbeEB1, eliProbeEB2, eliProbeEB3, eliProbeEB4,
+	} {
+		out = append(out, eliParseObs(id, 200, body))
+	}
+	return out
+}
+
+func eliParseReplace(set []eliOwn, id triage.ProbeID, status int, norm string) []eliOwn {
+	for i := range set {
+		if set[i].Probe == id {
+			set[i] = eliParseObs(id, status, norm)
+		}
+	}
+	return set
+}
+
+// THE POSITIVE, AND IT IS THE WHOLE POINT OF THE ARM: nothing came back. No marker in the
+// response, no -494967296, no qm7vbn7w, no exception text. Only the fact that the route answered
+// an expression that parses differently from one that does not, in both delimiters.
+func TestTheParseDifferentialConcludesWithNothingComingBack(t *testing.T) {
+	set := eliParseSet(`{"status":"error","code":500}`)
+	set = eliParseReplace(set, eliProbeEB1, 200, `{"status":"ok"}`)
+	set = eliParseReplace(set, eliProbeEB3, 200, `{"status":"ok"}`)
+	// EB2 and EB4, which do not parse, keep the generic error document. Note what is NOT in it:
+	// no dialect name, no stack trace, no marker, nothing el_error could have read.
+	got := eliParseDifferential(set, true, false, "")
+	if got.Outcome != eliParseSeparated {
+		t.Fatalf("the parse arm did not fire on a route that answers 200 to both parsing expressions and 500 "+
+			"to both broken ones: %+v", got)
+	}
+	if !strings.Contains(got.Why, "proves a parser") {
+		t.Errorf("the reason %q does not cap the claim. A parse differential proves a parser and says nothing "+
+			"about evaluation, and a row that does not say so will be read as proof of evaluation", got.Why)
+	}
+}
+
+// ONE DELIMITER IS NOT ENOUGH. Most routes with a validator in front of them answer two different
+// strings differently, and a one-pair rule would fire on all of them.
+func TestTheParseDifferentialRefusesOneDelimiterAlone(t *testing.T) {
+	set := eliParseSet(`{"status":"ok"}`)
+	set = eliParseReplace(set, eliProbeEB1, 200, `{"status":"ok","extra":1}`)
+	got := eliParseDifferential(set, true, false, "")
+	if got.Outcome != eliParseSilent {
+		t.Errorf("got %+v: only the dollar-brace pair separated, so the arm must stay silent, and it must be "+
+			"SILENT rather than not-run because every precondition held", got)
+	}
+}
+
+// And the two pairs have to agree on direction.
+func TestTheParseDifferentialRefusesTwoPairsThatDisagree(t *testing.T) {
+	set := eliParseSet(`{"status":"ok"}`)
+	set = eliParseReplace(set, eliProbeEB1, 200, `{"status":"ok","extra":1}`) // parses LARGER
+	set = eliParseReplace(set, eliProbeEB4, 200, `{"status":"ok","extra":1}`) // broken LARGER
+	if got := eliParseDifferential(set, true, false, ""); got.Outcome == eliParseSeparated {
+		t.Errorf("got %+v: the two delimiters moved opposite ways, which is an endpoint being arbitrary and "+
+			"not a container parsing", got)
+	}
+}
+
+// THE LENGTH CONTROL. On an endpoint whose response length follows its input length, every pair
+// separates for that reason, so the arm must disable itself rather than report.
+func TestTheParseDifferentialDisablesItselfOnALengthSensitiveEndpoint(t *testing.T) {
+	set := eliParseSet(`{"status":"ok"}`)
+	set = eliParseReplace(set, eliProbeEBN1, 200, `{"echo":"kwm4ve7p2n"}`)
+	set = eliParseReplace(set, eliProbeEBN2, 200, `{"echo":"kwm4ve7p2nx3rd806q"}`)
+	set = eliParseReplace(set, eliProbeEB1, 200, `{"status":"ok","extra":1}`)
+	set = eliParseReplace(set, eliProbeEB3, 200, `{"status":"ok","extra":1}`)
+	got := eliParseDifferential(set, true, false, "")
+	if got.Outcome != eliParseNotRun || !strings.Contains(got.Why, "length_sensitive_endpoint") {
+		t.Errorf("got %+v: the inert controls are eight bytes apart and moved apart, so this endpoint tracks "+
+			"input length and a pair differential on it measures the same thing", got)
+	}
+}
+
+// The noise model is not optional, and neither is a normalised body.
+func TestTheParseDifferentialRefusesToRunWithoutItsPreconditions(t *testing.T) {
+	fire := func() []eliOwn {
+		set := eliParseSet(`{"status":"error"}`)
+		set = eliParseReplace(set, eliProbeEB1, 200, `{"status":"ok"}`)
+		set = eliParseReplace(set, eliProbeEB3, 200, `{"status":"ok"}`)
+		return set
+	}
+	t.Run("no stability gate", func(t *testing.T) {
+		got := eliParseDifferential(fire(), false, false, "too_volatile")
+		if got.Outcome != eliParseNotRun || !strings.Contains(got.Why, "too_volatile") {
+			t.Errorf("got %+v: a differential on an endpoint that differs from itself produces one for free", got)
+		}
+	})
+	t.Run("a degraded comparison", func(t *testing.T) {
+		got := eliParseDifferential(fire(), true, true, "")
+		if got.Outcome != eliParseNotRun || !strings.Contains(got.Why, "comparison_degraded") {
+			t.Errorf("got %+v", got)
+		}
+	})
+	t.Run("a probe with no normalised body", func(t *testing.T) {
+		set := fire()
+		for i := range set {
+			if set[i].Probe == eliProbeEB3 {
+				set[i].Obs.Proj.NormBody = nil
+			}
+		}
+		got := eliParseDifferential(set, true, false, "")
+		if got.Outcome != eliParseNotRun || !strings.Contains(got.Why, "pair_incomplete") {
+			t.Errorf("got %+v: the raw body carries this class's marker on every probe, so comparing raw "+
+				"lengths would separate any two probes by the marker alone", got)
+		}
+	})
+	t.Run("the length control never came back", func(t *testing.T) {
+		var set []eliOwn
+		for _, o := range fire() {
+			if o.Probe == eliProbeEBN2 {
+				continue
+			}
+			set = append(set, o)
+		}
+		got := eliParseDifferential(set, true, false, "")
+		if got.Outcome != eliParseNotRun || !strings.Contains(got.Why, "length_control_not_measured") {
+			t.Errorf("got %+v: the arm must disable itself rather than run without the control that keeps it "+
+				"from measuring echo length", got)
+		}
+	})
+}
+
+// Each pair has to be byte-length-equal, or a length differential between its members can be the
+// echo rather than the container.
+func TestEveryParseDifferentialPairIsLengthMatched(t *testing.T) {
+	byID := map[triage.ProbeID][]byte{}
+	for _, sp := range (eliClassifier{}).Probes() {
+		byID[sp.ID] = sp.Logical
+	}
+	for _, pr := range eliParsePairs() {
+		a, b := byID[pr.OK], byID[pr.Bad]
+		if a == nil || b == nil {
+			t.Fatalf("pair %s names %s/%s and one of them is not declared", pr.Delimiter, pr.OK, pr.Bad)
+		}
+		if len(a) != len(b) {
+			t.Errorf("%s is %q (%d bytes) and %s is %q (%d): an endpoint that echoes the value returns two "+
+				"different lengths for these, and the arm would fire on every reflecting slot",
+				pr.OK, a, len(a), pr.Bad, b, len(b))
+		}
+	}
+	if len(byID[eliProbeEBN1]) == len(byID[eliProbeEBN2]) {
+		t.Error("the two inert controls are the same length, so they cannot detect an endpoint whose response " +
+			"length tracks its input length")
+	}
+}
+
+// The arm is only planned when the two computation arms came back with nothing. Spending six
+// requests to add a weaker statement to a slot that already has a stronger one is waste.
+func TestTheParseDifferentialIsPlannedExactlyWhereTheLadderUsedToStop(t *testing.T) {
+	ctx := triage.PlanCtx{
+		Slot:   triage.Slot{Key: "query:q", Kind: triage.KindQuery, ServerReachable: true, SegmentIndex: -1},
+		Round:  3,
+		Budget: triage.TriageBudget{PerSlot: 40, RemainingPerSlot: 40},
+	}
+	// A hit takes round 3 down its identification-and-controls path, which must not carry the
+	// arm: adding a weaker statement to a slot that already has a stronger one is waste.
+	for _, got := range [][]triage.ProbeRequest{eliPlanRound(ctx, eliProbeEL1, false), eliPlanRound(ctx, "", true)} {
+		for _, r := range got {
+			for _, arm := range []triage.ProbeID{eliProbeEB1, eliProbeEB2, eliProbeEB3, eliProbeEB4, eliProbeEBN1, eliProbeEBN2} {
+				if r.Spec == arm {
+					t.Errorf("round 3 planned %s after a hit", arm)
+				}
+			}
+		}
+	}
+	// AND THE BRANCH THAT USED TO RETURN nil MUST NOT. The runner retires a class for a slot the
+	// first time Plan returns nothing, so a round that returns nil on "nothing fired" is the
+	// ladder refusing before it has tried its last arm.
+	got := eliPlanRound(ctx, "", false)
+	if len(got) != 6 {
+		t.Fatalf("round 3 planned %d probes with no hit, want 6 (two inert controls and two pairs). The "+
+			"runner ends the ladder on the first empty round, so returning nil here is the arm never "+
+			"running on exactly the slots it exists for: %+v", len(got), got)
+	}
+	first := got[0].Spec
+	if first != eliProbeEBN1 && first != eliProbeEBN2 {
+		t.Errorf("the first probe of the arm is %s: the inert length controls go FIRST, so a budget that cuts "+
+			"the round short loses a pair rather than losing the control that decides whether any pair may "+
+			"be read at all", first)
+	}
+}
+
+// And the sentence reaches the row. A no_reflection that does not say whether the one arm needing
+// nothing back had run is a statement about the endpoint standing in for a statement about two of
+// three arms.
+func TestTheNoReflectionRowSaysWhatTheNonReflectiveArmDid(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		res  eliParseResult
+		want string
+	}{
+		{"it ran and found nothing", eliParseResult{Outcome: eliParseSilent, Why: "x"}, "DID run"},
+		{"it could not run", eliParseResult{Outcome: eliParseNotRun, Why: "y"}, "did not run"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := eliParseSentence(tc.res); !strings.Contains(got, tc.want) {
+				t.Errorf("eliParseSentence = %q, want it to contain %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE PARSE DIFFERENTIAL'S REFUSALS SAY WHICH PROBE AND WHY, AND A SEPARATION OUTRANKS A BLOCK
+//
+// MEASURED, canary oracle, 2026-09-19, whole registry at full tier, per-slot cap 48. This arm is
+// the one of the three that WAS running: it fired on /eli/blind (suspicious,
+// el_parse_differential) and reported parse_differential_ran_and_was_silent everywhere else, and
+// the sentence was on the row. What it could not do was say WHY it had not run when it had not,
+// and it lost to a uniform-block rung that is a weaker test than its own controls.
+// ---------------------------------------------------------------------------------------------
+
+// eliParseTestObs builds one observation this arm can compare. It reads Proj.NormBody and
+// nothing else, so a fixture that leaves it nil is one the arm correctly refuses.
+func eliParseTestObs(id triage.ProbeID, status int, norm string) eliOwn {
+	return eliOwn{
+		Probe: id,
+		Obs: triage.Observation{
+			ObsID: string(id), RunID: "eli-parse", Status: status, Kind: triage.ObsProbe,
+			Class: triage.ClassELI, Body: []byte(norm), BodyLen: len(norm),
+			Proj:    triage.Projections{NormBody: []byte(norm)},
+			Payload: triage.PayloadWire{Wire: []byte(id), Survived: triage.WireSurvivalEncoded},
+		},
+	}
+}
+
+// eliParseTestSet is a whole arm's worth of responses, all identical, which is what a route with
+// no EL container returns. Cases then move the ones they mean to.
+func eliParseTestSet(body string) []eliOwn {
+	var out []eliOwn
+	for _, id := range []triage.ProbeID{eliProbeEBN1, eliProbeEBN2, eliProbeEB1, eliProbeEB2, eliProbeEB3, eliProbeEB4} {
+		out = append(out, eliParseTestObs(id, 200, body))
+	}
+	return out
+}
+
+func eliParseTestDrop(set []eliOwn, id triage.ProbeID) []eliOwn {
+	var out []eliOwn
+	for _, o := range set {
+		if o.Probe != id {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// "PRODUCED NO COMPARABLE RESPONSE" WAS ONE PHRASE FOR FOUR CAUSES, and only one of them is
+// about the endpoint. The one that was true on the live run is a number in the settings
+// document, and an operator reading the old sentence goes looking at the target instead.
+func TestTheParseDifferentialRefusalNamesTheProbeAndTheCause(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		mutate     func(set []eliOwn) []eliOwn
+	}{
+		{"never sent", "NEVER SENT", func(set []eliOwn) []eliOwn {
+			return eliParseTestDrop(set, eliProbeEBN1)
+		}},
+		{"transport refused", "transport refused it", func(set []eliOwn) []eliOwn {
+			for i := range set {
+				if set[i].Probe == eliProbeEBN1 {
+					set[i].Obs.TransportErr = triage.TransportConnect
+				}
+			}
+			return set
+		}},
+		{"truncated", "TRUNCATED", func(set []eliOwn) []eliOwn {
+			for i := range set {
+				if set[i].Probe == eliProbeEBN1 {
+					set[i].Obs.BodyTruncated = true
+				}
+			}
+			return set
+		}},
+		{"no normalised body", "no normalised body", func(set []eliOwn) []eliOwn {
+			for i := range set {
+				if set[i].Probe == eliProbeEBN1 {
+					set[i].Obs.Proj.NormBody = nil
+				}
+			}
+			return set
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := eliParseDifferential(tc.mutate(eliParseTestSet("{\"ok\":true}")), true, false, "")
+			if got.Outcome != eliParseNotRun {
+				t.Fatalf("outcome %v: the arm read a length off a control it could not measure", got.Outcome)
+			}
+			if !strings.Contains(got.Why, "length_control_not_measured") {
+				t.Fatalf("the reason %q does not name the precondition that failed", got.Why)
+			}
+			if !strings.Contains(got.Why, string(eliProbeEBN1)) || !strings.Contains(got.Why, tc.want) {
+				t.Errorf("the reason %q does not say which control failed and why, so a setting the "+
+					"operator can raise is indistinguishable from a fact about the endpoint", got.Why)
+			}
+			if !strings.Contains(got.Why, string(eliProbeEBN2)+" was measured") {
+				t.Errorf("the reason %q reads as though both controls had failed", got.Why)
+			}
+		})
+	}
+}
+
+// A PAIR WITH ONE MEMBER MISSING NAMES THE MEMBER TOO.
+func TestTheParseDifferentialNamesTheMissingHalfOfAPair(t *testing.T) {
+	set := eliParseTestDrop(eliParseTestSet("{\"ok\":true}"), eliProbeEB2)
+	got := eliParseDifferential(set, true, false, "")
+	if got.Outcome != eliParseNotRun || !strings.Contains(got.Why, "pair_incomplete") {
+		t.Fatalf("got %+v, want a pair_incomplete refusal", got)
+	}
+	if !strings.Contains(got.Why, string(eliProbeEB2)) || !strings.Contains(got.Why, "NEVER SENT") {
+		t.Errorf("the reason %q does not name the member that was missing or why", got.Why)
+	}
+}
+
+// THE UNIFORM-BLOCK RUNG IS A WEAKER TEST THAN THIS ARM'S OWN CONTROLS AND MUST NOT PREEMPT IT.
+// A filter refuses the expression that parses and the one that does not alike, because both
+// carry the delimiter it is refusing, so it cannot separate a pair. An application that RAISES
+// on what it cannot parse produces the block reading and separates the pair, which is exactly
+// the shape of /ssti/blind and /trav/blind on the canary oracle.
+func TestAUniformBlockDoesNotOutrankAParseDifferentialThatSeparated(t *testing.T) {
+	set := eliParseTestSet("{\"ok\":true,\"items\":[]}")
+	for i := range set {
+		switch set[i].Probe {
+		case eliProbeEB2, eliProbeEB4:
+			set[i] = eliParseTestObs(set[i].Probe, 500, "{\"error\":\"eval_failed\"}")
+		}
+	}
+	got := eliParseDifferential(set, true, false, "")
+	if got.Outcome != eliParseSeparated {
+		t.Fatalf("outcome %v (%s): both delimiter pairs answered 200 to the expression that parses and "+
+			"500 to the one that does not, which is the separation this arm exists to find", got.Outcome, got.Why)
+	}
+
+	v := eliParseFired("query:q", got, []uint64{1}, "the endpoint also looked like a uniform block")
+	if len(v) != 1 || v[0].State != triage.StateSuspicious || v[0].Oracle != eliOracleParse {
+		t.Fatalf("the fired verdict is %+v, want one suspicious row on the parse oracle", v)
+	}
+	if v[0].Grade != triage.GradeLow {
+		t.Errorf("grade %q: a parse differential proves a parser and never an evaluation, and there is no "+
+			"confirmation probe that could raise it", v[0].Grade)
+	}
+	if !strings.Contains(v[0].Reason, "uniform block") {
+		t.Errorf("the row does not tell the reader the endpoint also read as a block and why the arm "+
+			"outranked that: %s", v[0].Reason)
+	}
+}
+
+// AND A FILTER DOES NOT SEPARATE A PAIR, which is the fact that makes the rung above safe to
+// demote. Both members carry the delimiter, so both get the same page.
+func TestAFilterAnsweringBothMembersOfEveryPairLeavesTheArmSilent(t *testing.T) {
+	set := eliParseTestSet("{\"ok\":true}")
+	for i := range set {
+		switch set[i].Probe {
+		case eliProbeEB1, eliProbeEB2, eliProbeEB3, eliProbeEB4:
+			set[i] = eliParseTestObs(set[i].Probe, 403, "<html>403 Forbidden: request blocked</html>")
+		}
+	}
+	got := eliParseDifferential(set, true, false, "")
+	if got.Outcome != eliParseSilent {
+		t.Fatalf("outcome %v (%s): a filter answered all four expression probes with one identical block "+
+			"page, and the arm claimed something. If this can fire, demoting the uniform-block rung below "+
+			"it is unsafe", got.Outcome, got.Why)
+	}
+}
+
+// TestNoOracleCaseContradictsItsOwnReason.
+//
+// THE DEFECT THIS PINS. /eli/longmath was declared Expect "negative", which this type documents
+// as "this class MUST stay silent there", and the very next sentence of its own Why said "the
+// verdict must be suspicious (el_overflow_unwrapped) and must NOT be a finding". Both cannot be
+// true, and the label is the half that scorecards and corpus passes read: a route recorded as a
+// negative that this class is measured firing on is counted as a false positive against the
+// class, and a reader tidying that mismatch away would have had to break the detector to do it.
+//
+// The handler settles which half was wrong. docker/oracle/main.go's eliDialectLong is an
+// EVALUATING JVM EL sink with 64-bit arithmetic, and its own comment says listing it among the
+// clean controls would be a wrong answer. So the label moved to positive and the detector did
+// not move at all.
+//
+// THE RULE IS GENERAL, deliberately, because the next contradiction will be somewhere else: a
+// case that tells the rig to expect silence may not also tell it to expect a verdict that is not
+// silence.
+func TestNoOracleCaseContradictsItsOwnReason(t *testing.T) {
+	fires := []string{
+		"the verdict must be suspicious",
+		"must fire",
+		"must still fire",
+		"is observed firing",
+	}
+	for _, c := range (eliClassifier{}).OracleCases() {
+		if c.Expect != "negative" {
+			continue
+		}
+		why := strings.ToLower(c.Why)
+		for _, phrase := range fires {
+			if strings.Contains(why, phrase) {
+				t.Errorf("route %s is declared a NEGATIVE, which this type documents as \"this class MUST stay silent there\", "+
+					"and its own reason says %q. A scorecard reads the label, so the class would be charged with a false "+
+					"positive for doing what the reason demands", c.Route, phrase)
+			}
+		}
+	}
+}
+
+// TestTheLongTypedSinkIsDeclaredAsARouteThisClassFiresOn is the specific half, kept separate so a
+// future edit that quietly relabels it back has a row with the handler's own words in it.
+func TestTheLongTypedSinkIsDeclaredAsARouteThisClassFiresOn(t *testing.T) {
+	var found bool
+	for _, c := range (eliClassifier{}).OracleCases() {
+		if c.Route != "/eli/longmath" {
+			continue
+		}
+		found = true
+		if c.Expect != "positive" {
+			t.Errorf("/eli/longmath is declared %q. The oracle handler eliDialectLong EVALUATES the arithmetic in a "+
+				"64-bit long, so something there really does evaluate and a scanner that found it would be right. "+
+				"MEASURED 2026-09-19 on the 80-route canary exam: suspicious, el_overflow_unwrapped. What this class "+
+				"owes is neither a finding nor a clean, and a NEGATIVE label makes the correct answer look like a defect", c.Expect)
+		}
+		if !strings.Contains(c.Why, eliUnwrapped) || !strings.Contains(c.Why, eliWrapped) {
+			t.Error("the reason no longer names both answers, and the whole point of this route is that the unwrapped one " +
+				"arrives where the wrapped one would on a 32-bit sink")
+		}
+	}
+	if !found {
+		t.Fatal("/eli/longmath is no longer declared at all, so the one route that separates a long-typed sink from a 32-bit one is unclaimed")
 	}
 }

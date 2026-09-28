@@ -1926,3 +1926,345 @@ func TestTheUnreadableBreakGateStaysOutOfTheShapesThatAlreadyHaveAnOwner(t *test
 		}
 	})
 }
+
+// =================================================================================================
+// THE REASON FLOOR, AND THE CLASSES IT COVERS BY NAME
+//
+// WHY THIS LIVES IN sql_test.go. The floor itself is in the vocabulary (utils/triage/types.go:
+// every StateRule row now carries RequiresReason: true, and the vocabulary's own test fails the
+// build on a row that sets it false). A vocabulary test cannot see a class, because package
+// triage is below package triageclasses and importing upwards is the cycle that split exists to
+// prevent. So the cross-class half has to live in the classifier package, and file ownership this
+// round put sql_test.go in this agent's hands. SQL is also the class the floor was written for,
+// having shipped five rungs through StateFinding, StateSuspicious and StateClean with Reason "".
+//
+// WHAT IT PINS AND WHY IT NAMES THEM. The register is a moving list, and a guard that only counts
+// says nothing about which class it protected. Naming all nineteen means a twentieth cannot be
+// registered without an author reading this test, and it means a report can say what was covered
+// rather than "all of them".
+// =================================================================================================
+
+// sqlTestReasonFloorClasses is every class registered when this test was written.
+var sqlTestReasonFloorClasses = []triage.ClassID{
+	triage.ClassSSTI,         // 1
+	triage.ClassELI,          // 2
+	triage.ClassCMDI,         // 3
+	triage.ClassSQL,          // 4
+	triage.ClassNoSQL,        // 5
+	triage.ClassXSSReflected, // 9
+	triage.ClassCSTI,         // 10
+	triage.ClassTraversal,    // 13
+	triage.ClassLFI,          // 14
+	triage.ClassRFI,          // 15
+	triage.ClassRedirect,     // 18
+	triage.ClassCRLF,         // 19
+	triage.ClassHostHeader,   // 20
+	triage.ClassPPServer,     // 22
+	triage.ClassDeser,        // 24
+	triage.ClassHPP,          // 26
+	triage.ClassCORS,         // 28
+	triage.ClassORMLeak,      // 29
+	triage.ClassExample,      // 63, the registered placeholder
+}
+
+func TestTheReasonFloorCoversEveryRegisteredClassByName(t *testing.T) {
+	reg := triage.RegisteredClassifiers()
+
+	// (1) The list above is the register, in both directions. A class added without a row here is
+	// a class nobody checked against the floor.
+	want := map[triage.ClassID]bool{}
+	for _, id := range sqlTestReasonFloorClasses {
+		want[id] = true
+		if _, ok := reg[id]; !ok {
+			t.Errorf("%s is named by this guard and is not registered, so the guard checks nothing for it", id)
+		}
+	}
+	for id := range reg {
+		if !want[id] {
+			t.Errorf("class %s (%d) is registered and this guard does not name it. Add it to "+
+				"sqlTestReasonFloorClasses after checking that every verdict it can emit carries a reason: "+
+				"twelve of the seventeen classes written before it pinned no reason floor of their own, "+
+				"which is how SQL shipped five rungs with an empty reason", id, uint8(id))
+		}
+	}
+
+	// (2) Every named class, driven to a verdict, passes the floor. A bare ClassifyCtx reaches
+	// each class's structural refusal, which is shallow, and it is the deepest rung reachable
+	// from outside package triage: a Perturbed cannot be minted here, which is the property that
+	// stops one class reading another's responses. The per-class tests carry the deep rungs; what
+	// this asserts is that the floor is now enforced for all of them from ONE place, so a class
+	// written next year inherits it without its author knowing this test exists.
+	for _, id := range sqlTestReasonFloorClasses {
+		c, ok := reg[id]
+		if !ok {
+			continue
+		}
+		vs := c.Classify(triage.ClassifyCtx{})
+		if len(vs) == 0 {
+			t.Errorf("%s returned no verdict at all, so the slot reads as untouched rather than as refused", id)
+			continue
+		}
+		for i, v := range vs {
+			if err := v.Validate(); err != nil {
+				t.Errorf("%s verdict %d of %d does not meet its own contract: %v", id, i+1, len(vs), err)
+			}
+			if strings.TrimSpace(v.Reason) == "" {
+				t.Errorf("%s verdict %d of %d ships state %q with a COMPLETELY EMPTY reason", id, i+1, len(vs), v.State)
+			}
+		}
+	}
+
+	// (3) And the floor is the vocabulary's, not this test's. If a future edit sets
+	// RequiresReason back to false on any row, every class above silently loses its floor again,
+	// so the two halves are pinned together rather than left to agree by luck.
+	for _, r := range triage.StateRules() {
+		if !r.RequiresReason {
+			t.Errorf("state %q no longer requires a reason, so the floor this test claims to cover "+
+				"%d classes with is not enforced for any of them", r.State, len(sqlTestReasonFloorClasses))
+		}
+	}
+}
+
+// AND SQL'S OWN FIVE RUNGS, WHICH ARE THE FIVE THAT SHIPPED EMPTY.
+//
+// MEASURED before the fix, through sqlDecide on the fixtures below: the parser-error finding, the
+// boolean-differential finding, the LIKE suspicion and BOTH cleans came back with Reason "". Five
+// rows, two of them findings and two of them the rows that tell an operator not to look.
+func TestEverySQLRungCarriesItsOwnReasonAndNotTheEmptyString(t *testing.T) {
+	base := sqlTestObs("3 results")
+	wider := sqlTestObs("47 results")
+	silent := sqlTestObs("ok")
+	row := sqlTestObs(sqlOracleRowPage)
+	empty := sqlTestObs(sqlOracleEmptyPage)
+
+	for _, tc := range []struct {
+		name  string
+		ev    *sqlEvidence
+		state triage.TriageState
+		// names is what an operator reading ONLY this field has to be able to see.
+		names []string
+	}{
+		{
+			name:  "the parser-error rung",
+			ev:    sqlTestEvidence(silent, sqlTestProbe{id: sqlQ1, obs: sqlTestObs(sqlPGError())}),
+			state: triage.StateSuspicious,
+			names: []string{"parser_error", string(sqlQ1), "marker"},
+		},
+		{
+			name: "the boolean-differential rung",
+			ev: sqlOracleLookupEvidence(
+				sqlTestProbe{id: sqlA1, obs: row}, sqlTestProbe{id: sqlA1, obs: row},
+				sqlTestProbe{id: sqlA2, obs: empty}, sqlTestProbe{id: sqlA3, obs: empty}),
+			state: triage.StateFinding,
+			names: []string{"boolean_differential", string(sqlA1), string(sqlA2), string(sqlA3)},
+		},
+		{
+			name: "the LIKE rung",
+			ev: sqlTestEvidence(base,
+				sqlTestProbe{id: sqlL1, obs: wider}, sqlTestProbe{id: sqlL2, obs: base}),
+			state: triage.StateSuspicious,
+			names: []string{"like_widening", string(sqlL1), string(sqlL2), "NOT A PARSER BREAK"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vs := sqlDecide(sqlTestCtx(), tc.ev, false)
+			if len(vs) != 1 {
+				t.Fatalf("want one verdict, got %s", sqlReasons(vs))
+			}
+			v := vs[0]
+			if v.State != tc.state {
+				t.Fatalf("state %q, want %q: this case is not exercising the rung it names", v.State, tc.state)
+			}
+			if err := v.Validate(); err != nil {
+				t.Fatalf("the rung does not meet its own contract: %v", err)
+			}
+			if strings.Contains(v.Reason, "reason_not_composed") {
+				t.Fatalf("the row reached a report carrying the placeholder, so the line that composes "+
+					"its reason never ran: %q", v.Reason)
+			}
+			for _, w := range tc.names {
+				if !strings.Contains(v.Reason, w) {
+					t.Errorf("reason does not name %q, so a reader cannot tell what was sent or what came "+
+						"back:\n  %s", w, v.Reason)
+				}
+			}
+		})
+	}
+
+	// THE TWO CLEANS, WHICH ARE ONE SLOT AND TWO ROWS. Each states its own arm's preconditions,
+	// and neither stands for the other.
+	t.Run("both cleans", func(t *testing.T) {
+		ev := sqlTestEvidence(silent,
+			sqlTestProbe{id: sqlQ1, obs: silent}, sqlTestProbe{id: sqlQ2, obs: silent},
+			sqlTestProbe{id: sqlA1, obs: silent}, sqlTestProbe{id: sqlA2, obs: silent},
+			sqlTestProbe{id: sqlA3, obs: silent})
+		vs := sqlDecide(sqlTestCtx(), ev, false)
+		byOracle := map[string]triage.ClassVerdict{}
+		for _, v := range vs {
+			if err := v.Validate(); err != nil {
+				t.Errorf("a clean does not meet its own contract: %v", err)
+			}
+			byOracle[v.Oracle] = v
+		}
+		errArm, ok := byOracle["parser_error"]
+		if !ok || errArm.State != triage.StateClean {
+			t.Fatalf("no clean from the error oracle: %s", sqlReasons(vs))
+		}
+		for _, w := range []string{"clean (parser_error)", "break probes ran", "ONE ORACLE'S SILENCE"} {
+			if !strings.Contains(errArm.Reason, w) {
+				t.Errorf("the error arm's clean does not say %q:\n  %s", w, errArm.Reason)
+			}
+		}
+		boolArm, ok := byOracle["boolean_differential"]
+		if !ok || boolArm.State != triage.StateClean {
+			t.Fatalf("no clean from the boolean oracle: %s", sqlReasons(vs))
+		}
+		for _, w := range []string{"clean (boolean_differential)", string(sqlA3), "stability gate passed"} {
+			if !strings.Contains(boolArm.Reason, w) {
+				t.Errorf("the boolean arm's clean does not say %q:\n  %s", w, boolArm.Reason)
+			}
+		}
+	})
+
+	// A CLEAN MAY NOT CLAIM A CONTROL THAT WAS NEVER SENT. That is the empty reason's disease one
+	// sentence further on: a row saying "and the control stayed silent" about a request that never
+	// left is an assertion with nothing behind it, exactly like the empty field it replaced.
+	t.Run("the clean does not claim a control it never sent", func(t *testing.T) {
+		ev := sqlTestEvidence(silent,
+			sqlTestProbe{id: sqlQ1, obs: silent}, sqlTestProbe{id: sqlQ2, obs: silent},
+			sqlTestProbe{id: sqlA1, obs: silent}, sqlTestProbe{id: sqlA2, obs: silent},
+			sqlTestProbe{id: sqlA3, obs: silent})
+		if ev.count(sqlNC1) != 0 {
+			t.Fatal("the fixture now sends the junk control, so this case proves nothing")
+		}
+		for _, v := range sqlDecide(sqlTestCtx(), ev, false) {
+			if v.Oracle != "parser_error" || v.State != triage.StateClean {
+				continue
+			}
+			if !strings.Contains(v.Reason, "NOT SENT") {
+				t.Errorf("the clean does not say its junk control was never sent, so it is resting the "+
+					"silence on a request that did not happen:\n  %s", v.Reason)
+			}
+			if strings.Contains(v.Reason, "WATCHED staying silent") {
+				t.Errorf("the clean claims the detector was watched staying silent on a control that was "+
+					"never sent:\n  %s", v.Reason)
+			}
+		}
+	})
+}
+
+// =================================================================================================
+// AN UNTESTED ROW MAY NOT NAME A CAUSE IT DID NOT READ
+//
+// THE SENTENCE THIS REPLACES was the fallback in sqlUntested, and it fired on every probe
+// sqlSkipReason had no rule for:
+//
+//	not_run (early_exit): the ladder stopped before this rung because an earlier probe settled
+//	                      the slot. It was not sent and it is not clean
+//
+// Four different things put a probe in that list and they call for different next moves: an
+// earlier rung really did settle the slot, the per-slot cap bit, the run's tier is below the
+// probe's, or the run ended before the round. SSTI's equivalent names the three it cannot
+// separate and picks none, and says in its own comment that naming one would be inventing a
+// cause. This class asserted the one cause that tells an operator to do nothing.
+// =================================================================================================
+
+// THE LADDER HAS FOUR EXIT CONDITIONS AND A CONFIRMED BOOLEAN DIFFERENTIAL IS NOT ONE OF THEM.
+//
+// This is the test that caught the first draft of sqlLadderGapReason asserting a fifth. The only
+// boolean short circuit in sqlNextRequests is `booleanPairLooksTrue() && ev.count(SQL-A1) < 2`,
+// which stops being true the moment the repeat lands, so after d2Confirmed the rung loop runs on.
+// A row saying "the ladder stopped because an earlier probe settled the slot" on such a slot
+// would be this round's own defect shipped inside its fix.
+func TestAConfirmedBooleanDifferentialDoesNotStopTheLadderSoNoRowMaySayItDid(t *testing.T) {
+	row := sqlTestObs(sqlOracleRowPage)
+	empty := sqlTestObs(sqlOracleEmptyPage)
+	ev := sqlOracleLookupEvidence(
+		sqlTestProbe{id: sqlA1, obs: row}, sqlTestProbe{id: sqlA1, obs: row},
+		sqlTestProbe{id: sqlA2, obs: empty}, sqlTestProbe{id: sqlA3, obs: empty})
+	if _, ok := ev.d2Confirmed(); !ok {
+		t.Fatal("the fixture no longer confirms the boolean differential, so this test proves nothing")
+	}
+	if reqs := sqlNextRequests(sqlTestCtx().PlanCtx, ev); len(reqs) == 0 {
+		t.Fatal("the ladder now STOPS after a confirmed boolean differential. That makes the early_exit " +
+			"sentence true for it, and sqlLadderGapReason must gain the branch it deliberately does not have")
+	}
+	for _, v := range sqlDecide(sqlTestCtx(), ev, false) {
+		for _, s := range v.Untested {
+			if strings.Contains(s.Reason, "early_exit") {
+				t.Errorf("%s claims an early exit on a slot where the ladder did not stop:\n  %s", s.ProbeID, s.Reason)
+			}
+		}
+	}
+}
+
+// AND THE FOUR THAT ARE EXIT CONDITIONS SAY SO, WHILE A SLOT WITH NONE OF THEM NAMES NO CAUSE.
+func TestTheUntestedFallbackNamesACauseOnlyWhereItReadOne(t *testing.T) {
+	silent := sqlTestObs("ok")
+	blocked := sqlTestObs("<html><body>Request blocked by security policy.</body></html>")
+
+	t.Run("a parser break really did stop the rungs below it", func(t *testing.T) {
+		ev := sqlTestEvidence(silent, sqlTestProbe{id: sqlQ1, obs: sqlTestObs(sqlPGError())})
+		got := sqlLadderGapReason(sqlTestCtx(), ev)
+		if !strings.Contains(got, "early_exit") || !strings.Contains(got, string(sqlQ1)) {
+			t.Errorf("the row does not name the probe that stopped the ladder:\n  %s", got)
+		}
+	})
+
+	t.Run("the junk control fired", func(t *testing.T) {
+		ev := sqlTestEvidence(silent,
+			sqlTestProbe{id: sqlNC1, obs: sqlTestObs(sqlPGError())},
+			sqlTestProbe{id: sqlQ1, obs: sqlTestObs(sqlPGError())})
+		if !ev.junkSensitive {
+			t.Fatal("the fixture no longer trips the junk control")
+		}
+		if got := sqlLadderGapReason(sqlTestCtx(), ev); !strings.Contains(got, "junk control") {
+			t.Errorf("the row does not name the junk control:\n  %s", got)
+		}
+	})
+
+	t.Run("a uniform block", func(t *testing.T) {
+		ev := sqlTestEvidence(sqlTestObs(sqlOracleRowPage),
+			sqlTestProbe{id: sqlU1, obs: blocked}, sqlTestProbe{id: sqlQ1, obs: blocked},
+			sqlTestProbe{id: sqlQ2, obs: blocked})
+		if !ev.uniformBlock {
+			t.Skip("the fixture no longer trips the uniform-block rule; the branch is covered by its own test")
+		}
+		if got := sqlLadderGapReason(sqlTestCtx(), ev); !strings.Contains(got, "byte-identical") {
+			t.Errorf("the row does not name the block it read:\n  %s", got)
+		}
+	})
+
+	t.Run("nothing settled anything, so no cause is named", func(t *testing.T) {
+		ev := sqlTestEvidence(silent,
+			sqlTestProbe{id: sqlQ1, obs: silent}, sqlTestProbe{id: sqlQ2, obs: silent})
+		got := sqlLadderGapReason(sqlTestCtx(), ev)
+		if strings.Contains(got, "early_exit") {
+			t.Errorf("the row claims an early exit on a slot where no oracle fired:\n  %s", got)
+		}
+		for _, w := range []string{"CANNOT SEE WHICH OF THREE", "per-slot probe cap", "tier", "ended before the round"} {
+			if !strings.Contains(got, w) {
+				t.Errorf("the row does not name %q among the causes it cannot separate:\n  %s", w, got)
+			}
+		}
+	})
+
+	t.Run("the budget reads exhausted, and the row says what that does not prove", func(t *testing.T) {
+		ctx := sqlTestCtx()
+		ctx.Budget.RemainingPerSlot = 0
+		ctx.Budget.RemainingPerRun = 0
+		if !ctx.Budget.Exhausted() {
+			t.Skip("TriageBudget.Exhausted does not read these fields; the branch is unreachable from here")
+		}
+		ev := sqlTestEvidence(silent,
+			sqlTestProbe{id: sqlQ1, obs: silent}, sqlTestProbe{id: sqlQ2, obs: silent})
+		got := sqlLadderGapReason(ctx, ev)
+		if !strings.Contains(got, "EXHAUSTED") {
+			t.Fatalf("the row does not name the budget reading:\n  %s", got)
+		}
+		if !strings.Contains(got, "not that it bit before this rung") {
+			t.Errorf("the row treats an end-of-run budget reading as proof of an ordering it cannot "+
+				"establish:\n  %s", got)
+		}
+	})
+}

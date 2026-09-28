@@ -143,18 +143,19 @@ func CheckWebhookResults(ctx context.Context, settings map[string]any, tokens ma
 		}
 	}
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		// Redirects are NOT followed. A results URL that answers 3xx is almost always an
-		// authentication redirect, and following it lands on a login page that is a perfectly good
-		// 200 with no tokens in it. Since this function decides whether an out-of-band callback
-		// arrived by substring-searching the body, that reads as "the target never called out",
-		// which is the one wrong answer this whole section exists to avoid.
-		//
-		// Measured against a private webhook.site token: GET /token/{id}/requests answers
-		// 302 to https://webhook.site/login, both with no auth header and with a wrong one.
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
+	// Redirects are NOT followed. A results URL that answers 3xx is almost always an
+	// authentication redirect, and following it lands on a login page that is a perfectly good
+	// 200 with no tokens in it. Since this function decides whether an out-of-band callback
+	// arrived by substring-searching the body, that reads as "the target never called out",
+	// which is the one wrong answer this whole section exists to avoid.
+	//
+	// Measured against a private webhook.site token: GET /token/{id}/requests answers
+	// 302 to https://webhook.site/login, both with no auth header and with a wrong one.
+	//
+	// A NoFollowClient rather than an http.Client with CheckRedirect, because the latter does not
+	// keep the 3xx: net/http parses Location before it consults CheckRedirect, so the login
+	// redirect this comment is about would have come back as a transport error instead.
+	client := NewNoFollowClient(&http.Client{Timeout: 30 * time.Second})
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -320,6 +319,34 @@ func triagePassSqueeze(body []byte) triageDecodedPass {
 	return triageDecodedPass{form: MarkerFormSqueezed, text: out, orig: orig}
 }
 
+// triageFoldASCII returns a copy of src with A-Z folded to a-z and EVERY OTHER BYTE COPIED THROUGH
+// UNTOUCHED. The return is the same length as the argument, by construction, for every input.
+//
+// WHY NOT strings.ToLower. Unicode case mapping is not length preserving: U+023A and U+023E are
+// two bytes each and lower to three, and U+212A, U+212B, U+0130 and U+1E9E all get shorter. The
+// scanner has to hold a folded view and the original side by side, because the offsets it reports
+// are offsets into the body the caller still has, and a fold that changes the length makes an
+// index valid in at most one of them. That is not a bounds problem to be clamped. On a growing
+// rune it panicked and runTriage marked the whole run status=error; on a shrinking one it silently
+// read the run from the wrong bytes and lost the marker, which is the more expensive direction.
+//
+// NOTHING IS LOST BY FOLDING ASCII ONLY. The marker alphabet is [0-9a-z] and the run is terminated
+// by triageIsMarkerAlnum on the ORIGINAL bytes, so a multi-byte rune ended the run under the old
+// code too: no Unicode mapping could ever have extended a marker run, only shifted the indexes
+// used to read one. The only runes that lower into the ASCII alphabet at all are U+212A to 'k' and
+// U+0130 to 'i', and neither could have joined a run for the same reason.
+func triageFoldASCII(src []byte) []byte {
+	out := make([]byte, len(src))
+	for i := 0; i < len(src); i++ {
+		b := src[i]
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		out[i] = b
+	}
+	return out
+}
+
 // triageCaseTransformOf names what happened to the case of the run, in the MarkerHit vocabulary
 // none | upper | title | mixed.
 func triageCaseTransformOf(raw string) string {
@@ -394,19 +421,28 @@ func ScanMarkers(body []byte) []MarkerSighting {
 
 func triageScanOnePass(p triageDecodedPass) []MarkerSighting {
 	var out []MarkerSighting
-	lower := strings.ToLower(string(p.text))
-	for i := 0; i+triage.MarkerAnchorLen <= len(lower); i++ {
-		if lower[i:i+triage.MarkerAnchorLen] != triage.DefaultMarkerAnchor {
+
+	// ONE INDEX SPACE. folded, p.text and p.orig are all the same length: the fold is length
+	// preserving by construction and every pass above appends to text and orig in lockstep. That
+	// is what makes i and end below mean the same byte in all three, and it is the whole of the
+	// fix for the two-buffer defect. This loop used to bound itself on a strings.ToLower copy and
+	// index p.text, which are different lengths whenever the body contains U+023A, U+023E, U+212A,
+	// U+212B, U+0130 or U+1E9E: past the end of p.text it panicked and killed the RUN, and short
+	// of it the anchor's index named the wrong bytes and the marker was silently never seen. See
+	// triageFoldASCII for why folding ASCII only costs no coverage.
+	folded := triageFoldASCII(p.text)
+	for i := 0; i+triage.MarkerAnchorLen <= len(folded); i++ {
+		if string(folded[i:i+triage.MarkerAnchorLen]) != triage.DefaultMarkerAnchor {
 			continue
 		}
 		// Read the alphanumeric run from the anchor, capped at the marker length. Capping rather
 		// than demanding a delimiter is the alphanumeric-filter case: a token glued to the text
 		// after it is still a token, and the checksum is what rejects a bad slice.
 		end := i
-		for end < len(lower) && end-i < triage.MarkerLen && triageIsMarkerAlnum(p.text[end]) {
+		for end < len(folded) && end-i < triage.MarkerLen && triageIsMarkerAlnum(folded[end]) {
 			end++
 		}
-		run := lower[i:end]
+		run := string(folded[i:end])
 		if len(run) < markerMinSightingLen {
 			continue
 		}

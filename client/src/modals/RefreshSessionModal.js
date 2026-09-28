@@ -45,9 +45,13 @@ function isExpired(t) {
 // A single line showing where the token goes on the wire. This duplicates the preview logic in
 // ManageSessionsModal on purpose: the two modals are independent, and a row here only needs the
 // one-line form, not the whole request sketch.
-function wireSummary(t) {
-  const value = t.token_value || '';
-  const shown = value.length <= 24 ? value : `${value.slice(0, 20)}...`;
+//
+// THE CREDENTIAL IS IN IT, VERBATIM. The line is the exact bytes a scan puts on the wire, which is
+// what makes it worth pasting into a repeater tab and what makes a captured credential provable.
+// The row is truncated by CSS at the width of its column and the whole line is on the title
+// attribute, so nothing is cut out of the value itself.
+export function wireSummary(t) {
+  const shown = credentialForWire(t);
   const prefix = t.value_prefix || '';
   switch (t.token_type) {
     case 'bearer':
@@ -62,6 +66,16 @@ function wireSummary(t) {
     default:
       return `${t.header_name || 'Authorization'}: ${prefix}${shown}`;
   }
+}
+
+// credentialForWire is the credential, or a word saying there is not one.
+//
+// A row that holds nothing and a row that holds a credential are DIFFERENT STATES and must not
+// render the same: "no value stored" is the reason a scan is going out unauthenticated, and it is
+// an absence rather than something withheld.
+function credentialForWire(t) {
+  if (t.token_value) return t.token_value;
+  return t.has_value === true ? '<the stored credential>' : '<no value stored>';
 }
 
 function whenText(iso) {

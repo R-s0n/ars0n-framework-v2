@@ -3,7 +3,9 @@ package utils
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"math/rand"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/jackc/pgx/v5"
 )
 
 // Active flow detection: sending requests to find routing the operator never clicked.
@@ -121,6 +124,22 @@ type FlowDetectionConfig struct {
 	// gets a 400 from most endpoints, which would be recorded as if the endpoint had been tested.
 	// Off means every request goes out with an empty body; the plan says which it was.
 	SendRecordedBodies *bool `json:"send_recorded_bodies"`
+
+	// OFF by default (plain bool: omitted == false == excluded). A request whose method or endpoint
+	// name reads as a mutation - PUT/PATCH/DELETE, or an RPC method beginning create/update/delete/set/
+	// register/... - is NOT replayed unless this is on. Detect Flows discovers routing; replaying a
+	// recorded createDefault or registerUser body against a live programme can seed a resource or send
+	// a verification mail, and on a VDP whose rule is "only interact with accounts you own" that is not
+	// a default worth having. The skip is reported in the plan with reason "write_op", never silent, so
+	// the operator can turn this on deliberately after reading what it would send.
+	IncludeWrites bool `json:"include_writes"`
+
+	// OFF by default. Clear infrastructure and telemetry endpoints - Cloudflare /cdn-cgi/*, Google
+	// Analytics / Tag Manager beacons - are not requested unless this is on. Re-firing a one-shot
+	// /cdn-cgi challenge token pokes the bot-management that is already blocking us; replaying an
+	// analytics beacon fabricates a tracking event and tests nothing. Reported as reason
+	// "infrastructure" in the plan, so it is visible rather than a silent corpus narrowing.
+	IncludeInfrastructure bool `json:"include_infrastructure"`
 }
 
 // BodiesEnabled reports whether recorded bodies are sent, resolving the pointer's default.
@@ -152,6 +171,8 @@ type FlowDetectionTarget struct {
 //	host_excluded     the host is marked in_scope=false on this target.
 //	out_of_scope      the host is outside the target's boundary.
 //	method            the endpoint's method is not one this run is sending.
+//	write_op          a likely state-changing operation, held back unless include_writes is on.
+//	infrastructure    edge infrastructure or an analytics beacon, held back unless include_infrastructure is on.
 //	unusable_url      the row does not parse into an http(s) URL.
 //	over_budget       the run's max_requests was reached before this endpoint's turn.
 type FlowDetectionSkip struct {
@@ -317,6 +338,115 @@ func DefaultFlowDetectionConfig() FlowDetectionConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Saved run config
+//
+// The run config used to live only in the Detect Flows modal and travel inline with each /run. Now
+// the Configure modal owns it and the card's Detect Flows button just runs, so it needs a per-target
+// home. The programme's own limits (rps, budget, timeout, redirects, the identifying header) still
+// live in scope_target_engagement_config and are folded in - and can only tighten - at plan time; this
+// stores the detection-specific choices (verbs, query, bodies, the write and infrastructure guards).
+// ---------------------------------------------------------------------------
+
+var flowDetectionConfigSchemaOnce sync.Once
+
+func ensureFlowDetectionConfigSchema() {
+	flowDetectionConfigSchemaOnce.Do(func() {
+		if _, err := dbPool.Exec(context.Background(), `
+			CREATE TABLE IF NOT EXISTS flow_detection_config (
+				scope_target_id UUID PRIMARY KEY REFERENCES scope_targets(id) ON DELETE CASCADE,
+				config JSONB NOT NULL,
+				updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+			)`); err != nil {
+			log.Printf("[FLOW-DETECT] Could not ensure flow_detection_config schema: %v", err)
+		}
+	})
+}
+
+// LoadSavedFlowDetectionConfig returns the saved run config for a target and whether a row existed.
+// With nothing saved it returns the validated default, so a first-time run and a caller that never
+// saved both get a sane config rather than an error.
+func LoadSavedFlowDetectionConfig(scopeTargetID string) (FlowDetectionConfig, bool, error) {
+	ensureFlowDetectionConfigSchema()
+	var raw []byte
+	err := dbPool.QueryRow(context.Background(),
+		`SELECT config FROM flow_detection_config WHERE scope_target_id = $1`, scopeTargetID).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DefaultFlowDetectionConfig(), false, nil
+	}
+	if err != nil {
+		return DefaultFlowDetectionConfig(), false, err
+	}
+	var cfg FlowDetectionConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		// A row we cannot parse is not worth failing a run over; fall back to the default and say the
+		// row existed so the caller does not treat it as unconfigured.
+		return DefaultFlowDetectionConfig(), true, nil
+	}
+	// Re-validate on read: the clamps may have tightened since it was saved, and a stored value must
+	// never be trusted past what a fresh request would be allowed.
+	out, verr := ValidateFlowDetectionConfig(cfg)
+	if verr != nil {
+		return DefaultFlowDetectionConfig(), true, nil
+	}
+	return out, true, nil
+}
+
+func saveFlowDetectionConfig(scopeTargetID string, cfg FlowDetectionConfig) error {
+	ensureFlowDetectionConfigSchema()
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	_, err = dbPool.Exec(context.Background(), `
+		INSERT INTO flow_detection_config (scope_target_id, config, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (scope_target_id) DO UPDATE SET config = EXCLUDED.config, updated_at = NOW()`,
+		scopeTargetID, raw)
+	return err
+}
+
+// GetFlowDetectionConfigHandler handles GET /flow-config/{scope_target_id}/detection.
+func GetFlowDetectionConfigHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	scopeTargetID := mux.Vars(r)["scope_target_id"]
+	if _, err := uuid.Parse(scopeTargetID); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "scope_target_required", "scope_target_id must be a UUID")
+		return
+	}
+	cfg, saved, err := LoadSavedFlowDetectionConfig(scopeTargetID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"config": cfg, "saved": saved})
+}
+
+// PutFlowDetectionConfigHandler handles PUT /flow-config/{scope_target_id}/detection.
+func PutFlowDetectionConfigHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	scopeTargetID := mux.Vars(r)["scope_target_id"]
+	if _, err := uuid.Parse(scopeTargetID); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "scope_target_required", "scope_target_id must be a UUID")
+		return
+	}
+	var requested FlowDetectionConfig
+	if err := json.NewDecoder(r.Body).Decode(&requested); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_body", "Body must be JSON: "+err.Error())
+		return
+	}
+	cfg, err := ValidateFlowDetectionConfig(requested)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_config", err.Error())
+		return
+	}
+	if err := saveFlowDetectionConfig(scopeTargetID, cfg); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"config": cfg, "saved": true})
+}
+
+// ---------------------------------------------------------------------------
 // Planning: which endpoints, and which are refused and why
 // ---------------------------------------------------------------------------
 
@@ -348,6 +478,110 @@ func flowDetectVerbTakesBody(method string) bool {
 		return false
 	}
 	return true
+}
+
+// flowDetectWriteVerbs are the method-name prefixes that read as a state change. They are matched
+// against the LAST path segment - the ConnectRPC / gateway method name - at a camelCase, underscore or
+// whole-word boundary, so createChat, updateMessage, iam/createDefault, UserSettingsService/Set and
+// registerUser are writes while getSettings, listProjectsAll and getResources are not ("settings" is
+// not "set", because the character after the verb is lowercase).
+var flowDetectWriteVerbs = []string{
+	"create", "update", "delete", "remove", "set", "register", "revoke", "grant",
+	"add", "edit", "reset", "rotate", "disable", "enable", "activate", "deactivate",
+	"upload", "cancel", "approve", "reject", "put", "patch",
+}
+
+// flowDetectIsWrite reports whether replaying this request would likely change server state: an
+// HTTP write verb, or an RPC/gateway method whose name begins with a mutating verb.
+func flowDetectIsWrite(method, path string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	}
+	seg := strings.TrimRight(path, "/")
+	if i := strings.LastIndex(seg, "/"); i >= 0 {
+		seg = seg[i+1:]
+	}
+	low := strings.ToLower(seg)
+	for _, v := range flowDetectWriteVerbs {
+		if strings.HasPrefix(low, v) {
+			rest := seg[len(v):]
+			if rest == "" || rest[0] == '_' || (rest[0] >= 'A' && rest[0] <= 'Z') {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// flowDetectInfrastructure reports whether a URL is edge infrastructure or an analytics/telemetry
+// beacon rather than an application endpoint, with a short reason. Conservative on purpose: it matches
+// only clear signals, so an opaque first-party-proxied path (a bare numeric id segment) is left to an
+// operator rule rather than guessed at and wrongly dropped.
+func flowDetectInfrastructure(rawURL string) (bool, string) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false, ""
+	}
+	host := strings.ToLower(u.Hostname())
+	path := strings.ToLower(u.Path)
+	if strings.Contains(path, "/cdn-cgi/") {
+		return true, "Cloudflare edge infrastructure (/cdn-cgi)"
+	}
+	switch host {
+	case "google-analytics.com", "www.google-analytics.com", "analytics.google.com",
+		"googletagmanager.com", "www.googletagmanager.com", "stats.g.doubleclick.net":
+		return true, "analytics/telemetry beacon (" + host + ")"
+	}
+	for _, marker := range []string{"/gtag/", "/gtm.js", "/g/collect", "/ag/g/c"} {
+		if strings.Contains(path, marker) {
+			return true, "analytics/telemetry beacon"
+		}
+	}
+	return false, ""
+}
+
+// flowResponseBlocked reports whether a response is the target REFUSING automated traffic rather than
+// answering: an auth/forbidden/rate/unavailable status, or a bot-management challenge body. It is what
+// lets a run notice it is being uniformly blocked - the console.nebius.com case, where Cloudflare
+// 403-challenges every scripted request - instead of recording hundreds of interstitials as if the
+// endpoints had been tested. It is a heuristic for pacing, never a security judgement.
+func flowResponseBlocked(resp ScanResponse) bool {
+	if flowStatusBlocked(resp.Status) {
+		return true
+	}
+	low := strings.ToLower(resp.Body)
+	for _, m := range []string{
+		"just a moment", "cf_chl", "cf-chl", "checking your browser",
+		"attention required", "verify you are human", "captcha",
+	} {
+		if strings.Contains(low, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// flowStatusBlocked reports whether a status code is the target refusing rather than answering. Used
+// both live (via flowResponseBlocked) and at labelling time, where only the stored status is available.
+func flowStatusBlocked(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden,
+		http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return true
+	}
+	return false
+}
+
+// flowEffectiveSource downgrades a blocked ACTIVE capture to passive for the passive/active/both
+// signal: a request that was challenged or refused did not reach the endpoint, so it must not count as
+// the scanner having reproduced the route (which would light the "found by both" badge on a block
+// page). The capture row is untouched; this governs only the label.
+func flowEffectiveSource(source string, status int) string {
+	if strings.EqualFold(strings.TrimSpace(source), FlowSourceActive) && flowStatusBlocked(status) {
+		return FlowSourcePassive
+	}
+	return source
 }
 
 // loadFlowDetectionBodies indexes the request bodies this target has actually recorded.
@@ -794,6 +1028,21 @@ func buildFlowDetectionPlan(
 			})
 			continue
 		}
+		if !cfg.IncludeInfrastructure {
+			if infra, why := flowDetectInfrastructure(sendable); infra {
+				plan.Skipped = append(plan.Skipped, FlowDetectionSkip{
+					URL: sendable, Method: method, Reason: "infrastructure", Detail: why,
+				})
+				continue
+			}
+		}
+		if !cfg.IncludeWrites && flowDetectIsWrite(method, parsed.Path) {
+			plan.Skipped = append(plan.Skipped, FlowDetectionSkip{
+				URL: sendable, Method: method, Reason: "write_op",
+				Detail: "looks like a state-changing operation; turn on \"include writes\" to send it",
+			})
+			continue
+		}
 
 		target := FlowDetectionTarget{
 			URL: sendable, Method: method, Host: host, Path: parsed.Path, Source: c.Source,
@@ -982,12 +1231,18 @@ func DryRunFlowDetection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := DefaultFlowDetectionConfig()
-	if r.Body != nil {
-		// An empty body is a dry run of the defaults, which is the most common thing to want.
+	// An empty body previews the SAVED config, which is what the card and a first open want; the
+	// Configure modal posts the config it is currently editing so the preview tracks the form.
+	rawBody, _ := io.ReadAll(r.Body)
+	var cfg FlowDetectionConfig
+	if len(strings.TrimSpace(string(rawBody))) == 0 {
+		cfg, _, _ = LoadSavedFlowDetectionConfig(scopeTargetID)
+	} else {
 		var requested FlowDetectionConfig
-		if err := json.NewDecoder(r.Body).Decode(&requested); err == nil {
+		if err := json.Unmarshal(rawBody, &requested); err == nil {
 			cfg = requested
+		} else {
+			cfg = DefaultFlowDetectionConfig()
 		}
 	}
 
@@ -1012,16 +1267,29 @@ func StartFlowDetection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var requested FlowDetectionConfig
-	if err := json.NewDecoder(r.Body).Decode(&requested); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid_body", "Body must be JSON: "+err.Error())
-		return
-	}
-
-	cfg, err := ValidateFlowDetectionConfig(requested)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid_config", err.Error())
-		return
+	// The card's Detect Flows button runs with an EMPTY body and expects the saved config; the
+	// Configure modal still posts a config inline. Reading the body once lets us tell them apart.
+	rawBody, _ := io.ReadAll(r.Body)
+	var cfg FlowDetectionConfig
+	if len(strings.TrimSpace(string(rawBody))) == 0 {
+		saved, _, lerr := LoadSavedFlowDetectionConfig(scopeTargetID)
+		if lerr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "internal_error", lerr.Error())
+			return
+		}
+		cfg = saved
+	} else {
+		var requested FlowDetectionConfig
+		if err := json.Unmarshal(rawBody, &requested); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_body", "Body must be JSON: "+err.Error())
+			return
+		}
+		validated, err := ValidateFlowDetectionConfig(requested)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_config", err.Error())
+			return
+		}
+		cfg = validated
 	}
 
 	// One request-issuing scan at a time per target. The rate budget only governs this process's own
@@ -1177,6 +1445,8 @@ func executeFlowDetectionRun(ctx context.Context, runID, scopeTargetID, sessionI
 	targetHost := scopeTargetHost(scopeTargetID)
 
 	sent, errors, redirects := 0, 0, 0
+	blocked := 0
+	blockedOut := false
 	lastError := ""
 	cancelled := false
 	interval := time.Duration(float64(time.Second) / plan.RPS)
@@ -1217,12 +1487,13 @@ func executeFlowDetectionRun(ctx context.Context, runID, scopeTargetID, sessionI
 			break
 		}
 
-		hopsUsed, hopErrors, hopLast := runFlowDetectionChain(
+		hopsUsed, hopErrors, hopBlocked, hopLast := runFlowDetectionChain(
 			ctx, client, budget, rules, denied, scope,
 			scopeTargetID, sessionID, targetHost, target, plan.Config, engagementHeaders,
 			plan.Config.MaxRequests-sent, interval, pacingDeficit)
 		sent += hopsUsed
 		errors += hopErrors
+		blocked += hopBlocked
 		if hopsUsed > 1 {
 			redirects += hopsUsed - 1
 		}
@@ -1231,12 +1502,28 @@ func executeFlowDetectionRun(ctx context.Context, runID, scopeTargetID, sessionI
 		}
 
 		updateFlowDetectionProgress(runID, sent, errors, redirects, lastError)
+
+		// Stop hammering a target that is refusing everything. The budget's own ladder only sees
+		// 429/503; a wall of 403 challenges (the Cloudflare Bot Management case) is invisible to it and
+		// would otherwise run to the full budget while recording interstitials as tested endpoints. After
+		// a warm-up, an overwhelming block ratio ends the run and says so.
+		if sent >= 20 && blocked*5 >= sent*4 {
+			blockedOut = true
+			break
+		}
 	}
 
 	status := flowRunCompleted
 	abortReason := ""
 	if cancelled {
 		status = flowRunCancelled
+	}
+	if blockedOut {
+		status = flowRunAborted
+		abortReason = fmt.Sprintf(
+			"target is blocking automated traffic: %d of %d requests were challenged or refused "+
+				"(403/401/429/503 or a bot-management interstitial), so the run stopped rather than "+
+				"record block pages as tested endpoints", blocked, sent)
 	}
 	if reason := budget.Aborted(); reason != "" {
 		status = flowRunAborted
@@ -1261,7 +1548,7 @@ func runFlowDetectionChain(
 	scopeTargetID, sessionID, targetHost string, target FlowDetectionTarget,
 	cfg FlowDetectionConfig, engagementHeaders map[string]string,
 	remaining int, interval, pacingDeficit time.Duration,
-) (sent int, failed int, lastError string) {
+) (sent int, failed int, blocked int, lastError string) {
 
 	current := target.URL
 	// The verb and body for THIS hop. They change across a redirect, which is the whole reason they
@@ -1272,7 +1559,7 @@ func runFlowDetectionChain(
 
 	for hop := 0; hop <= cfg.MaxRedirects; hop++ {
 		if ctx.Err() != nil || sent >= remaining {
-			return sent, failed, lastError
+			return sent, failed, blocked, lastError
 		}
 
 		// Jitter on top of HostBudget's fixed interval, plus whatever the budget's own floor cannot
@@ -1297,11 +1584,17 @@ func runFlowDetectionChain(
 
 		started := time.Now().UTC()
 		resp := client.Do(ctx, ScanRequest{
-			URL:      current,
-			Method:   method,
-			Body:     body,
+			URL:    current,
+			Method: method,
+			Body:   body,
+			// READ AND KEPT. This used to be false, on the reasoning that routing and redirects were
+			// the observation and bodies were not needed; the capture it wrote then had an empty
+			// response_body, so a run that put hundreds of requests on the target recorded nothing
+			// about what came back. The body is where the error message, the echoed input and the
+			// other account's record are. The request was sent either way: reading what it returned
+			// costs no extra traffic.
+			ReadBody: true,
 			Headers:  headers,
-			ReadBody: false, // routing and redirects are the observation; bodies are not needed
 		})
 		sent++
 
@@ -1310,6 +1603,9 @@ func runFlowDetectionChain(
 			errText = resp.Err.Error()
 			lastError = errText
 			failed++
+		}
+		if flowResponseBlocked(resp) {
+			blocked++
 		}
 
 		next := ""
@@ -1349,14 +1645,14 @@ func runFlowDetectionChain(
 		// recording it as the POST that started the chain would put a body in the capture table that
 		// never went on the wire.
 		writeFlowDetectionCapture(scopeTargetID, sessionID, targetHost, current, method, body,
-			contentType, resp, chain, errText, started, hop == 0)
+			contentType, headers, resp, chain, errText, started, hop == 0)
 
 		if next == "" {
-			return sent, failed, lastError
+			return sent, failed, blocked, lastError
 		}
 		current = next
 	}
-	return sent, failed, lastError
+	return sent, failed, blocked, lastError
 }
 
 // flowRedirectRefusal returns why a redirect destination must not be followed, or "".
@@ -1453,7 +1749,7 @@ func flowDetectionJitter(ctx context.Context, interval, deficit time.Duration) {
 // response sitting next to it.
 func writeFlowDetectionCapture(
 	scopeTargetID, sessionID, targetHost, requestURL, method, body, contentType string,
-	resp ScanResponse, chain []FlowRedirectHop, errText string,
+	sentHeaders map[string]string, resp ScanResponse, chain []FlowRedirectHop, errText string,
 	at time.Time, isRoot bool,
 ) {
 	responseHeaders := map[string]string{}
@@ -1462,17 +1758,15 @@ func writeFlowDetectionCapture(
 	}
 	responseHeadersJSON, _ := json.Marshal(responseHeaders)
 
-	// The request headers as they were actually sent, so the repeater can reproduce this exact
-	// request. There are no credentials in here by construction.
-	sentHeaders := map[string]string{
-		"User-Agent":        "ars0n-framework/2.0 (+authorized-testing)",
-		"Accept-Encoding":   "identity",
-		"X-Ars0n-Framework": "endpoint-workflow",
+	// The request headers as they were ACTUALLY SENT, handed in by the sender rather than restated
+	// here. Restating them meant the row described a request nobody made the moment the engagement
+	// config set a different user agent or a programme header, and the repeater rebuilt that wrong
+	// request from the row.
+	recorded := map[string]string{}
+	for k, v := range sentHeaders {
+		recorded[k] = v
 	}
-	if body != "" && contentType != "" {
-		sentHeaders["Content-Type"] = contentType
-	}
-	requestHeadersJSON, _ := json.Marshal(sentHeaders)
+	requestHeadersJSON, _ := json.Marshal(recorded)
 
 	chainJSON, _ := json.Marshal(chain)
 	if len(chain) == 0 {
@@ -1498,17 +1792,18 @@ func writeFlowDetectionCapture(
 		   tab_id, timestamp, mime_type, sources, graphql_operation, resource_type, initiator,
 		   redirect_chain, error, duration_ms, request_body_truncated, response_body_truncated,
 		   is_direct, capture_source)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'', '{}'::jsonb,'{}'::jsonb,$11,
-		        NULL,$12,$13,$14,'',$15,$16,$17,$18,$19,FALSE,FALSE,$20,'active')`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'{}'::jsonb,'{}'::jsonb,$12,
+		        NULL,$13,$14,$15,'',$16,$17,$18,$19,$20,FALSE,$21,$22,'active')`,
 		uuid.New().String(), sessionID, scopeTargetID,
 		sanitizeForPostgres(requestURL), sanitizeForPostgres(requestURL),
 		strings.ToUpper(method), resp.Status, requestHeadersJSON, responseHeadersJSON,
 		// post_data and body_type: the request body actually sent, and how it was labelled.
-		sanitizeForPostgres(body), sanitizeForPostgres(contentType),
+		// response_body is what came back, whole, sanitised only so a text column can hold it.
+		sanitizeForPostgres(body), sanitizeForPostgres(resp.Body), sanitizeForPostgres(contentType),
 		// mime_type is the RESPONSE content type. Not the same field as body_type above.
 		at, sanitizeForPostgres(resp.ContentType), []string{"active_detection"},
 		resourceType, initiator, chainJSON, sanitizeForPostgres(errText),
-		int(resp.ElapsedMS), isDirect)
+		int(resp.ElapsedMS), resp.Truncated, isDirect)
 	if err != nil {
 		log.Printf("[FLOW-DETECT] Failed to store capture for %s: %v", requestURL, err)
 	}
@@ -1808,14 +2103,17 @@ func FlowDetectionSources(scopeTargetID string) map[string]string {
 	// capture_source is fetched separately rather than added to the projection above, because that
 	// projection belongs to replayRequestFlows.go and its FlowCapture struct has no field for it.
 	sources := map[string]string{}
+	statuses := map[string]int{}
 	rows, err := dbPool.Query(context.Background(),
-		`SELECT id, COALESCE(capture_source,'passive') FROM manual_crawl_captures WHERE scope_target_id = $1`,
+		`SELECT id, COALESCE(capture_source,'passive'), COALESCE(status_code,0) FROM manual_crawl_captures WHERE scope_target_id = $1`,
 		scopeTargetID)
 	if err == nil {
 		for rows.Next() {
 			var id, src string
-			if rows.Scan(&id, &src) == nil {
+			var status int
+			if rows.Scan(&id, &src, &status) == nil {
 				sources[id] = src
+				statuses[id] = status
 			}
 		}
 		rows.Close()
@@ -1833,6 +2131,8 @@ func FlowDetectionSources(scopeTargetID string) map[string]string {
 			if src == "" {
 				src = FlowSourcePassive
 			}
+			// A blocked active capture did not reach the endpoint, so it cannot confirm the flow.
+			src = flowEffectiveSource(src, statuses[c.ID])
 			in.CaptureSources = append(in.CaptureSources, src)
 			in.Tuples = append(in.Tuples, NormalizeFlowTuple(c.Method, c.URL))
 		}

@@ -56,6 +56,11 @@ const EMPTY_FORM = {
   expires_at: '',
   is_active: true,
   notes: '',
+  // What the row holds. A new token has none of the three, which is what makes the value box
+  // required for it and optional on an edit.
+  has_value: false,
+  value_fingerprint: '',
+  value_length: 0,
 };
 
 const RAW_PASTE_PLACEHOLDER = `Set-Cookie: session=abc123; Path=/; Secure; HttpOnly; SameSite=Lax
@@ -89,12 +94,38 @@ function fromLocalInput(local) {
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+// storedCredentialSummary identifies the credential the row holds.
+//
+// A row with a credential and a row with none MUST NOT READ THE SAME: "no value stored" is why a
+// scan on this target is going out unauthenticated, and it has the opposite fix to a row whose
+// credential is fine. The fingerprint and the length are how two long opaque strings are told
+// apart at a glance; the value itself is in the box and in the preview above it.
+export function storedCredentialSummary(row) {
+  if (!row || row.has_value !== true) return 'No value stored on this row.';
+  const fingerprint = row.value_fingerprint && row.value_fingerprint !== 'none'
+    ? row.value_fingerprint : 'unknown';
+  const length = Number(row.value_length);
+  const size = Number.isFinite(length) && length > 0 ? `, ${length} bytes` : '';
+  return `A credential is stored: fingerprint ${fingerprint}${size}.`;
+}
+
+// credentialForWire is the credential, or a word saying there is not one. An absence is a fact the
+// operator has to act on; it is not the value being withheld.
+function credentialForWire(row) {
+  if (row && row.token_value) return row.token_value;
+  return row && row.has_value === true ? '<the stored credential>' : '<no value stored>';
+}
+
 // Build the request sketch shown in the preview panel. This is deliberately the whole first few
 // lines of a request rather than just the header: the query-parameter type does not produce a
 // header at all, and showing only a header would make that type look broken.
-function buildWire(form, host, reveal) {
-  const value = form.token_value || '';
-  const shown = reveal || value.length <= 28 ? value : `${value.slice(0, 24)}...`;
+//
+// THE CREDENTIAL IS IN IT, IN FULL. The preview is the exact bytes that go on the wire, which is
+// what makes it worth copying into a repeater tab and what makes a captured credential provable.
+// It draws whatever the box holds: the value the list served for a stored token, or the one the
+// operator is part way through typing over it.
+export function buildWire(form, host) {
+  const shown = credentialForWire(form);
   const prefix = form.value_prefix || '';
   const target = host || 'target-host';
 
@@ -156,7 +187,6 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
 
   const [form, setForm] = useState(EMPTY_FORM);
   const [domainDraft, setDomainDraft] = useState('');
-  const [reveal, setReveal] = useState(false);
 
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteRaw, setPasteRaw] = useState('');
@@ -165,8 +195,8 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
   const [pasteResult, setPasteResult] = useState(null);
 
   const targetHost = useMemo(() => hostFromUrl(scopeTargetUrl), [scopeTargetUrl]);
-  const wire = useMemo(() => buildWire(form, form.scope_domains[0] || targetHost, reveal),
-    [form, targetHost, reveal]);
+  const wire = useMemo(() => buildWire(form, form.scope_domains[0] || targetHost),
+    [form, targetHost]);
 
   // A prefix that does not end in a space concatenates straight onto the value, which produces
   // "BearereyJhbGc..." and a 401 nobody can explain. The preview above already shows it, this just
@@ -213,7 +243,6 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
     if (!show) {
       setForm(EMPTY_FORM);
       setDomainDraft('');
-      setReveal(false);
       setPasteOpen(false);
       setPasteRaw('');
       setPasteResult(null);
@@ -290,7 +319,14 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
       cookie_name: t.cookie_name || '',
       param_name: t.param_name || '',
       value_prefix: t.value_prefix || '',
+      // THE STORED CREDENTIAL, as the list serves it. The box shows what is there, so the operator
+      // can read it, copy it and correct it, and a Save writes back exactly what it was given.
+      // Emptying the box means "leave the stored credential alone", because the PUT then omits the
+      // key entirely.
       token_value: t.token_value || '',
+      has_value: t.has_value === true,
+      value_fingerprint: t.value_fingerprint || '',
+      value_length: Number(t.value_length) || 0,
       scope_domains: Array.isArray(t.scope_domains) ? t.scope_domains : [],
       cookie_path: t.cookie_path || '',
       cookie_domain: t.cookie_domain || '',
@@ -302,7 +338,6 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
       notes: t.notes || '',
     });
     setDomainDraft('');
-    setReveal(false);
     setError('');
     setNotice('');
   };
@@ -310,12 +345,15 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
   const newToken = () => {
     setForm(EMPTY_FORM);
     setDomainDraft('');
-    setReveal(false);
     setError('');
     setNotice('');
   };
 
-  const canSave = form.name.trim() !== '' && form.token_value.trim() !== '' && form.auth_flow_id !== '';
+  // A NEW token needs a credential typed in; an EXISTING one already has one and the box is a
+  // replace-it box. Requiring the value on an edit is what would force an operator to paste a live
+  // credential into the browser to change a cookie path.
+  const canSave = form.name.trim() !== '' && form.auth_flow_id !== ''
+    && (form.token_value.trim() !== '' || form.has_value === true);
 
   const saveToken = async () => {
     if (!canSave || !scopeTargetId) return;
@@ -338,7 +376,6 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
       cookie_name: form.cookie_name,
       param_name: form.param_name,
       value_prefix: form.value_prefix,
-      token_value: form.token_value,
       scope_domains: domains,
       cookie_path: form.cookie_path,
       cookie_domain: form.cookie_domain,
@@ -349,6 +386,13 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
       is_active: form.is_active,
       notes: form.notes,
     };
+    // THE KEY IS OMITTED, NOT SENT EMPTY. Every field of the server's write payload is a pointer
+    // so that an update can tell "leave this alone" from "set this to empty", and blanking a
+    // credential because the operator edited a cookie path is precisely the case that distinction
+    // exists for. A typed value replaces the stored one; an empty box changes nothing.
+    if (form.token_value.trim() !== '') {
+      body.token_value = form.token_value;
+    }
 
     try {
       const url = form.id ? `/api/session-tokens/${form.id}` : `/api/session-tokens/target/${scopeTargetId}`;
@@ -589,8 +633,14 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                         cookie_name: t.cookie_name,
                         param_name: t.param_name,
                         value_prefix: t.value_prefix,
-                        token_value: t.token_value || '',
-                      }, '', false);
+                        // The row draws the real request line, credential included. It is clipped
+                        // to the column width by CSS and the whole line is on the title attribute,
+                        // so nothing is cut out of the value.
+                        token_value: t.token_value,
+                        has_value: t.has_value === true,
+                        value_fingerprint: t.value_fingerprint,
+                        value_length: t.value_length,
+                      }, '');
                       return (
                         <ListGroup.Item
                           key={t.id}
@@ -641,14 +691,8 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                     <span className="text-white-50 small text-uppercase">How this will be sent on the wire</span>
                     <span className="d-flex align-items-center gap-2">
                       <Badge bg="secondary">{wire.location}</Badge>
-                      <Form.Check
-                        type="switch"
-                        id="reveal-token-value"
-                        className="text-white-50 small"
-                        label="Show full value"
-                        checked={reveal}
-                        onChange={(e) => setReveal(e.target.checked)}
-                      />
+                      {/* THERE IS NO "SHOW FULL VALUE" SWITCH. The preview already shows the full
+                          value, so a switch would have nothing left to reveal. */}
                       <Button size="sm" variant="outline-secondary" onClick={copyWire}>Copy</Button>
                     </span>
                   </div>
@@ -664,11 +708,15 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                       after it unless the target really expects them joined.
                     </div>
                   )}
-                  {!form.token_value && (
-                    <div className="text-white-50" style={{ fontSize: '0.72rem' }}>
-                      No value yet. The preview updates as you type.
-                    </div>
-                  )}
+                  <div className="text-white-50" style={{ fontSize: '0.72rem' }}>
+                    {/* Which of the two this says decides what the operator does next: a row with
+                        no credential at all is why the scans on this target are going out
+                        unauthenticated. */}
+                    {storedCredentialSummary(form)}
+                    {form.has_value === true && !form.token_value
+                      ? ' The Value box is empty, so a Save leaves what is stored alone.'
+                      : ' The preview is the Value box, exactly as it will be sent.'}
+                  </div>
                 </div>
 
                 <Row className="g-2">
@@ -754,11 +802,15 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                       as="textarea"
                       rows={3}
                       style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}
-                      placeholder="Paste the token exactly as the application issued it, with no prefix"
+                      placeholder={form.has_value === true
+                        ? 'Empty leaves the stored credential alone. Paste a new one to replace it.'
+                        : 'Paste the token exactly as the application issued it, with no prefix'}
                       value={form.token_value}
                       onChange={(e) => setField({ token_value: e.target.value })}
                     />
                     <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
+                      {storedCredentialSummary(form)}
+                      {' '}
                       Leave the scheme out of this box. The prefix field adds it, so the same value can be
                       reused if the header ever changes.
                     </div>
@@ -915,7 +967,9 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                     )}
                     {!canSave && (
                       <span className="text-white-50 small">
-                        A name, a value and an auth flow are all required.
+                        {form.has_value === true
+                          ? 'A name and an auth flow are both required.'
+                          : 'A name, a value and an auth flow are all required.'}
                       </span>
                     )}
                     {/* The verdict lives on the saved row rather than in the form, because the form

@@ -1,6 +1,7 @@
 const { z } = require('zod');
 const { apiGet, apiPost, apiPut, apiDelete } = require('../api');
 const { limitResults, clampLimit } = require('../utils/truncate');
+const { clip, bodyOptions, DEFAULTS } = require('../utils/clip');
 
 // The Authorization workflow over MCP: the four ways an application decides whether a caller may do
 // a thing, modelled ahead of testing so that later work knows what SHOULD be refused. Client
@@ -21,9 +22,16 @@ const { limitResults, clampLimit } = require('../utils/truncate');
 // definition of what is valid instead of two.
 //
 // Size is the constraint on the way back. An identity pattern carries a whole raw request and the
-// response body it produced, which is routinely a full HTML page or a JSON document, so nothing
-// comes back whole by default: bodies are clipped, lists are clamped, and the verbose half of every
-// row sits behind detail:"full".
+// response body it produced, which is routinely a full HTML page or a JSON document, so a listing
+// does not come back whole by default: rows carry a preview and lists are clamped.
+//
+// A DEFAULT IS NOT A CEILING HERE. Every body budget below is a starting point the caller raises
+// with max_body_chars, and body_match returns the window around a string instead of the head of
+// the document. That matters most on exactly this tool: an identity pattern is the record of one
+// account's response, and the thing that proves an IDOR is the other account's name, email or
+// balance sitting somewhere in the middle of the body. A cap that could not be lifted meant the
+// proof was in the database and out of reach. response_body_chars is always reported, so a caller
+// can see there is more before deciding what to ask for.
 
 const IDENTITY_CATEGORY = z.enum(['user_context_object', 'signed_token', 'parameter']);
 const IDENTIFIER_LOCATION = z.enum(['', 'query', 'path', 'body', 'header', 'cookie',
@@ -31,16 +39,13 @@ const IDENTIFIER_LOCATION = z.enum(['', 'query', 'path', 'body', 'header', 'cook
 const POLICY_VALUE = z.enum(['allow', 'deny', 'unset']);
 const MATRIX_VALUE = z.enum(['can_do', 'cannot_do', 'forbidden_to_do']);
 
-// The ceiling on anything that came off the wire, applied per field. A replay must never echo more
-// than this, whatever the target returned.
-const BODY_LIMIT = 2000;
-// What a single compact row shows of a body. Enough to read the account name a response echoed
-// back, or the first field of a JSON error, which is what identifies the pattern being modelled.
-const BODY_PREVIEW = 600;
-// And what a row in a list shows. Smaller because the multiplier is different: fifty patterns at
-// the single-row preview is thirty kilobytes of mostly page furniture, and a list is read to pick
-// which pattern to open, not to read the evidence on all of them.
-const LIST_PREVIEW = 200;
+// Starting budgets, per field, all raisable with max_body_chars up to the shared ceiling.
+// A read of ONE pattern gets the single-record budget, because the row multiplier is 1 and there is
+// no reason to be mean. A list gets the list budget, because fifty patterns multiply it.
+const SINGLE_BODY = DEFAULTS.single;
+const LIST_PREVIEW = DEFAULTS.list;
+// Errors only. A transport failure message is not evidence and does not need a knob.
+const ERROR_CHARS = 600;
 
 // How much of the identity the attacker controls, worst to best. Used to order the pattern list so
 // the rows worth testing first arrive first, because the list is read to pick a target.
@@ -116,10 +121,22 @@ const manageIdentityPatternsSchema = z.object({
 
   detail: z.enum(['compact', 'full']).optional().describe(
     'compact (default) is the category, identifier, response status and timing, plus a preview of ' +
-    `the response body (${LIST_PREVIEW} chars in a list, ${BODY_PREVIEW} on a single pattern). ` +
-    `full adds the raw request, the complete response headers, and up to ${BODY_LIMIT} chars of ` +
-    'body.'),
+    `the response body (${LIST_PREVIEW} chars per row in a list, ${SINGLE_BODY} on a single ` +
+    'pattern). full adds the raw request and the complete response headers. Neither figure is a ' +
+    'ceiling: raise it with max_body_chars, or jump to the part you want with body_match.'),
   max_results: z.number().optional().describe('Maximum rows (default 50, max 1000)'),
+
+  max_body_chars: z.number().int().positive().optional().describe(
+    'Characters of response_body and raw_request to return, per field. Raises the default above, ' +
+    'up to 200000. This is the knob to reach for when the thing that proves the finding is ' +
+    'further into the body than the preview reaches: another account\'s name, an email address, ' +
+    'a balance. response_body_chars always reports the true length whether or not it was clipped.'),
+  body_match: z.string().optional().describe(
+    'Return the window around the FIRST case-insensitive occurrence of this string in the body ' +
+    'instead of the head of it. Cheaper and more precise than raising max_body_chars on a large ' +
+    'page: ask for the other account\'s id, or "email", and read what surrounds it.'),
+  body_match_window: z.number().int().positive().optional().describe(
+    'Characters either side of a body_match hit (default 400).'),
 });
 
 async function manageIdentityPatterns(params) {
@@ -136,7 +153,8 @@ async function manageIdentityPatterns(params) {
       // where a user_context_object pattern is worth none.
       rows.sort((a, b) => (IDOR_RANK[a.category] ?? 9) - (IDOR_RANK[b.category] ?? 9));
 
-      const projected = rows.map((p) => compactPattern(p, full, LIST_PREVIEW));
+      const bopts = bodyOptions(params, LIST_PREVIEW, rows.length || 1);
+      const projected = rows.map((p) => compactPattern(p, full, bopts));
       return {
         by_category: countBy(rows, (p) => p.category),
         ...limitResults(projected, clampLimit(params.max_results)),
@@ -150,7 +168,7 @@ async function manageIdentityPatterns(params) {
       }
       const hit = (await fetchPatterns(params.target_id)).find((p) => p.id === params.pattern_id);
       if (!hit) return { error: 'no identity pattern with that id on this target' };
-      return compactPattern(hit, full);
+      return compactPattern(hit, full, bodyOptions(params, SINGLE_BODY, 1));
     }
 
     case 'create': {
@@ -211,7 +229,7 @@ async function manageIdentityPatterns(params) {
       return {
         pattern_id: params.pattern_id,
         replayed: true,
-        ...compactPattern(out, full),
+        ...compactPattern(out, full, bodyOptions(params, SINGLE_BODY, 1)),
       };
     }
 
@@ -816,10 +834,11 @@ async function getAuthzSummary(params) {
 
 // === projections ===============================================================================
 
-// bodyPreview is how much of the response body a compact row carries, so a list can be stingier
-// than a single row without a second projection existing to drift from this one.
-function compactPattern(p, full, bodyPreview = BODY_PREVIEW) {
+// bopts is {limit, match, window} from bodyOptions, so a list can be stingier than a single row
+// without a second projection existing to drift from this one, and the caller can override either.
+function compactPattern(p, full, bopts) {
   if (!p || typeof p !== 'object') return p;
+  const opts = bopts || bodyOptions({}, SINGLE_BODY, 1);
   const headers = p.response_headers || {};
   return clean({
     id: p.id,
@@ -840,13 +859,19 @@ function compactPattern(p, full, bodyPreview = BODY_PREVIEW) {
     response_status: p.response_status === null ? undefined : p.response_status,
     response_time_ms: p.response_time_ms === null ? undefined : p.response_time_ms,
     content_type: full ? undefined : headerValue(headers, 'content-type'),
-    response_body: clip(p.response_body, full ? BODY_LIMIT : bodyPreview),
+    response_body: clip(p.response_body, opts.limit, opts) || undefined,
+    // Always the true length, never the length of what came back. A caller who sees 48213 here
+    // beside a 600 character body knows to ask again rather than concluding the body is all there.
+    response_body_chars: typeof p.response_body === 'string' && p.response_body.length
+      ? p.response_body.length : undefined,
     notes: p.notes,
     created_at: p.created_at,
     updated_at: p.updated_at,
 
     ...(full ? {
-      raw_request: clip(p.raw_request, BODY_LIMIT),
+      raw_request: clip(p.raw_request, opts.limit) || undefined,
+      raw_request_chars: typeof p.raw_request === 'string' && p.raw_request.length
+        ? p.raw_request.length : undefined,
       response_headers: headers,
     } : {}),
   });
@@ -1144,12 +1169,6 @@ function clean(obj) {
   return out;
 }
 
-function clip(text, limit) {
-  if (typeof text !== 'string' || !text) return undefined;
-  if (text.length <= limit) return text;
-  return text.slice(0, limit) + `\n... [truncated, ${text.length - limit} chars remaining]`;
-}
-
 // Response headers come back as {name: [values]} from the Go replay engine and as {name: value}
 // from anything that round-tripped through JSON, so both are handled rather than guessed at.
 function headerValue(headers, name) {
@@ -1165,7 +1184,7 @@ function headerValue(headers, name) {
 function apiError(err) {
   const raw = String(err && err.message ? err.message : err);
   const m = raw.match(/failed \((\d+)\):\s*([\s\S]*)$/);
-  return clip((m ? m[2] : raw).trim(), BODY_PREVIEW);
+  return clip((m ? m[2] : raw).trim(), ERROR_CHARS);
 }
 
 module.exports = {

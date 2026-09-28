@@ -121,21 +121,23 @@ describe('the repeater display controls do not change the bytes', () => {
     await open();
 
     await clickReplay();
-    const withoutWrap = sends()[0].body.raw_request;
+    const firstSend = sends()[0].body.raw_request;
 
+    // Wrap now defaults ON (the operator asked for it), so this flips it to the other state rather
+    // than assuming it starts off. Either way the bytes must be identical.
     const toggle = document.querySelector('#replay-wrap-toggle');
     expect(toggle).toBeTruthy();
-    expect(toggle.checked).toBe(false);
+    const initial = toggle.checked;
     await act(async () => { toggle.click(); });
-    expect(document.querySelector('#replay-wrap-toggle').checked).toBe(true);
+    expect(document.querySelector('#replay-wrap-toggle').checked).toBe(!initial);
 
     await clickReplay();
-    const withWrap = sends()[1].body.raw_request;
+    const secondSend = sends()[1].body.raw_request;
 
-    expect(withWrap).toBe(withoutWrap);
-    expect(withWrap).toBe(RAW);
+    expect(secondSend).toBe(firstSend);
+    expect(secondSend).toBe(RAW);
     // And there is no line break anywhere inside the long query string.
-    expect(withWrap).toContain(`/a?q=${LONG} HTTP/1.1`);
+    expect(secondSend).toContain(`/a?q=${LONG} HTTP/1.1`);
   });
 
   // The one control that IS allowed to change bytes. It must change the length header too.

@@ -87,12 +87,13 @@ func BuildRawHTTPRequest(method, rawURL string, headers map[string]interface{}, 
 	}
 	sort.Strings(names)
 
+	// One line per value. A repeated header name is stored as an array, and folding an array into a
+	// single comma-joined line changes what the request says, which for a rebuilt request is the
+	// difference between replaying what was captured and replaying something else.
 	for _, name := range names {
-		text := stringifyHeaderValue(headers[name])
-		if text == "" {
-			continue
+		for _, text := range headerValueList(headers[name]) {
+			fmt.Fprintf(&sb, "%s: %s\r\n", canonicalHeaderName(name), text)
 		}
-		fmt.Fprintf(&sb, "%s: %s\r\n", canonicalHeaderName(name), text)
 	}
 
 	if body != "" {
@@ -490,16 +491,39 @@ func CreateAuthFlowFromCaptures(w http.ResponseWriter, r *http.Request) {
 
 // expandHeaderMap converts the flat header map captures store into the multi-value shape
 // auth_flow_steps.response_headers uses (which is http.Header, so replay's cookie seeding works).
+// expandHeaderMap turns the flat header map a capture stores into http.Header.
+//
+// A repeated header name is stored as a JSON array and each element becomes its own header value.
+// Joining them into one string, which is what this used to do, loses every Set-Cookie after the
+// first, because http.Response.Cookies parses one cookie per value; the session is rarely the
+// first cookie a login sets.
 func expandHeaderMap(flat map[string]interface{}) map[string][]string {
 	out := map[string][]string{}
 	for name, value := range flat {
-		text := stringifyHeaderValue(value)
-		if text == "" {
+		values := headerValueList(value)
+		if len(values) == 0 {
 			continue
 		}
-		out[canonicalHeaderName(name)] = []string{text}
+		out[canonicalHeaderName(name)] = values
 	}
 	return out
+}
+
+// headerValueList flattens a stored header value into one entry per value sent on the wire.
+func headerValueList(value interface{}) []string {
+	if list, ok := value.([]interface{}); ok {
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			if text := stringifyHeaderValue(item); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	}
+	if text := stringifyHeaderValue(value); text != "" {
+		return []string{text}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +559,10 @@ var (
 // "userid" happens to be one of the alternatives. On a real target that meant the two canonical IDOR
 // parameters, postId and productId, were never offered while the AWS load balancer cookie was
 // offered sixty times.
+// Long enough for a session JWT with a fat claim set. The shape patterns below already reject
+// anything containing whitespace, so this bounds a single opaque token, not free text.
+const maxIdentifierValueLen = 8192
+
 func keyLooksLikeIdentifier(key string) bool {
 	if key == "" {
 		return false
@@ -610,7 +638,7 @@ func isInfrastructureIdentifier(name string) bool {
 // testing, not every string in the traffic.
 func looksLikeIdentifier(value string) bool {
 	v := strings.TrimSpace(value)
-	if len(v) < 3 || len(v) > 512 {
+	if len(v) < 3 || len(v) > maxIdentifierValueLen {
 		return false
 	}
 	if strings.ContainsAny(v, " \t\n\r") {
@@ -726,7 +754,9 @@ func AutoDetectClientIdentifiers(w http.ResponseWriter, r *http.Request) {
 
 		add := func(value, label string) {
 			value = strings.TrimSpace(value)
-			if value == "" || len(value) > 512 {
+			// The ceiling used to be 512, which is shorter than a routine session JWT, so the one
+			// identifier an IDOR test starts from was the one the list never offered.
+			if value == "" || len(value) > maxIdentifierValueLen {
 				return
 			}
 			// The dedupe key decides how much noise this produces, and including the endpoint in it

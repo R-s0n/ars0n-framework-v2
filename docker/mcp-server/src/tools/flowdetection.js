@@ -1,7 +1,7 @@
 const { z } = require('zod');
 const { apiGet, apiPost, apiPut, apiDelete } = require('../api');
 const { limitResults, clampLimit } = require('../utils/truncate');
-const { clip } = require('../utils/clip');
+const { clip, resolveLimit } = require('../utils/clip');
 
 // Request Flow Replay: detection, configuration and the card metrics.
 //
@@ -44,6 +44,9 @@ const PLAN_TARGETS_DEFAULT = 25;
 const PLAN_SKIPPED_DEFAULT = 25;
 const PATTERN_LIST_DEFAULT = 40;
 const NOTES_CHARS = 1200;
+// A starting budget for a planned request's body, not a wall: max_body_chars raises it. The body
+// is what would actually be put on the target, so a caller checking a plan before running it has
+// to be able to read the whole of one.
 const BODY_PREVIEW_CHARS = 200;
 const ERROR_CHARS = 400;
 
@@ -130,6 +133,10 @@ const manageFlowDetectionSchema = z.object({
   // --- output shaping ---
   max_results: z.number().optional().describe(
     `list_exclusions: how many rules to return. Default ${EXCLUSION_LIST_DEFAULT}.`),
+  max_body_chars: z.number().int().positive().optional().describe(
+    `dry_run: characters of each planned request's body to return (default ${BODY_PREVIEW_CHARS} ` +
+    'per target, ceiling 200000). body_bytes always reports the true length. Raise it, or lower ' +
+    'max_targets first, to read exactly what a step would send before sending it.'),
   max_targets: z.number().optional().describe(
     `dry_run: how many planned requests to list. Default ${PLAN_TARGETS_DEFAULT}. The plan's own ` +
     'request_count is always the true total and is never the length of this list.'),
@@ -319,7 +326,8 @@ function projectPlan(plan, params) {
       note: plan.body_note || undefined,
     },
 
-    targets: targets.slice(0, tLimit).map(projectTarget),
+    targets: targets.slice(0, tLimit).map((t) => projectTarget(t,
+      resolveLimit(params.max_body_chars, BODY_PREVIEW_CHARS, Math.min(targets.length, tLimit) || 1))),
     targets_returned: Math.min(targets.length, tLimit),
     targets_truncated: targets.length > tLimit,
 
@@ -365,7 +373,7 @@ function projectPlan(plan, params) {
   return out;
 }
 
-function projectTarget(t) {
+function projectTarget(t, bodyLimit = BODY_PREVIEW_CHARS) {
   const row = {
     method: t.method,
     url: t.url,
@@ -374,7 +382,7 @@ function projectTarget(t) {
   if (t.body_bytes) {
     row.body_bytes = t.body_bytes;
     row.content_type = t.content_type;
-    row.body_preview = clip(String(t.body || ''), BODY_PREVIEW_CHARS);
+    row.body_preview = clip(String(t.body || ''), bodyLimit);
   }
   return row;
 }

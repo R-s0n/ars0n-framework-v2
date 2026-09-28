@@ -1,6 +1,10 @@
 const { z } = require('zod');
 const { query } = require('../db');
 const { limitResults, truncateText } = require('../utils/truncate');
+const { resolveLimit } = require('../utils/clip');
+
+// The starting budget for one stored tool result. A default, not a wall: max_chars raises it.
+const RESULT_CHARS = 3000;
 
 const SEVERITY_ORDER = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
 
@@ -136,8 +140,14 @@ async function getNucleiFindingSummary(params) {
     critical: { count: summary.critical.length, findings: summary.critical },
     high: { count: summary.high.length, findings: summary.high },
     medium: { count: summary.medium.length, findings: summary.medium },
-    low: { count: summary.low.length, findings: summary.low.slice(0, 25) },
+    low: { count: summary.low.length, findings: summary.low },
+    // Counted rather than listed, because an info finding is nuclei naming a technology far more
+    // often than it is naming a problem and there are usually thousands. They are NOT lost:
+    // query_nuclei_findings with severity:"info" returns every one of them, with the fields this
+    // projection does not carry (extracted_results, matcher_name, curl_command).
     info_count: summary.info_count,
+    info_findings_are_at: summary.info_count
+      ? 'query_nuclei_findings with severity:"info"' : undefined,
     total_scans: summary.total_scans,
   };
 }
@@ -152,6 +162,13 @@ const getScanResultsSchema = z.object({
     'arjun', 'x8',
   ]).describe('The scanner tool to get results for'),
   max_results: z.number().optional().describe('Maximum results to return (default 10)'),
+  max_chars: z.number().int().positive().optional().describe(
+    `Characters of each run's stored result to return (default ${RESULT_CHARS}, ceiling 200000). ` +
+    'result_chars always reports the true length whether or not it was clipped, so a clipped ' +
+    'result is never mistaken for a short one. Raise it rather than concluding a tool found ' +
+    'nothing past the cut: the stored result is the tool output itself, and what a crawler or a ' +
+    'secret scanner found is as likely to be at the end of it as at the start. get_tool_output ' +
+    'action "run" is the other way in, with head/tail selection.'),
 });
 
 async function getScanResults(params) {
@@ -161,9 +178,11 @@ async function getScanResults(params) {
 
   const result = await query(sql, [params.target_id, params.max_results || 10]);
 
+  const limit = resolveLimit(params.max_chars, RESULT_CHARS, 1);
   return result.rows.map((row) => ({
     ...row,
-    result: row.result ? truncateText(row.result, 3000) : null,
+    result: row.result ? truncateText(row.result, limit) : null,
+    result_chars: typeof row.result === 'string' ? row.result.length : undefined,
   }));
 }
 

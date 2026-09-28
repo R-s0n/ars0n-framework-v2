@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -614,5 +616,476 @@ func TestLFIStillCallsItBlockedWhenTheIdenticalBodyIsACannedBlockPage(t *testing
 	if lfiBlockRefutedByContent(honest, [][]byte{baseline}, live) {
 		t.Fatal("a canned 403 with no file content in it must still read as blocked, or the fix has " +
 			"traded one silent failure for another")
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// THE EARLY STOP, AND THE SENTENCE THAT BLAMED THE RUNNER FOR IT
+// ------------------------------------------------------------------------------------------------
+
+// lfiTestObs is a response this class could have received. The normalised hash is derived from the
+// body so two different bodies never collide, which is what the uniform-block reading turns on.
+func lfiTestObs(id string, status int, body string) triage.Observation {
+	var norm [32]byte
+	for i, b := range []byte(body) {
+		norm[i%32] ^= b + byte(i)
+	}
+	return triage.Observation{
+		ObsID: id, RunID: "lfi-stop", Status: status, Kind: triage.ObsProbe,
+		Class: triage.ClassLFI, Body: []byte(body), BodyLen: len(body),
+		BodySHA256: sha256.Sum256([]byte(body)),
+		Proj:       triage.Projections{NormBodySHA256: norm},
+		Payload:    triage.PayloadWire{Wire: []byte(id), Survived: triage.WireSurvivalEncoded},
+	}
+}
+
+func lfiTier1Own(bodies map[triage.ProbeID]string) []faOwnObs {
+	var out []faOwnObs
+	for _, id := range lfiTier1IDs {
+		b, ok := bodies[id]
+		if !ok {
+			continue
+		}
+		out = append(out, faOwnObs{ProbeID: id, Obs: lfiTestObs(string(id), 200, b)})
+	}
+	return out
+}
+
+// THE UNIFORM-BLOCK STOP MUST BE MEASURED AGAINST THE BASELINE, WHICH IS THE WHOLE POINT OF THE
+// BASELINE.
+//
+// This is the defect TRAVERSAL found, wrote up above trvUnderStop and fixed, and which this class
+// still had: faUniformBlock skips a response only when "len(baseline) > 0 && bytes.Equal(o.Body,
+// baseline)", so passing nil makes an endpoint that serves ONE page whatever you send read as
+// three distinct payloads producing one identical non-baseline body, which is the signature of a
+// filter answering. It is not a filter. It is a route with one page.
+//
+// MEASURED, canary oracle, the 80-route exam: all 29 LFI not_run cells carried tier2_not_sent,
+// /clean/always500 among them, and /clean/always500 returns the same 142 bytes to the baseline and
+// to every payload alike. The verdict's OWN block gate, which does pass the baseline, correctly
+// did not fire on it; only the planner's copy did.
+func TestTheEarlyStopIsMeasuredAgainstTheBaselineAndNotAgainstNothing(t *testing.T) {
+	page := "internal server error"
+	own := lfiTier1Own(map[triage.ProbeID]string{
+		lfiDEC: page, lfiNC1: page, lfiL1: page, lfiL2: page, lfiL16: page,
+	})
+	if why := lfiStopReason(own, []byte(page)); why != "" {
+		t.Errorf("this class stopped its own ladder with %q on an endpoint that answers one identical "+
+			"page to the unperturbed control and to every payload alike. Nothing was blocked: every "+
+			"response IS the baseline, and tier 2, tier 3 and the blind arm were all suppressed on "+
+			"that reading", why)
+	}
+	// And the positive control: when the three identical bodies are NOT the baseline, that is the
+	// shape the gate exists for and it must still fire.
+	block := "<html>403 Forbidden: request blocked</html>"
+	blocked := lfiTier1Own(map[triage.ProbeID]string{
+		lfiDEC: block, lfiNC1: block, lfiL1: block, lfiL2: block, lfiL16: block,
+	})
+	if why := lfiStopReason(blocked, []byte(page)); why != "uniform_block" {
+		t.Errorf("three distinct payloads produced one identical body that is NOT the baseline and "+
+			"the gate reported %q. That is a filter answering and the ladder must stop", why)
+	}
+}
+
+// THE tier2_not_sent SENTENCE MAY NOT BLAME THE RUNNER FOR A DECISION THIS CLASS MADE.
+//
+// It shipped as "tier 2 (L4, L5, L7, L8) is unconditional by design, because a wrapper works where
+// an absolute path does not. Without it this class has tested absolute paths only and must not say
+// clean about the rest". True of the DECLARATION in lfiTier2IDs and false of the RUN: Plan round 1
+// returns nil whenever lfiStopReason fires, so tier 2 is conditional on the stop in exactly the
+// way the sentence denies. An operator reads "unconditional by design" as a runner bug and opens
+// triageRun.go, which is the wrong file.
+func TestTheTierTwoReasonNamesTheGateThatActuallyFired(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stop   string
+		wantIn []string
+		notIn  []string
+	}{
+		{
+			name:   "this class chose not to send it",
+			stop:   "uniform_block",
+			wantIn: []string{"lfiStopReason", "uniform_block", "this class"},
+			notIn:  []string{"unconditional by design"},
+		},
+		{
+			name:   "nothing in this class stopped the ladder, so the probes were dropped elsewhere",
+			stop:   "",
+			wantIn: []string{"no gate in this class", "runner"},
+			notIn:  []string{"unconditional by design"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := lfiTier2NotSentReason(tc.stop)
+			for _, want := range tc.wantIn {
+				if !strings.Contains(strings.ToLower(got), strings.ToLower(want)) {
+					t.Errorf("the reason does not name %q:\n  %s", want, got)
+				}
+			}
+			for _, no := range tc.notIn {
+				if strings.Contains(got, no) {
+					t.Errorf("the reason still says %q, which is a claim about the declaration and "+
+						"not about this run:\n  %s", no, got)
+				}
+			}
+		})
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// THE NEGATIVE TAIL: TWO SHAPES THAT WERE MEASURED CLEAN AND HAD NOTHING MEASURED IN THEM
+// ------------------------------------------------------------------------------------------------
+
+// lfiFlatOwn is a full ladder in which every response is the SAME response: tier 1, the
+// unconditional tier 2 and both errno families, all carrying one identical body.
+//
+// It is the shape two whole families of oracle route cannot see through, and it is not
+// hypothetical: /clean/always500 answers one 142-byte error page to the unperturbed control and
+// to every payload alike, and the five fixed-302 routes answer twelve identical bytes to
+// everything.
+func lfiFlatOwn(status int, body string) []faOwnObs {
+	ids := []triage.ProbeID{lfiDEC, lfiNC1, lfiL1, lfiL2, lfiL16, lfiL4, lfiL5, lfiL7, lfiL8,
+		lfiL14, lfiL15}
+	out := make([]faOwnObs, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, faOwnObs{ProbeID: id, Obs: lfiTestObs(string(id), status, body)})
+	}
+	return out
+}
+
+func lfiTailOne(state triage.TriageState, reason, oracle string, grade triage.TriageGrade,
+	ords []uint64) []triage.ClassVerdict {
+	return []triage.ClassVerdict{{
+		Class: triage.ClassLFI, SlotKey: "query:file", State: state, Reason: reason,
+		Grade: grade, Oracle: oracle, Ordinals: ords,
+	}}
+}
+
+func lfiTailFactsFor(control triage.Observation) lfiTailFacts {
+	return lfiTailFacts{Kind: triage.KindQuery, DecodeDepth: 1, Control: control, HaveControl: true}
+}
+
+// A CONTROL THAT IS ALREADY FAILING MAKES EVERY BODY THIS CLASS SEARCHED THE FAILURE'S PAGE.
+//
+// MEASURED, canary oracle, the 80-route exam. On ONE run, on ONE route, three classes reading the
+// same 142 bytes:
+//
+//	/clean/always500  DESER     cannot_determine  control_already_failing
+//	/clean/always500  ORM-LEAK  cannot_determine  junk_sensitive
+//	/clean/always500  LFI       clean             "its own oracles stayed silent"
+//
+// The seven clean preconditions this class listed contained no check that the control itself was
+// failing, so the one class of the three that had no such guard reported the green tick.
+func TestAnAlreadyFailingControlIsNotAnLFIClean(t *testing.T) {
+	page := "<!doctype html><title>Error</title>\n<h1>Something went wrong</h1>\n" +
+		"<p>The service could not complete your request. Please try again later.</p>\n"
+	control := lfiTestObs("route-control", 500, page)
+	v := lfiNegative(lfiFlatOwn(500, page), [][]byte{[]byte(page)}, lfiTailFactsFor(control),
+		map[string]any{}, nil, nil, lfiTailOne)
+	if len(v) != 1 {
+		t.Fatalf("the tail produced %d verdicts, want 1", len(v))
+	}
+	if v[0].State.CountsAsClean() {
+		t.Fatalf("LFI reported %s on an endpoint that answered the SAME %d-byte error page to the "+
+			"unperturbed control and to every payload alike. Every oracle in this class reads that "+
+			"body, so the pages searched were the failure's and not the application's answer about "+
+			"our value: %s", v[0].State, len(page), v[0].Reason)
+	}
+	if !strings.Contains(v[0].Reason, "control_already_failing") {
+		t.Errorf("the refusal does not name control_already_failing, which is what DESER and ORM-LEAK "+
+			"call the identical reading on the identical route: %s", v[0].Reason)
+	}
+}
+
+// AN ENDPOINT THAT ANSWERS EVERY PAYLOAD THE WAY IT ANSWERS A REQUEST CARRYING NONE OF OUR BYTES
+// HAS NOT BEEN MEASURED BY THIS CLASS AT ALL.
+//
+// MEASURED, same exam run: five fixed-302 routes (/redirect/local, /redirect/fixed,
+// /redirect/loginwrap, /redirect/strictvalidator, /redirect/alwaysoffsite) answer twelve identical
+// body bytes to the control and to every payload. HPP refuses that shape as route_insensitive and
+// LFI called it clean. The body is not empty and the status is not 5xx, so neither arm of
+// pxReadsBody sees it: this is the class's own value_insensitive, the one NOSQL and TRAVERSAL
+// already carry.
+func TestARouteThatAnswersEveryPayloadIdenticallyIsNotAnLFIClean(t *testing.T) {
+	body := "redirecting"
+	control := lfiTestObs("route-control", 302, body)
+	v := lfiNegative(lfiFlatOwn(302, body), [][]byte{[]byte(body)}, lfiTailFactsFor(control),
+		map[string]any{}, nil, nil, lfiTailOne)
+	if len(v) != 1 {
+		t.Fatalf("the tail produced %d verdicts, want 1", len(v))
+	}
+	if v[0].State.CountsAsClean() {
+		t.Fatalf("LFI reported %s on a route that returned the unperturbed control's own %d bytes to "+
+			"every payload it was sent. No content signature, no marker, no stack error and no errno "+
+			"difference can appear in a response that is byte-identical to one carrying none of our "+
+			"bytes, so nothing was read here: %s", v[0].State, len(body), v[0].Reason)
+	}
+	if !strings.Contains(v[0].Reason, "route_insensitive") {
+		t.Errorf("the refusal does not name route_insensitive: %s", v[0].Reason)
+	}
+}
+
+// THE OTHER HALF, AND THE REASON THIS IS NOT A LICENCE TO REFUSE EVERYTHING. An endpoint that
+// answers differently to the payloads is one this class CAN read, and its silence there is the
+// application's answer and must stay a clean.
+func TestARouteThatAnswersDifferentlyStillReachesTheLFIClean(t *testing.T) {
+	control := lfiTestObs("route-control", 200, "you asked for readme")
+	own := lfiFlatOwn(200, "no such file")
+	v := lfiNegative(own, [][]byte{[]byte("you asked for readme")}, lfiTailFactsFor(control),
+		map[string]any{}, nil, nil, lfiTailOne)
+	if len(v) != 1 {
+		t.Fatalf("the tail produced %d verdicts, want 1", len(v))
+	}
+	if v[0].State != triage.StateClean {
+		t.Fatalf("state %s, want clean: this endpoint answered each payload differently, so the "+
+			"oracles had something to read and their silence is a measurement: %s", v[0].State, v[0].Reason)
+	}
+}
+
+// A CONTROL THAT REFUSES EVERYONE IS THE 4xx HALF OF THE SAME FACT, AND THE MECHANISM DID NOT
+// COVER IT.
+//
+// pxBodySurfaceUnreadable is the shared precondition for every class that declares pxReadsBody,
+// and its control arm is a bare status >= 500 copied from ORM-LEAK. That leaves the shape the
+// operator's live estate is mostly made of: 88% of probes against it come back 401. The
+// credential-carrying case is caught by the auth gate; a vector with NO credential against an
+// endpoint that refuses everyone fell through both and landed on a clean.
+//
+// pxControlRefusesEveryone is the missing arm. The second half of this test is the one that
+// matters most: an endpoint that refuses the control and ANSWERS a payload has given the class a
+// body to read, and the arm must not touch it.
+func TestTheBodySurfacePreconditionCoversAControlThatRefusesEveryone(t *testing.T) {
+	page := `{"error":"not found"}`
+	control := lfiTestObs("route-control", 404, page)
+
+	why, absent := pxControlRefusesEveryone(lfiFlatOwn(404, page), control, true)
+	if !absent {
+		t.Fatalf("the 4xx arm let through an endpoint that answered 404 with the SAME %d bytes to the "+
+			"unperturbed control and to every probe. Every body searched was the page this endpoint "+
+			"hands a request it is refusing, so a negative read out of it is the refusal's silence "+
+			"and not the application's", len(page))
+	}
+	if !strings.Contains(why, "control_refuses_everyone") {
+		t.Errorf("the refusal does not name control_refuses_everyone: %s", why)
+	}
+	if !strings.Contains(why, "404") {
+		t.Errorf("the refusal does not name the status it measured, so a reader cannot check it: %s", why)
+	}
+
+	// THE NARROWNESS, and it is the whole reason this arm is not a bare status test. A 404 to the
+	// observed value is an ordinary answer. One payload that moves the endpoint means there was a
+	// real body to read, and the class must be allowed to read it.
+	answered := lfiFlatOwn(404, page)
+	answered[3].Obs = lfiTestObs(string(answered[3].ProbeID), 200, "root:x:0:0:root:/root:/bin/sh")
+	if why, absent := pxControlRefusesEveryone(answered, control, true); absent {
+		t.Errorf("the arm refused an endpoint that answered one of this class's payloads differently "+
+			"from the control. That endpoint handed the oracles a body, and refusing there deletes "+
+			"true negatives rather than false ones: %s", why)
+	}
+
+	// AND A 5xx CONTROL IS NOT THIS ARM'S BUSINESS: pxBodySurfaceUnreadable already refuses it on
+	// one witness, and answering twice in two voices helps nobody.
+	if why, absent := pxControlRefusesEveryone(lfiFlatOwn(500, page),
+		lfiTestObs("route-control", 500, page), true); absent {
+		t.Errorf("the 4xx arm fired on a 5xx control, which the shared precondition already refuses "+
+			"for a different and stronger reason: %s", why)
+	}
+}
+
+// A PRECONDITION LIST MAY NOT PRINT A FACT NOBODY MEASURED.
+//
+// Every guard added in this round is a statement about the UNPERTURBED ROUTE CONTROL, and on a
+// slot where no control resolved not one of them ran: pxBodySurfaceUnreadable skips its control
+// arm, and both route arms return false on the spot. A clean that still listed "the control did
+// not answer 5xx" would be the stale-fact failure in its purest form, and it would be read by an
+// operator as a check that passed.
+func TestTheLFICleanDoesNotClaimControlFactsWhenThereWasNoControl(t *testing.T) {
+	own := lfiFlatOwn(200, "no such file")
+	facts := lfiTailFacts{Kind: triage.KindQuery, DecodeDepth: 1} // HaveControl is false
+	var got []triage.ClassVerdict
+	ann := map[string]any{}
+	one := func(state triage.TriageState, reason, oracle string, grade triage.TriageGrade,
+		ords []uint64) []triage.ClassVerdict {
+		got = []triage.ClassVerdict{{State: state, Reason: reason, Annotations: ann}}
+		return got
+	}
+	v := lfiNegative(own, [][]byte{[]byte("baseline")}, facts, ann, nil, nil, one)
+	if v[0].State != triage.StateClean {
+		t.Fatalf("state %s, want clean: with no route control the new guards cannot fire, and refusing "+
+			"here would delete every clean on a slot whose control did not resolve: %s", v[0].State, v[0].Reason)
+	}
+	lines, _ := ann["clean_preconditions"].([]string)
+	if len(lines) == 0 {
+		t.Fatal("the clean carries no preconditions at all")
+	}
+	joined := strings.Join(lines, " | ")
+	if strings.Contains(joined, "did not itself answer 5xx") ||
+		strings.Contains(joined, "THE ENDPOINT IS NOT FLAT") ||
+		strings.Contains(joined, "NOT REFUSING EVERYONE") {
+		t.Errorf("the clean lists a control fact on a slot that had no control, so it asserts three "+
+			"checks that did not run: %s", joined)
+	}
+	if !strings.Contains(joined, "NOT CHECKED on this slot") {
+		t.Errorf("the clean does not say which checks were skipped for want of a control: %s", joined)
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// ROUND 8: route_insensitive MAY NOT DENY WHAT THE OTHER CHANNEL DID
+// ---------------------------------------------------------------------------------------------
+
+// lfiHdrObs is one of this class's own observations with response headers on it, which lfiTestObs
+// does not carry. The header channel is the whole subject of the two tests below and it is the
+// one thing the existing fixtures cannot express.
+func lfiHdrObs(id triage.ProbeID, status int, body string, headers ...[2]string) faOwnObs {
+	o := lfiTestObs(string(id), status, body)
+	o.RespHeaders = append([][2]string{}, headers...)
+	return faOwnObs{ProbeID: id, Ordinal: 11, Obs: o}
+}
+
+func lfiHdrCtl(status int, body string, headers ...[2]string) triage.Observation {
+	o := lfiTestObs("route-control", status, body)
+	o.RespHeaders = append([][2]string{}, headers...)
+	return o
+}
+
+// THE FOUR ROUTES THIS TEST IS WRITTEN FROM, MEASURED AND NOT RECALLED. /redirect/local answers
+// twelve constant body bytes to everything and puts the slot's value straight into Location:
+// "Location: hppa&hppdup=hppb" to one probe and "Location: hppa-hppdup-hppb" to the next.
+// /redirect/loginwrap, /redirect/strictvalidator and /crlf/setcookie do the same in Location and
+// in Set-Cookie. On all four, lfiRouteInsensitive shipped "came back INDISTINGUISHABLE from the
+// unperturbed route control" and "That is true of any payload anyone could send", and both
+// sentences are false there: the responses are distinguishable, and the endpoint is demonstrably
+// reading what we sent.
+//
+// THE DECISION IS NOT WHAT IS BEING FIXED. Every oracle in this class searches a BODY, so a
+// moving Location hands them nothing, and counting it as movement returns LFI to clean on five
+// routes whose bodies never change. The sentence is what was bigger than the measurement.
+func TestLFIRouteInsensitiveDoesNotCallAMovingHeaderIndistinguishable(t *testing.T) {
+	const body = "redirecting"
+	control := lfiHdrCtl(302, body, [2]string{"Location", "/go?u=control"})
+	honest := []faOwnObs{
+		lfiHdrObs(lfiL1, 302, body, [2]string{"Location", "/go?u=alpha"}),
+		lfiHdrObs(lfiL2, 302, body, [2]string{"Location", "/go?u=beta"}),
+		lfiHdrObs(lfiL4, 302, body, [2]string{"Location", "/go?u=gamma"}),
+	}
+	why, flat := lfiRouteInsensitive(honest, control, true)
+	if !flat {
+		t.Fatalf("the refusal stopped firing on an endpoint whose status and body never move. "+
+			"Widening THIS decision to the header channel is what returns LFI to clean on "+
+			"/redirect/local, /redirect/fixed, /redirect/loginwrap, /redirect/strictvalidator and "+
+			"/redirect/alwaysoffsite, where all four of its oracles search a body that never "+
+			"changed: %s", why)
+	}
+	if strings.Contains(why, "INDISTINGUISHABLE") {
+		t.Errorf("the reason still calls two responses with different Location headers "+
+			"indistinguishable: %s", why)
+	}
+	if strings.Contains(why, "out. That is true of any payload anyone could send") {
+		t.Errorf("the reason still generalises an UNQUALIFIED null result to every payload that "+
+			"exists, on an endpoint that answered three probes with three different Locations. The "+
+			"generalisation is only true of the channel this class reads and the sentence has to "+
+			"say so: %s", why)
+	}
+	for _, want := range []string{
+		"THE SAME STATUS AND THE SAME NORMALISED BODY",
+		"ON THAT CHANNEL that is true of any payload anyone could send",
+		"3 of those probes",
+		"location",
+	} {
+		if !strings.Contains(why, want) {
+			t.Errorf("the reason does not contain %q, so a reader cannot tell which channel was read "+
+				"or what the other one saw: %s", want, why)
+		}
+	}
+}
+
+// AND WHERE NOTHING MOVED IN EITHER CHANNEL THE SECOND SENTENCE MUST BE ABSENT. A caveat printed
+// on every row is a caveat nobody reads, and "0 probes came back with a different header" is the
+// same overclaim pointing the other way.
+func TestLFIRouteInsensitiveStaysSilentAboutHeadersThatDidNotMove(t *testing.T) {
+	const body = "redirecting"
+	control := lfiHdrCtl(302, body, [2]string{"Location", "/account/home"})
+	honest := []faOwnObs{
+		lfiHdrObs(lfiL1, 302, body, [2]string{"Location", "/account/home"}),
+		lfiHdrObs(lfiL2, 302, body, [2]string{"Location", "/account/home"}),
+	}
+	why, flat := lfiRouteInsensitive(honest, control, true)
+	if !flat {
+		t.Fatalf("the refusal did not fire on an endpoint that answered everything identically "+
+			"in both channels: %s", why)
+	}
+	if strings.Contains(why, "THE OTHER CHANNEL DID MOVE") {
+		t.Errorf("the reason reports header movement on an endpoint whose headers are identical "+
+			"to the control's: %s", why)
+	}
+}
+
+// THE BACKSTOP AT lfi.go IS UNREACHABLE, AND THAT IS A PROPERTY RATHER THAN AN ACCIDENT.
+//
+// The ladder asks pxNoEvidenceToRead(pxReadsBody, ...) and then pxControlRefusesEveryone. The 4xx
+// arm inside pxBodySurfaceUnreadable and pxControlRefusesEveryone are the same four comparisons,
+// so the first call answers on every input the second would answer on, and the second line can
+// never be the one that returns. The round-7 verifier flagged the comment above it as stale and
+// warned that the next round would either redo work already done or delete the reachable copy.
+//
+// This test is the thing that keeps the answer current. It fails the moment either predicate is
+// narrowed, which is exactly when the backstop stops being a backstop and starts being the arm.
+func TestTheLFIFourHundredBackstopIsUnreachableBecauseTheSharedArmRunsFirst(t *testing.T) {
+	page := `{"error":"not found"}`
+	for _, c := range []struct {
+		name    string
+		status  int
+		own     []faOwnObs
+		control triage.Observation
+	}{
+		{"404 reproduced by every probe", 404, lfiFlatOwn(404, page), lfiTestObs("rc", 404, page)},
+		{"401 reproduced by every probe", 401, lfiFlatOwn(401, page), lfiTestObs("rc", 401, page)},
+		{"403 reproduced by every probe", 403, lfiFlatOwn(403, page), lfiTestObs("rc", 403, page)},
+		{"429 reproduced by every probe", 429, lfiFlatOwn(429, page), lfiTestObs("rc", 429, page)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, backstop := pxControlRefusesEveryone(c.own, c.control, true)
+			shared, first := pxNoEvidenceToRead(pxReadsBody, c.own, c.control, true)
+			if backstop && !first {
+				t.Fatalf("the backstop fired where the shared precondition did not, so lfi.go's " +
+					"second 4xx line is LOAD BEARING and the comment calling it a backstop is now " +
+					"wrong. Fix the comment, not this test")
+			}
+			if backstop && !strings.Contains(shared, "control_refuses_everyone") {
+				t.Errorf("the shared precondition answered first with something other than the 4xx "+
+					"arm, so the two are no longer the same rule: %s", shared)
+			}
+		})
+	}
+}
+
+// The nothing-sent ladder asks the planner before it asks the budget. See pxbudgetarm.go.
+//
+// This class has TWO derived sets and the ladder must read the same branch Plan reads: a path
+// slot whose percent handling refuses %2F gets lfiPathNoSlashIDs and everything else gets
+// lfiTier1IDs. Both are non-empty, so LFI's not_planned arm is structurally unreachable and its
+// nothing-sent rows are honestly about the cap; what the conversion buys is the sentence, which
+// no longer dates the cap to before this class planned when nothing measured that order.
+func TestLFINothingSentReadsTheSameDerivedSetPlanReads(t *testing.T) {
+	if len(lfiTier1IDs) == 0 || len(lfiPathNoSlashIDs) == 0 {
+		t.Fatal("one of this class's derived sets is empty, so the comment above is wrong and the " +
+			"not_planned arm is reachable after all")
+	}
+	src, err := os.ReadFile(filepath.Join(packageDirOf(t), "lfi.go"))
+	if err != nil {
+		t.Fatalf("read lfi.go: %v", err)
+	}
+	text := string(src)
+	// The %2F branch is Plan's, and the ladder now carries the same condition. Two occurrences:
+	// one in Plan, one in Classify's nothing-sent ladder.
+	if n := strings.Count(text, "ctx.Slot.Kind == triage.KindPath && ctx.Slot.Constraints.PctRejected"); n != 2 {
+		t.Errorf("the %%2F branch appears %d time(s) in lfi.go, want 2 (Plan and the nothing-sent "+
+			"ladder). If the ladder stops reading the branch Plan reads, it is counting probes this "+
+			"class would never have sent on this slot", n)
+	}
+	if !strings.Contains(text, "pxNothingSentTail(ctx, len(derived)") {
+		t.Error("the nothing-sent ladder does not hand pxNothingSentTail the derived count, so the " +
+			"ordering and the sentence are being asserted by the class again")
 	}
 }

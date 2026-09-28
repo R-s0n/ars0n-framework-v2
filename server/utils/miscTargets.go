@@ -165,9 +165,13 @@ func GetFoundJWTs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The token itself is truncated: it is a live credential and there is no reason to paint it
-	// across a screen that may be shared.
+	// THE TOKEN GOES OUT WHOLE. It used to be served as a 6+4 character preview because it is a
+	// live credential, which had it exactly backwards: a token found in this target's own traffic
+	// is the finding, and a preview cannot be decoded, replayed or checked against its issuer.
 	type shown struct {
+		Token string `json:"token"`
+		// Preview carries the same full token. The name is a compatibility alias for the URL
+		// workflow's JWT card, which still reads `preview`; drop it once that reads `token`.
 		Preview string `json:"preview"`
 		URL     string `json:"url"`
 		Source  string `json:"source"`
@@ -177,7 +181,7 @@ func GetFoundJWTs(w http.ResponseWriter, r *http.Request) {
 	out := make([]shown, 0, len(found))
 	for _, jwt := range found {
 		out = append(out, shown{
-			Preview: truncateSecret(jwt.Token), URL: jwt.URL, Source: jwt.Source,
+			Token: jwt.Token, Preview: jwt.Token, URL: jwt.URL, Source: jwt.Source,
 			Alg: jwt.Alg, Issuer: jwt.Issuer,
 		})
 	}

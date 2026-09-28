@@ -255,9 +255,11 @@ node lib/scope.test.mjs           # scope, endpoint naming, GraphQL, body parsin
 node lib/captureStages.test.mjs   # the webRequest stage machine, replayed in chrome's event order
 node injected.test.mjs            # the page hook, driven against a simulated page
 node popup.test.mjs               # the scope list: row order, DOM identity, striping
+node lib/deepcapture.test.mjs     # the debugger source: media bodies, capping, SVG as text
+node scoperules.test.mjs          # authored scope rules
 ```
 
-`node --test extension/` does NOT recurse into `lib/`, so run the four files by path.
+`node --test extension/` does NOT recurse into `lib/`, so run the files by path.
 
 `injected.test.mjs` runs the real `injected.js` inside a sandboxed fake page and asserts both that
 it captures bodies and that it does not change what the page observes from `fetch`, `XHR`,
@@ -267,6 +269,11 @@ it captures bodies and that it does not change what the page observes from `fetc
 carrying one `requestId`. That sequence is the point: each stage looks correct on its own, and the
 record was still destroyed by the order, because the redirect destination is a different HTTP
 message writing over the request that caused it.
+
+`deepcapture.test.mjs` drives the debugger source through the CDP event sequence with a stubbed
+`chrome.debugger`. It is the only source that ever sees an `<img>`, `<video>` or `@font-face` load,
+because those are neither `fetch` nor XHR and `webRequest` carries no body, so it is the only place
+the bytes of a photo returned by an IDOR can be taken at all.
 
 `popup.test.mjs` runs the real `popup.js` against a minimal DOM and asserts that out-of-scope rows
 never reorder as their hit counts change and that their DOM nodes are reused rather than recreated.

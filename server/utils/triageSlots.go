@@ -300,6 +300,7 @@ func triageHeaderSlots(row triageVectorRow, names []string) ([]triage.Slot, []tr
 	captured := triageHeaderValues(row.RawRequest)
 
 	var slots []triage.Slot
+	var notes []triage.PlanNote
 	seen := map[string]bool{}
 	emit := func(name string, origin triage.SlotOrigin) {
 		lower := strings.ToLower(strings.TrimSpace(name))
@@ -314,12 +315,30 @@ func triageHeaderSlots(row triageVectorRow, names []string) ([]triage.Slot, []tr
 		}
 		s := triageValueSlot(row, triage.KindHeader, triage.SlotKey("header:"+lower), lower, value, vo,
 			origin, triage.EncodeHeaderValue)
-		s.Constraints.IsCredential = triageCredentialHeader(lower)
+		s.Constraints.IsCredential = triageCredentialHeader(lower, value)
 		slots = append(slots, s)
 	}
 
+	candidates := make([]string, 0, len(captured)+len(names))
+	for name := range captured {
+		candidates = append(candidates, name)
+	}
+	sort.Strings(candidates) // captured is a map, and a note that depends on map order is a flake
 	for _, n := range names {
+		candidates = append(candidates, strings.ToLower(strings.TrimSpace(n)))
+	}
+
+	for _, n := range names {
+		lower := strings.ToLower(strings.TrimSpace(n))
+		if covered, note := triageTemplatedNameCovered(row, triage.KindHeader, "header:", lower, candidates); covered {
+			notes = append(notes, note)
+			continue
+		}
 		emit(n, triage.SlotObserved)
+		if triageNameCarriesTemplate(lower) {
+			notes = append(notes, triage.PlanNote{VectorID: row.ID, Kind: triage.KindHeader,
+				Reason: "header_name_carries_an_unresolved_template_and_no_concrete_form_of_it_exists_on_this_vector"})
+		}
 	}
 	for _, n := range triageInferredHeaders() {
 		emit(n, triage.SlotInferred)
@@ -327,10 +346,10 @@ func triageHeaderSlots(row triageVectorRow, names []string) ([]triage.Slot, []tr
 	// Nothing below can make this zero, because the inferred set is never empty, but the check
 	// stays so that emptying that list is a loud note rather than a silent zero.
 	if len(slots) == 0 {
-		return nil, []triage.PlanNote{{VectorID: row.ID, Kind: triage.KindHeader,
-			Reason: "no_header_names_and_the_inferred_set_is_empty"}}
+		return nil, append(notes, triage.PlanNote{VectorID: row.ID, Kind: triage.KindHeader,
+			Reason: "no_header_names_and_the_inferred_set_is_empty"})
 	}
-	return slots, nil
+	return slots, notes
 }
 
 // triageCookieSlots emits one slot per cookie name, from the captured Cookie header unioned with
@@ -345,6 +364,7 @@ func triageCookieSlots(row triageVectorRow, names []string) ([]triage.Slot, []tr
 	captured := triageCookiePairs(row.RawRequest)
 
 	var slots []triage.Slot
+	var notes []triage.PlanNote
 	seen := map[string]bool{}
 	emit := func(name, value string, vo triage.ValueOrigin, origin triage.SlotOrigin) {
 		if name == "" || seen[name] {
@@ -353,22 +373,41 @@ func triageCookieSlots(row triageVectorRow, names []string) ([]triage.Slot, []tr
 		seen[name] = true
 		s := triageValueSlot(row, triage.KindCookie, triage.SlotKey("cookie:"+name), name, value, vo, origin,
 			triage.EncodeCookie)
-		s.Constraints.IsCredential = triageCredentialCookie(name)
+		s.Constraints.IsCredential = triageCredentialCookie(name, value)
 		slots = append(slots, s)
 	}
+
+	// The concrete form has to be in the candidate set before the templated form is judged against
+	// it, and the array's own names count as candidates too, so the decision does not depend on
+	// which order the two arrived in.
+	candidates := make([]string, 0, len(captured)+len(names))
+	for _, kv := range captured {
+		candidates = append(candidates, kv[0])
+	}
+	candidates = append(candidates, names...)
 
 	for _, kv := range captured {
 		emit(kv[0], kv[1], triage.ValueObserved, triage.SlotObserved)
 	}
 	for _, n := range names {
+		if covered, note := triageTemplatedNameCovered(row, triage.KindCookie, "cookie:", n, candidates); covered {
+			notes = append(notes, note)
+			continue
+		}
 		emit(n, "", triage.ValueSynthesized, triage.SlotInferred)
+		if triageNameCarriesTemplate(n) {
+			// Kept, because a name nothing on this vector resolves is still a name the corpus
+			// believes in and dropping it would be the silent zero. Noted, because the probe goes
+			// out under a name no client ever sent, so a clean here is not a measured clean.
+			notes = append(notes, triage.PlanNote{VectorID: row.ID, Kind: triage.KindCookie,
+				Reason: "cookie_name_carries_an_unresolved_template_and_no_concrete_form_of_it_exists_on_this_vector"})
+		}
 	}
 
 	if len(slots) == 0 {
-		return nil, []triage.PlanNote{{VectorID: row.ID, Kind: triage.KindCookie,
-			Reason: "no_cookie_header_captured_and_no_parameters"}}
+		return nil, append(notes, triage.PlanNote{VectorID: row.ID, Kind: triage.KindCookie,
+			Reason: "no_cookie_header_captured_and_no_parameters"})
 	}
-	var notes []triage.PlanNote
 	credentials := 0
 	for _, s := range slots {
 		if s.Constraints.IsCredential {
@@ -676,6 +715,165 @@ func triageDedupeNames(in []string) []string {
 	return out
 }
 
+// ---------------------------------------------------------------------------------------------
+// THE ONE DEDUPE THIS DERIVATION IS ALLOWED TO DO, AND THE THREE IT IS NOT.
+//
+// WHAT WAS MEASURED, on the operator's live run a218419a, 3,450 slots over 216 vectors:
+//
+//	kind   | slots | distinct names | vectors | distinct (host, method, path)
+//	cookie |  2068 |             31 |      75 |                            73
+//	header |   931 |             19 |      49 |                            49
+//
+// It looks like 85% replication and it is not. The 75 cookie vectors are 75 different endpoints:
+// /api/v1/accounts/{uuid}/details, /api/v1/oauth/clients/{token}/secret, /internal/clock, /verify.
+// Probing AMP_d6814239bf on 69 of them does not test one thing 69 times, it asks 69 different
+// handlers whether they read that cookie, and the answer is per handler. So THREE dedupes that
+// look obvious are refused here:
+//
+//  1. SAME NAME ACROSS VECTORS, for example one probe of _gcl_au for the whole host. A cookie read
+//     by /api/v1/documents and ignored by /internal/clock is the normal case, not the exotic one.
+//     Probing one endpoint and recording the other 72 as covered is a coverage lie with a false
+//     negative under it, and the standing rule here is that a missed bug costs more than an extra
+//     request.
+//  2. THE INFERRED HEADER SET ACROSS VECTORS. X-Forwarded-For against /account/login and against
+//     /api/v1/paper_accounts/{uuid}/orders are different ACL decisions by different code. Same
+//     argument, and measured harder: all 49 header vectors are 49 distinct endpoints, so the
+//     replication factor on that axis is exactly 1.
+//  3. THIRD-PARTY ANALYTICS COOKIES (AMP_*, _gcl_au, __stripe_mid, _rdt_*, intercom-device-id-*).
+//     A cookie the server never reads is not an attack surface, and that would be a
+//     not_applicable rather than a dedupe, but IT CANNOT BE DECIDED HERE AND IT IS NOT GUESSED.
+//     A derivation sees triageVectorRow and triage.SlotEvidence: a request, a URL and a canary.
+//     No response, no Set-Cookie, no body. And the corpus cannot answer it either: 4,643 captures
+//     on this scope target carry zero Set-Cookie headers, so nothing on record separates a cookie
+//     the server issued from one a third-party script wrote, and neither of those answers the
+//     question actually asked, which is whether the server READS it. A name that looks like
+//     analytics is a guess, and a wrongly excluded slot is a false negative.
+//
+// WHAT IS DEDUPED, and it is not a policy, it is the existing union dedupe finishing its job.
+// triageCookieSlots and triageHeaderSlots already union the captured names with the parameters
+// array through one seen map, so a name in both produces one slot. That map compares raw text, so
+// it does not see that these two are the same cookie:
+//
+//	CognitoIdentityServiceProvider.<pool>.d4887448-50b1-7015-03be-6b285cf9fb5e.accessToken   observed
+//	CognitoIdentityServiceProvider.<pool>.{uuid}.accessToken                                 inferred, empty
+//
+// The second is the first with a path-templating placeholder left in the NAME. Live count: 560
+// such cookie slots, 5,600 pairs, 16.2% of the corpus, and all 560 have their concrete twin on
+// THE SAME VECTOR, same kind, carrying an observed value. No client ever sent a cookie called
+// "...{uuid}.accessToken" and no application reads one, so the slot is a probe of a name that
+// does not exist, and its answer is already being asked one slot over on the same request.
+//
+// Because the cover is on the same vector, no coverage row crosses an endpoint boundary: the pair
+// the operator loses and the pair that replaces it are on the same vector_id, and the note names
+// the slot key that carries it. THE COVER IS ALWAYS NAMED. A slot that disappears without a record
+// is the failure this layer exists to prevent, and it is worse than the request it saved.
+//
+// AND THE FAIL-OPEN HALF. A templated name with no concrete twin on its vector is KEPT, with a
+// note saying the name is unresolved, because an unmatched template is a name the corpus believes
+// in and a dropped one is a silent zero. Measured today: zero such cases, which is exactly when a
+// guard is cheap to add.
+
+// triageNameCarriesTemplate reports whether a cookie or header NAME still carries an unresolved
+// {...} path-template placeholder. It is a name test only; a templated VALUE is a normal thing to
+// probe and is not touched.
+func triageNameCarriesTemplate(name string) bool {
+	open := strings.Index(name, "{")
+	if open < 0 {
+		return false
+	}
+	return strings.Contains(name[open+1:], "}")
+}
+
+// triageTemplatedNameCovered reports that this name is the templated form of a concrete name that
+// is already a slot on this same vector, and returns the note that records which one covers it.
+//
+// It returns false for everything it is not certain about, which is the whole point: a name with
+// no placeholder, a placeholder that matches nothing, and a pattern with no literal text of its
+// own (a bare "{uuid}", which would otherwise match every cookie on the request) all keep their
+// slot.
+func triageTemplatedNameCovered(row triageVectorRow, kind triage.SlotKind, prefix, name string,
+	candidates []string) (bool, triage.PlanNote) {
+	if !triageNameCarriesTemplate(name) {
+		return false, triage.PlanNote{}
+	}
+	literals, ok := triageTemplateLiterals(name)
+	if !ok {
+		return false, triage.PlanNote{}
+	}
+	for _, c := range candidates {
+		if c == "" || c == name || triageNameCarriesTemplate(c) {
+			continue
+		}
+		if !triageTemplateLiteralsMatch(literals, c) {
+			continue
+		}
+		return true, triage.PlanNote{VectorID: row.ID, Kind: kind,
+			Reason: fmt.Sprintf("name_is_the_unresolved_template_of_%s%s_which_is_a_slot_on_this_same_vector_and_carries_the_probe", prefix, c)}
+	}
+	return false, triage.PlanNote{}
+}
+
+// triageTemplateLiterals cuts a templated name into the literal text around its {...} runs, and
+// refuses a pattern that has no literal text at all.
+//
+// The refusal is the safety. "{uuid}" alone reduces to "match anything", which would let one
+// arbitrary cookie on the request absorb the slot, and absorbing a slot into the wrong cover is
+// the same false negative as dropping it.
+func triageTemplateLiterals(name string) ([]string, bool) {
+	var out []string
+	rest := name
+	literal := 0
+	for {
+		open := strings.Index(rest, "{")
+		if open < 0 {
+			break
+		}
+		closeAt := strings.Index(rest[open+1:], "}")
+		if closeAt < 0 {
+			break
+		}
+		out = append(out, rest[:open])
+		literal += open
+		rest = rest[open+1+closeAt+1:]
+	}
+	out = append(out, rest)
+	literal += len(rest)
+	if literal == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// triageTemplateLiteralsMatch walks the literal chunks through the candidate in order, requiring
+// the head and the tail to be anchored and every placeholder to have swallowed at least one
+// character. It is deliberately not a regexp: the literals come from a target's own cookie names
+// and compiling those as a pattern is how a name with a "." or a "+" in it silently matches
+// something else.
+func triageTemplateLiteralsMatch(literals []string, candidate string) bool {
+	if len(literals) < 2 {
+		return false
+	}
+	head, tail := literals[0], literals[len(literals)-1]
+	if !strings.HasPrefix(candidate, head) || !strings.HasSuffix(candidate, tail) {
+		return false
+	}
+	rest := candidate[len(head):]
+	for _, mid := range literals[1 : len(literals)-1] {
+		// The placeholder must swallow something, so the search starts one character in.
+		if rest == "" {
+			return false
+		}
+		at := strings.Index(rest[1:], mid)
+		if at < 0 {
+			return false
+		}
+		rest = rest[1+at+len(mid):]
+	}
+	// The last placeholder has to swallow something too, and the tail has to be what is left rather
+	// than something that merely appears earlier in the name.
+	return len(rest) > len(tail)
+}
+
 // triagePathSegmentsOf splits a composed URL's path the same way vectorConcreteTemplatedURLFrom
 // does, as TEXT. Round-tripping through net/url re-encodes the path and changes the bytes on the
 // wire, which is exactly what a path or traversal probe is measuring.
@@ -878,31 +1076,217 @@ func triageInferredHeaders() []string {
 	}
 }
 
+// ---------------------------------------------------------------------------------------------
+// THE CREDENTIAL RULE, AND WHY A SUBSTRING MATCH IS A FALSE-NEGATIVE MACHINE
+//
+// The flag means ONE thing: perturbing this slot throws the request's own credential away, so the
+// application answers 401, and that 401 is a perfect differential against the baseline that looks
+// exactly like a finding. It also invalidates the session the rest of the run depends on. The slot
+// is emitted anyway and refused at plan time (triagePairExclusion), so "deliberately skipped"
+// stays visibly different from "does not exist".
+//
+// THE TWO ERRORS ARE NOT SYMMETRIC. A credential slot wrongly PROBED costs a false positive and a
+// re-login. A real slot wrongly REFUSED is a question never asked, recorded as is_credential, and
+// that is a missed bug. On this codebase's standing rule a missed bug costs far more than an extra
+// request, so the rule leans towards probing and the VALUE net below is what makes that safe.
+//
+// WHAT WAS MEASURED, live run a218419a. The cookie half of the rule was fifteen strings.Contains
+// calls over a lowercased name. One of them was "identity", which matches inside the product name
+// CognitoIdentityServiceProvider, so the WHOLE Cognito family was refused, including four leaves
+// that hold no secret at all:
+//
+//	.clockDrift       a clock offset in seconds          70 vectors
+//	.deviceKey        a device identifier                70 vectors
+//	.deviceGroupKey   a device group identifier          70 vectors
+//	.userData         a JSON blob of username and attrs  70 vectors
+//
+// 280 slots that never sent a byte and could not have produced a 401 if they had. The leaves that
+// ARE the session (.accessToken, .idToken, .refreshToken, .randomPasswordKey, .LastAuthUser) stay
+// refused, on words that are actually there.
+//
+// "identity" was not the only one, and patching that one needle would leave the machine running.
+// A bare strings.Contains over fifteen short words refuses author_id, authority, resident_id,
+// subsidiary_id, sidebar_state, assessment_id, identity_provider, login_redirect, login_hint,
+// passwordless_enabled and remembered_filters, every one of which is a probeable input and two of
+// which (login_redirect, identity_provider) are exactly where an open redirect lives.
+//
+// SO THE MATCH IS BY WORD, IN THREE TIERS:
+//
+//  1. WHOLE-WORD. triageNameTokens cuts the name the way a human reads it, on separators, on
+//     camelCase and on digit boundaries, and a short or ambiguous word ("sid", "auth", "sess",
+//     "token") only counts when it IS one of those tokens. "sid" matches __stripe_sid and not
+//     resident_id; "auth" matches LastAuthUser and not author_id.
+//  2. RUN-TOGETHER. Tokenising cannot save PHPSESSID or TAsessionID, which are one token each, so
+//     a short list of compound forms that no benign name contains is matched as a substring of the
+//     name with its separators removed. This is where "session" and "sessid" live.
+//  3. THE VALUE, AND IT IS THE SAFETY OF THE WHOLE THING. A value shaped like a compact JWS is a
+//     credential whatever the cookie is called. Cognito names its cookies per user pool and the
+//     next target will use a name nobody listed, so the name lists are a convenience and this is
+//     the net under them. It reuses reflectionValueLooksLikeJWT rather than writing a third copy.
+//     It is SHAPE only: three base64url segments and a JOSE header prefix, no decode, no
+//     comparison against held material, nothing logged.
+//
+// TWO WORDS WERE DROPPED OUTRIGHT, because they name a SUBJECT and not a SECRET:
+//
+//	identity  an identity is who you claim to be. identity_provider and identityId are IDOR-rich
+//	          probeable inputs, and no application 401s because one changed.
+//	login     a login names a user. login_redirect and login_hint are open-redirect and SSO slots.
+//	          Cookies that actually carry a login SESSION are caught by session/auth/token/jwt.
+//
+// WHAT THIS DOES NOT ANSWER, and is not guessed. Whether the server READS a given cookie is not
+// decidable here: a derivation sees a request, and a request shows what the browser SENT. See the
+// dedupe note above for the corpus measurement (4,643 captures on this scope target, zero
+// Set-Cookie headers). Third-party analytics cookies are therefore emitted as probeable slots.
+// ---------------------------------------------------------------------------------------------
+
 // triageCredentialHeader names the headers a probe must never perturb. Injecting into
 // Authorization produces a 401, and that 401 is a differential against baseline that looks exactly
 // like a finding.
-func triageCredentialHeader(lower string) bool {
+//
+// IT IS AN EXACT LIST AND DELIBERATELY NOT THE COOKIE RULE. The header slots are where the class's
+// best probes live (x-forwarded-for, x-original-url, x-rewrite-url, x-http-method-override) and
+// every one of them carries a word the cookie rule would refuse on. Measured: of 931 header slots
+// in the live corpus exactly 49 are refused, all of them "authorization", and that is right. The
+// value net applies here too, for a header that carries a bearer token under a name nobody listed.
+func triageCredentialHeader(lower, value string) bool {
 	switch lower {
 	case "authorization", "proxy-authorization", "cookie", "x-api-key", "api-key",
 		"x-auth-token", "x-access-token", "x-session-token", "authentication",
 		"x-csrf-token", "x-xsrf-token", "x-amz-security-token":
 		return true
 	}
-	return false
+	return reflectionValueLooksLikeJWT(value)
 }
 
-// triageCredentialCookie flags session and CSRF cookies by name shape. It is a NAME test and never
-// a value test: a value test on a cookie means reading credentials into a comparison, and the
-// point of the flag is that the value is never touched.
-func triageCredentialCookie(name string) bool {
-	lower := strings.ToLower(name)
-	for _, needle := range []string{"session", "sess", "sid", "auth", "token", "jwt", "csrf",
-		"xsrf", "remember", "login", "credential", "secret", "identity", "passwd", "password"} {
-		if strings.Contains(lower, needle) {
+// triageCredentialWholeWords only count when they are a WHOLE token of the name.
+//
+// Every entry here is short enough, or common enough as a fragment, that a substring match on it
+// refuses real slots. "key" is deliberately absent: deviceKey, sortKey and partitionKey are not
+// credentials and the compound forms that are (apikey, secretkey, privatekey) are in the
+// run-together list instead.
+var triageCredentialWholeWords = map[string]bool{
+	"sess": true, "sid": true,
+	"auth": true, "oauth": true, "authentication": true, "authorization": true,
+	"token": true, "jwt": true, "csrf": true, "xsrf": true,
+	"remember": true, "credential": true, "credentials": true,
+	"secret": true, "password": true, "passwd": true, "bearer": true,
+}
+
+// triageCredentialCompactForms are matched as a substring of the name with every separator
+// removed, because tokenising cannot cut a name that was never cut.
+//
+// PHPSESSID, JSESSIONID and TAsessionID are one token each and are the canonical session cookies
+// of three ecosystems. Each entry here is a compound with no benign container: a cookie whose
+// compacted name contains "refreshtoken" holds a refresh token.
+var triageCredentialCompactForms = []string{
+	"session", "sessid",
+	"csrftoken", "xsrftoken", "authtoken", "accesstoken", "refreshtoken", "idtoken",
+	"sessiontoken", "bearertoken", "jwttoken", "oauthtoken", "verificationtoken", "antiforgery",
+	"apikey", "apitoken", "secretkey", "privatekey", "clientsecret", "sharedsecret",
+}
+
+// triageCredentialCookie flags session and CSRF cookies. See the block above for the three tiers
+// and for the two words that were dropped.
+//
+// The value is used for the JWS SHAPE net only. It is never decoded, never compared against held
+// material and never recorded here; the shape test is the same one the reflection probe uses.
+func triageCredentialCookie(name, value string) bool {
+	// THE ORIGINAL CASE IS THE DATA. Lowercasing first and then tokenising destroys every
+	// camelCase boundary, which silently turns randomPasswordKey and LastAuthUser back into one
+	// token each and lets the two cookies that ARE the session through as probeable. Caught by
+	// TestTheCredentialRuleDoesNotMatchAWordInsideAnotherWord before it left this file.
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	compact := triageCompactName(name)
+	for _, form := range triageCredentialCompactForms {
+		if strings.Contains(compact, form) {
 			return true
 		}
 	}
-	return false
+	for _, tok := range triageNameTokens(name) {
+		if triageCredentialWholeWords[tok] {
+			return true
+		}
+	}
+	return reflectionValueLooksLikeJWT(value)
+}
+
+// triageCompactName lowercases a name and drops everything that is not a letter or a digit, so a
+// compound form can be found whatever the target punctuated it with. "X-CSRF-Token", "csrf_token"
+// and "csrfToken" all compact to "csrftoken".
+func triageCompactName(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range strings.ToLower(name) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// triageNameTokens cuts a cookie or header name into the words a human reads in it, lowercased.
+//
+// Three boundaries, and each is there because a real cookie name needs it:
+//
+//	separators    . - _ { } and anything else that is not alphanumeric
+//	camelCase     clockDrift -> clock, drift.  The tail of a PascalCase word does NOT split, so
+//	              Session stays one token, and an acronym run splits before its last capital, so
+//	              SessionId -> session, id and HTTPServer -> http, server.
+//	digits        d4887448 -> d, 4887448, which keeps a pool id from swallowing the leaf name.
+//
+// It is not a regexp. These names come from a target and compiling them is how a "." or a "+"
+// silently matches something else, which is the same reasoning as triageTemplateLiteralsMatch.
+func triageNameTokens(name string) []string {
+	runes := []rune(name)
+	class := func(r rune) int {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return 1
+		case r >= 'A' && r <= 'Z':
+			return 2
+		case r >= '0' && r <= '9':
+			return 3
+		}
+		return 0
+	}
+	var out []string
+	start := -1
+	flush := func(end int) {
+		if start >= 0 && end > start {
+			out = append(out, strings.ToLower(string(runes[start:end])))
+		}
+		start = -1
+	}
+	for i, r := range runes {
+		c := class(r)
+		if c == 0 {
+			flush(i)
+			continue
+		}
+		if start < 0 {
+			start = i
+			continue
+		}
+		p := class(runes[i-1])
+		boundary := false
+		switch {
+		case p != c && !(p == 2 && c == 1):
+			// Everything but upper->lower, which is the ordinary inside of a PascalCase word.
+			boundary = true
+		case p == 2 && c == 2 && i+1 < len(runes) && class(runes[i+1]) == 1:
+			// The last capital of an acronym run starts the next word: HTTPServer, ASPSessionId.
+			boundary = true
+		}
+		if boundary {
+			flush(i)
+			start = i
+		}
+	}
+	flush(len(runes))
+	return out
 }
 
 // triageIdentifierShaped reports whether a path segment looks like a resource identifier rather

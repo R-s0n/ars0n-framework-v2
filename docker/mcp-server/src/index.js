@@ -55,7 +55,7 @@ const { manageAttackVectorsSchema, manageAttackVectors } = require('./tools/atta
 const { findSubdomainTakeoverSchema, findSubdomainTakeover, findExposedPanelsSchema, findExposedPanels, findApiEndpointsSchema, findApiEndpoints, findInterestingResponsesSchema, findInterestingResponses, findSensitiveFilesSchema, findSensitiveFiles, compareScansSchema, compareScans, getScopeStatsSchema, getScopeStats, findUniqueHostsSchema, findUniqueHosts, queryByCidrSchema, queryByCidr, queryByTechStackSchema, queryByTechStack, searchGlobalSchema, searchGlobal } = require('./tools/bugbounty');
 const { getSettingsSchema, getSettings, updateSettingsSchema, updateSettings, setApiKeySchema, setApiKey, deleteApiKeySchema, deleteApiKey, setAiApiKeySchema, setAiApiKey, deleteAiApiKeySchema, deleteAiApiKey } = require('./tools/settings');
 const { listAuthFlowsSchema, listAuthFlows, createAuthFlowSchema, createAuthFlow, updateAuthFlowSchema, updateAuthFlow, deleteAuthFlowSchema, deleteAuthFlow, getAuthFlowStepsSchema, getAuthFlowSteps, addAuthFlowStepSchema, addAuthFlowStep, updateAuthFlowStepSchema, updateAuthFlowStep, deleteAuthFlowStepSchema, deleteAuthFlowStep, replayAuthFlowStepSchema, replayAuthFlowStep, replayAuthFlowSchema, replayAuthFlow } = require('./tools/authflows');
-const { replayRequestSchema, replayRequest, manageRequestVersionsSchema, manageRequestVersions, manageDetectedFlowsSchema, manageDetectedFlows } = require('./tools/requestflows');
+const { replayRequestSchema, replayRequest, manageRequestVersionsSchema, manageRequestVersions, manageRequestVariantsSchema, manageRequestVariants, manageDetectedFlowsSchema, manageDetectedFlows } = require('./tools/requestflows');
 const { manageFlowDetectionSchema, manageFlowDetection, manageFlowConfigSchema, manageFlowConfig, getFlowMetricsSchema, getFlowMetrics } = require('./tools/flowdetection');
 const { manageFlowBuilderSchema, manageFlowBuilder } = require('./tools/flowbuilder');
 const { browseKnowledgeBaseSchema, browseKnowledgeBase, readKnowledgeFileSchema, readKnowledgeFile, searchKnowledgeBaseSchema, searchKnowledgeBase } = require('./tools/knowledgebase');
@@ -981,6 +981,11 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
 
   server.tool('manage_request_versions', `Version history for a replayed request. Nothing is ever overwritten: the capture's unmodified bytes are the ORIGINAL and every edit is a new row that remembers what it was edited from, so there is always a way back to what the target actually said. The ORIGINAL refuses update and delete; it can still be sent.`, manageRequestVersionsSchema.shape, async (params) => {
     const result = await manageRequestVersions(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_request_variants', `The VARIANTS of a target's endpoints. A variant is one distinct recorded request/response of an endpoint (method+host+path); the crawl's captures collapse into variants by a coarse request/response signature. Each variant has a NAME - yours if you set one, otherwise the source it came from ("Active detection", "Manual crawl") - and one variant per endpoint is the PRIMARY, the one the sitemap shows and a leaf click opens. list them (filter by method/host/path), rename one (empty name reverts to the source default), or set_primary. Names and the primary are overlay state and never touch the captures, so a new recording that joins a variant keeps your choices. This is the same model the Configure repeater's variants column shows.`, manageRequestVariantsSchema.shape, async (params) => {
+    const result = await manageRequestVariants(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 

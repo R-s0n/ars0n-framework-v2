@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -203,6 +206,35 @@ type ffufPreflight struct {
 	Note           string `json:"note"`
 }
 
+// preflightFailureText describes a preflight failure without claiming to know whose fault it was.
+//
+// A transport error message embeds the URL, and a URL can carry userinfo, so it is never pasted
+// in raw: a note is rendered to the operator and stored, and a password in it would be a
+// credential written to the database. Only the recognised shapes are named, and anything else is
+// reported as unrecognised rather than guessed at.
+func preflightFailureText(err error) string {
+	switch {
+	case err == nil:
+		return "no response and no error was recorded, which should not happen and is worth reporting"
+	case IsLocationParseError(err):
+		return "the target answered with a redirect whose Location header net/http will not parse, " +
+			"and the response was discarded rather than lost on the network"
+	case errors.Is(err, context.DeadlineExceeded), os.IsTimeout(err):
+		return "the request timed out"
+	case errors.Is(err, context.Canceled):
+		return "the request was cancelled by the framework, not by the target"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "the hostname did not resolve"
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return "the connection failed at the network layer (" + opErr.Op + ")"
+	}
+	return "an unrecognised transport error; it is not known whether the target answered"
+}
+
 // preflightTarget measures two things before any fuzzing starts: what the target returns for the
 // URL that will be held constant, and what it returns for paths that cannot exist.
 //
@@ -222,9 +254,18 @@ func preflightTarget(base string) ffufPreflight {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return nil },
 	}
 
+	// GetFollowing, not client.Get. This client FOLLOWS, and net/http throws the whole response
+	// away when any hop carries a Location it cannot parse, returning an error instead. get()
+	// turns any error into ok=false, so a target that answered every request in full was reported
+	// Reachable=false with the note "The target did not answer a request from the framework" and
+	// the entire preflight was abandoned against a host that was talking the whole time. The
+	// recovery re-sends once without following, so the baseline is measured from the hop the
+	// chain actually reached.
+	var lastErr error
 	get := func(u string) (int, int, bool) {
-		resp, err := client.Get(u)
+		resp, err := GetFollowing(client, u)
 		if err != nil {
+			lastErr = err
 			return 0, 0, false
 		}
 		defer resp.Body.Close()
@@ -235,8 +276,15 @@ func preflightTarget(base string) ffufPreflight {
 	root := strings.TrimSuffix(base, "/")
 	status, size, ok := get(root + "/")
 	if !ok {
-		out.Note = "The target did not answer a request from the framework, so a scan finding " +
-			"nothing says nothing about the target."
+		// THE NOTE MAY NOT GUESS A CAUSE. The old wording, "The target did not answer a request
+		// from the framework", asserted something this code never measured: every failure in
+		// get() reads the same, including the ones where the target answered in full and the
+		// framework discarded the answer. It states what was witnessed, which is that no
+		// response was obtained, and names the error so the reader can tell a dead host from a
+		// response this process threw away.
+		out.Note = "The framework did not obtain a response from this target, so a scan finding " +
+			"nothing says nothing about the target. What went wrong: " +
+			preflightFailureText(lastErr)
 		return out
 	}
 	out.Reachable = true

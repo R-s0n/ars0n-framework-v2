@@ -153,6 +153,35 @@ const (
 	ClassHPP          ClassID = 26
 	ClassCSVI         ClassID = 27
 
+	// ClassCORS is the FIRST ID ADDED AFTER THE ORIGINAL TWENTY-SEVEN, and 28 is simply the next
+	// free number after CSVI(27). CATALOGUE 1.0 has no row for it, which is the omission rather
+	// than a decision: cross-origin resource sharing is a per-response protocol effect that every
+	// modern JSON API emits an opinion about, and it is the cheapest deterministic true positive
+	// in the whole register. One Origin header out, two response headers back, no baseline
+	// differential, no reflection, no threshold.
+	//
+	// It is added here and not squeezed into an existing id because the id IS the marker's ordinal
+	// stripe: sharing one with HOSTHDR or CSVI would make a CORS probe's marker attributable to
+	// that class by arithmetic, which is the one property R12 exists to guarantee.
+	ClassCORS ClassID = 28
+
+	// ClassORMLeak is the SECOND ID ADDED AFTER THE ORIGINAL TWENTY-SEVEN. 29 is the next free
+	// number after CORS(28), and the two were added in the same round, so this comment names the
+	// neighbour rather than leaving a reader to wonder why the register jumped.
+	//
+	// CATALOGUE 1.0 has no row for it either, and the omission is the interesting part: an ORM
+	// that is handed a request dictionary it did not validate answers an unknown FILTER KEYWORD
+	// with an error that quotes the keyword back and then ENUMERATES THE MODEL'S COLUMNS in the
+	// same sentence. Measured on Django 6.1.1:
+	//
+	//	FieldError: Cannot resolve keyword 'zqjorm000028abc' into field.
+	//	            Choices are: created_by, created_by_id, id, title
+	//
+	// The keyword in that sentence is this run's own marker, so no baseline can contain it and no
+	// application that ships a stack trace on every response can produce a false positive. It
+	// needs its own id for the same reason CORS does: the id IS the marker's ordinal stripe.
+	ClassORMLeak ClassID = 29
+
 	// ClassExample is RESERVED FOR THE PLACEHOLDER CLASSIFIER and is deliberately outside the
 	// twenty-seven real ids.
 	//
@@ -198,6 +227,8 @@ var triageClassNames = map[ClassID]string{
 	ClassMassAssign:   "MASSASSIGN",
 	ClassHPP:          "HPP",
 	ClassCSVI:         "CSVI",
+	ClassCORS:         "CORS",
+	ClassORMLeak:      "ORM-LEAK",
 	ClassExample:      "EXAMPLE",
 }
 
@@ -406,6 +437,29 @@ type StateRule struct {
 	Unknown bool
 	// RequiresReason: the row is meaningless without one. "Unknown" with no reason is how a check
 	// that never ran gets quietly re-classified as clean on the next refactor.
+	//
+	// IT IS TRUE ON EVERY ROW, AND THAT IS THE FIX RATHER THAN THE ACCIDENT. It used to be false
+	// on finding, on suspicious and on clean, on the argument that those three carry their
+	// justification in Oracle, Grade and Evidence instead. MEASURED, sqlDecide at the five rungs
+	// that reach those states: SQL shipped a parser-error finding, a boolean-differential
+	// finding, a LIKE suspicion and BOTH of its cleans with Reason "". A finding with no reason
+	// is a pointer an operator cannot act on: it says "spend twenty-eight minutes of sqlmap here"
+	// and gives no ground for it, and a clean with no reason is the same silence wearing the
+	// other colour. Twelve of the seventeen classes written so far pin no reason floor of their
+	// own, so the only place a floor can hold for the classes NOT YET WRITTEN is here.
+	//
+	// THIS FIELD IS NOT A CONSTANT DRESSED AS DATA. It stays a per-row field because the row is
+	// where a future state records its decision, and TestEveryStateInTheVocabularyRequiresAReason
+	// fails the build on any new row that sets it false, so the decision has to be argued in a
+	// test rather than typed into a literal.
+	//
+	// WHAT THE FLOOR IS NOT. It is non-emptiness and nothing more. A LENGTH floor belongs to the
+	// states that assert something about the application, not to every state: not_planned
+	// legitimately has little to say ("no probe was derived for this slot" is the whole fact),
+	// and a vocabulary-wide minimum would push the terse unknowns into padding, which is how a
+	// reason string starts guessing. Four classes (CORS, HOSTHDR, HPP, SSTI) pin a 40-byte floor
+	// in their own tests; lifting that into this row is a separate change, because the placeholder
+	// reason in utils/triageStore_test.go is 18 bytes and would have to move with it.
 	RequiresReason bool
 	// RequiresOrdinals: the row asserts something about the application, so it must name the
 	// probes that produced it. A clean with zero ordinals is a hard error, not a warning. A
@@ -418,13 +472,13 @@ type StateRule struct {
 // TriageState constants out of the source and asserts the two sets match in both directions, so a
 // new state cannot be added without a decision recorded here.
 var triageStateRules = []StateRule{
-	{StateFinding, StateKindPositive, false, false, true, "this class's own oracle fired and confirmed; point the tool here"},
-	{StateSuspicious, StateKindPositive, false, false, true, "fired at reduced confidence, or a degraded or secondary oracle fired; worth a look, never a clean"},
+	{StateFinding, StateKindPositive, false, true, true, "this class's own oracle fired and confirmed; point the tool here"},
+	{StateSuspicious, StateKindPositive, false, true, true, "fired at reduced confidence, or a degraded or secondary oracle fired; worth a look, never a clean"},
 	{StateBorderline, StateKindPositive, false, true, true, "the differential fell between the measured threshold and the floor"},
 	{StateMaskedOnly, StateKindPositive, false, true, true, "the response changed, but only where this endpoint varies anyway"},
 	{StateReordered, StateKindPositive, false, true, true, "same bytes, different order"},
 
-	{StateClean, StateKindNegative, false, false, true, "this class's own probes ran, its own oracle stayed silent, and its clean-preconditions held"},
+	{StateClean, StateKindNegative, false, true, true, "this class's own probes ran, its own oracle stayed silent, and its clean-preconditions held"},
 	{StateNotExploitable, StateKindNegative, false, true, true, "tested, the mechanism is reachable, and a named defence stops it"},
 
 	{StateNotApplicable, StateKindStructural, true, true, false, "the mechanism cannot exist here; correctly not run, and unknown to every aggregate"},
@@ -577,8 +631,20 @@ func (v ClassVerdict) Validate() error {
 			v.Class, v.State, v.SlotKey)
 	}
 	if v.State.RequiresReason() && strings.TrimSpace(v.Reason) == "" {
-		return fmt.Errorf("triage: class %s emitted %s on %q with no reason, and an unknown with no reason is how a check that never ran becomes a clean",
-			v.Class, v.State, v.SlotKey)
+		// THE MESSAGE NAMES THE KIND, because the two halves of this rule fail for different
+		// reasons and an operator reading the refusal is owed the right one. An unknown with no
+		// reason is how a check that never ran becomes a clean. A FINDING with no reason is a
+		// pointer nobody can act on, and a CLEAN with no reason is an assertion about the
+		// application with nothing behind it in the one field every audit of this layer greps.
+		what := "an unknown with no reason is how a check that never ran becomes a clean"
+		switch v.State.Kind() {
+		case StateKindPositive:
+			what = "a positive with no reason is a pointer at an expensive scanner with no ground given for it"
+		case StateKindNegative:
+			what = "a negative with no reason asserts something about the application and shows nothing for it"
+		}
+		return fmt.Errorf("triage: class %s emitted %s on %q with no reason, and %s",
+			v.Class, v.State, v.SlotKey, what)
 	}
 	if v.State.IsUnknown() && v.Grade != GradeUnrated {
 		return fmt.Errorf("triage: class %s emitted unknown state %s on %q graded %q, but only a fired oracle carries a grade",
@@ -1012,10 +1078,19 @@ func (k ObsKind) CarriesPayload() bool {
 	return k == ObsProbe || k == ObsDecodeControl || k == ObsPctControl
 }
 
-// CookieObs records a Set-Cookie without storing its value. The name and the attributes are the
-// signal; the value is a credential and is hashed.
+// CookieObs records a Set-Cookie: its name, the value the target set and its attributes.
+//
+// A cookie a probe made the target issue is EVIDENCE. Session fixation, a cookie built out of a
+// reflected parameter, and a CRLF injection that lands a whole Set-Cookie line are all findings
+// nobody can write up without the value, so the value is carried whole.
+//
+// ValueSHA stays beside it as the identity key. triageCompare.go folds cookies by name and
+// attributes for the differential, so a session cookie rotating between two responses does not read
+// as a difference; the hash is how two issuances of the same value are told apart when something
+// does need to compare them. It is a key next to the bytes, never in place of them.
 type CookieObs struct {
 	Name       string
+	Value      string
 	ValueSHA   [32]byte
 	Attributes []string
 }

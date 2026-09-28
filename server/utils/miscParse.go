@@ -226,10 +226,14 @@ func parseJWTToolOutput(stdout, report string, row vectorRow) []VectorFinding {
 			Severity: "info",
 			Confidence: "not a vulnerability: this is what the token says about itself, and nothing " +
 				"was confirmed against a server",
-			InsertionPoint:  row.InsertionPoint,
-			Method:          row.Method,
-			URL:             row.EvidenceURL,
-			Evidence:        evidence + ". " + truncateSecret(row.RawRequest),
+			InsertionPoint: row.InsertionPoint,
+			Method:         row.Method,
+			URL:            row.EvidenceURL,
+			// THE WHOLE CAPTURED REQUEST, TOKEN AND ALL. It used to be stubbed to 6+4 characters,
+			// which made the row useless: a JWT cannot be decoded, replayed or checked against an
+			// issuer from its first six characters, and this finding exists precisely so the
+			// operator has the token in front of them.
+			Evidence:        evidence + ". " + row.RawRequest,
 			DetectionMethod: "jwt_tool",
 			InjectType:      alg,
 			IsGraphQLTarget: row.IsGraphQLTarget,

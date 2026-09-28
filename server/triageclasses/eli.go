@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"ars0n-framework-v2-server/utils/triage"
@@ -145,6 +146,16 @@ const (
 	// eliBodyErr is the error oracle and the ruling R1 disambiguator. Every dialect answers a
 	// method-not-found with an exception that names the dialect.
 	eliBodyErr = `(1).zqjNoSuchMethod()`
+	// eliBodyParses and eliBodyBroken are the parse-differential pair's inner bodies. They are
+	// the SAME SEVENTEEN BYTES with the closing parenthesis pair transposed, which is what makes
+	// them length-equal; deleting a character would have made the shorter member's response
+	// shorter on any echoing route and the arm would have fired on every reflecting slot.
+	//
+	// intValue() rather than valueOf(): it takes no argument, so the valid member parses in every
+	// JVM EL dialect without a literal that a quote filter could eat, and it computes nothing
+	// worth reading, which is the point. This arm is not trying to get a value back.
+	eliBodyParses = `(2).intValue()`
+	eliBodyBroken = `(2).intValue)(`
 
 	// The confirmation and identification bodies.
 	eliBodyGenConfirm  = `1*((1).valueOf('` + eliOperand2 + `')+` + eliOperand2 + `)`
@@ -178,6 +189,31 @@ const (
 	eliProbeELS1 = triage.ProbeID("ELI-ELS1") // string oracle through ${ }
 	eliProbeELS2 = triage.ProbeID("ELI-ELS2") // string oracle through %{ }
 	eliProbeELE  = triage.ProbeID("ELI-ELE")  // error oracle
+
+	// THE PARSE-DIFFERENTIAL ARM, AND WHY IT IS NOT MORE OF THE SAME.
+	//
+	// Every arm above this line needs the answer back. el_overflow needs -494967296 in the
+	// response, el_string needs qm7vbn7w, and even el_error needs the dialect's exception TEXT to
+	// reach the body. On a JSON API that echoes nothing and returns a generic error document, all
+	// three are blind, and the class reports no_reflection on every slot.
+	//
+	// These four ask a question that does not need any of it: does this endpoint answer an
+	// expression that PARSES differently from one that does not? An EL container parses the value
+	// before it evaluates anything, so a parse failure changes the response of a route with an EL
+	// sink even when the exception text never reaches the page and the value never comes back.
+	//
+	// EB1/EB2 are the ${ } pair and EB3/EB4 the %{ } pair, so a hit also says which delimiter.
+	// Each pair is BYTE-LENGTH-EQUAL, produced by transposing the closing parenthesis pair rather
+	// than deleting a character, so an endpoint that merely echoes the value returns two equal
+	// lengths and cannot fire the arm.
+	eliProbeEB1 = triage.ProbeID("ELI-EB1") // ${ }  parses
+	eliProbeEB2 = triage.ProbeID("ELI-EB2") // ${ }  does not parse
+	eliProbeEB3 = triage.ProbeID("ELI-EB3") // %{ }  parses
+	eliProbeEB4 = triage.ProbeID("ELI-EB4") // %{ }  does not parse
+	// The inert length controls, deliberately eight bytes apart, which is the widest length gap
+	// anywhere in this arm.
+	eliProbeEBN1 = triage.ProbeID("ELI-EBN1")
+	eliProbeEBN2 = triage.ProbeID("ELI-EBN2")
 
 	eliProbeCF1  = triage.ProbeID("ELI-CF1")
 	eliProbeCF2  = triage.ProbeID("ELI-CF2")
@@ -217,6 +253,10 @@ const (
 	eliOracleString    = "el_string"
 	eliOraclePartial   = "el_string_partial"
 	eliOracleError     = "el_error"
+	// eliOracleParse is the parse differential: a PARSER was shown to read this slot, by the
+	// response moving between an expression that parses and one that does not. It is the only
+	// oracle here that concludes anything on a route that returns none of its own bytes.
+	eliOracleParse = "el_parse_differential"
 )
 
 // eliUntestedAlways is on EVERY verdict this class emits, clean included. Both are real holes and
@@ -392,6 +432,30 @@ func (eliClassifier) Probes() []triage.ProbeSpec {
 		eliProbe(eliProbeJVM, `${`+eliBodyVersion+`}`, eliPointsAll, triage.TierOptIn,
 			"reads java.version, once per vector, ONLY after a confirmed finding. Read-only: writes nothing, starts "+
 				"no process, touches no file. The JVM major version decides which gadget chains apply later"),
+
+		// ---- the parse-differential arm: the only arm here that needs nothing back -----------
+		eliProbe(eliProbeEB1, `${`+eliBodyParses+`}`, eliPointsAll, triage.TierFull,
+			"parse differential, dollar-brace, the member that PARSES. It is not trying to get a value back and "+
+				"carries no expected answer: the oracle is the difference against EB2. This is the arm that can "+
+				"answer on a JSON API, where el_overflow, el_string and el_error are all structurally blind"),
+		eliProbe(eliProbeEB2, `${`+eliBodyBroken+`}`, eliPointsAll, triage.TierFull,
+			"parse differential, dollar-brace, the member that does NOT parse. Same seventeen bytes as EB1 with "+
+				"the closing parenthesis pair transposed, so an echoing route returns two equal-length responses "+
+				"and cannot fire this arm"),
+		eliProbe(eliProbeEB3, `%{`+eliBodyParses+`}`, eliPointsAll, triage.TierFull,
+			"the OGNL delimiter's parse-differential pair, valid member. Two delimiters rather than one because "+
+				"a hit tells the operator WHICH container to point the tool at, and because two families that "+
+				"must agree is what separates a signal from an endpoint that answers two strings differently"),
+		eliProbe(eliProbeEB4, `%{`+eliBodyBroken+`}`, eliPointsAll, triage.TierFull,
+			"the OGNL delimiter's parse-differential pair, invalid member"),
+		eliControl(eliProbeEBN1, `kwm4ve7p2n`,
+			"CONTROL: the ten-byte inert. No delimiter, no operator, no parenthesis, nothing any EL container "+
+				"parses. Paired with EBN2 it is the length control the parse differential cannot run without: if "+
+				"these two move apart, this endpoint's response tracks its INPUT LENGTH and every pair above "+
+				"would separate for that reason. The arm disables itself rather than report"),
+		eliControl(eliProbeEBN2, `kwm4ve7p2nx3rd806q`,
+			"CONTROL: the eighteen-byte inert, eight bytes longer than EBN1, which is the widest length gap in "+
+				"this arm. A length-tracking endpoint shows up here before it shows up anywhere else"),
 
 		// ---- the negative controls. A detector never shown to STAY SILENT is not verified.
 		eliControl(eliProbeNC1, `x24x7B1x2A((1).valueOf(x27`+eliOperand+`x27)PLUS`+eliOperand+`)x7D`,
@@ -623,7 +687,26 @@ func eliPlanRound(ctx triage.PlanCtx, overflowHit triage.ProbeID, stringHit bool
 			want = append(want, eliProbeELS3)
 		}
 		if len(want) == 0 {
-			return nil
+			// NOTHING FIRED, AND THIS IS THE ROUND THAT USED TO END THE LADDER.
+			//
+			// MEASURED, and it is why the arm lives here and not in a round of its own. The
+			// runner's ladder is `reqs := c.Plan(planCtx); if len(reqs) == 0 { done[class] = true }`
+			// (triageRun.go), so the FIRST round that plans nothing retires the class for that
+			// slot and no later round is ever called. A round 4 holding the parse differential
+			// was therefore structurally unreachable on exactly the slots it was written for:
+			// the ones where nothing fired. Verified against the canary oracle, first cut: ELI
+			// sent 14 probes of a 24 budget and none of the six was among them.
+			//
+			// So the arm goes in the branch that used to return nil. That is also where it
+			// belongs on the merits: it is earned by the ABSENCE of a hit, and by round 3 the
+			// battery has been tried and come back with nothing.
+			//
+			// THE TWO INERT CONTROLS GO FIRST. If the budget cuts this round short, losing a pair
+			// costs the arm one delimiter; losing the length control costs it the right to read
+			// any pair at all, because without it a separation cannot be told from an endpoint
+			// whose response length follows its input length.
+			return eliRequests(ctx, eliProbeEBN1, eliProbeEBN2,
+				eliProbeEB1, eliProbeEB2, eliProbeEB3, eliProbeEB4)
 		}
 		// Every hit drags the control set along with it. CATALOGUE 1.2: a class whose control
 		// fires has not proven its detector silent, and all of its verdicts on that slot become
@@ -1207,6 +1290,246 @@ func (c eliClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerdict {
 // which is to say the detectors would ship verified on the empty case alone. The unpacking stays
 // in Classify, where the ownership re-check runs; everything after it is a pure function of this
 // class's own observations and is exercised row by row in eli_test.go.
+// -------------------------------------------------------------------------------------------
+// 6b. THE PARSE DIFFERENTIAL: THE ARM THAT NEEDS NOTHING BACK
+// -------------------------------------------------------------------------------------------
+//
+// MEASURED, AND THIS IS WHY IT EXISTS. On a live JSON REST API, 30 query vectors, this class
+// returned cannot_determine (no_reflection) on every slot, while CRLF and REDIRECT ANSWERED on the
+// same four slots. The difference was not payload quality. It was that both of those read the
+// response ENVELOPE and this class waits for its own value.
+//
+// All three shipped arms wait. el_overflow needs -494967296 in the response. el_string needs
+// qm7vbn7w. el_error needs the container's exception TEXT to reach the body, which a generic JSON
+// error document removes. So the honest reading of an API that echoes nothing has been
+// "structurally blind", three times over, and the class stopped there.
+//
+// THE QUESTION THAT STILL HAS AN ANSWER. An EL container PARSES the value before it evaluates
+// anything. A value that does not parse fails earlier and differently from one that does, and
+// that difference reaches the response as a status or a length even when no exception text does.
+// So: send one expression that parses and one that does not, in the same delimiter, of the same
+// byte length, and see whether the route separates them.
+//
+// WHAT IT PROVES AND WHAT IT DOES NOT. It proves a PARSER, which is all a parse differential can
+// ever prove. It does not prove evaluation, it does not name a dialect, and it may never produce
+// a finding or a clean. Grade low, state suspicious, and the row says which delimiter, because
+// the delimiter is what decides whether the operator reaches for a Struts template set or a
+// Spring one.
+
+type eliParseOutcome int
+
+const (
+	eliParseNotRun eliParseOutcome = iota
+	eliParseSilent
+	eliParseSeparated
+)
+
+type eliParseResult struct {
+	Outcome   eliParseOutcome
+	Delimiter string
+	Why       string
+}
+
+// eliParsePair is one (parses, does not parse) pair and the delimiter it names.
+type eliParsePair struct {
+	OK, Bad   triage.ProbeID
+	Delimiter string
+}
+
+func eliParsePairs() []eliParsePair {
+	return []eliParsePair{
+		{OK: eliProbeEB1, Bad: eliProbeEB2, Delimiter: "${ }"},
+		{OK: eliProbeEB3, Bad: eliProbeEB4, Delimiter: "%{ }"},
+	}
+}
+
+// eliParseDifferential is the whole rule as a pure function of this class's own responses plus
+// the two baseline facts, for the same reason eliVerdict is split out: a classifier cannot build
+// a populated ClassifyCtx, so a rule left inline is a rule whose only reachable branch in a test
+// is the one that returns nothing.
+//
+// BOTH PAIRS MUST SEPARATE, AND IN THE SAME DIRECTION. One pair alone fires on any route that
+// answers two different strings differently, which is most routes with a validator in front of
+// them. Requiring the ${ } pair and the %{ } pair to agree is what makes it a signal, and the
+// price of that is that a container which only reads one of the two delimiters is missed here
+// and has to be caught by the arms above.
+func eliParseDifferential(owned []eliOwn, stable, degraded bool, gateReason string) eliParseResult {
+	if !stable {
+		why := gateReason
+		if why == "" {
+			why = "no_model"
+		}
+		return eliParseResult{Why: "parse_differential_not_run (noise_model_absent: " + why + "): this arm is a " +
+			"differential and an endpoint that differs from itself produces one for free"}
+	}
+	if degraded {
+		return eliParseResult{Why: "parse_differential_not_run (comparison_degraded): the body was oversized, " +
+			"truncated or untokenisable, so a length comparison over it compares truncation points"}
+	}
+
+	// THE LENGTH CONTROL, and the arm does not run without it. EBN1 and EBN2 are inert plain text
+	// eight bytes apart. If they move apart, this endpoint's response tracks its input length and
+	// every pair below separates for that reason and no other.
+	n1, s1, ok1 := eliParseShape(owned, eliProbeEBN1)
+	n2, s2, ok2 := eliParseShape(owned, eliProbeEBN2)
+	if !ok1 || !ok2 {
+		// THE SENTENCE NAMES WHICH ONE AND WHY. "Produced no comparable response" was one phrase
+		// covering four causes that call for four different actions, and the one that was true on
+		// the live run - the probes were never sent, the per-slot cap having gone first - is a
+		// number in the settings document and not a property of the target. SSTI carried the same
+		// wording and the same ambiguity; both now say what happened.
+		return eliParseResult{Why: "parse_differential_not_run (length_control_not_measured): ELI-EBN1 and " +
+			"ELI-EBN2 are the inert pair that proves this arm is not measuring how long the value is, and " +
+			eliParseWhyNoShape(owned, eliProbeEBN1, ok1) + "; " + eliParseWhyNoShape(owned, eliProbeEBN2, ok2)}
+	}
+	if n1 != n2 || s1/100 != s2/100 {
+		return eliParseResult{Why: "parse_differential_not_run (length_sensitive_endpoint): the two inert " +
+			"controls differ by eight bytes of input and came back " + strconv.Itoa(n1) + " and " +
+			strconv.Itoa(n2) + " normalised bytes at " + strconv.Itoa(s1) + " and " + strconv.Itoa(s2) +
+			", so this response follows its input length rather than its meaning"}
+	}
+
+	signs := make([]int, 0, 2)
+	var detail []string
+	for _, pr := range eliParsePairs() {
+		sign, d, measured := eliParseMoved(owned, pr)
+		if !measured {
+			_, _, okOK := eliParseShape(owned, pr.OK)
+			_, _, okBad := eliParseShape(owned, pr.Bad)
+			return eliParseResult{Why: "parse_differential_not_run (pair_incomplete: " + pr.Delimiter + "): a " +
+				"pair with one member missing is not a pair, and " +
+				eliParseWhyNoShape(owned, pr.OK, okOK) + "; " + eliParseWhyNoShape(owned, pr.Bad, okBad)}
+		}
+		if sign == 0 {
+			signs = nil
+			break
+		}
+		signs = append(signs, sign)
+		detail = append(detail, d)
+	}
+	if len(signs) == 2 && signs[0] == signs[1] {
+		return eliParseResult{
+			Outcome: eliParseSeparated, Delimiter: "${ } and %{ }",
+			Why: "parse_differential: both delimiter pairs separated an expression that PARSES from one that " +
+				"does not, in the same direction, on a stable endpoint whose inert length control stayed put. " +
+				"The two members of each pair are the same byte length, so this is not an echo. Something " +
+				"parses this slot. It is SUSPICIOUS and not a finding: a parse differential proves a parser " +
+				"and nothing about evaluation, and the two arms that would tell them apart need the value " +
+				"back, which is what was unavailable here. " + strings.Join(detail, "; "),
+		}
+	}
+	return eliParseResult{Outcome: eliParseSilent,
+		Why: "parse_differential_ran_and_was_silent: both delimiter pairs went out on a stable endpoint with the " +
+			"length control holding, and neither separated a parsing expression from a broken one. That is " +
+			"evidence against an EL container reading this slot through ${ } or %{ }, and it is evidence about " +
+			"nothing else: a differential that stayed quiet is not a clean"}
+}
+
+// eliParseShape is the normalised length and the status of one of this class's probes.
+//
+// IT IS THE NORMALISED BODY OR NOTHING. Proj.NormBody already has this endpoint's MEASURED
+// volatile regions and every marker form cut out of it, which is the noise band this arm would
+// otherwise have to invent. The raw body would put a request id and a timestamp back into a
+// two-byte differential, and this class already carries a marker on every probe, so the raw body
+// differs between any two probes by the marker alone.
+func eliParseShape(owned []eliOwn, id triage.ProbeID) (length, status int, ok bool) {
+	o, found := eliFind(owned, id)
+	if !found || !o.Obs.Delivered() || o.Obs.BodyTruncated || o.Obs.Proj.NormBody == nil {
+		return 0, 0, false
+	}
+	return len(o.Obs.Proj.NormBody), o.Obs.Status, true
+}
+
+// eliParseWhyNoShape says, for one probe of this arm, why no comparable shape could be read off
+// it. The four causes are four different facts and only one of them is about the endpoint:
+//
+//	not sent            absent from this class's own set. The round that requests it did not run,
+//	                    or the per-slot cap bit first. A setting, not a target property.
+//	transport refused   sent, and the socket said no, so the application never saw it.
+//	body truncated      came back past the capture limit, so its length is the limit's.
+//	no normalised body  the projection was never built, and the raw length carries the request id
+//	                    and the timestamp this arm must not measure.
+func eliParseWhyNoShape(owned []eliOwn, id triage.ProbeID, ok bool) string {
+	if ok {
+		return string(id) + " was measured"
+	}
+	o, found := eliFind(owned, id)
+	switch {
+	case !found:
+		return string(id) + " was NEVER SENT (absent from this class's own set: the round that requests it " +
+			"did not run, or the per-slot probe cap bit before it left), so nothing about this endpoint " +
+			"explains it"
+	case !o.Obs.Delivered():
+		return string(id) + " was sent and the transport refused it (" + string(o.Obs.TransportErr) + "), so " +
+			"the application never saw it"
+	case o.Obs.BodyTruncated:
+		return string(id) + " came back TRUNCATED, so its length is the capture limit and not the response"
+	default:
+		return string(id) + " came back with no normalised body built, and the raw length carries the " +
+			"volatile regions this arm must not measure"
+	}
+}
+
+// eliParseMoved compares one pair: +1 when the PARSING member came back larger or in a lower
+// status class, -1 the other way, 0 when nothing separated them.
+func eliParseMoved(owned []eliOwn, pr eliParsePair) (sign int, detail string, measured bool) {
+	nOK, sOK, okA := eliParseShape(owned, pr.OK)
+	nBad, sBad, okB := eliParseShape(owned, pr.Bad)
+	if !okA || !okB {
+		return 0, "", false
+	}
+	if sOK/100 != sBad/100 {
+		s := 1
+		if sOK/100 > sBad/100 {
+			s = -1
+		}
+		return s, pr.Delimiter + " answered " + strconv.Itoa(sOK) + " to the expression that parses and " +
+			strconv.Itoa(sBad) + " to the one that does not", true
+	}
+	if nOK == nBad {
+		return 0, "", true
+	}
+	s := 1
+	if nOK < nBad {
+		s = -1
+	}
+	return s, pr.Delimiter + " returned " + strconv.Itoa(nOK) + " normalised bytes for the expression that " +
+		"parses and " + strconv.Itoa(nBad) + " for the one that does not", true
+}
+
+// eliParseFired builds the one verdict the parse differential is allowed to produce. It is a
+// function because the arm is now scored at TWO rungs - once above the uniform-block refusal,
+// where a separation outranks the block, and once in its own place below el_error - and two
+// copies of the grade cap would be two policies.
+//
+// GRADE LOW AND IT MAY NEVER BE ANYTHING ELSE. A parse differential proves a parser. It does not
+// prove evaluation, it does not name a dialect, and there is no confirmation probe that could
+// raise it: a second differential is a second coin toss, not a reproduction.
+func eliParseFired(key triage.SlotKey, parse eliParseResult, ordinals []uint64, extra string) []triage.ClassVerdict {
+	reason := parse.Why
+	if extra != "" {
+		reason += " " + extra
+	}
+	v := eliOne(key, triage.StateSuspicious, reason, ordinals, "")
+	v[0].Grade = triage.GradeLow
+	v[0].Oracle = eliOracleParse
+	v[0].Untested = eliUntestedAlways()
+	return v
+}
+
+// eliParseSentence is what the arm contributes to a row it did not win, and it is a sentence
+// because the operator reading the row decides from it whether to spend a tool run.
+func eliParseSentence(r eliParseResult) string {
+	switch r.Outcome {
+	case eliParseSilent:
+		return "The non-reflective arm DID run here: " + r.Why
+	case eliParseSeparated:
+		return "The non-reflective arm FIRED and this row should not have been reached: " + r.Why
+	default:
+		return "The non-reflective arm did not run: " + r.Why
+	}
+}
+
 func eliVerdict(ctx triage.ClassifyCtx, owned []eliOwn) []triage.ClassVerdict {
 	key := ctx.Slot.Key
 	if len(owned) == 0 {
@@ -1263,11 +1586,36 @@ func eliVerdict(ctx triage.ClassifyCtx, owned []eliOwn) []triage.ClassVerdict {
 			ordinals, "")
 	}
 
+	// THE PARSE DIFFERENTIAL IS COMPUTED HERE, ABOVE THE UNIFORM-BLOCK RUNG, so that a rung which
+	// is a heuristic cannot preempt an arm that carries a stricter control than the heuristic is.
+	//
+	// The block reading is "three or more distinct payloads landed on one non-baseline body". An
+	// application that raises on everything it cannot parse produces exactly that shape, and
+	// MEASURED on the canary oracle, 2026-09-19, it is the shape of /ssti/blind and /trav/blind -
+	// both of them routes built as POSITIVES for a non-reflective arm. A filter, by contrast,
+	// refuses the expression that parses and the one that does not alike, because both carry the
+	// delimiters it is refusing, so it cannot SEPARATE a pair. Both pairs separating in the same
+	// direction, over two same-length members, on an endpoint whose inert length control held, is
+	// therefore a statement a block page cannot make.
+	//
+	// Everything weaker than a separation still loses to the block, and the rung now carries the
+	// arm's sentence so the row says which of the two happened.
+	parse := eliParseDifferential(owned, ctx.Baseline.Samples > 0 && ctx.Baseline.Stable && !ctx.Baseline.Degraded,
+		ctx.Baseline.Degraded, eliGateReason(ctx.Baseline))
+
 	// 6. Uniform block, computed from THIS class's own payloads only (foundations 5.8).
 	if eliUniformBlock(owned, baseline) {
+		if parse.Outcome == eliParseSeparated {
+			return eliParseFired(key, parse, ordinals,
+				"This endpoint also answered three or more of this class's distinct payloads with one "+
+					"byte-identical non-baseline body, which on its own reads as a filter. The arm outranks "+
+					"that reading here: a filter refuses the expression that parses and the one that does "+
+					"not alike, and these separated.")
+		}
 		return eliOne(key, triage.StateCannotDetermine,
 			"blocked: three or more of this class's own distinct payloads produced byte-identical responses that "+
-				"differ from the baseline, which is a filter answering rather than the application", ordinals, "")
+				"differ from the baseline, which is a filter answering rather than the application. "+
+				eliParseSentence(parse), ordinals, "")
 	}
 
 	// 7. The oracles, strongest first.
@@ -1339,16 +1687,41 @@ func eliVerdict(ctx triage.ClassifyCtx, owned []eliOwn) []triage.ClassVerdict {
 			ordinals, h, h.Dialect)
 	}
 
-	// 8. Nothing fired. Now the question is whether this class is entitled to say clean, and the
-	// default answer is no.
-	if reason, ok := eliCleanBlocked(ctx, owned); !ok {
-		return eliOne(key, triage.StateCannotDetermine, reason, ordinals, "")
+	// 7b. THE PARSE DIFFERENTIAL, LAST OF THE ORACLES AND THE ONLY ONE THAT NEEDED NOTHING BACK.
+	//
+	// It sits below el_error deliberately. el_error reads the container's own exception TEXT, so
+	// it names the dialect and grades medium; this reads only whether the response MOVED, so it
+	// names a delimiter and grades low. When the text is available, the text wins. This arm is
+	// for the endpoint where it is not: the JSON API that answers a generic error document, where
+	// all three arms above are structurally blind and this class has until now reported
+	// no_reflection on every slot it ever saw.
+	if parse.Outcome == eliParseSeparated {
+		return eliParseFired(key, parse, ordinals, "")
 	}
 
+	// 8. Nothing fired. Now the question is whether this class is entitled to say clean, and the
+	// default answer is no.
+	//
+	// THE PARSE ARM'S OUTCOME RIDES ON WHATEVER REASON COMES BACK. Every sentence eliCleanBlocked
+	// produces is "this class could not conclude, and here is the precondition that failed", and
+	// until now none of them said whether the one arm that does not need the value back had even
+	// run. no_reflection in particular read as a statement about the endpoint when it was a
+	// statement about two of three arms. Same state, fuller sentence.
+	if reason, ok := eliCleanBlocked(ctx, owned); !ok {
+		return eliOne(key, triage.StateCannotDetermine, reason+". "+eliParseSentence(parse), ordinals, "")
+	}
+
+	// THE CLEAN SAYS WHAT THE FOURTH ARM DID, AND IT IS NOT A PRECONDITION OF THE CLEAN.
+	//
+	// The parse differential is TierFull and is only earned when the two computation arms came
+	// back empty, so requiring it would make a clean unreachable at reduced tier for a reason
+	// that has nothing to do with the endpoint. But a clean that does not mention it is a clean
+	// whose reader cannot tell whether four arms were silent or three ran and a fourth was never
+	// paid for, and those are different amounts of assurance.
 	v := eliOne(key, triage.StateClean,
 		"clean: this class's own probes reached the wire with their payloads proven intact, its bare marker came "+
 			"back so the slot demonstrably reflects, all three independent oracle arms (int32 overflow, string "+
-			"method, dialect error signature) ran, and every one of them stayed silent",
+			"method, dialect error signature) ran, and every one of them stayed silent. "+eliParseSentence(parse),
 		ordinals, "")
 	v[0].Label = triage.TriageLabel{
 		Tools: []string{"nuclei-dast"},
@@ -1922,12 +2295,23 @@ type eliOracleCase struct {
 func (eliClassifier) OracleCases() []eliOracleCase {
 	return []eliOracleCase{
 		{
+			Route: "/eli/blind", Expect: "positive",
+			Probes: []triage.ProbeID{eliProbeEBN1, eliProbeEBN2, eliProbeEB1, eliProbeEB2, eliProbeEB3, eliProbeEB4},
+			Why: "THE PARSE DIFFERENTIAL'S POSITIVE, and it was not declared here until the arm had been " +
+				"watched firing on it. MEASURED 2026-09-19, whole registry at full tier: suspicious, " +
+				"el_parse_differential, grade low, on a route that reflects nothing at all. Paired with " +
+				"/clean/echo and /eli/echo, where the same six probes go out and the arm reports " +
+				"parse_differential_ran_and_was_silent, that is the arm observed in BOTH directions, which " +
+				"is what makes it verified rather than declared",
+		},
+		{
 			Route: "/eli", Expect: "positive",
 			Probes: []triage.ProbeID{eliProbeEL1, eliProbeEL6, eliProbeELS1, eliProbeCF1},
-			Why: "MISSING AND REQUIRED. A closed grammar that recognises 1*((1).valueOf('<int>')+<int>), computes " +
-				"the sum in int32 and renders it WRAPPED, and recognises '<tok>'.replace('<a>','<b>'). No evaluator, " +
-				"no reflection: it is a string rewrite over two integers and one method name, in the same spirit as " +
-				"the existing /ssti handler. Without it this class's detectors have never been seen firing",
+			Why: "BUILT AND MEASURED, and its own note went on calling it unbuilt for a round after it was built. A closed " +
+				"grammar that recognises 1*((1).valueOf('<int>')+<int>), computes the sum in int32 and renders it " +
+				"WRAPPED, and recognises '<tok>'.replace('<a>','<b>'). MEASURED 2026-09-19 on the 80-route canary " +
+				"exam: finding, el_overflow, off the int32 wrap adjacent to this probe's own marker. This is the " +
+				"route that turned this class from one whose detectors had only ever been seen staying silent",
 		},
 		{
 			Route: "/eli/spel", Expect: "positive",
@@ -1944,13 +2328,19 @@ func (eliClassifier) OracleCases() []eliOracleCase {
 				"on the encoder getting it right",
 		},
 		{
-			Route: "/eli/longmath", Expect: "negative",
+			Route: "/eli/longmath", Expect: "positive",
 			Probes: []triage.ProbeID{eliProbeEL1, eliProbeCF1},
-			Why: "MISSING AND REQUIRED, and it is the most valuable negative in the set. The same grammar computing " +
-				"in a 64-bit long, so the response carries " + eliUnwrapped + " and NOT " + eliWrapped + ". The " +
-				"verdict must be suspicious (el_overflow_unwrapped) and must NOT be a finding. An implementation " +
-				"that only looks for the wrapped answer records CLEAN on a real long-typed JVM EL sink, and an " +
-				"implementation that accepts either records a finding it cannot support",
+			Why: "THE LABEL WAS WRONG AND THE CLASS WAS RIGHT, and the label contradicted the sentence next to it. " +
+				"This case read Expect \"negative\", which this type documents as \"this class MUST stay silent " +
+				"there\", while its own Why said the verdict must be suspicious. The handler settles it: " +
+				"eliDialectLong is an EVALUATING JVM EL sink whose arithmetic is a 64-bit long, so it answers " +
+				eliUnwrapped + " where a 32-bit sink answers " + eliWrapped + ". Something there really does " +
+				"evaluate; a scanner that found it would be right. What this class owes is suspicious " +
+				"(el_overflow_unwrapped), which is neither a finding nor a clean, and MEASURED 2026-09-19 on the " +
+				"80-route canary exam that is exactly what it says. An implementation that only looks for the " +
+				"wrapped answer records CLEAN on a real long-typed sink, and one that accepts either records a " +
+				"finding it cannot support; carrying this route as a NEGATIVE would have made the second of those " +
+				"three wrong answers look like the correct one",
 		},
 		{
 			Route: "/eli/echo", Expect: "negative",
@@ -1963,10 +2353,12 @@ func (eliClassifier) OracleCases() []eliOracleCase {
 		{
 			Route: "/eli/hardened", Expect: "negative",
 			Probes: []triage.ProbeID{eliProbeEL1, eliProbeEL2, eliProbeEL3, eliProbeELS1, eliProbeELE},
-			Why: "MISSING AND REQUIRED. An endpoint that reflects the payload verbatim with no evaluator anywhere. " +
-				"Every probe must stay silent AND the verdict must be clean with ordinals, not cannot_determine: " +
-				"this is the route that proves this class can reach a legitimate clean at all, which is the half " +
-				"of the contract a fire-only rig never tests",
+			Why: "BUILT AND MEASURED, and its own note went on calling it unbuilt for a round after it was built. An endpoint " +
+				"that reflects the payload verbatim with no evaluator anywhere. Every probe must stay silent AND " +
+				"the verdict must be clean with ordinals, not cannot_determine: this is the route that proves this " +
+				"class can reach a legitimate clean at all, which is the half of the contract a fire-only rig " +
+				"never tests. MEASURED 2026-09-19 on the 80-route canary exam: clean, with ordinals, naming all " +
+				"three arms as having run and stayed silent",
 		},
 		{
 			Route: "/ssti", Expect: "negative",
@@ -1995,10 +2387,12 @@ func (eliClassifier) OracleCases() []eliOracleCase {
 		{
 			Route: "/eli/devmode", Expect: "negative",
 			Probes: []triage.ProbeID{eliProbeELE},
-			Why: "MISSING AND REQUIRED. A baseline that already carries 'Struts Problem Report' on every request, " +
-				"which is what struts.devMode=true does. The signature must be disabled for that endpoint by " +
-				"baseline differencing while the other OGNL signatures stay live. Without this route the class " +
-				"reports a finding on every slot of every devMode application forever",
+			Why: "BUILT AND MEASURED, and its own note went on calling it unbuilt for a round after it was built. A baseline " +
+				"that already carries 'Struts Problem Report' on every request, which is what struts.devMode=true " +
+				"does. The signature must be disabled for that endpoint by baseline differencing while the other " +
+				"OGNL signatures stay live. Without this route the class reports a finding on every slot of every " +
+				"devMode application forever. MEASURED 2026-09-19 on the 80-route canary exam: clean, so the " +
+				"differencing holds",
 		},
 		{
 			Route: "fixture: a response body carrying SSTI's own expected answer", Expect: "negative",
@@ -2016,3 +2410,21 @@ func (eliClassifier) OracleCases() []eliOracleCase {
 // exceptions swallowed) is honestly cannot_determine (no_reflection) here and not clean, and the
 // absence is declared as a method rather than left as a silence.
 func (eliClassifier) Settle(triage.ClassifyCtx) []triage.ProbeRequest { return nil }
+
+// RunnerPlacesMarkers opts this class in to runner-placed markers.
+//
+// ELI is the one class that wants it. Its payloads are expressions whose grammar the marker must
+// not disturb, so they spell no marker token and declare MarkerPos: MarkerPrefix instead, letting
+// the runner attach the marker at the front where the attribution rule expects it. Without this
+// the class is completely inert: every landing site reads Unattributed and it fires on nothing.
+// Measured on the oracle, this opt-in is the difference between 0/0/0/62 and 2/1/27/28.
+//
+// It is an opt-in because the default must be OFF. Injecting a marker into a payload that did not
+// ask for one broke three other classes: LFI-L7 depends on the plaintext marker being ABSENT from
+// the request (only its base64 is sent), and SSTI's polyglot measures whether its own bytes come
+// back unrewritten. Both were corrupted while this class was being rescued. See
+// triageRunnerPlacesMarkersClass in triageRun.go for the full account.
+//
+// ELI-EL6 remains the exception WITHIN this class: it is the bare-expression probe and carries
+// Variant["marker_placement"]="omitted", which the runner honours ahead of MarkerPos.
+func (eliClassifier) RunnerPlacesMarkers() bool { return true }

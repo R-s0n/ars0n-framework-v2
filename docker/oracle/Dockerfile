@@ -10,7 +10,7 @@ FROM golang:1.23-alpine AS build
 WORKDIR /src
 # go.mod is COMMITTED rather than created here by `go mod init`, so main_test.go can run outside
 # docker. main.go is copied by name and the test file is not, so the image contents are unchanged.
-COPY go.mod main.go ./
+COPY go.mod main.go round4.go ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /oracle .
 
 # scratch, not alpine: the emulated command injection and file inclusion endpoints are emulated

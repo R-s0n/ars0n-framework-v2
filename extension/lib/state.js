@@ -10,6 +10,12 @@
 
 export const STATE_KEY = 'crawlState';
 export const QUEUE_KEY = 'crawlQueue';
+// The scope-target id that OWNS the captures currently in QUEUE_KEY. A stop/abandon leaves the queue
+// in place (it may hold un-flushed captures); startCaptureSession re-flushes it when the next
+// session is for this same owner, and only then discards it when the owner differs. This is what
+// makes an abandoned-session 409 or an offline stop non-destructive instead of silently wiping the
+// tail of a recording.
+export const QUEUE_OWNER_KEY = 'crawlQueueOwner';
 
 export const MERGE_WINDOW_MS = 2500;
 export const MAX_QUEUE_LENGTH = 5000;
@@ -29,17 +35,55 @@ export function approximateSize(value) {
   }
 }
 
+// A globally unique id for one queue entry. crypto.randomUUID is present in the service worker and
+// in modern Node (the .mjs tests); the fallback keeps this from throwing in any stripped context.
+// The value doubles as the server row's primary key, so it must be a real UUID the server can parse.
+export function newCaptureUid() {
+  try {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  } catch (error) {
+    /* fall through */
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = Math.floor(Math.random() * 16);
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+// Sheds ONLY the bytes of a media body, keeping its digest and everything textual. This is the
+// first thing to go when the queue is over budget: a media object is by far the largest thing in
+// it, and a JSON response naming another user's records is worth more per byte than a sprite.
+//
+// The digest survives, and that is the narrow thing a hash alone is worth, worth saying out loud:
+// it cannot show the operator the photo, but it still proves two responses were byte identical,
+// which is how you show that user B's endpoint returned user A's avatar. The framework marks such
+// a row as pointing at bytes it does not hold, so nobody mistakes it for a stored body.
+export function shedBlobBytes(capture) {
+  if (!capture.responseBodyBlob || !capture.responseBodyBlob.base64) return capture;
+  return {
+    ...capture,
+    responseBodyBlob: { ...capture.responseBodyBlob, base64: '' },
+  };
+}
+
 // Strips the bodies from a capture while keeping everything that identifies it. Used when the queue
 // is over budget: an endpoint recorded without its body is still worth far more than no record.
+// A media body loses its bytes here too, but keeps its digest, as shedBlobBytes explains.
 export function shedBodies(capture) {
-  if (!capture.postData && !capture.responseBody) return capture;
-  return {
+  const hasBlobBytes = Boolean(capture.responseBodyBlob && capture.responseBodyBlob.base64);
+  if (!capture.postData && !capture.responseBody && !hasBlobBytes) return capture;
+  const shed = {
     ...capture,
     postData: '',
     responseBody: '',
     requestBodyTruncated: Boolean(capture.postData) || capture.requestBodyTruncated,
     responseBodyTruncated: Boolean(capture.responseBody) || capture.responseBodyTruncated,
   };
+  if (hasBlobBytes) {
+    shed.responseBodyBlob = { ...capture.responseBodyBlob, base64: '' };
+  }
+  return shed;
 }
 
 export const EMPTY_STATE = {
@@ -135,12 +179,37 @@ export function mutateStats(fn) {
   });
 }
 
-export function clearState() {
+// Resets the SESSION state but, by default, PRESERVES the queue. Every path that used to wipe the
+// queue here (a normal Stop, and the 404/409 abandonment handled from both runFlush and the
+// heartbeat) was a silent-capture-loss bug: it deleted un-flushed captures while the log claimed to
+// keep them. The queue now outlives the session and startCaptureSession is the single place that
+// re-flushes it (same owner) or discards it (different owner). Pass { wipeQueue: true } only for a
+// deliberate discard.
+export function clearState(options) {
+  const wipeQueue = !!(options && options.wipeQueue);
   return runExclusive(async () => {
     stateCache = { ...EMPTY_STATE };
-    await chrome.storage.session.set({ [STATE_KEY]: stateCache, [QUEUE_KEY]: [] });
+    const patch = { [STATE_KEY]: stateCache };
+    if (wipeQueue) {
+      patch[QUEUE_KEY] = [];
+      patch[QUEUE_OWNER_KEY] = null;
+    }
+    await chrome.storage.session.set(patch);
     return stateCache;
   });
+}
+
+export async function getQueueOwner() {
+  try {
+    const got = await chrome.storage.session.get([QUEUE_OWNER_KEY]);
+    return got[QUEUE_OWNER_KEY] || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+export async function setQueueOwner(scopeTargetId) {
+  await chrome.storage.session.set({ [QUEUE_OWNER_KEY]: scopeTargetId || null });
 }
 
 export function setState(next) {
@@ -202,6 +271,14 @@ async function readQueue() {
   return stored[QUEUE_KEY] || [];
 }
 
+// A media capture has a body: its bytes are in the blob, not in responseBody. The popup's body
+// counter reads this, and a counter that calls a stored photo "no body" is a counter that lies.
+function hasResponseBody(capture) {
+  if (!capture) return false;
+  return Boolean(capture.responseBody) ||
+    Boolean(capture.responseBodyBlob && (capture.responseBodyBlob.base64 || capture.responseBodyBlob.sha256));
+}
+
 // Adds a capture, or merges it into a recent entry describing the same request. `patch` fields
 // only overwrite when the incoming source has better information, which is why bodies are applied
 // with the "first non-empty wins, higher-precedence source overrides" rule below.
@@ -222,16 +299,21 @@ export function enqueueOrMerge(capture, sourcePrecedence) {
       if (entry._mergeUntil <= now) break; // older entries are already sealed
       if ((entry.sources || []).includes(capture.sources[0])) continue;
 
-      const before = Boolean(entry.responseBody);
+      const before = hasResponseBody(entry);
       queue[i] = mergeCaptures(entry, capture, sourcePrecedence);
-      gainedResponseBody = !before && Boolean(queue[i].responseBody);
+      gainedResponseBody = !before && hasResponseBody(queue[i]);
       merged = true;
       break;
     }
 
     if (!merged) {
-      queue.push({ ...capture, _mergeUntil: now + MERGE_WINDOW_MS });
-      gainedResponseBody = Boolean(capture.responseBody);
+      // captureUid is the entry's stable identity, minted once here when the entry is created (a
+      // merge keeps the existing entry's uid, so all sources of one request share it). It is
+      // persisted with the queue and uploaded, so: the flush drops exactly the entries it uploaded
+      // by uid (never by position, which a concurrent front-eviction can shift under it), and the
+      // server dedupes a re-POSTed entry on its primary key instead of inserting a duplicate row.
+      queue.push({ ...capture, _mergeUntil: now + MERGE_WINDOW_MS, captureUid: capture.captureUid || newCaptureUid() });
+      gainedResponseBody = hasResponseBody(capture);
     }
 
     let dropped = 0;
@@ -243,18 +325,36 @@ export function enqueueOrMerge(capture, sourcePrecedence) {
     // Bring the queue under the byte budget by shedding bodies from the oldest entries first, and
     // only dropping whole records if that is not enough. Losing a body is recoverable; losing the
     // fact that an endpoint exists is not.
+    // The budget is enforced by adjusting a RUNNING total by each entry's own size delta, not by
+    // re-stringifying the whole queue on every shed step. The old code called approximateSize(queue)
+    // (a full JSON.stringify of up to QUEUE_BYTE_LIMIT bytes) once per loop iteration, so shedding K
+    // entries near the cap cost O(K x queue-bytes). Replacing one entry changes JSON.stringify(queue)
+    // by exactly (newEntrySize - oldEntrySize) since the separators are unchanged, so the running
+    // total stays exact; a shift also removes one separator comma.
     let bytes = approximateSize(queue);
     let shed = 0;
+    // Media bytes go first, oldest first: one 2 MB image would otherwise push out the text bodies
+    // of dozens of API responses, which is the wrong way round. The digest survives either way.
+    for (let i = 0; i < queue.length && bytes > QUEUE_BYTE_LIMIT; i++) {
+      if (!queue[i].responseBodyBlob || !queue[i].responseBodyBlob.base64) continue;
+      const before = approximateSize(queue[i]);
+      queue[i] = shedBlobBytes(queue[i]);
+      bytes -= before - approximateSize(queue[i]);
+      shed++;
+    }
     for (let i = 0; i < queue.length && bytes > QUEUE_BYTE_LIMIT; i++) {
       if (!queue[i].postData && !queue[i].responseBody) continue;
+      const before = approximateSize(queue[i]);
       queue[i] = shedBodies(queue[i]);
+      bytes -= before - approximateSize(queue[i]);
       shed++;
-      bytes = approximateSize(queue);
     }
     while (queue.length > 1 && bytes > QUEUE_BYTE_LIMIT) {
+      // Subtract the entry AND the separator comma so the running total cannot over-count and drop
+      // one more record than the budget requires.
+      bytes -= approximateSize(queue[0]) + 1;
       queue.shift();
       dropped++;
-      bytes = approximateSize(queue);
     }
 
     const written = await writeQueueSafely(queue);
@@ -326,6 +426,10 @@ export function mergeCaptures(existing, incoming, sourcePrecedence) {
   return {
     _mergeKey: existing._mergeKey,
     _mergeUntil: existing._mergeUntil,
+    // Keep the existing entry's identity. Without this the merged entry would lose its captureUid
+    // and the flush could neither drop it by uid after upload (so it would re-upload every flush)
+    // nor let the server dedupe it.
+    captureUid: existing.captureUid,
     sources: Array.from(new Set([...(existing.sources || []), ...(incoming.sources || [])])),
     url: existing.url,
     method: existing.method,
@@ -356,7 +460,20 @@ export function mergeCaptures(existing, incoming, sourcePrecedence) {
     durationMs: existing.durationMs || incoming.durationMs || 0,
     requestBodyTruncated: Boolean(existing.requestBodyTruncated || incoming.requestBodyTruncated),
     responseBodyTruncated: Boolean(existing.responseBodyTruncated || incoming.responseBodyTruncated),
+    responseBodyBlob: pickBlob(existing.responseBodyBlob, incoming.responseBodyBlob, incomingWins),
   };
+}
+
+// A blob carrying bytes always beats one carrying only a digest, whatever the source ranking says.
+// One side holding the photo and the other holding only its name is not a conflict to settle by
+// precedence: the bytes are the evidence.
+function pickBlob(existing, incoming, incomingWins) {
+  const hasBytes = (blob) => Boolean(blob && blob.base64);
+  if (hasBytes(existing) && !hasBytes(incoming)) return existing;
+  if (hasBytes(incoming) && !hasBytes(existing)) return incoming;
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+  return incomingWins ? incoming : existing;
 }
 
 // Returns the leading run of entries whose merge window has closed, bounded by both a count and a

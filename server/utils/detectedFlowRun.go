@@ -111,11 +111,13 @@ const (
 	// bounding them is a visibly wrong edit rather than an omission.
 	detectedFlowMaxRetries = 0
 
-	// Read from the wire, and kept in memory. Runs live in this process, so the second number is a
-	// memory budget rather than a fidelity choice: the full body of any one step is a click away in
-	// the repeater, which reads it from the database.
-	detectedFlowMaxReadBody   = 2 * 1024 * 1024
-	detectedFlowMaxStoredBody = 64 * 1024
+	// Read from the wire, and KEPT WHOLE. What the target sent back is the evidence: a step's
+	// response is where the session cookie, the other account's record or the error that proves the
+	// bug actually is, and a run of a detected flow persists nowhere, so a byte clipped here is a
+	// byte gone. There used to be a second, smaller cap that kept 64KB of each body and threw the
+	// rest away on the theory that the whole thing was "a click away in the repeater"; it is not,
+	// because the repeater sends a NEW request and this response is the one that happened.
+	detectedFlowMaxReadBody = 2 * 1024 * 1024
 	// What the progress endpoint returns per step when bodies were not asked for, so a poll every
 	// second does not carry megabytes.
 	detectedFlowBodyPreview = 2048
@@ -1140,18 +1142,19 @@ func sendDetectedFlowRequest(ctx context.Context, raw, capturedURL string, jar h
 		timeout = time.Duration(engagementDefaultTimeoutS) * time.Second
 	}
 
-	client := &http.Client{
+	// NoFollowClient, not http.Client: net/http parses the Location header of a 3xx before it
+	// consults CheckRedirect, so ErrUseLastResponse does not stop Client.Do from discarding a
+	// response whose Location will not parse as a URL. The hop is the observation here, and a
+	// hop that only a malformed Location makes interesting is the one most worth keeping.
+	client := NewNoFollowClient(&http.Client{
 		Timeout: timeout,
 		Jar:     jar,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
 		Transport: &http.Transport{
 			// Matches the repeater and the auth-flow replay: these are replays of traffic the operator
 			// already recorded against this host, often a staging origin with its own certificate.
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
-	}
+	})
 
 	start := time.Now()
 	resp, err := client.Do(req.WithContext(ctx))
@@ -1165,12 +1168,11 @@ func sendDetectedFlowRequest(ctx context.Context, raw, capturedURL string, jar h
 	out.Status = resp.StatusCode
 	out.Headers = resp.Header
 	out.Bytes = len(read)
-	stored := sanitizeForTextColumn(string(read))
-	if len(stored) > detectedFlowMaxStoredBody {
-		stored = stored[:detectedFlowMaxStoredBody]
-		out.Truncated = true
-	}
-	out.Body = stored
+	// Bytes counted BEFORE the sanitiser, so the number is what came off the wire rather than what
+	// survived being made storable. Truncated says the 2MB read cap was hit, which is the only thing
+	// that shortens a body here.
+	out.Truncated = len(read) == detectedFlowMaxReadBody
+	out.Body = sanitizeForTextColumn(string(read))
 	return out, nil
 }
 
@@ -1320,9 +1322,13 @@ func (r *detectedFlowRunRegistry) snapshot(runID string, bodies bool) *DetectedF
 	out.Plan = run.Plan.withoutSteps()
 	out.Steps = make([]DetectedFlowRunStep, len(run.Steps))
 	copy(out.Steps, run.Steps)
-	if !bodies {
-		// A progress poll every second must not carry megabytes. The bytes and the truncation flag
-		// stay, so the preview never reads as the whole body.
+	// ONLY WHILE THE RUN IS STILL GOING. A progress poll every second must not carry megabytes, so a
+	// run in flight answers with a preview unless bodies=1 was asked for. A FINISHED run answers with
+	// the whole body either way, because the poll is over and the reader is now an operator looking
+	// at what the target said. The client stops at the first terminal poll and never asks for
+	// bodies=1, so clipping that last answer would put the evidence behind a URL nothing constructs,
+	// in a run that is deleted 30 minutes later.
+	if !bodies && detectedFlowRunInFlight(out.Status) {
 		for i := range out.Steps {
 			if len(out.Steps[i].ResponseBody) > detectedFlowBodyPreview {
 				out.Steps[i].ResponseBody = out.Steps[i].ResponseBody[:detectedFlowBodyPreview]
@@ -1331,6 +1337,11 @@ func (r *detectedFlowRunRegistry) snapshot(runID string, bodies bool) *DetectedF
 		}
 	}
 	return &out
+}
+
+// detectedFlowRunInFlight reports whether the runner may still be writing into this run.
+func detectedFlowRunInFlight(status string) bool {
+	return status == detectedFlowRunPlanned || status == detectedFlowRunRunning
 }
 
 // ---------------------------------------------------------------------------
@@ -1588,8 +1599,10 @@ func detectedFlowPacer(interval time.Duration) func(context.Context) bool {
 
 // GetDetectedFlowRun returns progress and results.
 //
-// Bodies are omitted by default and returned in full with ?bodies=1, because this endpoint is polled
-// while the run is in flight and fifty 64KB bodies on every poll is a megabyte a second for nothing.
+// While the run is in flight, bodies come back as a 2KB preview unless ?bodies=1 is passed, because
+// this endpoint is polled every second and fifty full bodies a second is a megabyte a second for
+// nothing. Once the run has finished, every body comes back whole whatever the query says: the
+// polling is over and what the target sent is the point of having run it.
 func GetDetectedFlowRun(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 

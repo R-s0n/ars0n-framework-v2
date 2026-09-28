@@ -3886,13 +3886,11 @@ func getHTTPInfoFast(domain string) (int, string, string) {
 	}
 
 	// 3 second timeout for HTTP requests (faster)
-	client := &http.Client{
-		Timeout: 3 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Don't follow redirects to save time
-			return http.ErrUseLastResponse
-		},
-	}
+	// NoFollowClient, not http.Client: net/http parses the Location header of a 3xx before it
+	// consults CheckRedirect, so ErrUseLastResponse does not stop Client.Do from discarding a
+	// response whose Location will not parse as a URL. The hop is the observation here, and a
+	// hop that only a malformed Location makes interesting is the one most worth keeping.
+	client := NewNoFollowClient(&http.Client{Timeout: 3 * time.Second})
 
 	// Try HTTPS first, then HTTP
 	urls := []string{

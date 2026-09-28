@@ -18,6 +18,12 @@ import {
   parseQueryParams,
   truncateBody,
   isTextualMime,
+  isMediaMime,
+  buildMediaBlob,
+  base64ToBytes,
+  lowerHeaderMap,
+  decodeBytesLossless,
+  BASE64_BODY_PREFIX,
   mergeKey,
   normalizeFormData,
   encodeFormBody,
@@ -33,6 +39,7 @@ import {
   takeReady,
   stripInternal,
   shedBodies,
+  shedBlobBytes,
   approximateSize,
   trimObservedHosts,
   OBSERVED_HOST_LIMIT,
@@ -151,14 +158,17 @@ section('bodies: parsing');
 check('json body', parseParams('{"a":1,"b":"x"}', 'application/json'), { a: 1, b: 'x' });
 check('json detected without a content-type', parseParams('{"a":1}', ''), { a: 1 });
 check('form urlencoded', parseParams('a=1&b=2&a=3', 'application/x-www-form-urlencoded'), { a: ['1', '3'], b: '2' });
+// Values used to be dropped here: every field was recorded against an empty string, so a password
+// submitted through a multipart form was stored as "" and nothing downstream had a baseline value
+// to fuzz from.
 check(
-  'multipart field names recovered, file fields flagged',
+  'multipart values are recovered, not just the field names',
   parseParams(
     '--X\r\nContent-Disposition: form-data; name="avatar"; filename="a.txt"\r\n\r\nhi\r\n' +
       '--X\r\nContent-Disposition: form-data; name="title"\r\n\r\nhello\r\n--X--',
     'multipart/form-data; boundary=X'
   ),
-  { avatar: '[file:a.txt]', title: '' }
+  { avatar: { filename: 'a.txt', content: 'hi' }, title: 'hello' }
 );
 check('non-json text ignored', parseParams('hello', 'text/plain'), null);
 check('query params', parseQueryParams('https://x.com/a?x=1&y=2&x=3'), { x: ['1', '3'], y: '2' });
@@ -169,12 +179,114 @@ check('under the cap', truncateBody('abc', 10), { body: 'abc', truncated: false 
 check('over the cap', truncateBody('abcdefghijk', 5), { body: 'abcde', truncated: true });
 check('null body', truncateBody(null, 5), { body: '', truncated: false });
 
-section('mime: what is worth storing');
-check('json is textual', isTextualMime('application/json; charset=utf-8'), true);
-check('html is textual', isTextualMime('text/html'), true);
-check('png is not', isTextualMime('image/png'), false);
-check('octet-stream is not', isTextualMime('application/octet-stream'), false);
-check('empty defaults to textual', isTextualMime(''), true);
+section('mime: only rendered media is skipped');
+check('json is read', isTextualMime('application/json; charset=utf-8'), true);
+check('html is read', isTextualMime('text/html'), true);
+check('png is skipped', isTextualMime('image/png'), false);
+// An export endpoint answers with one of these, and its body is the proof in a data-exposure
+// write-up. They used to be skipped, which stored an empty body with no second chance at it.
+check('octet-stream is read', isTextualMime('application/octet-stream'), true);
+check('pdf is read', isTextualMime('application/pdf'), true);
+check('zip is read', isTextualMime('application/zip'), true);
+check('empty defaults to read', isTextualMime(''), true);
+
+// Rendered media is no longer thrown away, it just takes a different path: its bytes are stored
+// content addressed. An IDOR that answers with another user's uploaded photo has to be provable
+// from the capture table.
+section('media: bytes are kept, not skipped');
+check('png is media', isMediaMime('image/png'), true);
+check('woff2 is media', isMediaMime('font/woff2'), true);
+check('json is not media', isMediaMime('application/json'), false);
+// SVG is text with an image/ type, and an SVG is a place script hides.
+check('svg stays on the text path', isMediaMime('image/svg+xml'), false);
+check('svg with a charset stays on the text path', isTextualMime('image/svg+xml; charset=utf-8'), true);
+{
+  const wire = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+  const blob = buildMediaBlob(wire, 'image/png', 1024);
+  check('wire size recorded', blob.bytes, 6);
+  check('not capped', blob.capped, false);
+  check('every byte recoverable', Array.from(base64ToBytes(blob.base64)), Array.from(wire));
+}
+{
+  const wire = new Uint8Array(4096).fill(7);
+  const blob = buildMediaBlob(wire, 'video/webm', 1024);
+  check('capped body is flagged', blob.capped, true);
+  check('wire size is the real size, not the stored size', blob.bytes, 4096);
+  check('stored bytes are the cap', base64ToBytes(blob.base64).length, 1024);
+}
+
+// A shed body under storage pressure keeps its digest. That is the narrow thing a hash alone is
+// worth: it cannot show the operator the photo, but it still proves two responses were byte
+// identical, which is how you show user B's endpoint returned user A's avatar.
+section('media: shedding keeps the digest');
+{
+  const shed = shedBodies({
+    url: 'https://app.example.com/avatar/7',
+    responseBody: '',
+    postData: '',
+    responseBodyBlob: { sha256: 'abc123', bytes: 2048, capped: false, base64: 'AAAA' },
+  });
+  check('bytes are gone', shed.responseBodyBlob.base64, '');
+  check('digest survives', shed.responseBodyBlob.sha256, 'abc123');
+  check('wire size survives', shed.responseBodyBlob.bytes, 2048);
+}
+{
+  // Media bytes are shed BEFORE text bodies: one 2 MB image must not push out the text bodies of
+  // dozens of API responses, which is where the findings are.
+  const shed = shedBlobBytes({
+    postData: 'user=alice',
+    responseBody: '{"ssn":"111-22-3333"}',
+    responseBodyBlob: { sha256: 'abc123', bytes: 2048, base64: 'AAAA' },
+  });
+  check('media bytes dropped', shed.responseBodyBlob.base64, '');
+  check('the request body is untouched', shed.postData, 'user=alice');
+  check('the text response body is untouched', shed.responseBody, '{"ssn":"111-22-3333"}');
+}
+
+// Merging must not lose the bytes. A record that HAS the photo beats one that only has its name,
+// whatever the source ranking says.
+section('media: a blob with bytes wins the merge');
+{
+  const withBytes = {
+    _mergeKey: 'GET https://app.example.com/a.png',
+    sources: ['hook'],
+    responseBodyBlob: { sha256: 'aa', base64: 'QUJD' },
+  };
+  const withoutBytes = {
+    _mergeKey: 'GET https://app.example.com/a.png',
+    sources: ['debugger'],
+    responseBodyBlob: { sha256: 'aa', base64: '' },
+  };
+  const merged = mergeCaptures(withBytes, withoutBytes, ['webrequest', 'hook', 'debugger']);
+  check('bytes kept even though the other source outranks', merged.responseBodyBlob.base64, 'QUJD');
+}
+
+section('bytes: nothing the target sent is lost');
+check(
+  'valid utf-8 comes back verbatim',
+  decodeBytesLossless(new TextEncoder().encode('héllo → 世界')),
+  'héllo → 世界'
+);
+{
+  const wire = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+  const stored = decodeBytesLossless(wire);
+  check('undecodable bytes are base64, not replacement characters', stored.startsWith(BASE64_BODY_PREFIX), true);
+  const round = Uint8Array.from(atob(stored.slice(BASE64_BODY_PREFIX.length)), (c) => c.charCodeAt(0));
+  check('and every byte survives the round trip', Array.from(round), Array.from(wire));
+}
+
+section('headers: a repeated name keeps every value');
+{
+  const map = lowerHeaderMap([
+    { name: 'Set-Cookie', value: 'a=1' },
+    { name: 'set-cookie', value: 'session=deadbeef' },
+    { name: 'Content-Type', value: 'text/html' },
+  ]);
+  // Last-wins used to live here, and the session is rarely the last cookie a login sets.
+  check('both cookies stored', map['set-cookie'], ['a=1', 'session=deadbeef']);
+  check('a single-valued header is still a plain string', map['content-type'], 'text/html');
+  check('headerValue flattens for callers that want one string', headerValue(map, 'set-cookie'), 'a=1, session=deadbeef');
+}
 
 /* ------------------------------------------------------------------ merging */
 

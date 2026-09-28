@@ -4,6 +4,10 @@ const { limitResults, limitFetched, truncateText, clampLimit } = require('../uti
 const { parseAmassRecord } = require('../utils/dns');
 
 // === Find Subdomain Takeover Candidates ===
+// How many changed items compare_scans lists per direction by default. A default, not a wall:
+// max_items raises it and the counts are always over everything.
+const DIFF_ITEMS = 50;
+
 const findSubdomainTakeoverSchema = z.object({
   target_id: z.string().uuid().describe('The scope target UUID'),
   max_results: z.number().optional().describe('Maximum results (default 50)'),
@@ -103,7 +107,9 @@ async function findSubdomainTakeover(params) {
         category: 'dead_subdomains',
         count: deadSubs.rows.length,
         note: 'Subdomains with no HTTP response - check for dangling DNS',
-        subdomains: deadSubs.rows.slice(0, 20).map(r => r.subdomain),
+        // Every row the query returned. A second cap here under a `count` taken from the same
+        // rows meant the response said 50 and listed 20, and a caller reads the list.
+        subdomains: deadSubs.rows.map(r => r.subdomain),
       });
     }
   } catch {}
@@ -430,6 +436,11 @@ const compareScansSchema = z.object({
     'amass', 'subfinder', 'sublist3r', 'assetfinder', 'httpx', 'nuclei',
     'gau', 'ctl', 'gospider', 'shuffledns', 'cewl', 'subdomainizer',
   ]).describe('Tool to compare scan results for'),
+  max_items: z.number().int().positive().optional().describe(
+    `How many changed items to list, per direction (default ${DIFF_ITEMS}, max 1000). The counts ` +
+    'are over everything either way, and new_items_truncated / removed_items_truncated say ' +
+    'whether the list is the whole of it. A new subdomain is the reason this tool exists, so ' +
+    'raise this rather than reading the first fifty and stopping.'),
 });
 
 async function compareScans(params) {
@@ -463,16 +474,19 @@ async function compareScans(params) {
       const latest = new Set((scans.rows[0].result || '').split('\n').filter(Boolean));
       const previous = new Set((scans.rows[1].result || '').split('\n').filter(Boolean));
 
+      const diffLimit = clampLimit(params.max_items, DIFF_ITEMS);
       const newItems = [...latest].filter(x => !previous.has(x));
       const removedItems = [...previous].filter(x => !latest.has(x));
 
       comparison.latest_vs_previous = {
         latest_count: latest.size,
         previous_count: previous.size,
-        new_items: newItems.slice(0, 50),
+        new_items: newItems.slice(0, diffLimit),
         new_count: newItems.length,
-        removed_items: removedItems.slice(0, 50),
+        new_items_truncated: newItems.length > diffLimit,
+        removed_items: removedItems.slice(0, diffLimit),
         removed_count: removedItems.length,
+        removed_items_truncated: removedItems.length > diffLimit,
       };
     }
 

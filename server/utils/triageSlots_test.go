@@ -719,3 +719,477 @@ func triageSourceWithoutComments(t *testing.T, path string) string {
 	}
 	return buf.String()
 }
+
+// ---------------------------------------------------------------------------------------------
+// The templated-name dedupe, and the three dedupes the derivation refuses
+//
+// MEASURED ON THE OPERATOR'S LIVE RUN a218419a, 3,450 slots over 216 vectors, read out of Postgres:
+//
+//	kind   | slots | distinct names | vectors | distinct (host, method, path)
+//	cookie |  2068 |             31 |      75 |                            73
+//	header |   931 |             19 |      49 |                            49
+//
+// 560 of the 2,068 cookie slots carry an unresolved {uuid} in the NAME and all 560 have their
+// concrete twin on the same vector, carrying an observed value. Those are the ones deduped. The
+// rest is 31 names against 73 distinct endpoints and 19 names against 49 distinct endpoints,
+// which is not replication, and the tests below hold that line so a later optimisation cannot
+// quietly cross it.
+// ---------------------------------------------------------------------------------------------
+
+// triageCognitoRawRequest is the live cookie capture's shape: concrete Cognito cookies on the
+// wire, with the pool and subject replaced by neutral text.
+func triageCognitoRawRequest() []byte {
+	return []byte("GET /api/v1/accounts HTTP/1.1\r\nHost: h.example.com\r\n" +
+		"Cookie: CognitoIdentityServiceProvider.poolabc123.d4887448-50b1-7015-03be-6b285cf9fb5e.accessToken=eyJraWQ; " +
+		"CognitoIdentityServiceProvider.poolabc123.d4887448-50b1-7015-03be-6b285cf9fb5e.userData=%7B%22a%22%3A1%7D; " +
+		"CognitoIdentityServiceProvider.poolabc123.LastAuthUser=d4887448-50b1-7015-03be-6b285cf9fb5e; " +
+		"AMP_d6814239bf=JTdCJTIy\r\n\r\n")
+}
+
+func TestTemplatedCookieNameIsCoveredByItsConcreteTwinOnTheSameVector(t *testing.T) {
+	row := triageVectorRow{ID: "v1", Method: "GET", InsertionPoint: triage.KindCookie,
+		ComposedURL: "https://h.example.com/api/v1/accounts",
+		RawRequest:  triageCognitoRawRequest(),
+		Parameters: []string{
+			"CognitoIdentityServiceProvider.poolabc123.{uuid}.accessToken",
+			"CognitoIdentityServiceProvider.poolabc123.{uuid}.userData",
+			"CognitoIdentityServiceProvider.poolabc123.LastAuthUser",
+			"AMP_d6814239bf",
+		}}
+	slots, notes := SlotsFor(row, triage.SlotEvidence{})
+
+	for _, s := range slots {
+		if strings.Contains(string(s.Key), "{") {
+			t.Errorf("slot %q survived: no client ever sent a cookie whose NAME contains a %q placeholder, "+
+				"so the probe goes out under a name that does not exist and its answer is already being "+
+				"asked by the concrete twin one slot over on the same request", s.Key, "{uuid}")
+		}
+	}
+
+	// The concrete cookies are all still there. The dedupe must never cost a real name.
+	k := map[triage.SlotKey]bool{}
+	for _, s := range slots {
+		k[s.Key] = true
+	}
+	for _, want := range []triage.SlotKey{
+		"cookie:CognitoIdentityServiceProvider.poolabc123.d4887448-50b1-7015-03be-6b285cf9fb5e.accessToken",
+		"cookie:CognitoIdentityServiceProvider.poolabc123.d4887448-50b1-7015-03be-6b285cf9fb5e.userData",
+		"cookie:CognitoIdentityServiceProvider.poolabc123.LastAuthUser",
+		"cookie:AMP_d6814239bf",
+	} {
+		if !k[want] {
+			t.Errorf("no slot %q; got %v", want, triageSortedSlotKeys(slots))
+		}
+	}
+	if len(slots) != 4 {
+		t.Errorf("slots = %d, want 4. Live shape: 28 cookies per vector of which 8 are templated", len(slots))
+	}
+
+	// EVERY DROPPED SLOT NAMES ITS COVER. A slot that disappears without a record is a coverage
+	// lie, which is the exact failure this layer exists to prevent, and it is worse than the
+	// request it saved.
+	covered := 0
+	for _, n := range notes {
+		if !strings.HasPrefix(n.Reason, "name_is_the_unresolved_template_of_") {
+			continue
+		}
+		covered++
+		if n.VectorID != "v1" || n.Kind != triage.KindCookie {
+			t.Errorf("note %+v does not point at the vector that lost the slot", n)
+		}
+		if !strings.Contains(n.Reason, "d4887448-50b1-7015-03be-6b285cf9fb5e") {
+			t.Errorf("note %q does not name the slot that carries the probe instead", n.Reason)
+		}
+	}
+	if covered != 2 {
+		t.Errorf("cover notes = %d, want 2, one per dropped slot; notes = %v", covered, notes)
+	}
+}
+
+func TestATemplatedNameWithNoConcreteTwinIsKeptAndSaidToBeUnresolved(t *testing.T) {
+	// FAIL OPEN. An unmatched template is a name the corpus believes in, and dropping it is the
+	// silent zero. Measured on the live corpus: zero such cases today, which is exactly when the
+	// guard is cheap to add and impossible to notice missing.
+	row := triageVectorRow{ID: "v2", Method: "GET", InsertionPoint: triage.KindCookie,
+		ComposedURL: "https://h.example.com/x",
+		RawRequest:  []byte("GET /x HTTP/1.1\r\nCookie: other=1\r\n\r\n"),
+		Parameters:  []string{"prefix.{uuid}.suffix"}}
+	slots, notes := SlotsFor(row, triage.SlotEvidence{})
+
+	var found bool
+	for _, s := range slots {
+		if s.Key == "cookie:prefix.{uuid}.suffix" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the templated slot was dropped with nothing on this vector covering it; got %v",
+			triageSortedSlotKeys(slots))
+	}
+	var noted bool
+	for _, n := range notes {
+		if strings.Contains(n.Reason, "unresolved_template_and_no_concrete_form") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Errorf("kept the slot without saying the name is unresolved, so a clean here would read as a "+
+			"measured clean; notes = %v", notes)
+	}
+}
+
+func TestABareTemplatePlaceholderDoesNotAbsorbEveryCookieOnTheRequest(t *testing.T) {
+	// A bare placeholder reduces to "match anything". Absorbing a slot into the wrong cover is the
+	// same false negative as dropping it, so a pattern with no literal text of its own is refused
+	// and keeps its slot.
+	row := triageVectorRow{ID: "v3", Method: "GET", InsertionPoint: triage.KindCookie,
+		ComposedURL: "https://h.example.com/x",
+		RawRequest:  []byte("GET /x HTTP/1.1\r\nCookie: sid=abc; other=1\r\n\r\n"),
+		Parameters:  []string{"{uuid}"}}
+	slots, _ := SlotsFor(row, triage.SlotEvidence{})
+	var found bool
+	for _, s := range slots {
+		if s.Key == "cookie:{uuid}" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a bare placeholder was absorbed by an unrelated cookie; got %v", triageSortedSlotKeys(slots))
+	}
+}
+
+func TestTemplatedHeaderNameIsCoveredByItsConcreteTwin(t *testing.T) {
+	row := triageVectorRow{ID: "v4", Method: "GET", InsertionPoint: triage.KindHeader,
+		ComposedURL: "https://h.example.com/x",
+		RawRequest:  []byte("GET /x HTTP/1.1\r\nX-Tenant-abc123-Key: v\r\n\r\n"),
+		Parameters:  []string{"X-Tenant-abc123-Key", "X-Tenant-{token}-Key"}}
+	slots, notes := SlotsFor(row, triage.SlotEvidence{})
+	for _, s := range slots {
+		if strings.Contains(string(s.Key), "{") {
+			t.Errorf("templated header slot %q survived beside its concrete twin", s.Key)
+		}
+	}
+	var covered bool
+	for _, n := range notes {
+		if strings.Contains(n.Reason, "header:x-tenant-abc123-key") {
+			covered = true
+		}
+	}
+	if !covered {
+		t.Errorf("no note names the header slot that carries the probe instead; notes = %v", notes)
+	}
+}
+
+func TestTheSameCookieNameOnDifferentVectorsIsNotDeduped(t *testing.T) {
+	// THE DEDUPE THIS DERIVATION REFUSES, AND WHY.
+	//
+	// It looks like 85% replication: 31 cookie names over 2,068 slots. It is not. The 75 cookie
+	// vectors on the live corpus are 75 different endpoints, 73 distinct (host, method, path):
+	// /api/v1/accounts/{uuid}/details, /api/v1/oauth/clients/{token}/secret, /internal/clock,
+	// /verify. Probing AMP_d6814239bf on 69 of them does not test one thing 69 times, it asks 69
+	// different handlers whether they read that cookie, and a cookie read by one endpoint and
+	// ignored by another is the normal case. Probing one and recording the other 72 as covered is
+	// a coverage lie with a false negative under it.
+	raw := []byte("GET /x HTTP/1.1\r\nCookie: _gcl_au=1.1.2\r\n\r\n")
+	rows := []triageVectorRow{
+		{ID: "e1", Method: "GET", InsertionPoint: triage.KindCookie,
+			ComposedURL: "https://h.example.com/api/v1/accounts", RawRequest: raw},
+		{ID: "e2", Method: "GET", InsertionPoint: triage.KindCookie,
+			ComposedURL: "https://h.example.com/internal/clock", RawRequest: raw},
+	}
+	slots, notes, err := DeriveCorpusSlots(rows, map[string]triage.SlotEvidence{})
+	if err != nil {
+		t.Fatalf("DeriveCorpusSlots: %v", err)
+	}
+	if len(slots) != 2 {
+		t.Fatalf("corpus slots = %d, want 2. _gcl_au on /api/v1/accounts and _gcl_au on /internal/clock "+
+			"are two different handlers being asked the same question, not one question asked twice: "+
+			"%v (notes %v)", len(slots), triageSortedSlotKeys(slots), notes)
+	}
+	byVector := map[string]int{}
+	for _, s := range slots {
+		byVector[s.VectorID]++
+	}
+	if byVector["e1"] != 1 || byVector["e2"] != 1 {
+		t.Errorf("one endpoint lost its coverage row to the other: %v", byVector)
+	}
+}
+
+func TestTheInferredHeaderSetIsNotDedupedAcrossVectors(t *testing.T) {
+	// Measured: all 49 header vectors on the live corpus are 49 distinct endpoints, so the
+	// replication factor on that axis is exactly 1. X-Forwarded-For against /account/login and
+	// against /api/v1/paper_accounts/{uuid}/orders are different ACL decisions by different code.
+	rows := []triageVectorRow{
+		{ID: "h1", Method: "GET", InsertionPoint: triage.KindHeader, ComposedURL: "https://h.example.com/account/login"},
+		{ID: "h2", Method: "GET", InsertionPoint: triage.KindHeader, ComposedURL: "https://h.example.com/api/v1/orders"},
+	}
+	slots, _, err := DeriveCorpusSlots(rows, map[string]triage.SlotEvidence{})
+	if err != nil {
+		t.Fatalf("DeriveCorpusSlots: %v", err)
+	}
+	xff := 0
+	for _, s := range slots {
+		if s.Key == "header:x-forwarded-for" {
+			xff++
+		}
+	}
+	if xff != len(rows) {
+		t.Errorf("x-forwarded-for slots = %d over %d endpoints, want one each: an endpoint that lost its "+
+			"slot to another endpoint's probe was never tested and is recorded as covered", xff, len(rows))
+	}
+}
+
+func TestTemplateLiteralMatchingIsAnchoredAndNotARegexp(t *testing.T) {
+	// The literals come from a target's own cookie names. Compiling those as a pattern is how a
+	// name carrying a "." or a "+" silently matches something else.
+	cases := []struct {
+		pattern, candidate string
+		want               bool
+		why                string
+	}{
+		{"a.{uuid}.accessToken", "a.d4887448.accessToken", true, "the measured case"},
+		{"a.{uuid}.accessToken", "a.d4887448.refreshToken", false, "a different tail is a different cookie"},
+		{"a.{uuid}.deviceKey", "a.d4887448.deviceGroupKey", false, "deviceGroupKey is not deviceKey"},
+		{"a.{uuid}.k", "a..k", false, "the placeholder has to swallow at least one character"},
+		{"a.{x}.b.{y}.c", "a.1.b.2.c", true, "two placeholders in order"},
+		{"a.{x}.b.{y}.c", "a.1.c", false, "a middle literal that is not there"},
+		{"x+y{z}", "xAy1", false, "+ is a literal, not a quantifier"},
+		{"pre{z}", "prefix", true, "a trailing placeholder with an empty tail"},
+		{"pre{z}", "pre", false, "an empty match is not a match"},
+	}
+	for _, c := range cases {
+		literals, ok := triageTemplateLiterals(c.pattern)
+		got := ok && triageTemplateLiteralsMatch(literals, c.candidate)
+		if got != c.want {
+			t.Errorf("%q vs %q = %v, want %v (%s)", c.pattern, c.candidate, got, c.want, c.why)
+		}
+	}
+	if _, ok := triageTemplateLiterals("{uuid}"); ok {
+		t.Error("a pattern with no literal text of its own was accepted; it matches anything")
+	}
+	if triageNameCarriesTemplate("plain.name") {
+		t.Error("a name with no placeholder was read as templated")
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// R5. THE CREDENTIAL RULE, AND THE SLOTS IT WAS REFUSING BY ACCIDENT
+// ---------------------------------------------------------------------------------------------
+
+// The credential rule must not match a credential word INSIDE another word.
+//
+// MEASURED, live run a218419a on the engaged estate. The rule was fifteen strings.Contains calls,
+// and one of them was "identity". Every cookie in the CognitoIdentityServiceProvider family
+// therefore matched on the product's NAME rather than on anything it holds, so four leaves that
+// carry no secret at all were refused as credentials and never probed:
+//
+//	.clockDrift       a clock offset in seconds
+//	.deviceKey        a device identifier
+//	.deviceGroupKey   a device group identifier
+//	.userData         a JSON blob of username and attributes
+//
+// 4 names on 70 vectors each, 280 slots, never sent a byte and recorded with is_credential rather
+// than with a verdict. A credential slot correctly refused is good. A real slot wrongly refused is
+// a missed bug, and this is the false-negative door the whole layer exists to close.
+//
+// The other over-broad matches in the same rule, each of which refuses a probeable slot on a name
+// a real application uses, are in the table below. They are reachable on any target, not only
+// this one, which is why the fix is the matching rule and not a patch to one needle.
+func TestTheCredentialRuleDoesNotMatchAWordInsideAnotherWord(t *testing.T) {
+	const cognito = "CognitoIdentityServiceProvider.7cd3keuknr18mv2boiaesbgce3.d4887448-50b1-7015-03be-6b285cf9fb5e."
+
+	cases := []struct {
+		name string
+		want bool
+		why  string
+	}{
+		// The measured false negatives, in the exact live spelling.
+		{cognito + "clockDrift", false, "a clock offset is not a credential; it matched on identity inside the product name"},
+		{cognito + "deviceKey", false, "a device identifier is not a credential; same accidental match"},
+		{cognito + "deviceGroupKey", false, "a device group identifier is not a credential; same accidental match"},
+		{cognito + "userData", false, "a username blob is not a secret; same accidental match"},
+		// The same family's leaves that DO hold the secret must stay refused.
+		{cognito + "accessToken", true, "the access token is the session"},
+		{cognito + "idToken", true, "the id token is the session"},
+		{cognito + "refreshToken", true, "the refresh token mints sessions"},
+		{cognito + "randomPasswordKey", true, "the device password"},
+		{"CognitoIdentityServiceProvider.7cd3keuknr18mv2boiaesbgce3.LastAuthUser", true, "auth is a whole word here"},
+
+		// Over-broad matches reachable on any target. Each of these was refused by the old rule.
+		{"author_id", false, "auth inside author: an author id is an IDOR slot, not a credential"},
+		{"authority", false, "auth inside authority"},
+		{"resident_id", false, "sid inside resident"},
+		{"subsidiary_id", false, "sid inside subsidiary"},
+		{"consider_flag", false, "sid inside consider"},
+		{"inside_track", false, "sid inside inside"},
+		{"sidebar_state", false, "sid inside sidebar"},
+		{"assessment_id", false, "sess inside assessment"},
+		{"assessor", false, "sess inside assessor"},
+		{"identity_provider", false, "an identity names a subject, not a secret, and this is a probeable slot"},
+		{"login_redirect", false, "a login redirect is an open-redirect slot; login names a subject, not a secret"},
+		{"login_hint", false, "same"},
+		{"passwordless_enabled", false, "password inside passwordless: a feature flag"},
+		{"remembered_filters", false, "remember inside remembered"},
+
+		// True positives that must survive the tightening. These are the reason the rule exists.
+		{"PHPSESSID", true, "the canonical run-together session cookie"},
+		{"JSESSIONID", true, "same, Java"},
+		{"ASP.NET_SessionId", true, "same, .NET"},
+		{"TAsessionID", true, "a run-together name from the corpus"},
+		{"connect.sid", true, "express-session"},
+		{"laravel_session", true, "framework session"},
+		{"_csrf", true, "csrf token"},
+		{"csrf_token", true, "csrf token"},
+		{"XSRF-TOKEN", true, "angular csrf token"},
+		{"__RequestVerificationToken", true, "asp.net anti-forgery token"},
+		{"access_token", true, "bearer material"},
+		{"refresh_token", true, "bearer material"},
+		{"id_token", true, "bearer material"},
+		{"auth", true, "a whole word"},
+		{"sid", true, "a whole word"},
+		{"sess", true, "a whole word"},
+		{"__stripe_sid", true, "a session id, whole word"},
+		{"intercom-session-p7a9jdob", true, "a session, whole word"},
+		{"ai_session", true, "a session, whole word"},
+		{"remember_me", true, "a whole word"},
+		{"api_key", true, "api key"},
+		{"apiKey", true, "api key, camel"},
+		{"client_secret", true, "a secret"},
+		{"oauth_state", true, "oauth is a whole word and the old rule caught it through auth"},
+		{"jwt", true, "a whole word"},
+		{"user_password", true, "a whole word"},
+		{"passwd", true, "a whole word"},
+		{"Bearer", true, "a whole word"},
+		{"MFAdeviceToken", true, "token is a whole word"},
+
+		// Names on the live corpus that must stay probeable.
+		{"AMP_d6814239bf", false, "analytics, and not a credential by name"},
+		{"_gcl_au", false, "au is not auth"},
+		{"_rdt_uuid", false, "not a credential by name"},
+		{"__stripe_mid", false, "mid is not sid"},
+		{"intercom-device-id-p7a9jdob", false, "a device id is not a session"},
+		{"amplify-signin-with-hostedUI", false, "a boolean flag read by the browser"},
+		{"cf_clearance", false, "not a credential by name"},
+		{"notice_gdpr_prefs", false, "a preference"},
+	}
+
+	for _, c := range cases {
+		if got := triageCredentialCookie(c.name, ""); got != c.want {
+			t.Errorf("triageCredentialCookie(%q) = %v, want %v: %s", c.name, got, c.want, c.why)
+		}
+	}
+}
+
+// A cookie or header whose VALUE is a compact JWS is a credential whatever it is called.
+//
+// This is the half that makes tightening the name rule safe. Cognito names its cookies per user
+// pool and a target using a name nobody listed would otherwise be probed with its own session
+// thrown away, which produces a 401 that is a perfect differential against baseline and looks
+// exactly like a finding. The same net already guards the reflection probe
+// (reflectionValueLooksLikeJWT, which this reuses rather than copying), and it is a SHAPE test:
+// three base64url segments and a JOSE header prefix, never a decode and never a comparison
+// against held material.
+func TestAJWTValuedSlotIsACredentialWhateverItIsCalled(t *testing.T) {
+	const jws = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	if !triageCredentialCookie("prefs_blob", jws) {
+		t.Error("a cookie holding a JWS was not refused; a probe here throws the session away")
+	}
+	if !triageCredentialHeader("x-company-context", jws) {
+		t.Error("a header holding a JWS was not refused")
+	}
+	if triageCredentialCookie("prefs_blob", "eyJhbGciOiJIUzI1NiJ9") {
+		t.Error("a single base64 segment is not a JWS and must stay probeable")
+	}
+	if triageCredentialCookie("prefs_blob", "a.b.c") {
+		t.Error("three short segments are not a JWS")
+	}
+	if triageCredentialHeader("referer", "https://example.test/a.b.c") {
+		t.Error("a URL is not a JWS")
+	}
+}
+
+// The header credential rule stays an EXACT name list and does not inherit the substring match.
+//
+// Its failure mode is the opposite one: a header wrongly refused loses coverage on exactly the
+// slots that pay (x-forwarded-for, x-original-url), so it is deliberately narrow. This pins that
+// the tightening of the cookie rule did not leak into it.
+func TestTheHeaderCredentialRuleRefusesOnlyTheCredentialHeaders(t *testing.T) {
+	for _, n := range []string{"authorization", "proxy-authorization", "cookie", "x-api-key",
+		"api-key", "x-auth-token", "x-access-token", "x-session-token", "authentication",
+		"x-csrf-token", "x-xsrf-token", "x-amz-security-token"} {
+		if !triageCredentialHeader(n, "") {
+			t.Errorf("header %q is a credential and was not refused", n)
+		}
+	}
+	for _, n := range []string{"x-forwarded-for", "x-forwarded-host", "x-original-url",
+		"x-rewrite-url", "referer", "origin", "user-agent", "accept-language", "true-client-ip",
+		"cf-connecting-ip", "x-http-method-override", "x-request-id", "x-real-ip", "forwarded",
+		"x-author", "x-session-affinity"} {
+		if triageCredentialHeader(n, "") {
+			t.Errorf("header %q is probeable and was refused as a credential", n)
+		}
+	}
+}
+
+// The tokeniser cuts a name the way a human reads it, including run-together and camel forms.
+func TestCredentialNameTokenising(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"CognitoIdentityServiceProvider.7cd3.d4887448.clockDrift",
+			[]string{"cognito", "identity", "service", "provider", "7", "cd", "3", "d", "4887448", "clock", "drift"}},
+		{"__RequestVerificationToken", []string{"request", "verification", "token"}},
+		{"ASP.NET_SessionId", []string{"asp", "net", "session", "id"}},
+		{"_gcl_au", []string{"gcl", "au"}},
+		{"XSRF-TOKEN", []string{"xsrf", "token"}},
+		{"remember_me", []string{"remember", "me"}},
+		{"", nil},
+	}
+	for _, c := range cases {
+		got := triageNameTokens(c.in)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("triageNameTokens(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// The live corpus, end to end: the four Cognito leaves that hold no secret become probeable slots
+// and every leaf that holds one stays refused.
+//
+// It is the derivation and not the predicate, because the predicate being right is worth nothing
+// if triageCookieSlots stops calling it.
+func TestTheFourHarmlessCognitoLeavesBecomeProbeableSlots(t *testing.T) {
+	const pool = "CognitoIdentityServiceProvider.7cd3keuknr18mv2boiaesbgce3.d4887448-50b1-7015-03be-6b285cf9fb5e"
+	names := []string{"clockDrift", "deviceKey", "deviceGroupKey", "userData",
+		"accessToken", "idToken", "refreshToken", "randomPasswordKey"}
+	var jar []string
+	for _, n := range names {
+		jar = append(jar, pool+"."+n+"=x")
+	}
+	raw := "GET /api/v1/account HTTP/1.1\r\nHost: app.staging-v2.tradetalk.us\r\n" +
+		"Cookie: " + strings.Join(jar, "; ") + "\r\n\r\n"
+
+	slots, _ := SlotsFor(triageVectorRow{
+		ID: "v1", Method: "GET", ComposedURL: "https://app.staging-v2.tradetalk.us/api/v1/account",
+		InsertionPoint: triage.KindCookie, RawRequest: []byte(raw),
+	}, triage.SlotEvidence{})
+
+	cred := map[string]bool{}
+	for _, s := range slots {
+		cred[strings.TrimPrefix(s.Name, pool+".")] = s.Constraints.IsCredential
+	}
+	if len(cred) != len(names) {
+		t.Fatalf("derived %d cookie slots, want %d: %v", len(cred), len(names), cred)
+	}
+	for _, n := range []string{"clockDrift", "deviceKey", "deviceGroupKey", "userData"} {
+		if cred[n] {
+			t.Errorf("%s is refused as a credential and never probed; it holds no secret", n)
+		}
+	}
+	for _, n := range []string{"accessToken", "idToken", "refreshToken", "randomPasswordKey"} {
+		if !cred[n] {
+			t.Errorf("%s is the session and must stay refused", n)
+		}
+	}
+}

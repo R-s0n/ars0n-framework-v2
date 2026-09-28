@@ -11,9 +11,12 @@ import TriageRunModal, {
   reasonCode,
   rollUpPairs,
   blockingReasons,
-  certificateLine,
+  runHeadline,
+  coverageReadout,
+  TRIAGE_LEDE,
   triageCardLine,
   normalizeTriageStatus,
+  renewalReading,
 } from './TriageRunModal';
 
 // WHAT THESE TESTS PIN.
@@ -362,11 +365,130 @@ test('a run that measured nothing at all is a gap, and a cancelled run certifies
   expect(blockingReasons(null).length).toBeGreaterThan(0);
 });
 
-test('the certificate only says clean when the server said renders_as_clean, and says why not otherwise', () => {
-  const exam = certificateLine(normalizeTriageStatus(EXAM_STATUS));
-  expect(exam.kind).toBe('not_certified');
-  expect(exam.title).toMatch(/does not certify/i);
-  expect(exam.detail).toMatch(/not knowing is not clean/i);
+
+// ------------------------------------------------------------------------------------------------
+// 5. THE LIVE RUN THE OPERATOR IS ACTUALLY LOOKING AT
+//
+// Read out of the operator's own Postgres mid-run. It is the fixture that matters most, because
+// it is the shape that made them ask "what is this feature doing, I don't understand": a run 0.3%
+// of the way through, zero found either way, and 93% of its probes refused before they left the
+// process. Every number below is measured, not invented.
+// ------------------------------------------------------------------------------------------------
+
+const LIVE_COVERAGE = {
+  PlannedPairs: 34500,
+  PlanUnrecorded: false,
+  OrphanCoveragePairs: 0,
+  MissingCoveragePairs: 0,
+  CounterDisagreementPairs: 0,
+  RunStatus: 'running',
+  RunCancelRequested: false,
+  RunError: '',
+  EligiblePairs: 34500,
+  RanPairs: 100,
+  PairsWithNoVerdict: 0,
+  VerdictRows: 36446,
+  Positive: 0,
+  Negative: 0,
+  Clean: 0,
+  Unknown: 36446,
+  UnprovenProbes: 6931,
+  UnprovenPairs: 999,
+  MissingFidelityRows: 0,
+  MissingFidelityPairs: 0,
+  Untested: [],
+};
+
+const LIVE_STATUS = {
+  run: {
+    run_id: 'acaff558-13ce-4a2b-b6fe-8fef76058f12',
+    marker_run_id: 'acaff558',
+    status: 'running',
+    phase: 'probe',
+    planned_pairs: 34500,
+    completed_pairs: 1314,
+    probes_sent: 7425,
+    cancel_requested: false,
+    error: null,
+    created_at: '2026-09-19 12:36:42',
+  },
+  coverage: LIVE_COVERAGE,
+  renders_as_clean: false,
+};
+
+// The same screen after the planning waste is cut: the credential slots are never planned and the
+// encoder guard stops refusing, so the run is a tenth the size and nothing is stuck in the process.
+// This screen has to read well on BOTH, and the blocks that exist only to report waste have to
+// disappear when there is none rather than sit there at zero.
+const FIXED_STATUS = {
+  run: {
+    ...LIVE_STATUS.run,
+    status: 'completed',
+    phase: 'done',
+    planned_pairs: 2000,
+    completed_pairs: 2000,
+    probes_sent: 5400,
+  },
+  coverage: {
+    ...LIVE_COVERAGE,
+    RunStatus: 'completed',
+    PlannedPairs: 2000,
+    EligiblePairs: 2000,
+    RanPairs: 2000,
+    VerdictRows: 2000,
+    Positive: 12,
+    Negative: 1900,
+    Clean: 1900,
+    Unknown: 88,
+    UnprovenProbes: 0,
+    UnprovenPairs: 0,
+  },
+  renders_as_clean: false,
+};
+
+test('the readout is in the operator\'s units, and the numbers it derives are the ones on screen', () => {
+  const r = coverageReadout(normalizeTriageStatus(LIVE_STATUS));
+  expect(r.questions).toBe(34500);
+  expect(r.asked).toBe(100);
+  expect(r.notAskedYet).toBe(34400);
+  expect(r.reached).toBe(1314);
+  expect(r.worthScanning).toBe(0);
+  expect(r.ruledOut).toBe(0);
+  expect(r.noAnswer).toBe(36446);
+  expect(r.probesSent).toBe(7425);
+  expect(r.probesStuck).toBe(6931);
+  expect(r.stuckPairs).toBe(999);
+  expect(r.stuckPercent).toBe(93);
+  // 0.3% of the way in with nothing either way is EARLY, not a result.
+  expect(r.tooEarly).toBe(true);
+
+  const done = coverageReadout(normalizeTriageStatus(FIXED_STATUS));
+  expect(done.tooEarly).toBe(false);
+  expect(done.probesStuck).toBe(0);
+  expect(done.worthScanning).toBe(12);
+  expect(done.ruledOut).toBe(1900);
+
+  // A finished run that found nothing at all is NOT early. It is a finished run that found
+  // nothing, and calling that early would be the false reassurance in the other direction.
+  const empty = coverageReadout(normalizeTriageStatus({
+    ...FIXED_STATUS,
+    coverage: { ...FIXED_STATUS.coverage, Positive: 0, Clean: 0, Unknown: 2000 },
+  }));
+  expect(empty.tooEarly).toBe(false);
+  expect(coverageReadout(null)).toBe(null);
+});
+
+test('the headline leads with progress and findings, and says clean only when the server did', () => {
+  const live = runHeadline(normalizeTriageStatus(LIVE_STATUS));
+  expect(live.kind).toBe('running');
+  // Progress in their units, on the first line, before any caveat.
+  expect(live.title).toMatch(/1,314 of 34,500/);
+  expect(live.title).not.toMatch(/certif/i);
+
+  const exam = runHeadline(normalizeTriageStatus(EXAM_STATUS));
+  expect(exam.kind).toBe('finished');
+  expect(exam.title).toMatch(/28/);
+  expect(exam.title).toMatch(/96/);
 
   const perfect = {
     run: { ...EXAM_STATUS.run, completed_pairs: 320 },
@@ -376,14 +498,23 @@ test('the certificate only says clean when the server said renders_as_clean, and
     },
     renders_as_clean: true,
   };
-  expect(certificateLine(normalizeTriageStatus(perfect)).kind).toBe('clean');
+  expect(runHeadline(normalizeTriageStatus(perfect)).kind).toBe('certified');
   // The client never re-derives the answer upwards. If the server withholds renders_as_clean the
   // screen withholds it too, whatever the counts look like.
-  expect(certificateLine(normalizeTriageStatus({ ...perfect, renders_as_clean: false })).kind)
-    .toBe('not_certified');
-  expect(certificateLine(normalizeTriageStatus({ run: null })).kind).toBe('no_run');
+  expect(runHeadline(normalizeTriageStatus({ ...perfect, renders_as_clean: false })).kind)
+    .toBe('finished');
+  expect(runHeadline(normalizeTriageStatus({ run: null })).kind).toBe('no_run');
 });
 
+test('the lede says what triage is for without naming a single internal state', () => {
+  const lede = `${TRIAGE_LEDE.what} ${TRIAGE_LEDE.how}`.toLowerCase();
+  expect(lede).toMatch(/scanner/);
+  expect(lede).toMatch(/pointers/);
+  ['verdict', 'eligible', 'unproven', 'certif', 'renders_as_clean', 'coverage row']
+    .forEach((w) => expect(lede).not.toContain(w));
+  // The vocabulary is defined exactly once, here, and nowhere else on the screen.
+  expect(lede).toContain('attack class');
+});
 // ------------------------------------------------------------------------------------------------
 // 5. THE CARD LINE
 // ------------------------------------------------------------------------------------------------
@@ -409,7 +540,7 @@ test('normalizeTriageStatus keeps a missing run distinct from a finished one', (
 test('the card line says what a run has not answered, and says so loudest when none has run', () => {
   const never = triageCardLine(normalizeTriageStatus({ run: null }));
   expect(never.unknown).toBe(true);
-  expect(never.text).toMatch(/never/i);
+  expect(never.text).toMatch(/has not run its classifier pass|never/i);
   expect(never.text).toMatch(/gap in coverage, not a clean result/i);
 
   const running = triageCardLine(normalizeTriageStatus({
@@ -496,21 +627,120 @@ const click = async (el) => {
   await settle();
 };
 
-test('the screen leads with the coverage, not with the findings', async () => {
-  serve();
-  const body = await mount();
-  const text = body.textContent;
+// ------------------------------------------------------------------------------------------------
+// 6b. WHAT THE OPERATOR SEES IN THE FIRST TWO SECONDS
+//
+// The operator commissioned this feature, opened it, and asked "what is this feature doing, I
+// don't understand". These tests are that question turned into assertions: the screen says what
+// it is before it says what it cannot promise, it says it in their words, and a run that has
+// found nothing because it has barely started says THAT rather than showing two zeroes.
+// ------------------------------------------------------------------------------------------------
 
-  // The banner is first and it is unambiguous.
-  expect(text).toMatch(/does not certify/i);
-  expect(text).toMatch(/not knowing is not clean/i);
-  // The denominator and the unknown majority are on screen without a click.
-  expect(text).toContain('320');
-  expect(text).toContain('676');
-  expect(text).toContain('76');
-  // And the reason each clause blocks certification is spelled out.
-  expect(text).toMatch(/76 of 320 eligible pairs were never measured/i);
-  expect(text).toMatch(/15 prob/i);
+test('the first thing on the screen is what triage is for, not what it cannot certify', async () => {
+  serve({ status: LIVE_STATUS, verdicts: [] });
+  await mount();
+  const head = document.querySelector('[data-triage-head]');
+  const lede = document.querySelector('[data-triage-lede]');
+  expect(lede).toBeTruthy();
+  // FIRST. Not after a disclaimer, not behind a toggle.
+  expect(head.firstElementChild).toBe(lede);
+  expect(lede.textContent).toMatch(/scanner/i);
+  expect(lede.textContent).toMatch(/pointers/i);
+  // The epistemology lecture that used to open the screen is gone from it.
+  expect(head.textContent).not.toMatch(/absences do not disagree/i);
+  expect(head.textContent).not.toMatch(/certifies nothing/i);
+  expect(head.textContent).not.toMatch(/unrecorded state/i);
+});
+
+test('the words on the first screen are the operator\'s, not the schema\'s', async () => {
+  serve({ status: LIVE_STATUS, verdicts: [] });
+  await mount();
+  const head = document.querySelector('[data-triage-head]').textContent.toLowerCase();
+  ['eligible pair', 'rows not known', 'unproven probe', 'verdict row', 'pairs with no row',
+    'renders_as_clean', 'absence'].forEach((w) => expect(head).not.toContain(w));
+  // And the one piece of vocabulary that cannot be avoided is defined ONCE, not in every label.
+  expect((head.match(/attack class/g) || []).length).toBe(1);
+});
+
+test('a run barely started says so instead of presenting nothing found as a result', async () => {
+  serve({ status: LIVE_STATUS, verdicts: [] });
+  const body = await mount();
+  const early = document.querySelector('[data-triage-early]');
+  expect(early).toBeTruthy();
+  expect(early.textContent).toMatch(/too early/i);
+  // Progress, in their units, on screen without a click.
+  expect(body.textContent).toContain('1,314');
+  expect(body.textContent).toContain('34,500');
+  // The two zeroes are labelled as not-yet, never as a finding and never as an all-clear.
+  const found = document.querySelector('[data-triage-figure="worth_scanning"]');
+  const ruled = document.querySelector('[data-triage-figure="ruled_out"]');
+  expect(found.getAttribute('data-triage-value')).toBe('0');
+  expect(ruled.getAttribute('data-triage-value')).toBe('0');
+  expect(body.textContent).not.toMatch(/all clear|nothing found|looks clean/i);
+});
+
+test('the probes that never left the process are counted in plain words', async () => {
+  serve({ status: LIVE_STATUS, verdicts: [] });
+  await mount();
+  const wire = document.querySelector('[data-triage-wire]');
+  expect(wire).toBeTruthy();
+  expect(wire.textContent).toContain('6,931');
+  expect(wire.textContent).toContain('7,425');
+  expect(wire.textContent).toContain('93%');
+  expect(wire.textContent).toContain('999');
+  expect(wire.textContent).toMatch(/never reached the target|onto the wire/i);
+  // And it says what that MEANS, which is that those questions were not asked at all.
+  expect(wire.textContent).toMatch(/not asked/i);
+});
+
+test('the honesty is one short line beside the number, and the full reasoning is one click away', async () => {
+  serve({ status: LIVE_STATUS, verdicts: [] });
+  await mount();
+  const honesty = document.querySelector('[data-triage-honesty]');
+  expect(honesty).toBeTruthy();
+  // ONE line. The rule survives; the lecture does not.
+  expect(honesty.textContent.length).toBeLessThan(160);
+  expect(honesty.textContent).toMatch(/not the same as/i);
+
+  // The clause-by-clause reasoning is still there in full, and still mirrors the server. It is
+  // just not the first thing anyone reads.
+  expect(document.body.textContent).not.toMatch(/were never measured/i);
+  const toggle = document.querySelector('[data-triage-why-toggle]');
+  expect(toggle).toBeTruthy();
+  await click(toggle);
+  const why = document.querySelector('[data-triage-why]');
+  expect(why.textContent).toMatch(/34400 of 34500 eligible pairs were never measured/i);
+  expect(why.textContent).toMatch(/not knowing is not clean/i);
+});
+
+test('the blocks that exist only to report waste disappear when there is none', async () => {
+  serve({ status: FIXED_STATUS, verdicts: [] });
+  const body = await mount();
+  // No refused probes on the fixed backend, so no block about them.
+  expect(document.querySelector('[data-triage-wire]')).toBe(null);
+  expect(document.querySelector('[data-triage-early]')).toBe(null);
+  expect(document.querySelector('[data-triage-figure="worth_scanning"]').getAttribute('data-triage-value')).toBe('12');
+  expect(document.querySelector('[data-triage-figure="ruled_out"]').getAttribute('data-triage-value')).toBe('1900');
+  expect(body.textContent).toContain('12');
+  // Finished and not certified: the honesty line is still there, still one line.
+  expect(document.querySelector('[data-triage-honesty]')).toBeTruthy();
+  expect(document.querySelector('[data-triage-why-toggle]')).toBeTruthy();
+});
+
+test('a run the server did certify says so plainly, and drops the toggle it no longer needs', async () => {
+  const perfect = {
+    run: { ...EXAM_STATUS.run, completed_pairs: 320 },
+    coverage: {
+      ...EXAM_COVERAGE, RanPairs: 320, VerdictRows: 320, Positive: 0, Clean: 320, Negative: 320,
+      Unknown: 0, UnprovenProbes: 0, UnprovenPairs: 0, Untested: [],
+    },
+    renders_as_clean: true,
+  };
+  serve({ status: perfect, verdicts: [] });
+  const body = await mount();
+  expect(document.querySelector('[data-triage-status]').getAttribute('data-triage-status')).toBe('certified');
+  expect(body.textContent).toMatch(/every question was asked/i);
+  expect(document.querySelector('[data-triage-why-toggle]')).toBe(null);
 });
 
 test('every class that ran is listed with what it could not answer, not only with what it found', async () => {
@@ -564,21 +794,34 @@ test('cancel and re-run call the routes nothing in this client called before', a
   expect(cancel).toBeTruthy();
   await click(cancel);
   expect(posted.some((u) => u.endsWith(`/api/triage/${TARGET.id}/run/cancel`))).toBe(true);
-  // A running run may not be re-run on top of itself: the server refuses it and so does the screen.
-  expect(document.querySelector('[data-triage-action="rerun"]').disabled).toBe(true);
+  // THERE IS NO RE-RUN CONTROL, AND THAT IS THE ASSERTION NOW. The classifiers are Investigate's
+  // third phase, not a scan of their own, so this screen offers no second way to start them. A
+  // "Re-run classifiers" button here used to contradict that and is why the operator asked what
+  // the separate thing was for. Starting is Investigate's job.
+  expect(document.querySelector('[data-triage-action="rerun"]')).toBeNull();
+  expect(posted.some((u) => u.endsWith(`/api/triage/${TARGET.id}/run`))).toBe(false);
 });
 
-test('re-running the classifiers posts to the run route', async () => {
+// THE CLASSIFIERS HAVE NO ENTRY POINT OF THEIR OWN, AND THIS PINS IT.
+//
+// They are the third phase of Investigate: StartInvestigateHandler runs passive, then active,
+// then chains StartTriageRun, and reports phases ["passive","active","triage"]. There is no flag
+// to skip them, so there must be no second way to start them either. This screen used to carry a
+// "Re-run classifiers" button, which made the classifier pass read as a separate feature the
+// operator had forgotten to run. It either runs as part of Investigate or it does not run.
+test('this screen offers no way to start the classifiers, because Investigate owns that', async () => {
   serve();
-  await mount();
-  await click(document.querySelector('[data-triage-action="rerun"]'));
-  expect(posted.some((u) => u.endsWith(`/api/triage/${TARGET.id}/run`))).toBe(true);
+  const body = await mount();
+  expect(document.querySelector('[data-triage-action="rerun"]')).toBeNull();
+  expect(body.textContent).not.toMatch(/re-run classifiers/i);
+  // And nothing it does touches the start route.
+  expect(posted.some((u) => u.endsWith(`/api/triage/${TARGET.id}/run`))).toBe(false);
 });
 
 test('a target that has never run the classifiers is told so, not shown an empty table', async () => {
   serve({ status: { run: null, note: 'No triage run has ever been started for this target.' }, verdicts: [] });
   const body = await mount();
-  expect(body.textContent).toMatch(/never/i);
+  expect(body.textContent).toMatch(/no triage run on this target yet/i);
   expect(body.textContent).toMatch(/gap in coverage, not a clean result/i);
   // No table of zeroes: a row of zeroes reads as "nothing found" and nothing was asked.
   expect(document.querySelectorAll('[data-triage-class]')).toHaveLength(0);
@@ -607,4 +850,240 @@ test('App.js opens this screen and calls all four triage run routes', () => {
   expect(app).toContain('/run/cancel');
   // The card offers a way in without adding a seventh button to a row that is already six wide.
   expect(app).toMatch(/data-triage-open/);
+});
+
+// ------------------------------------------------------------------------------------------------
+// 8. WAS MY SCAN AUTHENTICATED THE WHOLE WAY THROUGH?
+//
+// The renewal driver records its decision, every attempt and what the logins cost onto the run row,
+// and GetTriageRunStatus serves it as session_renewal. FAIL FIRST: nothing in client/src read that
+// field, so the one question this whole feature exists to answer was visible only in a log line.
+// ------------------------------------------------------------------------------------------------
+
+const renewalRecord = (over = {}) => ({
+  recorded: true,
+  on: true,
+  token_id: 'tok-bearer',
+  token_name: 'app bearer',
+  interval_seconds: 75,
+  derived_interval_seconds: 75,
+  clamped: false,
+  decision: 'renewing app bearer every 1m15s, the interval you set',
+  attempts: [],
+  cost: {
+    logins: 0, flow_steps: 0, flow_steps_failed: 0, budget_slots: 0,
+    hosts_revoked: 0, unpaced_logins: 0,
+  },
+  summary: 'Renewal was scheduled every 1m15s for app bearer. No login was replayed, so nothing '
+    + 'about the credential changed during this run.',
+  ...over,
+});
+
+const renewalAttempt = (over = {}) => ({
+  at: '2026-09-20T12:10:58Z',
+  attempted: true,
+  code: 'refresh_proven',
+  proven: true,
+  stored_new_value: true,
+  before_fingerprint: '3ab1fbc1',
+  after_fingerprint: '26399f4b',
+  detail: 'the login flow was replayed and the new credential was honoured',
+  withdrawn: false,
+  flow_steps: 4,
+  flow_steps_failed: 0,
+  budget_slots: 1,
+  hosts_revoked: 1,
+  rotation_told: true,
+  ...over,
+});
+
+const statusWithRenewal = (record) => ({ ...EXAM_STATUS, session_renewal: record });
+
+test('normalizeTriageStatus carries what renewal did, and does not invent it', () => {
+  const withRecord = normalizeTriageStatus(statusWithRenewal(renewalRecord()));
+  expect(withRecord.sessionRenewal).toBeTruthy();
+  expect(withRecord.sessionRenewal.on).toBe(true);
+  // A server that does not serve the field is NOT a run that did not renew. Null, never a default.
+  expect(normalizeTriageStatus(EXAM_STATUS).sessionRenewal).toBeNull();
+});
+
+test('a run that held its session and one whose renewal stopped mid-run do not read the same', () => {
+  const held = renewalReading(renewalRecord({
+    attempts: [renewalAttempt(), renewalAttempt({ at: '2026-09-20T12:12:13Z' })],
+    cost: { logins: 2, flow_steps: 8, flow_steps_failed: 0, budget_slots: 2, hosts_revoked: 2, unpaced_logins: 0 },
+    summary: 'Renewal was scheduled every 1m15s for app bearer. 2 login replay(s) went to the target: '
+      + '2 replaced the stored credential and 0 did not.',
+  }));
+  const stopped = renewalReading(renewalRecord({
+    attempts: [
+      renewalAttempt(),
+      renewalAttempt({
+        at: '2026-09-20T12:12:13Z', attempted: false, proven: false, stored_new_value: false,
+        code: 'renewal_withdrawn', withdrawn: true,
+        detail: 'automatic session renewal is switched on but is no longer permitted: the mint host '
+          + 'is outside this engagement',
+      }),
+    ],
+    cost: { logins: 1, flow_steps: 4, flow_steps_failed: 0, budget_slots: 1, hosts_revoked: 1, unpaced_logins: 0 },
+  }));
+  expect(held.kind).toBe('held');
+  expect(stopped.kind).toBe('stopped');
+  expect(stopped.tone).not.toBe(held.tone);
+  expect(stopped.title).toMatch(/stopped/i);
+});
+
+test('the screen says what the renewal driver decided, and a stopped schedule names its reason', async () => {
+  serve({
+    status: statusWithRenewal(renewalRecord({
+      attempts: [renewalAttempt({
+        attempted: false, proven: false, stored_new_value: false,
+        code: 'renewal_stopped_pacing', withdrawn: true,
+        detail: "renewal stopped because the run's pacing budget aborted: app.test is failing.",
+      })],
+      summary: 'Renewal was scheduled every 1m15s for app bearer. No login was replayed, so nothing '
+        + 'about the credential changed during this run. THE SCHEDULE THEN STOPPED: renewal stopped '
+        + "because the run's pacing budget aborted: app.test is failing. Every request the run made "
+        + 'after that carried whatever credential it was holding.',
+    })),
+  });
+  const body = await mount();
+  const el = document.querySelector('[data-triage-renewal]');
+  expect(el).toBeTruthy();
+  expect(el.getAttribute('data-triage-renewal')).toBe('stopped');
+  expect(body.textContent).toMatch(/THE SCHEDULE THEN STOPPED/);
+  expect(body.textContent).toMatch(/pacing budget aborted/i);
+  // The attempt's own reason is on the screen, not only folded into the summary.
+  expect(body.textContent).toMatch(/renewal_stopped_pacing/);
+});
+
+test('a run that renewed nothing says so on the screen instead of saying nothing', async () => {
+  serve({
+    status: statusWithRenewal(renewalRecord({
+      on: false,
+      token_id: '', token_name: '', interval_seconds: 0, derived_interval_seconds: 0,
+      decision: 'automatic session renewal is switched off for this target',
+      summary: 'This run did NOT renew its session, so it ran on the credential it started with for '
+        + 'its whole length. automatic session renewal is switched off for this target',
+    })),
+  });
+  const body = await mount();
+  const el = document.querySelector('[data-triage-renewal]');
+  expect(el.getAttribute('data-triage-renewal')).toBe('off');
+  expect(body.textContent).toMatch(/did NOT renew its session/);
+  expect(body.textContent).toMatch(/switched off for this target/);
+});
+
+test('a run with no renewal record is told that, and it does not read as renewal being off', async () => {
+  serve({
+    status: statusWithRenewal({
+      recorded: false,
+      summary: 'No session renewal record was written for this run, so whether it renewed anything '
+        + 'was not measured. Requests it made carried whatever credential was stored at the time.',
+    }),
+  });
+  const body = await mount();
+  const el = document.querySelector('[data-triage-renewal]');
+  expect(el.getAttribute('data-triage-renewal')).toBe('unrecorded');
+  expect(body.textContent).toMatch(/was not measured/);
+  expect(body.textContent).not.toMatch(/did NOT renew its session/);
+});
+
+test('a clamped schedule shows both figures, so the operator sees the one that is running', async () => {
+  serve({
+    status: statusWithRenewal(renewalRecord({
+      interval_seconds: 60, derived_interval_seconds: 22, clamped: true,
+    })),
+  });
+  const body = await mount();
+  const el = document.querySelector('[data-triage-renewal-clamp]');
+  expect(el).toBeTruthy();
+  expect(el.textContent).toMatch(/60s/);
+  expect(el.textContent).toMatch(/22s/);
+});
+
+test('renewal logins are shown apart from probes_sent, which counts classifier probes', async () => {
+  serve({
+    status: statusWithRenewal(renewalRecord({
+      attempts: [renewalAttempt()],
+      cost: { logins: 1, flow_steps: 4, flow_steps_failed: 0, budget_slots: 1, hosts_revoked: 1, unpaced_logins: 0 },
+      summary: 'Renewal was scheduled every 1m15s for app bearer. 1 login replay(s) went to the '
+        + 'target: 1 replaced the stored credential and 0 did not. Those logins replayed 4 flow '
+        + 'step(s) in total (0 of which did not complete) and are NOT counted in probes_sent, '
+        + 'which counts classifier probes.',
+    })),
+  });
+  const body = await mount();
+  expect(body.textContent).toMatch(/NOT counted in probes_sent/);
+  // probes_sent itself is untouched by this: 2411 is the classifier figure from the fixture.
+  expect(body.textContent).toMatch(/2,411|2411/);
+});
+
+test('a run still in flight does not present its renewal record as a final account', async () => {
+  serve({ status: { ...LIVE_STATUS, session_renewal: renewalRecord() }, verdicts: [] });
+  const body = await mount();
+  expect(document.querySelector('[data-triage-renewal-partial]')).toBeTruthy();
+  expect(body.textContent).toMatch(/still going, so the account above/i);
+
+  // And a finished run carries no such hedge: a line on every screen says nothing on any of them.
+  if (root) act(() => { root.unmount(); });
+  if (container) container.remove();
+  document.body.innerHTML = '';
+  serve({ status: { ...EXAM_STATUS, session_renewal: renewalRecord() } });
+  await mount();
+  expect(document.querySelector('[data-triage-renewal-partial]')).toBeNull();
+});
+
+test('where the interval came from is on the screen, and never twice', async () => {
+  serve({ status: statusWithRenewal(renewalRecord()) });
+  let body = await mount();
+  expect(body.textContent).toMatch(/the interval you set/);
+  expect(document.querySelector('[data-triage-renewal-decision]')).toBeTruthy();
+
+  // The driver appends its decision to the summary itself on the branches where it matters most,
+  // and the same sentence twice on one screen is its own defect.
+  if (root) act(() => { root.unmount(); });
+  if (container) container.remove();
+  document.body.innerHTML = '';
+  const decision = 'automatic session renewal is switched off for this target';
+  serve({
+    status: statusWithRenewal(renewalRecord({
+      on: false, decision, summary: `This run did NOT renew its session. ${decision}`,
+    })),
+  });
+  body = await mount();
+  expect(document.querySelector('[data-triage-renewal-decision]')).toBeNull();
+  expect(body.textContent.split(decision).length - 1).toBe(1);
+});
+
+test('a record written before the driver counted anything is unknown, not a run with zero logins', () => {
+  // A row an earlier driver wrote: a decision and a schedule, and no cost and no attempt list.
+  // num(undefined) is 0, so without a guard this reads as "a schedule was set and no login was
+  // replayed", which is a sentence nobody measured.
+  const old = { recorded: true, on: true, token_name: 'app bearer', interval_seconds: 75,
+    decision: 'renewing app bearer every 1m15s, the interval you set',
+    summary: 'Renewal was scheduled every 1m15s for app bearer.' };
+  const reading = renewalReading(old);
+  expect(reading.kind).toBe('incomplete');
+  expect(reading.title).not.toMatch(/no login was replayed/);
+  // And a record that DOES carry them is still counted.
+  expect(renewalReading(renewalRecord()).kind).toBe('idle');
+});
+
+test('renewal that was refused every time is not rendered as a quiet run with nothing due', () => {
+  const refusedTwice = renewalReading(renewalRecord({
+    attempts: [
+      renewalAttempt({ attempted: false, proven: false, stored_new_value: false,
+        code: 'mint_out_of_scope',
+        detail: 'the host that mints this credential is outside this engagement' }),
+      renewalAttempt({ at: '2026-09-20T12:12:13Z', attempted: false, proven: false,
+        stored_new_value: false, code: 'mint_out_of_scope',
+        detail: 'the host that mints this credential is outside this engagement' }),
+    ],
+  }));
+  const nothingDue = renewalReading(renewalRecord());
+  expect(refusedTwice.kind).toBe('refused');
+  expect(nothingDue.kind).toBe('idle');
+  expect(refusedTwice.tone).not.toBe(nothingDue.tone);
+  expect(refusedTwice.loud).toBe(true);
+  expect(refusedTwice.title).toMatch(/refused before anything was sent/);
 });

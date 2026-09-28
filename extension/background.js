@@ -35,6 +35,8 @@ import {
   stripInternal,
   loadQueue,
   persistQueue,
+  getQueueOwner,
+  setQueueOwner,
 } from './lib/state.js';
 
 import {
@@ -51,6 +53,11 @@ import {
   parseQueryParams,
   truncateBody,
   isTextualMime,
+  isMediaMime,
+  base64ToBytes,
+  buildMediaBlob,
+  sha256Hex,
+  MEDIA_BODY_MAX_BYTES,
   mergeKey,
   EXTRA_HOSTS_BY_TARGET_KEY,
   normalizeFormData,
@@ -82,11 +89,19 @@ const FLUSH_BATCH_SIZE = 40;
 // Cap a single upload so a batch of body-carrying captures stays a reasonable POST.
 const FLUSH_BATCH_BYTES = 3 * 1024 * 1024;
 const FLUSH_DEBOUNCE_MS = 1200;
+// How long to wait before retrying a batch the framework could not take for a transient reason
+// (too large, or a 5xx). Long enough not to hammer a restarting API, short enough that a recording
+// does not sit on unflushed captures.
+const FLUSH_RETRY_MS = 10000;
 const HEARTBEAT_INTERVAL_MS = 20000;
 const PENDING_TTL_MS = 120000;
-// 128 KB per body. chrome.storage.session is a ~10 MB budget shared by the whole queue, so a
-// larger default meant a handful of captures could exhaust it and start losing records.
-const DEFAULT_MAX_BODY_BYTES = 131072;
+// 2 MB per body. This used to be 128 KB, which is smaller than the JSON a paginated admin or
+// export endpoint answers with, so the single response most worth keeping was the one clipped.
+// chrome.storage.session is a ~10 MB budget shared by the whole queue, and that budget is still
+// enforced, but by the queue's own byte limit, which sheds and flags rather than silently clipping:
+// QUEUE_FLUSH_BYTES ships a batch at 768 KB, so a body this size is uploaded almost immediately
+// instead of sitting in storage.
+const DEFAULT_MAX_BODY_BYTES = 2 * 1024 * 1024;
 const DEFAULT_FRAMEWORK_URL = 'http://localhost';
 
 // Later entries win when two sources disagree about the same field.
@@ -94,12 +109,14 @@ const SOURCE_PRECEDENCE = ['webrequest', 'hook', 'debugger'];
 
 let flushTimer = null;
 let flushInFlight = null;
+// The absolute time the pending flushTimer is set to fire, so scheduleFlush can tell whether a new
+// request is SOONER than the one already scheduled.
+let flushScheduledAt = 0;
 
 // In-flight webRequest records being assembled across event stages. Deliberately in-memory: they
 // are short-lived, and every stage can reconstruct a usable record on its own if an earlier stage
 // was missed during a worker cold start.
 const pending = new Map();
-const seenEndpoints = new Set();
 
 // Hosts rejected by the scope filter, counted in memory and folded into persisted state on a timer.
 // Writing storage on every rejected request would mean a storage write per third-party beacon on
@@ -132,6 +149,18 @@ function maxBodyBytes(state) {
 
 function captureResponseBodies(state) {
   return !(state.settings && state.settings.captureResponseBodies === false);
+}
+
+// Rendered media (image, video, audio, font) has no text form, so its bytes are stored content
+// addressed rather than not at all. On by default: an IDOR that returns another user's uploaded
+// photo cannot be proved from a capture table that threw the photo away.
+function captureMediaBodies(state) {
+  return !(state.settings && state.settings.captureMediaBodies === false);
+}
+
+function maxMediaBytes(state) {
+  const configured = state.settings && state.settings.maxMediaBytes;
+  return typeof configured === 'number' && configured > 0 ? configured : MEDIA_BODY_MAX_BYTES;
 }
 
 // Shared predicate so all three sources agree on what is in scope.
@@ -218,12 +247,16 @@ async function submitCapture(raw, source) {
   const requestBody = truncateBody(rawRequestBody, limit);
   const responseBody = truncateBody(raw.responseBody || '', limit);
 
+  // The digest is computed HERE, in the service worker, and never in the page: crypto.subtle is
+  // unavailable on an http page, and a body without a hash would then be a body without a home.
+  // It is both the dedupe key and the identity of the bytes, and the framework recomputes it from
+  // what arrives, so a wrong value is caught rather than trusted.
+  const responseBodyBlob = await digestMediaBlob(raw.responseBodyBlob);
+
   const method = String(raw.method || 'GET').toUpperCase();
   const graphqlOperation = deriveGraphQLOperation(raw.url, requestBody.body);
   const endpoint = buildEndpointName(raw.url, method, requestBody.body);
 
-  const endpointKey = `${method}:${endpoint}`;
-  if (!seenEndpoints.has(endpointKey)) seenEndpoints.add(endpointKey);
 
   const capture = {
     _mergeKey: mergeKey(method, raw.url),
@@ -238,6 +271,7 @@ async function submitCapture(raw, source) {
     requestBodyTruncated: Boolean(raw.requestBodyTruncated) || requestBody.truncated,
     responseBody: responseBody.body,
     responseBodyTruncated: Boolean(raw.responseBodyTruncated) || responseBody.truncated,
+    responseBodyBlob,
     getParams: parseQueryParams(raw.url),
     // Taken from the structured form when there is one, rather than re-parsed out of the encoded
     // string. That is not just tidier: a body clipped at the size limit would otherwise clip the
@@ -265,14 +299,97 @@ async function submitCapture(raw, source) {
   // Ship early when the queue is heavy rather than waiting out the debounce, so bodies spend as
   // little time as possible occupying the session-storage budget.
   scheduleFlush(result && result.bytes > QUEUE_FLUSH_BYTES ? 0 : undefined);
+
+  // Keep the heartbeat fresh off real traffic; self-rate-limited, so this is a cheap no-op except
+  // roughly once per HEARTBEAT_INTERVAL_MS.
+  opportunisticHeartbeat();
+}
+
+// Digests already shipped to the framework in this worker's lifetime. A page load pulls the same
+// logo, sprite and font on every navigation, so sending the bytes once per digest is the whole
+// reason storing media is affordable at all. A digest only enters this set after the batch
+// carrying its bytes came back ok, and leaves it again if the framework reports it does not hold
+// them, so a lost batch costs one re-upload rather than a row pointing at nothing.
+// Persisted so it survives an MV3 worker suspend. A module-level Set is wiped on every suspend, so
+// after each idle gap the same media (a logo/sprite/font re-fetched on the next navigation) was
+// re-uploaded in full. The set is only an optimization: forgetting a digest costs a cheap re-send
+// (the server dedupes bytes by sha256), while wrongly remembering one the server dropped is the
+// hazard, so missingBlobs are pruned from it BEFORE it is persisted.
+const SHIPPED_BLOBS_KEY = 'crawlShippedBlobDigests';
+const SHIPPED_BLOBS_MAX = 5000;
+let shippedBlobDigests = new Set();
+
+async function persistShippedBlobDigests() {
+  try {
+    if (shippedBlobDigests.size > SHIPPED_BLOBS_MAX) {
+      // Set preserves insertion order, so keeping the tail keeps the most recently shipped digests.
+      shippedBlobDigests = new Set(Array.from(shippedBlobDigests).slice(-SHIPPED_BLOBS_MAX));
+    }
+    await chrome.storage.session.set({ [SHIPPED_BLOBS_KEY]: Array.from(shippedBlobDigests) });
+  } catch (error) {
+    /* the set is an optimization; losing it only costs re-uploads */
+  }
+}
+
+async function loadShippedBlobDigests() {
+  try {
+    const got = await chrome.storage.session.get([SHIPPED_BLOBS_KEY]);
+    if (Array.isArray(got[SHIPPED_BLOBS_KEY])) shippedBlobDigests = new Set(got[SHIPPED_BLOBS_KEY]);
+  } catch (error) {
+    /* start empty; worst case is re-uploading a few bodies */
+  }
+}
+
+async function digestMediaBlob(blob) {
+  if (!blob || !blob.base64) return null;
+  try {
+    return { ...blob, sha256: await sha256Hex(base64ToBytes(blob.base64)) };
+  } catch (error) {
+    console.warn('[MANUAL-CRAWL] Could not digest a media body:', error);
+    return null;
+  }
+}
+
+// Drops the bytes from any blob the framework already holds, and from repeats inside this batch.
+// Never mutates the queued capture: if the batch fails it is retried WITH the bytes.
+function dedupeBlobsForUpload(captures) {
+  const inThisBatch = new Set();
+  return captures.map((capture) => {
+    const blob = capture.responseBodyBlob;
+    if (!blob || !blob.sha256 || !blob.base64) return capture;
+    if (shippedBlobDigests.has(blob.sha256) || inThisBatch.has(blob.sha256)) {
+      return { ...capture, responseBodyBlob: { ...blob, base64: '' } };
+    }
+    inThisBatch.add(blob.sha256);
+    return capture;
+  });
+}
+
+function noteBlobsShipped(captures) {
+  captures.forEach((capture) => {
+    const blob = capture.responseBodyBlob;
+    if (blob && blob.sha256) shippedBlobDigests.add(blob.sha256);
+  });
 }
 
 function scheduleFlush(delayMs) {
-  if (flushTimer) return;
+  // `delayMs === undefined` means "use the debounce"; an explicit 0 means "ship now". The old code
+  // wrote `delayMs || FLUSH_DEBOUNCE_MS`, which turned the 0 fast-path (submitCapture asks for it
+  // when the queue crosses QUEUE_FLUSH_BYTES) back into the full 1200ms, so the "ship early when the
+  // queue is heavy" path never actually shipped early.
+  const delay = delayMs === undefined ? FLUSH_DEBOUNCE_MS : delayMs;
+  const targetAt = Date.now() + delay;
+  if (flushTimer) {
+    // A timer is already pending. Keep it unless this request is sooner (e.g. a 0ms ship-now while a
+    // 1200ms debounce, or a 10s retry, is pending), otherwise the pending timer already covers it.
+    if (targetAt >= flushScheduledAt) return;
+    clearTimeout(flushTimer);
+  }
+  flushScheduledAt = targetAt;
   flushTimer = setTimeout(() => {
     flushTimer = null;
     void flushQueue();
-  }, delayMs || FLUSH_DEBOUNCE_MS);
+  }, delay);
 }
 
 // Returns the in-flight flush when one is already running, so callers that need the queue drained
@@ -309,15 +426,30 @@ async function runFlush(options) {
       try {
         result = await postJSON(`${state.apiBase}/manual-crawl/capture/batch`, {
           sessionId: state.sessionId,
-          captures: batch.map(stripInternal),
+          captures: dedupeBlobsForUpload(batch.map(stripInternal)),
         });
       } catch (error) {
-        await updateState({ lastError: 'Framework unreachable: ' + error.message });
+        // A stalled upload that postJSON aborted, or a transient network drop. The batch is kept in
+        // the queue (we do NOT dropFromQueue), and we reschedule our own retry rather than waiting
+        // for the next capture or the 30s keepalive — without this an aborted/failed batch could sit
+        // for up to 30s (or, before the timeout existed, appear wedged) after the framework recovers.
+        const aborted = error && error.name === 'AbortError';
+        await updateState({
+          lastError: aborted
+            ? 'Framework did not respond to a capture upload in time; the batch is kept and will be retried.'
+            : 'Framework unreachable: ' + error.message,
+        });
+        scheduleFlush(FLUSH_RETRY_MS);
         break;
       }
 
       if (result.ok) {
-        await dropFromQueue(batch.length);
+        noteBlobsShipped(batch);
+        // Digests the framework says it does not hold after all, so the next response carrying
+        // those bytes ships them instead of assuming they are already there.
+        (result.body.missingBlobs || []).forEach((digest) => shippedBlobDigests.delete(digest));
+        await persistShippedBlobDigests();
+        await dropFromQueue(batch.map((entry) => entry.captureUid));
         const rejected = result.body.rejected || 0;
         await mutateStats((stats) => ({
           ...stats,
@@ -357,8 +489,26 @@ async function runFlush(options) {
         break;
       }
 
+      // A 413 or a 5xx says the framework could not take this batch RIGHT NOW, not that the
+      // captures are unstorable: a payload too large, a database hiccup, a restart mid-flush.
+      // Dropping them here destroyed real captures for a transient reason, and the only trace was
+      // a counter. The batch is kept and retried; the operator sees why it is stuck.
+      if (result.status === 413 || result.status >= 500) {
+        console.warn('[MANUAL-CRAWL] Batch not accepted, keeping it for retry:', result.status, result.body);
+        await updateState({
+          lastError: result.status === 413
+            ? `Framework refused a ${Math.round(approximateSize(batch) / 1024)} KB batch as too large. ` +
+              'The captures are kept and will be retried.'
+            : `Framework error ${result.status} while storing ${batch.length} captures. ` +
+              'They are kept and will be retried.',
+        });
+        scheduleFlush(FLUSH_RETRY_MS);
+        break;
+      }
+
+      // Anything else is the framework saying this payload is malformed, which a retry cannot fix.
       console.error('[MANUAL-CRAWL] Batch rejected:', result.status, result.body);
-      await dropFromQueue(batch.length);
+      await dropFromQueue(batch.map((entry) => entry.captureUid));
       await mutateStats((stats) => ({
         ...stats,
         failedCount: stats.failedCount + batch.length,
@@ -372,22 +522,57 @@ async function runFlush(options) {
   }
 }
 
-async function dropFromQueue(count) {
+// Removes exactly the entries that were uploaded, matched by their stable captureUid, NOT by a
+// positional count. The old slice(count) assumed the first `count` entries were still the batch,
+// but enqueueOrMerge can evict from the FRONT (MAX_QUEUE_LENGTH splice / byte-budget shift) during
+// the in-flight POST, so a positional drop could delete newer, never-uploaded captures. Matching by
+// uid is immune to that shift, and tolerates an entry already gone (uploaded-then-evicted) by simply
+// not finding it. Runs inside runExclusive so the read-filter-write cannot interleave with a
+// concurrent enqueue.
+async function dropFromQueue(uploadedUids) {
+  const drop = new Set((uploadedUids || []).filter(Boolean));
   const remaining = await runExclusive(async () => {
     const queue = await loadQueue();
-    const next = queue.slice(count);
+    const next = queue.filter((entry) => !drop.has(entry.captureUid));
     await persistQueue(next);
     return next;
   });
   await mutateStats((stats) => ({ ...stats, queuedCount: remaining.length }));
 }
 
-async function postJSON(url, payload) {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+// Bounds a raw GET the way postJSON bounds its POST. Without it, a socket the framework accepts but
+// never answers (backend busy on the same localhost origin, a half-open socket after sleep) leaves
+// the await pending forever. fetchScopeRules is awaited on the synchronous Start path, so an
+// unbounded stall there wedged Start entirely and pinned the worker alive to Chrome's ~5-min cap.
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs || 8000);
+  try {
+    return await fetch(url, { ...(options || {}), signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function postJSON(url, payload, timeoutMs) {
+  // No timeout meant a socket the framework accepted but never answered pinned the flush's
+  // single-flight promise forever: the queue stopped draining and Stop hung until Chrome killed the
+  // worker at its ~5-minute cap. The default is generous so a genuinely large-but-working localhost
+  // batch is not aborted mid-upload; on abort the fetch rejects and the caller keeps the batch for
+  // retry.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs || 20000);
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 
   let body = {};
   try {
@@ -400,6 +585,21 @@ async function postJSON(url, payload) {
 }
 
 /* ------------------------------------------------------------------ heartbeat */
+
+// Fired opportunistically from the capture path so an actively-recording tab keeps its heartbeat
+// fresh even when the 30s keepalive alarm is throttled or delayed (a background/hidden tab). It is
+// naturally cheap: sendHeartbeat(false) short-circuits before any POST when the last beat is within
+// HEARTBEAT_INTERVAL_MS, and the in-flight guard stops a burst of captures just past that window from
+// firing several concurrent heartbeats. The alarm remains the floor for the zero-traffic idle case.
+let heartbeatInFlight = false;
+function opportunisticHeartbeat() {
+  if (heartbeatInFlight) return;
+  heartbeatInFlight = true;
+  Promise.resolve()
+    .then(() => sendHeartbeat(false))
+    .catch(() => {})
+    .finally(() => { heartbeatInFlight = false; });
+}
 
 async function sendHeartbeat(force) {
   const state = await getState();
@@ -488,9 +688,24 @@ async function startCaptureSession(settings, frameworkUrl) {
     if (!result.ok) throw new Error(result.body.message || `Framework returned ${result.status}`);
 
     pending.clear();
-    seenEndpoints.clear();
 
-    await runExclusive(() => persistQueue([]));
+    const newTarget = result.body.scopeTargetId || settings.scopeTargetId;
+    // Re-flush, don't wipe. If the queue still holds captures owned by THIS target (a prior session
+    // abandoned by the framework, or stopped while the framework was unreachable, left them
+    // un-flushed), keep them: they ship under the new sessionId, and the server dedupes any that
+    // already committed by captureUid. A queue owned by a DIFFERENT target is discarded. Done under
+    // the lock so the keep/wipe decision cannot interleave with a queue write.
+    const resumed = await runExclusive(async () => {
+      const owner = await getQueueOwner();
+      const queue = await loadQueue();
+      if (owner === newTarget && queue.length) return queue.length;
+      await persistQueue([]);
+      return 0;
+    });
+    await setQueueOwner(newTarget);
+    if (resumed) {
+      console.log(`[MANUAL-CRAWL] Resuming ${resumed} unflushed capture(s) kept from a prior session on this target.`);
+    }
     await setState({
       ...EMPTY_STATE,
       active: true,
@@ -513,6 +728,10 @@ async function startCaptureSession(settings, frameworkUrl) {
     if (settings.deepCapture) await refreshDeepCapture();
     await pushConfigToPages();
     void broadcastState();
+
+    // Ship any captures resumed from the prior same-target session now that the new session is
+    // active (they were kept, not wiped, above).
+    if (resumed) scheduleFlush(0);
 
     console.log('[MANUAL-CRAWL] Session started:', result.body.sessionId);
     return { success: true, sessionId: result.body.sessionId, scopeHosts };
@@ -552,7 +771,6 @@ async function stopCaptureSession(options) {
     await chrome.alarms.clear(KEEPALIVE_ALARM);
     await detachAll();
     pending.clear();
-    seenEndpoints.clear();
     await clearState();
     if (opts.reason) await updateState({ lastError: opts.reason });
     await applyBadge();
@@ -588,7 +806,7 @@ async function persistExtraHostsForTarget(scopeTargetId, extraHosts) {
 async function fetchScopeRules(apiBase, scopeTargetId) {
   if (!scopeTargetId) return { rules: [], error: null };
   try {
-    const res = await fetch(`${apiBase}/scope-rules/${scopeTargetId}`);
+    const res = await fetchWithTimeout(`${apiBase}/scope-rules/${scopeTargetId}`, {}, 8000);
     if (!res.ok) return { rules: [], error: null };
     const body = await res.json();
     const serverCount = (body.rules || []).filter((row) => row.enabled !== false).length;
@@ -664,8 +882,12 @@ configureDeepCapture({
     return {
       active: state.active,
       captureResponseBodies: captureResponseBodies(state),
+      captureMediaBodies: captureMediaBodies(state),
+      maxMediaBytes: maxMediaBytes(state),
       inScope: (url) => shouldCapture(url, state).capture,
       isTextualMime,
+      base64ToBytes,
+      buildMediaBlob,
       truncate: (body) => truncateBody(body, limit),
     };
   },
@@ -863,14 +1085,37 @@ function toRawRecord(record) {
 // webRequest cannot read a response body, and the login response carrying the session token is the
 // entire point of recording an auth flow. Hook records that arrive with no crawl running are
 // dropped by submitCapture and used only as a body source by the recorder.
+// The page hook (injected.js) matches hosts with a simple suffix test against scopeHosts; it cannot
+// run the rule evaluator. So when scope RULES are active, feeding it only the host list makes it
+// BLIND to every host a rule allows but the host list omits — e.g. a target on console.nebius.com
+// with a rule allowing api.nebius.cloud gets webRequest metadata for the API but NONE of its request
+// or response bodies, which is the whole point of the hook. This unions the host list with the
+// literal hosts named by allow-rules (host / subtree / subdomains kinds) so the hook is never
+// narrower than shouldCapture. It can be broader (an exact = rule becomes suffix-matched, a deny is
+// not subtracted), but that is safe: submitCapture re-checks shouldCapture (which honours exact
+// hosts and denies) before anything is queued, so the worker drops any over-capture. contains/regex
+// rules cannot be reduced to a host and fall back to the host list only.
+function hookScopeHosts(state) {
+  const base = state.scopeHosts || [];
+  const rules = state.scopeRules || [];
+  if (!rules.length) return base;
+  const ruleHosts = rules
+    .filter((r) => r && r.enabled !== false && r.effect === 'allow' && r.value
+      && (r.kind === 'host' || r.kind === 'subtree' || r.kind === 'subdomains'))
+    .map((r) => r.value);
+  return ruleHosts.length ? Array.from(new Set([...base, ...ruleHosts])) : base;
+}
+
 async function buildHookConfig() {
   const state = await getState();
   if (state.active) {
     return {
       active: true,
-      scopeHosts: state.scopeHosts || [],
+      scopeHosts: hookScopeHosts(state),
       maxBodyBytes: maxBodyBytes(state),
       captureResponseBodies: captureResponseBodies(state),
+      captureMediaBodies: captureMediaBodies(state),
+      maxMediaBytes: maxMediaBytes(state),
     };
   }
 
@@ -881,6 +1126,9 @@ async function buildHookConfig() {
       scopeHosts: auth.observedHosts || [],
       maxBodyBytes: AUTH_MAX_BODY_BYTES,
       captureResponseBodies: true,
+      // An auth recording has no blob store of its own, so the page hook is told not to take the
+      // media path while only a recording is running: a blob nothing can store is a body lost.
+      captureMediaBodies: false,
     };
   }
 
@@ -889,6 +1137,8 @@ async function buildHookConfig() {
     scopeHosts: [],
     maxBodyBytes: maxBodyBytes(state),
     captureResponseBodies: captureResponseBodies(state),
+    captureMediaBodies: captureMediaBodies(state),
+    maxMediaBytes: maxMediaBytes(state),
   };
 }
 
@@ -934,7 +1184,10 @@ const AUTH_HEARTBEAT_INTERVAL_MS = 20000;
 // A finished record waits this long before it is uploaded, so a response body arriving late from
 // the page hook still lands on the row it belongs to instead of being dropped.
 const AUTH_SETTLE_MS = 1500;
-const AUTH_MAX_BODY_BYTES = 131072;
+// Matches the crawl's per-body cap. A login response carrying a full user object plus an embedded
+// token exceeded the old 128 KB on real targets, and that response is the entire point of a
+// recording.
+const AUTH_MAX_BODY_BYTES = 2 * 1024 * 1024;
 // Smaller than the crawl's budget because both queues share the same ~10 MB of session storage and
 // the crawl is the one that runs for hours; a recording is a couple of minutes long.
 const AUTH_QUEUE_BYTE_LIMIT = 2 * 1024 * 1024;
@@ -965,7 +1218,7 @@ const EMPTY_AUTH_STATE = {
   startedAt: null,
   lastHeartbeatAt: null,
   lastError: null,
-  stats: { requestCount: 0, queuedCount: 0, failedCount: 0 },
+  stats: { requestCount: 0, queuedCount: 0, failedCount: 0, bodiesShed: 0 },
 };
 
 // In-flight webRequest records, keyed by requestId. Separate from the crawl's `pending` map on
@@ -980,6 +1233,7 @@ const authBodyStash = new Map();
 
 let authFlushTimer = null;
 let authFlushInFlight = null;
+let authFlushScheduledAt = 0;
 let authSeqCursor = 0;
 let authSeqCeiling = 0;
 let authSeqReserving = null;
@@ -1198,9 +1452,10 @@ function authTouch(details) {
 
 function applyAuthResponseHeaders(record, headerArray) {
   record.responseHeaders = lowerHeaderMap(headerArray);
-  // lowerHeaderMap collapses duplicate names, and a response routinely sets several cookies at
-  // once, so Set-Cookie is collected separately as a list. Those cookies are the session the flow
-  // exists to produce; keeping only the last one would make the recording worthless.
+  // Set-Cookie is ALSO collected as its own list, because auth_flow_steps.set_cookies is the column
+  // session-token extraction and the replay cookie jar read. lowerHeaderMap keeps every value now,
+  // so this is no longer a workaround for a lossy header map; it is the shape those two readers
+  // want, and the two are kept in step deliberately.
   record.setCookies = (headerArray || [])
     .filter((header) => header && header.name && header.name.toLowerCase() === 'set-cookie')
     .map((header) => header.value || '');
@@ -1242,7 +1497,11 @@ function buildRawRequest(method, url, headers, body) {
     // The replay engine sends this request itself, so an encoding the browser negotiated would
     // describe a body we are storing decoded.
     if (lower === 'transfer-encoding' || lower === 'content-encoding' || lower === 'accept-encoding') return;
-    lines.push(`${name}: ${headers[name]}`);
+    // A repeated header name is stored as an array and has to be written back out as one line per
+    // value; joining them would change what the request says.
+    const value = headers[name];
+    if (Array.isArray(value)) value.forEach((item) => lines.push(`${name}: ${item}`));
+    else lines.push(`${name}: ${value}`);
   });
 
   if (body) lines.push(`Content-Length: ${byteLength(body)}`);
@@ -1316,10 +1575,21 @@ function stripAuthInternal(row) {
   return clean;
 }
 
+// Shedding a body is data loss, so it is never silent: the count is carried in the recording's
+// stats where the popup and the framework's recording view both read it, and a shed row keeps a
+// note in place of the body rather than an empty string that reads like "the server sent nothing".
 function shedAuthBodies(row) {
   if (!row.request_body && !row.response_body) return row;
-  return { ...row, request_body: '', response_body: '' };
+  return {
+    ...row,
+    request_body: row.request_body ? SHED_BODY_NOTE : '',
+    response_body: row.response_body ? SHED_BODY_NOTE : '',
+  };
 }
+
+const SHED_BODY_NOTE =
+  '[body dropped by the extension: the recording queue was over its storage budget before this ' +
+  'row could be uploaded. Re-record this step to capture it.]';
 
 async function enqueueAuthRequest(record) {
   const state = await getAuthState();
@@ -1336,6 +1606,7 @@ async function enqueueAuthRequest(record) {
     queue.push(row);
 
     let dropped = 0;
+    let shed = 0;
     if (queue.length > AUTH_MAX_QUEUE_LENGTH) {
       dropped = queue.length - AUTH_MAX_QUEUE_LENGTH;
       queue.splice(0, dropped);
@@ -1344,16 +1615,21 @@ async function enqueueAuthRequest(record) {
     // Same bargain the crawl queue makes: shed bodies from the oldest rows before dropping a row
     // outright, because a step recorded without its body can still be replayed and a missing step
     // breaks the sequence.
+    // Running total adjusted by each row's own delta, not a full JSON.stringify of the whole queue
+    // per iteration (the crawl queue was fixed the same way): replacing a row changes the whole-queue
+    // size by exactly (new - old), and a shift also removes one separator comma.
     let bytes = approximateSize(queue);
     for (let i = 0; i < queue.length && bytes > AUTH_QUEUE_BYTE_LIMIT; i++) {
       if (!queue[i].request_body && !queue[i].response_body) continue;
+      const before = approximateSize(queue[i]);
       queue[i] = shedAuthBodies(queue[i]);
-      bytes = approximateSize(queue);
+      bytes -= before - approximateSize(queue[i]);
+      shed++;
     }
     while (queue.length > 1 && bytes > AUTH_QUEUE_BYTE_LIMIT) {
+      bytes -= approximateSize(queue[0]) + 1;
       queue.shift();
       dropped++;
-      bytes = approximateSize(queue);
     }
 
     await persistAuthQueue(queue);
@@ -1369,6 +1645,7 @@ async function enqueueAuthRequest(record) {
         requestCount: current.stats.requestCount + 1,
         queuedCount: queue.length,
         failedCount: current.stats.failedCount + dropped,
+        bodiesShed: (current.stats.bodiesShed || 0) + shed,
       },
     });
   });
@@ -1540,11 +1817,20 @@ chrome.webRequest.onErrorOccurred.addListener(
 /* --------------------------------------------------------------- auth upload */
 
 function scheduleAuthFlush(delayMs) {
-  if (authFlushTimer) return;
+  // Same semantics as the crawl scheduleFlush: an explicit 0 is honoured (not coerced to the
+  // debounce), and a sooner request re-arms an already-pending timer so a 1.5s debounce is not stuck
+  // behind a 10s retry timer.
+  const delay = delayMs === undefined ? AUTH_FLUSH_DEBOUNCE_MS : delayMs;
+  const targetAt = Date.now() + delay;
+  if (authFlushTimer) {
+    if (targetAt >= authFlushScheduledAt) return;
+    clearTimeout(authFlushTimer);
+  }
+  authFlushScheduledAt = targetAt;
   authFlushTimer = setTimeout(() => {
     authFlushTimer = null;
     void flushAuthQueue();
-  }, delayMs || AUTH_FLUSH_DEBOUNCE_MS);
+  }, delay);
 }
 
 // Returns the in-flight flush when one is already running, so Stop actually waits for the queue to
@@ -1574,10 +1860,16 @@ function takeSettledAuth(queue, now, limit, byteLimit) {
   return ready;
 }
 
-async function dropFromAuthQueue(count) {
+// Removes exactly the uploaded rows by their unique seq, not by a positional count. The old
+// slice(count) could delete never-uploaded rows when enqueueAuthRequest evicted from the FRONT
+// (AUTH_MAX_QUEUE_LENGTH splice / byte-budget shift) during the in-flight POST — on a login flow the
+// lost row is often the token-issuing response. Matching by seq is immune to that shift and tolerates
+// a row already gone.
+async function dropFromAuthQueue(uploadedSeqs) {
+  const drop = new Set((uploadedSeqs || []).filter((s) => s !== undefined && s !== null));
   const remaining = await authExclusive(async () => {
     const queue = await loadAuthQueue();
-    const next = queue.slice(count);
+    const next = queue.filter((row) => !drop.has(row.seq));
     await persistAuthQueue(next);
     const current = await getAuthState();
     await writeAuthState({
@@ -1615,12 +1907,20 @@ async function runAuthFlush(options) {
           requests: batch.map(stripAuthInternal),
         });
       } catch (error) {
-        await updateAuthState({ lastError: 'Framework unreachable: ' + error.message });
+        // Keep the batch and retry on our own timer (mirrors the crawl flush); without this the
+        // steps sit until the 30s keepalive tick or the next captured request.
+        const aborted = error && error.name === 'AbortError';
+        await updateAuthState({
+          lastError: aborted
+            ? 'Framework did not respond to a step upload in time; the steps are kept and will be retried.'
+            : 'Framework unreachable: ' + error.message,
+        });
+        scheduleAuthFlush(FLUSH_RETRY_MS);
         break;
       }
 
       if (result.ok) {
-        await dropFromAuthQueue(batch.length);
+        await dropFromAuthQueue(batch.map((row) => row.seq));
         // The framework's running total is authoritative: it has seen every batch, including the
         // ones uploaded before this worker was last restarted.
         await mutateAuthState((current) => ({
@@ -1645,8 +1945,25 @@ async function runAuthFlush(options) {
         break;
       }
 
+      // Same bargain as the crawl flush: a 413 or a 5xx is the framework saying "not right now",
+      // not "these are unstorable". A recording is a couple of minutes long and every step in it
+      // matters, so the batch is kept and retried rather than deleted over a transient error.
+      if (result.status === 413 || result.status >= 500) {
+        console.warn('[AUTH-RECORDING] Batch not accepted, keeping it for retry:', result.status, result.body);
+        await mutateAuthState((current) => ({
+          ...current,
+          lastError: result.status === 413
+            ? `Framework refused a ${Math.round(approximateSize(batch) / 1024)} KB batch as too large. ` +
+              'The steps are kept and will be retried.'
+            : `Framework error ${result.status} while storing ${batch.length} steps. ` +
+              'They are kept and will be retried.',
+        }));
+        scheduleAuthFlush(FLUSH_RETRY_MS);
+        break;
+      }
+
       console.error('[AUTH-RECORDING] Batch rejected:', result.status, result.body);
-      await dropFromAuthQueue(batch.length);
+      await dropFromAuthQueue(batch.map((row) => row.seq));
       await mutateAuthState((current) => ({
         ...current,
         stats: { ...current.stats, failedCount: current.stats.failedCount + batch.length },
@@ -1870,7 +2187,7 @@ async function discoverAuthRecording() {
 
   let recording = null;
   try {
-    const res = await fetch(`${apiBase}/auth-recording/active/${scopeTargetId}`);
+    const res = await fetchWithTimeout(`${apiBase}/auth-recording/active/${scopeTargetId}`, {}, 8000);
     if (!res.ok) return;
     const body = await res.json();
     recording = body && body.recording;
@@ -1941,13 +2258,17 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // into a recording the operator considers finished.
     if (state.adopted) {
       try {
-        const res = await fetch(`${state.apiBase}/auth-recording/active/${state.scopeTargetId}`);
+        const res = await fetchWithTimeout(`${state.apiBase}/auth-recording/active/${state.scopeTargetId}`, {}, 8000);
         if (res.ok) {
           const body = await res.json();
           const live = body && body.recording;
           if (!live || live.id !== state.recordingId) {
             console.log('[AUTH-RECORDING] The adopted recording ended in the framework, stopping.');
+            // Force-flush like a deliberate Stop: the recording is still live here (it only just
+            // ended in the UI), so the settle-window tail — usually the token-issuing response — can
+            // still be shipped. A non-force flush would skip it and setAuthState below would orphan it.
             await flushAuthQueue();
+            await flushAuthQueue({ force: true });
             await setAuthState({ ...EMPTY_AUTH_STATE });
             await chrome.alarms.clear(AUTH_KEEPALIVE_ALARM);
             await applyBadge();
@@ -2219,6 +2540,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // matches the real session rather than whatever it happened to be before.
 async function restoreRuntimeSurface() {
   await applyBadge();
+  // Reload the shipped-blob dedupe set before any flush can run, so a suspend/resume does not
+  // re-upload media the framework already holds.
+  await loadShippedBlobDigests();
+  // The auth-recording adopt poll must run even when NO recording is active here: that is exactly
+  // the cold-start case where the operator starts a recording from the framework UI and the
+  // extension has to discover and adopt it. Creating this alarm only inside restoreAuthRecording
+  // (which early-returns when nothing is active) meant a fresh worker never polled and a UI-started
+  // recording captured nothing. It is idempotent to create and the handler is guarded by state.active.
+  await chrome.alarms.create(AUTH_DISCOVER_ALARM, { periodInMinutes: 0.5 });
   // Restored first and unconditionally: a recording can be running with no crawl behind it, and the
   // early return below would otherwise leave it without its alarm.
   await restoreAuthRecording();

@@ -676,3 +676,49 @@ func TestCSRFExclusionDoesNotSwallowRealIdentifiers(t *testing.T) {
 		t.Error("user_id must survive")
 	}
 }
+
+// A response that sets several cookies at once stores them as an array, and each one has to come
+// back out as its own header value: http.Response.Cookies parses one cookie per value, so joining
+// them loses everything after the first and the session is rarely first.
+func TestExpandHeaderMapKeepsEveryCookie(t *testing.T) {
+	expanded := expandHeaderMap(map[string]interface{}{
+		"set-cookie": []interface{}{
+			"csrf=aaa; Path=/",
+			"session=deadbeef; Path=/; HttpOnly",
+			"locale=en; Path=/",
+		},
+	})
+
+	resp := &http.Response{Header: http.Header(expanded)}
+	cookies := resp.Cookies()
+	if len(cookies) != 3 {
+		t.Fatalf("expected 3 cookies, got %d: %+v", len(cookies), cookies)
+	}
+
+	var session string
+	for _, c := range cookies {
+		if c.Name == "session" {
+			session = c.Value
+		}
+	}
+	if session != "deadbeef" {
+		t.Fatalf("the session cookie did not survive: %+v", cookies)
+	}
+}
+
+// SanitizeResponse used to drop every C0 control character except newline, carriage return and
+// tab. Postgres stores those, so dropping them rewrote the bytes the target sent with nothing
+// recording that it had happened.
+func TestSanitizeResponseKeepsControlCharacters(t *testing.T) {
+	wire := []byte("head\x1b[31m\x0cbody\x00tail")
+	got := SanitizeResponse(wire)
+
+	if strings.ContainsRune(got, 0) {
+		t.Fatal("a NUL byte survived; the column cannot hold one")
+	}
+	for _, want := range []string{"\x1b[31m", "\x0c", "head", "body", "tail"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q was stripped from the stored body: %q", want, got)
+		}
+	}
+}

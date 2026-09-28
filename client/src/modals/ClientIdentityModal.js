@@ -326,8 +326,11 @@ const ClientIdentityModal = ({ show, handleClose, activeTarget }) => {
                     <ListGroup variant="flush">
                       {endpointIdentifiers.map((i) => (
                         <ListGroup.Item key={i.id} className="bg-dark text-white d-flex justify-content-between align-items-center py-1">
-                          <span className="text-truncate me-2">
-                            <span className="d-block text-truncate" style={{ fontFamily: 'monospace', fontSize: '0.75rem' }} title={i.value}>
+                          <span className="me-2" style={{ minWidth: 0 }}>
+                            {/* Wrapped, not clipped. This is the value a test swaps for another
+                                account's, so it has to be selectable in full: a tooltip cannot be
+                                copied into a request. */}
+                            <span className="d-block" style={{ fontFamily: 'monospace', fontSize: '0.75rem', wordBreak: 'break-all', userSelect: 'text' }}>
                               {i.value}
                             </span>
                             {/* Where it was found: a path segment, a cookie, a JWT claim, a field in
@@ -368,8 +371,8 @@ const ClientIdentityModal = ({ show, handleClose, activeTarget }) => {
                   <div key={idx} className="mb-3">
                     <div className="d-flex align-items-center gap-2 mb-1">
                       <Badge bg={a.type === 'JWT' ? 'warning' : 'info'} text={a.type === 'JWT' ? 'dark' : undefined}>{a.type}</Badge>
-                      <span className="text-white-50 text-truncate" style={{ fontFamily: 'monospace', fontSize: '0.68rem' }} title={a.original}>
-                        {a.original.length > 40 ? a.original.slice(0, 40) + '…' : a.original}
+                      <span className="text-white-50" style={{ fontFamily: 'monospace', fontSize: '0.68rem', wordBreak: 'break-all', userSelect: 'text', minWidth: 0 }}>
+                        {a.original}
                       </span>
                     </div>
                     <pre

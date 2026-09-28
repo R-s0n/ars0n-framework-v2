@@ -9,11 +9,18 @@ import { Modal, Button, Form, InputGroup, Spinner, Alert } from 'react-bootstrap
 // Detect Flows is where you act. Opening it, editing it and saving it are all writes to this
 // framework's own database.
 //
-// THREE SECTIONS, THREE DIFFERENT KINDS OF STATEMENT.
+// FOUR SECTIONS, FOUR DIFFERENT KINDS OF STATEMENT.
 //
 //   ENDPOINTS is scoping. Which of the endpoints already discovered on this target may a detection
 //   run request. Everything is ticked by default, because the corpus is the corpus, and unticking is
 //   how you say "not this one, not today".
+//
+//   DETECTION RUN is the run itself: the verbs Detect Flows sends, whether the recorded query and
+//   body go with each request, and the two guards that hold writes and edge infrastructure back. It
+//   used to live in a Detect Flows modal that opened, was configured, and ran, all at once; now the
+//   card's Detect Flows button just runs, on whatever was saved here. The exclusion list lives here
+//   too, because an exclusion is a run-time safety rule, and a dry-run preview, because seeing what
+//   would go out is how you check the choices before the card sends them.
 //
 //   ENGAGEMENT RULES are the programme's requirements. DailyPay wants
 //   `X-HackerOne-DailyPay-Research: rs0n2` on every request or their SOC reads the traffic as an
@@ -108,6 +115,109 @@ const HEADER_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 // How many endpoint rows are drawn before the list asks whether you really want the rest. A display
 // cap only, and said as one: the selection covers every row whether or not it is on screen.
 const RENDER_CAP = 400;
+
+/* ---------------------------------------------------------------- detection run */
+
+// DETECTION is the run itself: the verbs a run sends, whether the recorded query and body go out,
+// and the two guards that hold writes and infrastructure back. It used to live in its own Detect
+// Flows modal that opened, was configured, and ran, all in one place. Now the card's Detect Flows
+// button just runs, on whatever was saved here, so the configuration had to move to the one screen
+// that already owns "what a run is allowed to do".
+//
+// The programme's CEILINGS - rate, budget, timeout, redirect depth, the identifying header - are
+// ENGAGEMENT, not here, and the server folds them in and can only tighten a run at plan time. This
+// screen still lets you ask for a rate, a budget, a timeout and a redirect depth for the run, and
+// says on each field that the engagement rules can lower it but never raise it, so the number on
+// screen is never a number the run quietly exceeds.
+//
+// Mirrors DefaultFlowDetectionConfig() in server/utils/flowDetectionActive.go. The key ORDER here is
+// load-bearing: dirtiness is a JSON string compare, and normalizeDetection rebuilds the object in
+// exactly this order so a saved config and an edited one compare byte for byte.
+const DETECTION_DEFAULTS = {
+  methods: ['DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST', 'PUT'],
+  rps: 1,
+  max_requests: 250,
+  max_redirects: 5,
+  timeout_s: 15,
+  follow_redirects: true,
+  include_query: false,
+  send_recorded_bodies: true,
+  include_writes: false,
+  include_infrastructure: false,
+};
+
+// The quick-pick verbs, in button order. NOT the vocabulary: any other verb an application answers
+// is typed into the custom box, because the server validates a method for SHAPE, not membership, so
+// PROPFIND, REPORT or an app's own invented verb is legal. A curated list would be a verb gate
+// wearing a checkbox, and it would mean the framework could not touch the endpoint that only answers
+// PROPFIND.
+const DETECTION_METHODS = ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'];
+
+// A single HTTP method token, per RFC 7230. Checked here so "GET /x" is refused for its shape before
+// it reaches a server that would answer the malformed request with a 400 that reads like a finding.
+const METHOD_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+// The verbs that take a body, so the "send recorded bodies" toggle is shown only when one is chosen.
+// Mirrors flowDetectVerbTakesBody: a deny-list of three, because a bodied GET/HEAD/OPTIONS is
+// accepted by almost nothing and would change the response for reasons unrelated to the endpoint.
+const BODYLESS_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+// The skip reasons a dry run reports, as the headings the preview groups them under. Mirrors the
+// reason codes on FlowDetectionSkip. write_op and infrastructure name the toggle that would include
+// them, because a skipped row the operator did not expect is a question the screen should answer in
+// place rather than send them to the docs.
+const SKIP_REASONS = {
+  exclusion: 'Excluded by a safety rule',
+  write_op: 'Held back as a likely write — turn on "Replay recorded writes" to include',
+  infrastructure: 'Edge infrastructure or analytics beacon — turn on "Include infrastructure" to include',
+  method: 'Verb not selected for this run',
+  over_budget: 'Past the request budget',
+  unusable_url: 'Row does not parse to an http(s) URL',
+  host_excluded: 'Host out of scope for this target',
+  out_of_scope: 'Host out of scope for this target',
+  deselected: 'Deselected in the Endpoints section',
+};
+
+// How many planned/skipped rows the preview draws before it stops and says how many more there are.
+const DETECTION_PREVIEW_CAP = 200;
+
+// The run's config, read out of GET /flow-config/{target}/detection (or a PUT response), rebuilt into
+// the fixed shape and key order this screen compares against. Booleans that marshal from Go pointers
+// arrive as plain true/false; a missing or non-positive number falls back to the default rather than
+// being sent as a zero the server would clamp.
+function normalizeDetection(cfg) {
+  const c = (cfg && typeof cfg === 'object') ? cfg : {};
+  const methods = Array.isArray(c.methods) && c.methods.length
+    ? [...new Set(c.methods.map((m) => String(m).toUpperCase().trim()).filter(Boolean))].sort()
+    : [...DETECTION_DEFAULTS.methods];
+  const posNum = (v, d) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : d;
+  };
+  return {
+    methods,
+    rps: posNum(c.rps, DETECTION_DEFAULTS.rps),
+    max_requests: posNum(c.max_requests, DETECTION_DEFAULTS.max_requests),
+    max_redirects: posNum(c.max_redirects, DETECTION_DEFAULTS.max_redirects),
+    timeout_s: posNum(c.timeout_s, DETECTION_DEFAULTS.timeout_s),
+    follow_redirects: c.follow_redirects !== false,
+    include_query: Boolean(c.include_query),
+    send_recorded_bodies: c.send_recorded_bodies !== false,
+    include_writes: Boolean(c.include_writes),
+    include_infrastructure: Boolean(c.include_infrastructure),
+  };
+}
+
+// Whole seconds, as a short human string, for the run estimate.
+function formatSeconds(total) {
+  const s = Math.max(0, Math.round(Number(total) || 0));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  if (m < 60) return rem ? `${m}m ${rem}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
 
 // The two locked states. Neither is a checkbox. They are separated because "somebody wrote a rule
 // about this endpoint" and "this host is outside what you are allowed to touch" are different facts
@@ -359,6 +469,37 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
   const [engagementAvailable, setEngagementAvailable] = useState(true);
   const [engagementNote, setEngagementNote] = useState('');
 
+  // Detection run config.
+  const [detection, setDetection] = useState(() => ({ ...DETECTION_DEFAULTS }));
+  const [savedDetection, setSavedDetection] = useState(JSON.stringify(DETECTION_DEFAULTS));
+  const [detectionLoading, setDetectionLoading] = useState(false);
+  const [detectionError, setDetectionError] = useState('');
+  const [detectionAvailable, setDetectionAvailable] = useState(true);
+  const [customMethod, setCustomMethod] = useState('');
+  const [customMethodError, setCustomMethodError] = useState('');
+
+  // Exclusions. Managed immediately (add/delete are their own writes), not folded into the Save
+  // button: an exclusion is a safety statement, and its whole point is that it takes effect the
+  // moment it is written rather than waiting for an unrelated save.
+  const [exclusions, setExclusions] = useState([]);
+  const [exclusionsLoading, setExclusionsLoading] = useState(false);
+  const [exclusionsError, setExclusionsError] = useState('');
+  const [newPattern, setNewPattern] = useState('');
+  const [newReason, setNewReason] = useState('');
+  const [addingExclusion, setAddingExclusion] = useState(false);
+  const [addExclusionError, setAddExclusionError] = useState('');
+  const [pendingDeleteExclusion, setPendingDeleteExclusion] = useState(null);
+
+  // Dry-run preview. Sends the config in the box (not the saved one), so an operator sees what the
+  // edits in front of them would do; the server makes no requests for a dry run. previewKey is the
+  // detection config the preview was computed for, so a preview that no longer matches the box can
+  // be labelled stale rather than read as current.
+  const [preview, setPreview] = useState(null);
+  const [previewKey, setPreviewKey] = useState('');
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState('');
+  const [showAllPreview, setShowAllPreview] = useState(false);
+
   // Save.
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -530,6 +671,64 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
     }
   }, [targetId]);
 
+  const loadDetection = useCallback(async () => {
+    if (!targetId) return;
+    setDetectionLoading(true);
+    setDetectionError('');
+    try {
+      const { ok, status, data, body } = await requestJSON(`/api/flow-config/${targetId}/detection`);
+      if (ok && data && data.config) {
+        const norm = normalizeDetection(data.config);
+        setDetection(norm);
+        setSavedDetection(JSON.stringify(norm));
+        setDetectionAvailable(true);
+        return;
+      }
+      if (status === 404) {
+        // Same shape of message the other two sections use for a missing route: this build cannot
+        // store a run config, so Detect Flows will fall back to framework defaults. The form still
+        // renders (on the defaults) so the operator can see what those defaults are.
+        setDetectionAvailable(false);
+        setDetection({ ...DETECTION_DEFAULTS });
+        setSavedDetection(JSON.stringify(DETECTION_DEFAULTS));
+        setDetectionError(
+          'This server build does not expose the detection config API '
+          + '(/flow-config/{target}/detection), so nothing in this section can be saved. Detect Flows '
+          + 'will run on the framework defaults shown below.'
+        );
+        return;
+      }
+      setDetectionError(errorMessage(data, body, status));
+    } catch (err) {
+      setDetectionError(`Could not reach the framework: ${err.message}`);
+    } finally {
+      setDetectionLoading(false);
+    }
+  }, [targetId]);
+
+  const loadExclusions = useCallback(async () => {
+    if (!targetId) return;
+    setExclusionsLoading(true);
+    setExclusionsError('');
+    try {
+      const { ok, status, data, body } = await requestJSON(`/api/flow-detection/${targetId}/exclusions`);
+      if (ok && data && Array.isArray(data.exclusions)) {
+        setExclusions(data.exclusions);
+        return;
+      }
+      // A missing exclusions route is not fatal to this section; the run config is still usable.
+      if (status === 404) {
+        setExclusions([]);
+        return;
+      }
+      setExclusionsError(errorMessage(data, body, status));
+    } catch (err) {
+      setExclusionsError(`Could not reach the framework: ${err.message}`);
+    } finally {
+      setExclusionsLoading(false);
+    }
+  }, [targetId]);
+
   useEffect(() => {
     if (!show || !targetId) return;
     setSection('endpoints');
@@ -539,9 +738,21 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
     setSaveNotice('');
     setConfirmDiscard(false);
     setEngagementError('');
+    setCustomMethod('');
+    setCustomMethodError('');
+    setNewPattern('');
+    setNewReason('');
+    setAddExclusionError('');
+    setPendingDeleteExclusion(null);
+    setPreview(null);
+    setPreviewKey('');
+    setPreviewError('');
+    setShowAllPreview(false);
     loadEndpoints();
     loadEngagement();
-  }, [show, targetId, loadEndpoints, loadEngagement]);
+    loadDetection();
+    loadExclusions();
+  }, [show, targetId, loadEndpoints, loadEngagement, loadDetection, loadExclusions]);
 
   /* -------------------------------------------------------------- selection */
 
@@ -626,6 +837,151 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
       return next;
     });
     setSaveNotice('');
+  };
+
+  /* -------------------------------------------------------------- detection */
+
+  const touchDetection = () => {
+    setSaveNotice('');
+    setSaveError('');
+  };
+
+  // THE VERB SET CAN NEVER BE EMPTIED. An empty methods list reaches the server as "unspecified" and
+  // comes back as the FULL default set, so a row with nothing ticked would send the opposite of what
+  // it shows. The last tick holds: unticking the final verb is a no-op, not a way to send everything.
+  const toggleMethod = (m) => {
+    setDetection((prev) => {
+      const set = new Set(prev.methods);
+      if (set.has(m)) {
+        if (set.size <= 1) return prev;
+        set.delete(m);
+      } else {
+        set.add(m);
+      }
+      return { ...prev, methods: [...set].sort() };
+    });
+    touchDetection();
+  };
+
+  const addCustomMethod = () => {
+    const m = customMethod.trim().toUpperCase();
+    if (!m) return;
+    if (!METHOD_TOKEN.test(m)) {
+      // Refused for its SHAPE, quoting what was typed, never with a list of approved verbs: the point
+      // of the custom box is that the vocabulary is not curated.
+      setCustomMethodError(
+        `"${customMethod.trim()}" is not a valid HTTP method token. A method is one or more of the `
+        + 'characters A-Z, a-z, 0-9 and ! # $ % & \' * + - . ^ _ ` | ~, with no spaces.'
+      );
+      return;
+    }
+    setDetection((prev) => ({ ...prev, methods: [...new Set([...prev.methods, m])].sort() }));
+    setCustomMethod('');
+    setCustomMethodError('');
+    touchDetection();
+  };
+
+  const setDetectField = (field, value) => {
+    setDetection((prev) => ({ ...prev, [field]: value }));
+    touchDetection();
+  };
+
+  const setDetectNumber = (field, raw, { min, max, integer }) => {
+    const parsed = integer ? parseInt(raw, 10) : parseFloat(raw);
+    if (!Number.isFinite(parsed)) return;
+    setDetectField(field, Math.min(max, Math.max(min, parsed)));
+  };
+
+  const detectionHasBodyVerb = useMemo(
+    () => detection.methods.some((m) => !BODYLESS_METHODS.has(m)),
+    [detection.methods]
+  );
+
+  // The dry run sends the config in the box, so the operator previews the edits in front of them.
+  const runPreview = async () => {
+    if (!targetId || previewLoading) return;
+    setPreviewLoading(true);
+    setPreviewError('');
+    setShowAllPreview(false);
+    const key = JSON.stringify(detection);
+    try {
+      const { ok, status, data, body } = await requestJSON(
+        `/api/flow-detection/${targetId}/dry-run`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(detection),
+        }
+      );
+      if (ok && data) {
+        setPreview(data);
+        setPreviewKey(key);
+      } else {
+        setPreview(null);
+        setPreviewError(errorMessage(data, body, status));
+      }
+    } catch (err) {
+      setPreview(null);
+      setPreviewError(`Could not reach the framework: ${err.message}`);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  /* -------------------------------------------------------------- exclusions */
+
+  const addExclusion = async () => {
+    const pattern = newPattern.trim();
+    const reason = newReason.trim();
+    if (!targetId || !pattern || !reason || addingExclusion) return;
+    setAddingExclusion(true);
+    setAddExclusionError('');
+    try {
+      const { ok, status, data, body } = await requestJSON(
+        `/api/flow-detection/${targetId}/exclusions`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pattern, reason }),
+        }
+      );
+      if (ok && data && Array.isArray(data.exclusions)) {
+        setExclusions(data.exclusions);
+        setNewPattern('');
+        setNewReason('');
+        // Any preview on screen was computed under the old rule set, so it no longer describes what a
+        // run would do. Cleared rather than left to read as current.
+        setPreview(null);
+        setPreviewKey('');
+      } else {
+        setAddExclusionError(errorMessage(data, body, status));
+      }
+    } catch (err) {
+      setAddExclusionError(`Could not reach the framework: ${err.message}`);
+    } finally {
+      setAddingExclusion(false);
+    }
+  };
+
+  const deleteExclusion = async (id) => {
+    if (!id) return;
+    try {
+      const { ok, status, data, body } = await requestJSON(
+        `/api/flow-detection/exclusions/${id}`,
+        { method: 'DELETE' }
+      );
+      if (ok) {
+        setExclusions((prev) => prev.filter((e) => e.id !== id));
+        setPreview(null);
+        setPreviewKey('');
+      } else {
+        setExclusionsError(errorMessage(data, body, status));
+      }
+    } catch (err) {
+      setExclusionsError(`Could not reach the framework: ${err.message}`);
+    } finally {
+      setPendingDeleteExclusion(null);
+    }
   };
 
   /* ------------------------------------------------------------- engagement */
@@ -717,10 +1073,12 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
     () => JSON.stringify(overrides, Object.keys(ENGAGEMENT_DEFAULTS).sort()),
     [overrides]
   );
+  const currentDetectionKey = useMemo(() => JSON.stringify(detection), [detection]);
 
   const selectionDirty = selectionSavable && currentDeselectedKey !== savedDeselected;
   const engagementDirty = engagementAvailable && currentOverridesKey !== savedOverrides;
-  const dirty = selectionDirty || engagementDirty;
+  const detectionDirty = detectionAvailable && currentDetectionKey !== savedDetection;
+  const dirty = selectionDirty || engagementDirty || detectionDirty;
 
   const saveBlockedReason = useMemo(() => {
     if (!targetId) return 'No target selected.';
@@ -831,6 +1189,32 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
             : `${count} engagement field${count === 1 ? '' : 's'} set for this target`);
         }
       }
+
+      if (detectionDirty) {
+        // One PUT, and the RESPONSE is what the section is re-seeded from, not the values that were
+        // sent. The server validates and clamps, so a rate of 40 sent from a box that let it through
+        // comes back as 10; showing the operator what they typed would be the "one number on screen,
+        // another in the run" failure this whole file exists to avoid.
+        const { ok, status, data, body } = await requestJSON(
+          `/api/flow-config/${targetId}/detection`,
+          {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(detection),
+          }
+        );
+        if (!ok) {
+          failed.push(`detection run config: ${errorMessage(data, body, status)}`);
+        } else {
+          const norm = (data && data.config) ? normalizeDetection(data.config) : detection;
+          setDetection(norm);
+          setSavedDetection(JSON.stringify(norm));
+          // A saved config makes any preview on screen a preview of the same thing, so it is left; it
+          // was already computed from these values.
+          const mc = norm.methods.length;
+          done.push(`detection: ${mc} verb${mc === 1 ? '' : 's'}, up to ${norm.rps} req/s, budget ${norm.max_requests.toLocaleString()}`);
+        }
+      }
     } catch (err) {
       failed.push(`could not reach the framework: ${err.message}`);
     } finally {
@@ -842,6 +1226,7 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
     if (failed.length) {
       loadEndpoints();
       loadEngagement();
+      loadDetection();
     }
     // Both halves are reported. A save where the selection stuck and the header did not must never
     // read as a single green tick, because the operator would then run believing the programme's
@@ -1606,6 +1991,587 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
     </div>
   );
 
+  const renderDetection = () => {
+    const previewStale = preview && previewKey && previewKey !== currentDetectionKey;
+
+    // The engagement caps that would actually tighten a run: only a TARGET-set limit does, because a
+    // value inherited from global Settings fills an unset field rather than lowering a chosen one.
+    // Stated honestly here so the pacing numbers are never presented as final when they are not.
+    const targetCaps = [];
+    if (provenanceOf('rps') === 'target') targetCaps.push(`rate to ${valueOf('rps')} req/s`);
+    if (provenanceOf('max_requests') === 'target') targetCaps.push(`budget to ${Number(valueOf('max_requests')).toLocaleString()}`);
+    if (provenanceOf('timeout_s') === 'target') targetCaps.push(`timeout to ${valueOf('timeout_s')} s`);
+    if (provenanceOf('max_redirects') === 'target') targetCaps.push(`redirects to ${valueOf('max_redirects')}`);
+
+    return (
+      <div className="d-flex flex-column h-100" style={{ minHeight: 0 }}>
+        <div className="p-3 border-bottom border-secondary">
+          <div className="text-white" style={{ fontSize: '0.86rem' }}>
+            How a detection run behaves
+          </div>
+          <div className="text-white-50 mt-1" style={{ fontSize: '0.72rem', lineHeight: 1.55 }}>
+            Detect Flows on the card sends nothing but what this section allows. The verbs it sends,
+            whether the recorded query and body go with each request, and the two guards that hold
+            writes and edge infrastructure back. Save it, and the card&apos;s Detect Flows button runs
+            on exactly these values.
+          </div>
+          {detectionError && (
+            <Alert variant="warning" className="py-2 mt-2 mb-0" style={{ fontSize: '0.7rem' }}>
+              <i className="bi bi-info-circle me-2" />
+              {detectionError}
+            </Alert>
+          )}
+        </div>
+
+        <div className="flex-grow-1" style={{ overflowY: 'auto', minHeight: 0 }}>
+          <div className="p-3" style={{ maxWidth: '960px' }}>
+
+            {/* ---- verbs ---- */}
+            <div className="border border-secondary rounded p-3 mb-3">
+              <div className="text-white-50 mb-2" style={{ fontSize: '0.68rem', letterSpacing: '0.04em' }}>
+                VERBS
+              </div>
+              <div className="text-white-50 mb-2" style={{ fontSize: '0.68rem', lineHeight: 1.5 }}>
+                The verb is also the selection filter: a run only touches endpoints already observed
+                answering that verb, so unticking POST does not merely send fewer requests, it removes
+                every write endpoint from the run. All seven start on.
+              </div>
+              <div className="d-flex flex-wrap mb-2" style={{ gap: '0.4rem' }}>
+                {DETECTION_METHODS.map((m) => {
+                  const on = detection.methods.includes(m);
+                  return (
+                    <Button
+                      key={m}
+                      id={`detect-method-${m}`}
+                      size="sm"
+                      variant={on ? 'danger' : 'outline-secondary'}
+                      onClick={() => toggleMethod(m)}
+                      disabled={!detectionAvailable}
+                      aria-pressed={on}
+                      style={{ fontFamily: MONO, fontSize: '0.7rem', minWidth: '68px' }}
+                      title={on ? 'Click to remove this verb from the run.' : 'Click to add this verb to the run.'}
+                    >
+                      {on && <i className="bi bi-check2 me-1" />}
+                      {m}
+                    </Button>
+                  );
+                })}
+                {/* Any verb outside the seven that was added shows as a removable chip. */}
+                {detection.methods.filter((m) => !DETECTION_METHODS.includes(m)).map((m) => (
+                  <Button
+                    key={m}
+                    size="sm"
+                    variant="danger"
+                    onClick={() => toggleMethod(m)}
+                    disabled={!detectionAvailable}
+                    style={{ fontFamily: MONO, fontSize: '0.7rem' }}
+                    title="A custom verb. Click to remove it."
+                  >
+                    {m}<i className="bi bi-x ms-1" />
+                  </Button>
+                ))}
+              </div>
+              <div className="d-flex align-items-start" style={{ gap: '0.4rem', maxWidth: '420px' }}>
+                <Form.Control
+                  size="sm"
+                  value={customMethod}
+                  onChange={(e) => { setCustomMethod(e.target.value); setCustomMethodError(''); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addCustomMethod(); } }}
+                  placeholder="your own verb, e.g. PROPFIND"
+                  spellCheck={false}
+                  disabled={!detectionAvailable}
+                  className="bg-dark text-white border-secondary"
+                  style={{ fontSize: '0.72rem', fontFamily: MONO }}
+                  data-bs-theme="dark"
+                />
+                <Button
+                  size="sm"
+                  variant="outline-light"
+                  onClick={addCustomMethod}
+                  disabled={!detectionAvailable || !customMethod.trim()}
+                >
+                  Add
+                </Button>
+              </div>
+              {customMethodError && (
+                <div className="text-warning mt-2" style={{ fontSize: '0.64rem' }}>
+                  <i className="bi bi-exclamation-triangle me-1" />
+                  {customMethodError}
+                </div>
+              )}
+            </div>
+
+            {/* ---- pacing ---- */}
+            <div className="border border-secondary rounded p-3 mb-3">
+              <div className="text-white-50 mb-2" style={{ fontSize: '0.68rem', letterSpacing: '0.04em' }}>
+                PACING
+              </div>
+              <div className="row g-3">
+                <div className="col-6 col-md-3">
+                  <Field label="RATE (req/s)">
+                    <Form.Control
+                      type="number" size="sm" min={0.1} max={MAX_RPS} step={0.1}
+                      value={detection.rps}
+                      onChange={(e) => setDetectNumber('rps', e.target.value, { min: 0.1, max: MAX_RPS })}
+                      disabled={!detectionAvailable}
+                      className="bg-dark text-white border-secondary"
+                      style={{ fontSize: '0.74rem' }}
+                      data-bs-theme="dark"
+                    />
+                  </Field>
+                </div>
+                <div className="col-6 col-md-3">
+                  <Field label="REQUEST BUDGET">
+                    <Form.Control
+                      type="number" size="sm" min={1} max={HARD_MAX_REQUESTS} step={1}
+                      value={detection.max_requests}
+                      onChange={(e) => setDetectNumber('max_requests', e.target.value, { min: 1, max: HARD_MAX_REQUESTS, integer: true })}
+                      disabled={!detectionAvailable}
+                      className="bg-dark text-white border-secondary"
+                      style={{ fontSize: '0.74rem' }}
+                      data-bs-theme="dark"
+                    />
+                  </Field>
+                </div>
+                <div className="col-6 col-md-3">
+                  <Field label="TIMEOUT (s)">
+                    <Form.Control
+                      type="number" size="sm" min={1} max={MAX_TIMEOUT_S} step={1}
+                      value={detection.timeout_s}
+                      onChange={(e) => setDetectNumber('timeout_s', e.target.value, { min: 1, max: MAX_TIMEOUT_S, integer: true })}
+                      disabled={!detectionAvailable}
+                      className="bg-dark text-white border-secondary"
+                      style={{ fontSize: '0.74rem' }}
+                      data-bs-theme="dark"
+                    />
+                  </Field>
+                </div>
+                <div className="col-6 col-md-3">
+                  <Field label="REDIRECT DEPTH">
+                    <Form.Control
+                      type="number" size="sm" min={0} max={HARD_MAX_REDIRECTS} step={1}
+                      value={detection.max_redirects}
+                      onChange={(e) => setDetectNumber('max_redirects', e.target.value, { min: 0, max: HARD_MAX_REDIRECTS, integer: true })}
+                      disabled={!detectionAvailable || !detection.follow_redirects}
+                      className="bg-dark text-white border-secondary"
+                      style={{ fontSize: '0.74rem' }}
+                      data-bs-theme="dark"
+                    />
+                  </Field>
+                </div>
+              </div>
+              <div className="text-white-50 mt-1" style={{ fontSize: '0.64rem', lineHeight: 1.5 }}>
+                What the run ASKS for. The ceilings are {MAX_RPS} req/s and{' '}
+                {HARD_MAX_REQUESTS.toLocaleString()} requests. This target&apos;s Engagement rules can
+                only tighten these, never raise them:{' '}
+                {targetCaps.length
+                  ? <span className="text-info">{targetCaps.join(', ')}. Edit them in Engagement rules.</span>
+                  : <span>no engagement caps are set for this target, so a run uses these values as-is.</span>}
+              </div>
+            </div>
+
+            {/* ---- what each request carries ---- */}
+            <div className="border border-secondary rounded p-3 mb-3">
+              <div className="text-white-50 mb-2" style={{ fontSize: '0.68rem', letterSpacing: '0.04em' }}>
+                WHAT EACH REQUEST CARRIES
+              </div>
+
+              <Form.Check
+                type="switch"
+                id="detect-follow-redirects"
+                className="text-white mb-2"
+                style={{ fontSize: '0.74rem' }}
+                checked={detection.follow_redirects}
+                disabled={!detectionAvailable}
+                onChange={(e) => setDetectField('follow_redirects', e.target.checked)}
+                label={
+                  <span>
+                    Follow redirects
+                    <span className="text-white-50 d-block" style={{ fontSize: '0.66rem' }}>
+                      Redirects are the whole reason this scanner exists, so this is on by default. Each
+                      redirect destination is re-checked against scope and your exclusions before it is
+                      followed.
+                    </span>
+                  </span>
+                }
+              />
+
+              <Form.Check
+                type="switch"
+                id="detect-include-query"
+                className="text-white mb-2"
+                style={{ fontSize: '0.74rem' }}
+                checked={detection.include_query}
+                disabled={!detectionAvailable}
+                onChange={(e) => setDetectField('include_query', e.target.checked)}
+                label={
+                  <span>
+                    Send the recorded query string
+                    <span className="text-white-50 d-block" style={{ fontSize: '0.66rem' }}>
+                      Off by default. On, the query is sent as it was recorded, which means any
+                      identifier in it goes too. Off, endpoints are deduplicated by path so
+                      <code className="text-info mx-1">/search?q=a</code> and
+                      <code className="text-info mx-1">/search?q=b</code> are one request.
+                    </span>
+                  </span>
+                }
+              />
+
+              {detectionHasBodyVerb && (
+                <Form.Check
+                  type="switch"
+                  id="detect-send-bodies"
+                  className="text-white mb-2"
+                  style={{ fontSize: '0.74rem' }}
+                  checked={detection.send_recorded_bodies}
+                  disabled={!detectionAvailable}
+                  onChange={(e) => setDetectField('send_recorded_bodies', e.target.checked)}
+                  label={
+                    <span>
+                      Send recorded bodies with body-taking verbs
+                      <span className="text-white-50 d-block" style={{ fontSize: '0.66rem' }}>
+                        On by default. Off, a POST/PUT/PATCH goes out with an empty body, which most
+                        endpoints answer 400 to, and the run records that as though the endpoint had
+                        been tested. Shown only while a body-taking verb is selected.
+                      </span>
+                    </span>
+                  }
+                />
+              )}
+            </div>
+
+            {/* ---- guards ---- */}
+            <div className="border border-warning rounded p-3 mb-3" style={{ background: '#2b2619' }}>
+              <div className="text-warning mb-2" style={{ fontSize: '0.68rem', letterSpacing: '0.04em' }}>
+                <i className="bi bi-shield-exclamation me-1" />
+                GUARDS
+              </div>
+
+              <Form.Check
+                type="switch"
+                id="detect-include-writes"
+                className="text-white mb-2"
+                style={{ fontSize: '0.74rem' }}
+                checked={detection.include_writes}
+                disabled={!detectionAvailable}
+                onChange={(e) => setDetectField('include_writes', e.target.checked)}
+                label={
+                  <span>
+                    Replay recorded writes
+                    <span className="text-white-50 d-block" style={{ fontSize: '0.66rem' }}>
+                      Off by default. A request whose verb or method name reads as a mutation
+                      (PUT/PATCH/DELETE, or an RPC method beginning create / update / delete / set /
+                      register / revoke / rotate ...) is held back unless this is on. Replaying a
+                      recorded <code className="text-info">registerUser</code> or
+                      <code className="text-info mx-1">createDefault</code> against a live target can
+                      seed a resource or send a real email. Every held request is listed in the preview
+                      with reason <code className="text-info">write_op</code>.
+                    </span>
+                  </span>
+                }
+              />
+
+              <Form.Check
+                type="switch"
+                id="detect-include-infra"
+                className="text-white"
+                style={{ fontSize: '0.74rem' }}
+                checked={detection.include_infrastructure}
+                disabled={!detectionAvailable}
+                onChange={(e) => setDetectField('include_infrastructure', e.target.checked)}
+                label={
+                  <span>
+                    Include edge infrastructure and analytics
+                    <span className="text-white-50 d-block" style={{ fontSize: '0.66rem' }}>
+                      Off by default. Cloudflare <code className="text-info">/cdn-cgi/*</code>, Google
+                      Analytics and Tag Manager beacons are not requested unless this is on. Re-firing a
+                      one-shot challenge token pokes the bot-management already in front of the target;
+                      replaying a beacon fabricates a tracking event and tests nothing. Held with reason
+                      <code className="text-info ms-1">infrastructure</code>.
+                    </span>
+                  </span>
+                }
+              />
+            </div>
+
+            {/* ---- exclusions ---- */}
+            <div className="border border-secondary rounded p-3 mb-3">
+              <div className="text-white-50 mb-1" style={{ fontSize: '0.68rem', letterSpacing: '0.04em' }}>
+                EXCLUSIONS
+              </div>
+              <div className="text-white-50 mb-2" style={{ fontSize: '0.68rem', lineHeight: 1.5 }}>
+                A safety statement with a written reason, enforced on every endpoint AND on every
+                redirect destination. Not a deselection: it takes effect the moment you add it, here,
+                and is deliberately harder to undo. A pattern is a path
+                (<code className="text-info">/account/verify</code>), a host
+                (<code className="text-info">api.example.com</code>), or both;
+                <code className="text-info mx-1">*</code> matches any run of characters.
+              </div>
+
+              {exclusionsError && (
+                <Alert variant="danger" className="py-2 mb-2" style={{ fontSize: '0.7rem' }}>
+                  <i className="bi bi-exclamation-triangle me-2" />
+                  {exclusionsError}
+                </Alert>
+              )}
+
+              {exclusionsLoading ? (
+                <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
+                  <Spinner animation="border" size="sm" variant="danger" className="me-2" />
+                  Reading this target&apos;s exclusion rules.
+                </div>
+              ) : exclusions.length === 0 ? (
+                <div className="text-white-50 fst-italic mb-2" style={{ fontSize: '0.7rem' }}>
+                  No exclusions on this target yet.
+                </div>
+              ) : (
+                <div className="mb-2">
+                  {exclusions.map((ex) => (
+                    <div
+                      key={ex.id}
+                      className="d-flex align-items-start px-2 py-1"
+                      style={{ borderLeft: '3px solid #dc3545', background: '#2b1d20', marginBottom: '2px' }}
+                    >
+                      <span className="text-danger flex-shrink-0 text-center" style={{ width: '22px' }}>
+                        <i className="bi bi-shield-lock-fill" />
+                      </span>
+                      <div className="flex-grow-1" style={{ minWidth: 0 }}>
+                        <div className="text-warning" style={{ fontFamily: MONO, fontSize: '0.68rem', wordBreak: 'break-all' }}>
+                          {ex.pattern}
+                        </div>
+                        <div className="text-white-50" style={{ fontSize: '0.64rem' }}>
+                          {ex.reason}
+                        </div>
+                      </div>
+                      {pendingDeleteExclusion === ex.id ? (
+                        <span className="d-inline-flex align-items-center flex-shrink-0" style={{ gap: '0.3rem' }}>
+                          <span className="text-warning" style={{ fontSize: '0.62rem' }}>Remove this safety rule?</span>
+                          <Button size="sm" variant="outline-secondary" style={{ fontSize: '0.62rem' }} onClick={() => setPendingDeleteExclusion(null)}>Keep</Button>
+                          <Button size="sm" variant="danger" style={{ fontSize: '0.62rem' }} onClick={() => deleteExclusion(ex.id)}>Remove</Button>
+                        </span>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="link"
+                          className="text-danger p-0 flex-shrink-0"
+                          style={{ fontSize: '0.66rem' }}
+                          onClick={() => setPendingDeleteExclusion(ex.id)}
+                          title="Remove this exclusion. It is confirmed first, because removing it lets a run reach this endpoint again."
+                        >
+                          <i className="bi bi-trash" />
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="row g-2 align-items-start mt-1">
+                <div className="col-12 col-md-4">
+                  <Form.Control
+                    size="sm"
+                    value={newPattern}
+                    onChange={(e) => { setNewPattern(e.target.value); setAddExclusionError(''); }}
+                    placeholder="/account/verify"
+                    spellCheck={false}
+                    className="bg-dark text-white border-secondary"
+                    style={{ fontSize: '0.72rem', fontFamily: MONO }}
+                    data-bs-theme="dark"
+                  />
+                </div>
+                <div className="col-12 col-md-6">
+                  <Form.Control
+                    size="sm"
+                    value={newReason}
+                    onChange={(e) => { setNewReason(e.target.value); setAddExclusionError(''); }}
+                    placeholder="what this endpoint does, e.g. texts a verification code to the account owner"
+                    spellCheck={false}
+                    className="bg-dark text-white border-secondary"
+                    style={{ fontSize: '0.72rem' }}
+                    data-bs-theme="dark"
+                  />
+                </div>
+                <div className="col-12 col-md-2">
+                  <Button
+                    size="sm"
+                    variant="outline-danger"
+                    className="w-100"
+                    onClick={addExclusion}
+                    disabled={addingExclusion || !newPattern.trim() || !newReason.trim()}
+                  >
+                    {addingExclusion
+                      ? <Spinner animation="border" size="sm" />
+                      : 'Add exclusion'}
+                  </Button>
+                </div>
+              </div>
+              {addExclusionError && (
+                <div className="text-warning mt-2" style={{ fontSize: '0.64rem' }}>
+                  <i className="bi bi-exclamation-triangle me-1" />
+                  {addExclusionError}
+                </div>
+              )}
+            </div>
+
+            {/* ---- dry run ---- */}
+            <div className="border border-info rounded p-3">
+              <div className="d-flex align-items-center justify-content-between flex-wrap mb-2" style={{ gap: '0.5rem' }}>
+                <div className="text-info" style={{ fontSize: '0.68rem', letterSpacing: '0.04em' }}>
+                  <i className="bi bi-eye me-1" />
+                  DRY RUN
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline-info"
+                  onClick={runPreview}
+                  disabled={!targetId || previewLoading}
+                >
+                  {previewLoading
+                    ? <><Spinner animation="border" size="sm" className="me-2" />Computing</>
+                    : <><i className="bi bi-play-circle me-1" />{preview ? 'Re-run preview' : 'Preview what a run would send'}</>}
+                </Button>
+              </div>
+              <div className="text-white-50 mb-2" style={{ fontSize: '0.66rem', lineHeight: 1.5 }}>
+                Computed by the server under your exclusions, this target&apos;s scope and the
+                engagement caps. It sends NO requests. Everything below is what a real run started now
+                would do.
+              </div>
+
+              {previewError && (
+                <Alert variant="danger" className="py-2 mb-2" style={{ fontSize: '0.7rem' }}>
+                  <i className="bi bi-exclamation-triangle me-2" />
+                  {previewError}
+                </Alert>
+              )}
+
+              {previewStale && (
+                <Alert variant="warning" className="py-2 mb-2" style={{ fontSize: '0.68rem' }}>
+                  <i className="bi bi-info-circle me-2" />
+                  The configuration changed since this preview. Re-run it to see what a run would do now.
+                </Alert>
+              )}
+
+              {preview && renderPreviewBody(preview)}
+            </div>
+
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // The dry-run result: the two request numbers, the body report, and the skipped rows grouped by
+  // reason so an operator can see what was held back and turn on the guard that would include it.
+  const renderPreviewBody = (p) => {
+    const skipped = Array.isArray(p.skipped) ? p.skipped : [];
+    const byReason = new Map();
+    skipped.forEach((s) => {
+      const r = String((s && s.reason) || 'other');
+      if (!byReason.has(r)) byReason.set(r, []);
+      byReason.get(r).push(s);
+    });
+    const targets = Array.isArray(p.targets) ? p.targets : [];
+    const shownTargets = showAllPreview ? targets : targets.slice(0, DETECTION_PREVIEW_CAP);
+
+    return (
+      <div>
+        {p.warning && (
+          <Alert variant="warning" className="py-2 mb-2" style={{ fontSize: '0.7rem' }}>
+            <i className="bi bi-exclamation-triangle me-2" />
+            {p.warning}
+          </Alert>
+        )}
+
+        <div className="d-flex flex-wrap mb-2" style={{ gap: '1.2rem' }}>
+          <div>
+            <div className="text-info" style={{ fontSize: '1.3rem', fontWeight: 600 }}>
+              {Number(p.request_count || 0).toLocaleString()}
+            </div>
+            <div className="text-white-50" style={{ fontSize: '0.62rem' }}>requests sent</div>
+          </div>
+          <div>
+            <div className="text-warning" style={{ fontSize: '1.3rem', fontWeight: 600 }}>
+              {Number(p.skipped_count || 0).toLocaleString()}
+            </div>
+            <div className="text-white-50" style={{ fontSize: '0.62rem' }}>held back</div>
+          </div>
+          <div>
+            <div className="text-white" style={{ fontSize: '1.3rem', fontWeight: 600 }}>
+              {formatSeconds(p.estimated_seconds)}
+              <span className="text-white-50" style={{ fontSize: '0.7rem' }}>
+                {' '}&ndash; {formatSeconds(p.estimated_seconds_worst_case)}
+              </span>
+            </div>
+            <div className="text-white-50" style={{ fontSize: '0.62rem' }}>
+              estimate at {p.rps} req/s (worst case if everything redirects)
+            </div>
+          </div>
+          <div>
+            <div className="text-white" style={{ fontSize: '1.3rem', fontWeight: 600 }}>
+              {Number(p.max_requests_worst_case || 0).toLocaleString()}
+            </div>
+            <div className="text-white-50" style={{ fontSize: '0.62rem' }}>worst-case requests</div>
+          </div>
+        </div>
+
+        {p.body_note && (
+          <div className="text-white-50 mb-2" style={{ fontSize: '0.66rem' }}>
+            <i className="bi bi-body-text me-1" />
+            {p.body_note}
+          </div>
+        )}
+
+        {byReason.size > 0 && (
+          <div className="mb-2">
+            {[...byReason.entries()].map(([reason, list]) => (
+              <div key={reason} className="mb-1">
+                <span className="text-warning" style={{ fontSize: '0.66rem' }}>
+                  {SKIP_REASONS[reason] || reason} ({list.length.toLocaleString()})
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {targets.length > 0 && (
+          <div
+            className="border-top border-secondary pt-2"
+            style={{ maxHeight: '260px', overflowY: 'auto' }}
+          >
+            {shownTargets.map((t, i) => (
+              <div
+                key={`${t.method}-${t.url}-${i}`}
+                className="d-flex align-items-center px-1"
+                style={{ gap: '0.4rem', fontSize: '0.64rem' }}
+              >
+                <span className="text-warning" style={{ fontFamily: MONO, minWidth: '54px' }}>{t.method}</span>
+                <span className="text-info" style={{ fontFamily: MONO, wordBreak: 'break-all' }}>
+                  {t.url}
+                </span>
+                {t.body_bytes ? (
+                  <span className="text-white-50" style={{ fontSize: '0.56rem' }} title="Recorded body attached to this request.">
+                    +{t.body_bytes}b body
+                  </span>
+                ) : null}
+              </div>
+            ))}
+            {targets.length > shownTargets.length && (
+              <Button
+                size="sm"
+                variant="link"
+                className="text-info p-0 mt-1"
+                style={{ fontSize: '0.64rem' }}
+                onClick={() => setShowAllPreview(true)}
+              >
+                show the other {(targets.length - shownTargets.length).toLocaleString()}
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderRails = () => (
     <div className="p-3" style={{ overflowY: 'auto', minHeight: 0 }}>
       <div className="text-white" style={{ fontSize: '0.86rem' }}>
@@ -1650,6 +2616,14 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
       badge: rows.length
         ? `${selectedCount.toLocaleString()}/${selectableRows.length.toLocaleString()}`
         : '',
+    },
+    {
+      id: 'detection',
+      icon: 'bi-broadcast-pin',
+      title: 'Detection run',
+      blurb: 'How Detect Flows behaves',
+      badge: `${detection.methods.length} verb${detection.methods.length === 1 ? '' : 's'}`
+        + (exclusions.length ? `, ${exclusions.length} excl` : ''),
     },
     {
       id: 'engagement',
@@ -1723,6 +2697,7 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
 
         <div className="flex-grow-1 d-flex flex-column" style={{ minWidth: 0, minHeight: 0 }}>
           {section === 'endpoints' && renderEndpoints()}
+          {section === 'detection' && renderDetection()}
           {section === 'engagement' && renderEngagement()}
           {section === 'rails' && renderRails()}
         </div>
@@ -1763,16 +2738,17 @@ export const FlowConfigureModal = ({ show, handleClose, activeTarget }) => {
           ) : dirty ? (
             <span className="text-warning">
               <i className="bi bi-pencil me-1" />
-              Unsaved changes
-              {selectionDirty && ' to the endpoint selection'}
-              {selectionDirty && engagementDirty && ' and'}
-              {engagementDirty && ' to the engagement rules'}
+              Unsaved changes to the {[
+                selectionDirty && 'endpoint selection',
+                detectionDirty && 'detection run config',
+                engagementDirty && 'engagement rules',
+              ].filter(Boolean).join(', ').replace(/, ([^,]*)$/, ' and $1')}
               . They apply to detection runs only once saved.
             </span>
           ) : (
             <span>
               {saveBlockedReason === 'Nothing has changed.'
-                ? 'Saved and up to date. Detect Flows will open on these values.'
+                ? 'Saved and up to date. The card’s Detect Flows button runs on these values.'
                 : saveBlockedReason}
             </span>
           )}

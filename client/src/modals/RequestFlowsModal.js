@@ -37,10 +37,10 @@ import BuiltFlowRunMap from '../components/BuiltFlowRunMap';
 //
 //   IT OPENS ON A DRY RUN. The first click arms nothing: it asks the server what would be sent, in
 //   what order, how many requests, and which steps are skipped and why. Sending is a SECOND,
-//   deliberate click on a differently-labelled button. The same shape DetectFlowsModal uses, because
-//   the operator has met it once already and a safety gate that changes shape between screens is a
-//   gate nobody reads. Change anything about the configuration and the plan is invalidated: a dry
-//   run of a different configuration is not evidence about this one.
+//   deliberate click on a differently-labelled button. The same shape the Configure modal's detection
+//   dry run uses, because the operator has met it once already and a safety gate that changes shape
+//   between screens is a gate nobody reads. Change anything about the configuration and the plan is
+//   invalidated: a dry run of a different configuration is not evidence about this one.
 //
 //   YOUR EDITS ARE WHAT GETS SENT. If you edited a request and saved a version, the run sends THAT
 //   version, not the bytes the target originally saw. Silently sending the original after somebody

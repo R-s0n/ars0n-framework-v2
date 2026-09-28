@@ -413,6 +413,34 @@ func (traversalClassifier) Reaches(k triage.SlotKind, mt triage.MediaType) triag
 var trvNameOrder = regexp.MustCompile(`(?i)(file|path|dir|folder|page|doc|document|template|view|include|require|load|read|open|download|attach|name|src|target|log|report|export|image|img)`)
 
 // Plan is the ladder. Five probes minimum, seventeen typical, and every skip is named.
+// trvRound0For is round 0, lifted out of Plan so that the nothing-sent ladder can ask THE PLANNER
+// what this class derives for a slot instead of asserting an answer on its behalf. It is the
+// five-probe minimum plus this class's own decode probe; T0 and NC1 come first because they are
+// what make everything after them interpretable.
+//
+// IT TAKES THE SUBSTITUTION RATHER THAN BUILDING ONE. faSubstFor(slot) alone is NOT the same
+// substitution Plan uses: Plan then sets Sibling from the composed URL, and a round-0 list built
+// without it would render different bytes. Both callers build the substitution the same way, in
+// trvSubstFor, so there is one definition of it rather than two that can drift.
+func trvRound0For(key triage.SlotKey, sub faSubst) []triage.ProbeRequest {
+	return []triage.ProbeRequest{
+		faReq(trvDEC, key, sub),
+		faReq(trvT0, key, sub),
+		faReq(trvNC1, key, sub),
+		faReq(trvT1L, key, sub),
+		faReq(trvT1W, key, sub),
+		faReq(trvC1, key, sub),
+	}
+}
+
+// trvSubstFor is the one definition of this class's substitution. Plan and the nothing-sent
+// ladder both go through it so that the list one of them derives is the list the other counts.
+func trvSubstFor(slot triage.Slot, composedURL string) faSubst {
+	sub := faSubstFor(slot)
+	sub.Sibling = trvSiblingRoute(composedURL)
+	return sub
+}
+
 func (c traversalClassifier) Plan(ctx triage.PlanCtx) []triage.ProbeRequest {
 	if _, ok := faEligibleSlot(ctx.Slot); !ok {
 		return nil
@@ -429,27 +457,17 @@ func (c traversalClassifier) Plan(ctx triage.PlanCtx) []triage.ProbeRequest {
 		return nil
 	}
 
-	sub := faSubstFor(ctx.Slot)
-	sub.Sibling = trvSiblingRoute(ctx.Vector.ComposedURL)
+	sub := trvSubstFor(ctx.Slot, ctx.Vector.ComposedURL)
 	key := ctx.Slot.Key
 	kind := ctx.Slot.Kind
 	own := faOwn(ctx.Own)
 
 	switch ctx.Round {
 	case 0:
-		// The five-probe minimum plus this class's own decode probe. T0 and NC1 first because
-		// they are what make everything after them interpretable.
-		return []triage.ProbeRequest{
-			faReq(trvDEC, key, sub),
-			faReq(trvT0, key, sub),
-			faReq(trvNC1, key, sub),
-			faReq(trvT1L, key, sub),
-			faReq(trvT1W, key, sub),
-			faReq(trvC1, key, sub),
-		}
+		return trvRound0For(key, sub)
 	case 1:
-		if trvStopEarly(own) {
-			return nil
+		if reqs, handled := trvUnderStop(trvStopReason(own, ctx.Route.Obs().Body), own, key, sub); handled {
+			return reqs
 		}
 		reqs := []triage.ProbeRequest{
 			faReq(trvNC2, key, sub),
@@ -483,26 +501,21 @@ func (c traversalClassifier) Plan(ctx triage.PlanCtx) []triage.ProbeRequest {
 		}
 		return reqs
 	case 2:
-		if trvStopEarly(own) {
-			return nil
+		// THE STOP IS RE-CHECKED EVERY ROUND AND THE BLOCK READING OFTEN ONLY APPEARS HERE.
+		// MEASURED on /trav/blind, canary oracle, 2026-09-19: round 0 produces two escape
+		// responses on one body, which is not yet three distinct payloads, so round 1 runs the
+		// whole battery and it is ROUND 2 that first sees the block. A guard in round 1 alone
+		// therefore bought nothing: round 2 returned nil, the runner retired the class, and
+		// round 3 - which is where TR-C3a lives - was never called.
+		if reqs, handled := trvUnderStop(trvStopReason(own, ctx.Route.Obs().Body), own, key, sub); handled {
+			return reqs
 		}
-		// The encoder sweep. Same logical bytes, different encoder layer, and per the verified
-		// encoder facts these are genuinely different wire bytes. pct_once is requested ONLY on a
-		// path slot, because everywhere else it is byte-identical to none.
-		var reqs []triage.ProbeRequest
-		for _, enc := range trvEncoderSweep(kind) {
-			s := sub
-			s.Encoder = enc
-			reqs = append(reqs, faReq(trvT1L, key, s))
-		}
-		return reqs
+		return trvRound2(kind, own, key, sub)
 	case 3:
-		// The blind branch, and it runs only when the content probes were all silent. C1 is
-		// already sent and supplies the ENOENT arm, so this costs one request, not three.
-		if trvContentFired(own) || trvStopEarly(own) {
-			return nil
+		if reqs, handled := trvUnderStop(trvStopReason(own, ctx.Route.Obs().Body), own, key, sub); handled {
+			return reqs
 		}
-		return []triage.ProbeRequest{faReq(trvC3a, key, sub)}
+		return trvRound3(own, key, sub)
 	default:
 		return nil
 	}
@@ -584,13 +597,89 @@ func trvSkipHead(reason string) string {
 	return reason
 }
 
-// trvEncoderSweep is the per-slot encoder list, and pct_once is absent from every slot but a path
-// segment BECAUSE IT WAS MEASURED, not because it seemed redundant.
-func trvEncoderSweep(k triage.SlotKind) []string {
-	if k == triage.KindPath {
-		return []string{string(triage.EncodeLiteralPct), string(triage.EncodePctTwice), string(triage.EncodeIISUnicode)}
+// trvRound2 is the encoder sweep, plus the one thing round 2 must do when this slot kind has no
+// sweep to send.
+//
+// Same logical bytes, different encoder layer, and per the verified encoder facts these are
+// genuinely different wire bytes. pct_once is requested ONLY on a path slot, because everywhere
+// else it is byte-identical to none.
+//
+// AN EMPTY LIST HERE IS NOT "NOTHING LEFT TO DO", IT IS "NOTHING LEFT TO DO IN THIS ROUND", and
+// returning nil for it would cost the blind arm. trvUnderStop records the measurement: a round
+// that asks for nothing retires the class, and TR-C3a lives in round 3, so on /trav/blind a nil
+// round 2 meant round 3 was never called. trvEncoderSweep is empty on every slot kind but query
+// and path, so this is reachable, not hypothetical.
+func trvRound2(kind triage.SlotKind, own []faOwnObs, key triage.SlotKey, sub faSubst) []triage.ProbeRequest {
+	var reqs []triage.ProbeRequest
+	for _, enc := range trvEncoderSweep(kind) {
+		s := sub
+		s.Encoder = enc
+		reqs = append(reqs, faReq(trvT1L, key, s))
 	}
-	return []string{string(triage.EncodePctTwice), string(triage.EncodeIISUnicode)}
+	if len(reqs) > 0 {
+		return reqs
+	}
+	return trvRound3(own, key, sub)
+}
+
+// trvRound3 is the blind branch, and it runs only when the content probes were all silent. C1 is
+// already sent and supplies the ENOENT arm, so this costs one request, not three.
+//
+// It refuses to ask for TR-C3a twice. Round 2 calls it when this slot kind has no sweep, and
+// without the check round 3 would ask for the same probe again, burn a second ordinal against the
+// operator's budget and record two attempts at one measurement.
+func trvRound3(own []faOwnObs, key triage.SlotKey, sub faSubst) []triage.ProbeRequest {
+	if trvContentFired(own) {
+		return nil
+	}
+	if _, already := faFind(own, trvC3a); already {
+		return nil
+	}
+	return []triage.ProbeRequest{faReq(trvC3a, key, sub)}
+}
+
+// trvEncoderSweep is the per-slot encoder list. Both of its exclusions are MEASURED rather than
+// reasoned: pct_once is absent from every slot but a path segment because everywhere else it
+// renders byte-identically to none, and every mode is absent from every slot but a query and a
+// path because that is what the encoder accepts.
+//
+// THE COMMENT THAT USED TO BE HERE WAS TRUE WHEN IT WAS WRITTEN AND FALSE WHEN IT SHIPPED, and
+// the row quoting it went out 32 times in one exam. It said iis_unicode "IS ASKED FOR ON EVERY
+// QUERY AND PATH SLOT AND THE LAYER HAS NO IMPLEMENTATION OF IT", and that THIS CLASS'S CLEAN IS
+// UNREACHABLE ON EVERY QUERY AND PATH SLOT IN THE LAYER. It was: the round-4 confusion matrix
+// measured 44 TRAVERSAL cells across three insertion points and ZERO clean. Then
+// triage.EncodeIISUnicode was implemented in utils/triageEncode.go. triageIISUnicodeEscape
+// renders the overlong form of each separator, the dispatch switch routes the mode into a query
+// pair or a path segment by slot kind, and the four modes that still refuse by name are the XML
+// and multipart ones, which have no vector in the measured corpus. This comment was not updated.
+//
+// MEASURED AFTER IT LANDED, canary oracle, the 80-route exam: TRAVERSAL returns 32 clean, 46
+// cannot_determine, 1 finding and exactly ONE not_run, where the same exam had returned zero
+// clean and a not_run reading "incomplete: TR-T1L (no_response_under_encoder(iis_unicode))" on
+// every route that would otherwise have been clean. The hole this comment was written about is
+// closed, and trvResidueNotCovered no longer claims it.
+//
+// THE SLOT-KIND GUARD IS THE SAME HOLE ONE KIND OVER AND IT WAS STILL OPEN. utils/triageEncode.go
+// admits literal_pct, pct_twice and iis_unicode into a query or a path and into nothing else, so
+// a sweep that asked a header, cookie or body slot for pct_twice and iis_unicode bought two
+// encoder_mode_not_valid_for_slot_kind refusals, no observation, two holes in trvSweepGaps and a
+// guaranteed not_run: CLEAN WAS UNREACHABLE ON EVERY HEADER, COOKIE AND BODY SLOT, for the same
+// reason and by the same route. It was invisible because something else answers first on most of
+// those slots: MEASURED, round-4 matrix, 26 TRAVERSAL cells across header and JSON body slots, 16
+// no_probe_reached_the_wire, 4 baseline_unstable, 1 blocked, and FIVE that got far enough to
+// report value_insensitive. Those five reached the wire and were one endpoint-property away from
+// the clean branch, where the two sweep gaps were waiting. A hole hidden behind another failure
+// is still a hole. An empty sweep is handled in trvRound2, which sends the blind arm rather than
+// nothing, because a round that asks for nothing retires the class.
+func trvEncoderSweep(k triage.SlotKind) []string {
+	switch k {
+	case triage.KindPath:
+		return []string{string(triage.EncodeLiteralPct), string(triage.EncodePctTwice), string(triage.EncodeIISUnicode)}
+	case triage.KindQuery:
+		return []string{string(triage.EncodePctTwice), string(triage.EncodeIISUnicode)}
+	default:
+		return nil
+	}
 }
 
 // trvStopEarly implements the class's own early exits, all of which are about this class's own
@@ -598,15 +687,135 @@ func trvEncoderSweep(k triage.SlotKind) []string {
 //
 // A NEGATIVE FROM ONE PAYLOAD SAYS NOTHING ABOUT ANOTHER. The only stops are: a confirmed hit
 // (there is nothing left to learn), and a uniform block (there is nothing left to measure).
-func trvStopEarly(own []faOwnObs) bool {
+//
+// THE BASELINE IS AN ARGUMENT NOW, AND PASSING nil HERE WAS A FALSE STOP ON EVERY SLOT THAT
+// IGNORES ITS VALUE. MEASURED against the canary oracle, 2026-09-19, on the static index at `/`,
+// which takes a query parameter and discards it: round 0's six probes all came back BYTE-IDENTICAL
+// TO EACH OTHER, because they are also byte-identical to the page the route always serves.
+// faUniformBlock's baseline argument is the only thing that tells those two apart, and it skips a
+// response only when `len(baseline) > 0 && bytes.Equal(o.Body, baseline)`. With nil it skipped
+// nothing, three distinct payloads hashed to one body, and this class declared a uniform block on
+// an endpoint that was not blocking anything.
+//
+// The cost was not one wrong annotation. Rounds 1, 2 and 3 never ran, so:
+//
+//	TR-NC2  this class's OWN value-ignored control, the probe whose entire job is to recognise
+//	        exactly this endpoint, was never sent.
+//	TR-C3a  the EACCES arm, so the blind three-way differential  -  the one oracle in this class
+//	        that needs no file content to come back  -  was structurally unavailable.
+//	sweep   the encoder sweep, so the escape was untested under pct_twice and iis_unicode.
+//
+// The class then fell through to append_suspected and reported a precondition refusal. That is the
+// shape this brief is about: refusing BEFORE trying. Every caller now passes the route control,
+// which Plan has already proven resolved, so a response that merely equals the baseline can no
+// longer be counted as one third of a block.
+func trvStopEarly(own []faOwnObs, baseline []byte) bool {
+	return trvStopReason(own, baseline) != ""
+}
+
+// trvStopReason is trvStopEarly with the two reasons kept apart, because they do not license the
+// same stop and collapsing them cost this class its blind arm on the route the arm exists for.
+//
+// MEASURED, canary oracle, 2026-09-19, whole registry at full tier, per-slot cap 48: on
+// /trav/blind - THE ROUTE THIS CLASS'S OWN OracleCases DECLARE AS THE BLIND THREE-WAY'S POSITIVE -
+// the verdict was "blocked: three or more of this class's own distinct payloads produced
+// byte-identical non-baseline responses". Seventeen probes went out, TR-NC2 and TR-C3a were not
+// among them, and the finding the route was built to produce was never reachable.
+//
+// WHY THE BLOCK READING IS WRONG THERE. /trav/blind answers 200 {"bytes":1841} to a readable
+// path, 200 {"bytes":80} to every escape that lands on /etc/passwd, and 404 to a name that does
+// not exist. The escapes share one body, three or more distinct payloads hash to it, and
+// faUniformBlock returns true. That is not a filter answering. It is the three-way differential
+// this class is looking for, seen from the one angle that cannot tell it from /clean/waf's
+// identical 403.
+//
+// A CONFIRMED HIT STILL STOPS EVERYTHING, and that stop is sound: the class has its answer and
+// more requests buy nothing.
+//
+// A UNIFORM BLOCK STOPS THE SWEEP AND NOT THE BLIND ARM. The arm costs one request (TR-C3a; the
+// other two members already went out in round 0) and it carries its own guard that a block page
+// satisfies and a filesystem does not: NC1, which is './'+value and escapes nothing, must
+// reproduce the baseline, and all three arms must differ from each other AFTER the echo is
+// stripped. On /clean/waf, which 403s '../../etc/passwd' and answers the baseline to './hello',
+// NC1 reproduces the baseline and all three escape arms come back as the same 403, so the arm
+// runs and finds nothing - which is what this class's OracleCases already declare for it.
+func trvStopReason(own []faOwnObs, baseline []byte) string {
+	if trvConfirmedHit(own) {
+		return "confirmed_hit"
+	}
 	obs := make([]triage.Observation, 0, len(own))
 	for _, o := range own {
 		obs = append(obs, o.Obs)
 	}
-	if faUniformBlock(obs, nil) {
-		return true
+	if faUniformBlock(obs, baseline) {
+		return "uniform_block"
 	}
-	return trvConfirmedHit(own)
+	return ""
+}
+
+// trvRound1UnderStop is what round 1 does when the ladder has been stopped, as a pure function
+// of the reason, because Plan's own branch is unreachable from a test in this package: ctx.Own
+// and a resolved ctx.Route can only be built by the triage package holding the runner capability.
+// handled=false means nothing stopped the ladder and round 1 proceeds normally.
+func trvUnderStop(stop string, own []faOwnObs, key triage.SlotKey, sub faSubst) (reqs []triage.ProbeRequest, handled bool) {
+	switch stop {
+	case "confirmed_hit":
+		return nil, true
+	case "uniform_block":
+		// See trvStopReason. The sweep and the rest of the battery stay suppressed, which is what
+		// the block gate is for; the blind arm does not, because it is the one oracle here whose
+		// own controls a filter satisfies and a filesystem does not. Whatever already went out is
+		// dropped, so a later round that finds nothing left returns an empty list and the runner
+		// retires the class, which is the right outcome once the arm has what it needs.
+		return trvBlindMinimum(own, key, sub), true
+	}
+	return nil, false
+}
+
+// trvBlindMinimum is the probe set the blind three-way still needs when a uniform block has
+// stopped the rest of the ladder. TR-NC2 is the value-read witness the append and value-ignored
+// branches read, and TR-C3a is the EACCES arm. Both are sent in ROUND 1 rather than in their
+// usual rounds because the runner retires a class on the first round that plans nothing, so a
+// round 2 that returns nil would mean round 3 is never called.
+func trvBlindMinimum(own []faOwnObs, key triage.SlotKey, sub faSubst) []triage.ProbeRequest {
+	var out []triage.ProbeRequest
+	for _, id := range []triage.ProbeID{trvNC2, trvC3a} {
+		if _, sent := faFind(own, id); sent {
+			continue
+		}
+		out = append(out, faReq(id, key, sub))
+	}
+	return out
+}
+
+// trvValueIsRead answers "does this response depend on this slot's value at all", using TR-NC2 and
+// nothing else. It is a THREE-valued answer on purpose: the difference between "no" and "nobody
+// looked" is the difference between an elimination and an absence, and a boolean would have to
+// pick one of them to be the zero value.
+type trvRead int
+
+const (
+	trvReadUnknown trvRead = iota // NC2 was not sent, or came back unusable
+	trvReadNo                     // NC2 is indistinguishable from the control: the slot is discarded
+	trvReadYes                    // NC2 moved the response: the slot reaches something
+)
+
+func trvValueIsRead(honest []faOwnObs, route triage.Observation) trvRead {
+	nc2, ok := faFind(honest, trvNC2)
+	if !ok {
+		return trvReadUnknown
+	}
+	switch faCompare(nc2.Obs, route) {
+	case faCmpSame:
+		return trvReadNo
+	case faCmpDifferent:
+		return trvReadYes
+	default:
+		// no_body, degraded and unmeasured are all "the comparison could not be made". None of
+		// them is evidence either way, and reading one as a No would hand the caller an
+		// elimination built out of a failed measurement.
+		return trvReadUnknown
+	}
 }
 
 // trvContentFired reports whether any content signature fired on any of this class's escape
@@ -748,16 +957,15 @@ func (c traversalClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerd
 				"prelude_failed: the vector needs a token this run could not obtain, so every probe "+
 					"would have measured the login page",
 				"", triage.GradeUnrated, nil)
-		case ctx.Budget.Exhausted():
-			return one(triage.StateNotRun,
-				"probe_budget_exhausted: the slot or run cap was reached before this class sent anything",
-				"", triage.GradeUnrated, nil)
-		default:
-			return one(triage.StateNotPlanned,
-				"no traversal probe was derived for this slot and no reason above applies, which is "+
-					"itself the finding: report it rather than reading it as a clean",
-				"", triage.GradeUnrated, nil)
 		}
+		// THE LAST TWO ARMS LIVE IN pxNothingSentTail AND THE ORDER IS THE WHOLE POINT. See
+		// pxbudgetarm.go. This class's round 0 is a fixed six-probe minimum, so the derivation
+		// count is a constant here and the arm that moves is the reason on the budget one: it no
+		// longer claims an ordering between a plan-time decision and a classify-time read.
+		state, reason := pxNothingSentTail(ctx, len(trvRound0For(ctx.Slot.Key, trvSubstFor(ctx.Slot, ctx.Vector.ComposedURL))), "a traversal probe",
+			"no traversal probe was derived for this slot and no reason above applies, which is "+
+				"itself the finding: report it rather than reading it as a clean")
+		return one(state, reason, "", triage.GradeUnrated, nil)
 	}
 
 	// Fail closed on a vault refusal. If the set and the vault disagree about who owns a response
@@ -814,11 +1022,32 @@ func (c traversalClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerd
 	}
 
 	// Uniform block, reached from THIS CLASS'S OWN distinct payloads.
+	//
+	// THE BLIND THREE-WAY IS TRIED BEFORE THIS RUNG REFUSES, AND IT IS THE ONLY ORACLE THAT IS.
+	// See trvStopReason for the measurement: on /trav/blind, this class's own declared positive
+	// for that arm, the escapes that succeed all return one body, which is three or more distinct
+	// payloads on one non-baseline response and is read here as a filter. The arm's own guards
+	// are what separate the two readings and they are stricter than this one: NC1 must reproduce
+	// the baseline, which a filter blocking './'+value does not satisfy, and the three arms must
+	// differ FROM EACH OTHER after the echo is stripped, which one shared block page cannot do.
+	// So a fired arm outranks the block reading, and a silent or unavailable one leaves it
+	// exactly where it was.
 	if faUniformBlock(faObsOf(honest), baselines[0]) {
+		if v := trvBlindThreeWay(ctx.Route.Obs(), ctx.Route.Resolved(), ctx.Baseline.Stable,
+			ctx.Baseline.GateReason, ctx.Slot.Key, honest, ann, ords, skips); v != nil {
+			v[0].Reason += ". This endpoint also answered three or more of this class's distinct payloads " +
+				"with one byte-identical non-baseline body, which on its own reads as a uniform block. The " +
+				"three-way outranks that reading here: a filter answers the same page to all three arms, and " +
+				"these three differ from each other after the echo was stripped while './'+value reproduced " +
+				"the baseline"
+			return v
+		}
 		v := one(triage.StateCannotDetermine,
 			"blocked: three or more of this class's own distinct payloads produced byte-identical "+
-				"non-baseline responses, which is a filter answering rather than the application, so "+
-				"nothing was learned about the path sink",
+				"non-baseline responses. That is what a filter answering looks like AND what one canned "+
+				"error page for any malformed path looks like, and this class cannot separate them from "+
+				"these responses; what both have in common, and all this row asserts, is that nothing "+
+				"was learned about the path sink. "+trvBlindArmSentence(ann),
 			"", triage.GradeUnrated, ords)
 		v[0].Untested = skips
 		return v
@@ -840,17 +1069,9 @@ func (c traversalClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerd
 
 	// The controls. Each one names the detector it validates, and a control that fires makes the
 	// detector unverified rather than making the slot clean.
-	if nc2, ok := faFind(honest, trvNC2); ok && ctx.Route.Resolved() {
-		if faCompare(nc2.Obs, ctx.Route.Obs()) == faCmpSame {
-			v := one(triage.StateCannotDetermine,
-				"value_ignored: NC2 put a nonexistent subdirectory in front of the observed value and "+
-					"the response was identical to the baseline, so this slot discards its value and no "+
-					"traversal verdict about it would mean anything",
-				"", triage.GradeUnrated, ords)
-			v[0].Untested = skips
-			return v
-		}
-	}
+	//
+	// TR-NC2 USED TO BE ONE OF THEM AND IS NOT ANY MORE. It is now read at the bottom of the
+	// ladder, beside append_suspected, and the move is in trvValueInsensitiveReason.
 	if c1, ok := faFind(honest, trvC1); ok {
 		if p, _ := faMatchSignatures(live, c1.Obs.Body); len(p) > 0 {
 			ann["control_that_fired"] = "TR-C1 (" + p[0].Name + ")"
@@ -887,25 +1108,27 @@ func (c traversalClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerd
 	}
 
 	// T0's escape mechanics: annotations only. It never suppresses a probe.
-	dotsegResolved := false
-	if t0, ok := faFind(honest, trvT0); ok && ctx.Route.Resolved() {
-		switch faCompare(t0.Obs, ctx.Route.Obs()) {
-		case faCmpSame:
-			if _, echoed := faMarkerForm(t0.Obs.Body, t0.Marker); !echoed {
-				dotsegResolved = true
-				ann["dotseg_resolved"] = true
-				ann["os_family"] = "win32_or_resolved_lexically"
-			} else {
-				ann["dotseg_echoed"] = true
-			}
-		case faCmpDifferent:
-			if t0.Obs.Status >= 400 && t0.Obs.Status < 500 {
-				ann["os_family"] = "posix"
-				dotsegResolved = true
-				ann["dotseg_resolved"] = true
-			}
-		}
-	}
+	//
+	// THE SAME-AS-BASELINE ARM NEEDS A WITNESS THAT THE SLOT IS READ AT ALL, and it did not have
+	// one. T0 sends `<marker>/../<value>`. Coming back byte-identical to the route control with no
+	// marker echoed has TWO explanations and they are opposites:
+	//
+	//	(a) Win32 canonicalised `<marker>/../` away lexically and served the same page. Dot
+	//	    segments are resolved, the value reaches a path, and append_suspected is the honest
+	//	    refusal.
+	//	(b) the application discards this parameter, so EVERY payload comes back as the control and
+	//	    T0 is one more of them. Nothing was resolved and nothing reached a path.
+	//
+	// MEASURED, canary oracle 2026-09-19: on the static index at `/`, which is case (b) by
+	// construction, this branch chose (a) and the class reported append_suspected on a route that
+	// never looks at its query string. The reason named a mechanism that was not there.
+	//
+	// TR-NC2 is the witness, and this class already ships it: it is `<marker>/<value>`, T0 with the
+	// dot segments removed. If NC2 MOVES the response away from the control, the slot is read, and
+	// T0 collapsing back ONTO the control is then real evidence of lexical resolution. If NC2 is
+	// also identical to the control, the slot is value-insensitive and T0 measured nothing. No NC2
+	// at all is the third case and it is not the first: an unwitnessed inference is not made.
+	dotsegResolved := trvDotSegResolved(ctx.Route.Obs(), ctx.Route.Resolved(), honest, ann)
 
 	// ORACLE 1, rank 1: content, confirmed by the filename-tracking pair.
 	var hits []faSigHit
@@ -1034,16 +1257,45 @@ func (c traversalClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerd
 	}
 
 	// ORACLE 5, rank 5: the blind three-way. Nothing is read; only the class of error is observed.
-	if v := c.blind(ctx, honest, ann, ords, skips); v != nil {
+	if v := trvBlindThreeWay(ctx.Route.Obs(), ctx.Route.Resolved(), ctx.Baseline.Stable,
+		ctx.Baseline.GateReason, ctx.Slot.Key, honest, ann, ords, skips); v != nil {
 		return v
 	}
 
 	// From here down nothing fired. What remains is deciding which KIND of nothing it was.
+
+	// TR-NC2, THE VALUE-INSENSITIVITY READING, AND WHY IT MOVED DOWN HERE.
+	//
+	// It used to sit with the controls, above every oracle, and return immediately. Two things
+	// were wrong with that.
+	//
+	// (1) THE SENTENCE NAMED A MECHANISM NOBODY MEASURED. It read "so this slot discards its
+	// value", which is one of two explanations and is FALSE on a route in our own corpus.
+	// MEASURED, canary oracle, 2026-09-19: /trav/append READS the value, appends an extension and
+	// returns ENOENT, and it returns the same ENOENT to the baseline value, so NC2 is
+	// byte-identical to the route control and this rung fired. The slot is read there. It is the
+	// RESPONSE that does not depend on it. The other explanation - a sink whose result never
+	// reaches the response - is a blind file read, which is exactly what this class cannot see,
+	// so the state is right and only the claim was wrong.
+	//
+	// (2) IT PREEMPTED EVERY ORACLE BELOW IT, and NC2 is evidence about NC2. It carries no escape
+	// and no dot segments: it says the response did not move for THAT payload. TR-T1L returning
+	// the contents of /etc/passwd would have been reported as value_ignored, and so would a blind
+	// three-way in which the escapes separate while a plain prefixed name does not. Measured
+	// scale: this rung fired on 10 of the 18 query routes in our own corpus, so whatever it hid
+	// it hid on more than half of them.
+	//
+	// Down here it is what it always was on the merits: a reason a silence is not a clean.
 	if ctx.Baseline.Degraded {
 		v := one(triage.StateCannotDetermine,
 			"degraded: the comparison was degraded (an oversized, truncated or untokenisable body), "+
 				"and a degraded comparison can never produce a clean",
 			"", triage.GradeUnrated, ords)
+		v[0].Untested = skips
+		return v
+	}
+	if why := trvValueInsensitiveReason(ctx.Route.Obs(), ctx.Route.Resolved(), honest, ann); why != "" {
+		v := one(triage.StateCannotDetermine, why, "", triage.GradeUnrated, ords)
 		v[0].Untested = skips
 		return v
 	}
@@ -1086,17 +1338,49 @@ func (c traversalClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerd
 		"three distinct payloads did not collide on one response",
 		"the comparison was not degraded",
 	}
-	ann["residue_not_covered"] = []string{
-		"a WAF that strips '../' recursively AND tolerates neither the overlong nor the double-encoded form",
-		"a signed or JWT-wrapped slot, which is signed_wrapper and not this",
-		"filter evasion beyond three encoders, which is the confirmation tool's job by design",
-	}
+	ann["residue_not_covered"] = trvResidueNotCovered(ctx.Slot.Kind)
 	v := one(triage.StateClean,
 		"this class's own probes ran, reached the wire, and its own oracles stayed silent with the "+
 			"preconditions in the annotations all holding",
 		"", triage.GradeUnrated, ords)
 	v[0].Untested = skips
 	return v
+}
+
+// trvResidueNotCovered is what a TRAVERSAL clean does NOT cover, and it is a function rather than
+// a literal inside Classify so that a test can read it. A residue list nobody can read from a test
+// is a paragraph, not a caveat.
+//
+// ITS FIRST ENTRY USED TO BE FALSE, AND IT WAS FALSE FOR A WHOLE RUN. It read "the iis_unicode
+// encoder, which this layer declares and does not implement, so the overlong %c0%af form of the
+// escape has never been sent on any slot". The encoder was implemented in utils/triageEncode.go
+// and watched delivering in the same round that sentence was left alone, and the exam then
+// produced 32 TRAVERSAL cleans where it had produced zero: 32 rows each asserting that the thing
+// which had just unblocked them had never run. A caveat is a claim about the run that carries it
+// and it goes stale exactly the way a verdict does.
+//
+// WHAT IS TRUE NOW, and it is narrower and more useful than what it replaces. THE SWEEP RE-SENDS
+// ONE PROBE. Round 2 asks for TR-T1L once per mode in trvEncoderSweep and asks for nothing else,
+// so the overlong and the double-encoded forms exist for the single '../' escape and for no other
+// payload in this class: the deep, appended, semicolon, UNC and overlong-literal payloads each
+// went out in exactly one encoding. That is a real hole, it is this class's own by choice, and it
+// is what an operator needs before pointing the confirmation tool somewhere else.
+func trvResidueNotCovered(k triage.SlotKind) []string {
+	out := []string{
+		"a WAF that strips '../' recursively AND tolerates neither the overlong nor the double-encoded form",
+		"a signed or JWT-wrapped slot, which is signed_wrapper and not this",
+		"filter evasion beyond the swept encoders, which is the confirmation tool's job by design",
+	}
+	sweep := trvEncoderSweep(k)
+	if len(sweep) == 0 {
+		return append(out, "any alternative encoding of any payload. trvEncoderSweep is empty on a "+
+			string(k)+" slot, because literal_pct, pct_twice and iis_unicode each render into a query "+
+			"or a path and into nothing else, so every payload here went out in exactly one form and "+
+			"this clean is a clean about that one form")
+	}
+	return append(out, "the swept encodings ("+strings.Join(sweep, ", ")+") of every payload but "+
+		"TR-T1L. Round 2 re-sends ONE probe, the single '../' escape, once per mode; the deep, "+
+		"appended, semicolon, UNC and overlong-literal payloads each went out in one encoding")
 }
 
 // blind is the three-way error differential, and it is this class's only answer when the file is
@@ -1107,22 +1391,34 @@ func (c traversalClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerd
 // payloads have different lengths and an echoing endpoint would otherwise fire it on every slot.
 // And it needs NC1 to match the baseline, because that is what says the slot is not simply
 // erroring on everything.
-func (traversalClassifier) blind(ctx triage.ClassifyCtx, honest []faOwnObs, ann map[string]any, ords []uint64, skips []triage.ProbeSkip) []triage.ClassVerdict {
+//
+// ITS FACTS ARE PARAMETERS AND NOT A ClassifyCtx, for the reason every rule in this file is
+// written that way: a classifier in this package cannot build a resolved Replay or a populated
+// baseline model, so an arm that reads them off ctx is an arm whose only reachable branch in a
+// test is the one that declines. This one is now scored at two rungs - above the uniform-block
+// refusal and in its own place at rank 5 - so an untestable version would be two untestable
+// versions.
+func trvBlindThreeWay(route triage.Observation, routeOK, stable bool, gateReason string,
+	slotKey triage.SlotKey, honest []faOwnObs, ann map[string]any, ords []uint64,
+	skips []triage.ProbeSkip) []triage.ClassVerdict {
 	eacces, okA := faFind(honest, trvC3a)
 	enoent, okB := faFind(honest, trvC1)
 	readable, okC := faFind(honest, trvT1L)
 	if !okA || !okB || !okC {
 		return nil
 	}
-	if !ctx.Baseline.Stable {
-		ann["blind_oracle"] = "not_run: the stability gate was " + ctx.Baseline.GateReason +
+	if !stable {
+		ann["blind_oracle"] = "not_run: the stability gate was " + gateReason +
 			", and a rank 5 differential on an endpoint that differs from itself proves nothing"
 		return nil
 	}
-	if nc1, ok := faFind(honest, trvNC1); ok && ctx.Route.Resolved() {
-		if faCompare(nc1.Obs, ctx.Route.Obs()) != faCmpSame {
-			ann["blind_oracle"] = "not_run: NC1 did not reproduce the baseline, so the endpoint " +
-				"reacts to any unfamiliar value and the three-way difference would not be about the filesystem"
+	if nc1, ok := faFind(honest, trvNC1); ok && routeOK {
+		if faCompare(nc1.Obs, route) != faCmpSame {
+			ann["blind_oracle"] = "not_run: TR-NC1, which names a path that cannot exist, did not " +
+				"reproduce the baseline, so this endpoint's response already depends on the value for " +
+				"some reason that is not a file read, and the three-way difference could not be " +
+				"attributed to the filesystem. WHETHER it reacts to every unfamiliar value or only to " +
+				"this one is not measured here and this annotation does not claim it"
 			return nil
 		}
 	}
@@ -1150,7 +1446,7 @@ func (traversalClassifier) blind(ctx triage.ClassifyCtx, honest []faOwnObs, ann 
 	}
 	if differing >= 1 && maskedOnly > 0 {
 		v := []triage.ClassVerdict{{
-			Class: triage.ClassTraversal, SlotKey: ctx.Slot.Key, State: triage.StateMaskedOnly,
+			Class: triage.ClassTraversal, SlotKey: slotKey, State: triage.StateMaskedOnly,
 			Reason: "the three error conditions differ, but at least one pair's difference disappears " +
 				"once the echoed payload is removed, so the endpoint may be reflecting rather than opening",
 			Oracle: "blind_three_way", Grade: triage.GradeLow, Ordinals: ords,
@@ -1159,7 +1455,7 @@ func (traversalClassifier) blind(ctx triage.ClassifyCtx, honest []faOwnObs, ann 
 		return v
 	}
 	return []triage.ClassVerdict{{
-		Class: triage.ClassTraversal, SlotKey: ctx.Slot.Key, State: triage.StateFinding,
+		Class: triage.ClassTraversal, SlotKey: slotKey, State: triage.StateFinding,
 		Reason: "blind_traversal: a path that exists and cannot be read, a path that does not exist, " +
 			"and a path that can be read produced responses that differ from each other after the echo " +
 			"was stripped, while './'+value reproduced the baseline. The application is performing a " +
@@ -1167,6 +1463,152 @@ func (traversalClassifier) blind(ctx triage.ClassifyCtx, honest []faOwnObs, ann 
 		Oracle: "blind_three_way", Grade: triage.GradeMedium, Ordinals: ords,
 		Annotations: ann, Untested: skips, Label: trvLabel(ann),
 	}}
+}
+
+// trvDotSegResolved is the dot-segment inference: did TR-T0's `<marker>/../<value>` show this
+// endpoint RESOLVING the dot segments, which is what says the value reaches a path and is the
+// only thing append_suspected below rests on.
+//
+// IT IS A FUNCTION SO BOTH OF ITS BRANCHES ARE REACHABLE FROM A TEST. Neither was: the inference
+// was inline in Classify, and a classifier cannot build a resolved ctx.Route in this package.
+// That is how the 4xx branch shipped without the witness the same-as-baseline branch had.
+//
+// THE SAME-AS-BASELINE BRANCH. T0 coming back byte-identical to the route control with no marker
+// echoed has TWO explanations and they are opposites:
+//
+//	(a) Win32 canonicalised `<marker>/../` away lexically and served the same page. Dot segments
+//	    are resolved, the value reaches a path, and append_suspected is the honest refusal.
+//	(b) the application discards this parameter, so EVERY payload comes back as the control and
+//	    T0 is one more of them. Nothing was resolved and nothing reached a path.
+//
+// MEASURED, canary oracle 2026-09-19: on the static index at `/`, which is case (b) by
+// construction, this branch chose (a) and the class reported append_suspected on a route that
+// never looks at its query string. TR-NC2 is the witness and this class already ships it: it is
+// `<marker>/<value>`, T0 with the dot segments removed. If NC2 MOVES the response, the slot is
+// read and T0 collapsing back onto the control is real evidence of lexical resolution. No NC2 at
+// all is the third case and it is not the first: an unwitnessed inference is not made.
+//
+// THE 4xx BRANCH HAD NO WITNESS AT ALL AND THAT ASYMMETRY IS THE DEFECT. Its inference is that a
+// POSIX kernel resolved `..` against a `<marker>` directory that does not exist, the open failed,
+// and the 4xx is evidence the value reached a path. True on a stack that opens files. But
+// "answers 4xx to a value it has not seen before" is the commonest behaviour a JSON API has and
+// it produces the identical observation. MEASURED on the operator's live JSON REST API: this
+// branch fired on EVERY slot and the class reported append_suspected on all of them, naming a
+// filesystem mechanism it had not measured. A gate that fires everywhere is not a gate.
+//
+// TR-NC1 IS ITS WITNESS AND THIS CLASS ALREADY SHIPS IT TOO. It is `./`+value: no escape, no
+// nonexistent prefix, the same file the baseline asked for. A stack that really is opening files
+// answers it exactly as the baseline. A route that 4xxs anything unfamiliar 4xxs this too, and
+// then T0's status is about unfamiliarity and not about dot segments. It is the same witness the
+// blind three-way already requires, so the two arms now rest on one fact rather than two
+// different standards.
+func trvDotSegResolved(route triage.Observation, routeOK bool, honest []faOwnObs, ann map[string]any) bool {
+	dotsegResolved := false
+	if t0, ok := faFind(honest, trvT0); ok && routeOK {
+		switch faCompare(t0.Obs, route) {
+		case faCmpSame:
+			if _, echoed := faMarkerForm(t0.Obs.Body, t0.Marker); !echoed {
+				switch trvValueIsRead(honest, route) {
+				case trvReadYes:
+					dotsegResolved = true
+					ann["dotseg_resolved"] = true
+					ann["os_family"] = "win32_or_resolved_lexically"
+				case trvReadNo:
+					ann["dotseg_unmeasurable"] = "value_insensitive: TR-T0 came back identical to the " +
+						"route control and so did TR-NC2, which carries no dot segments at all, so this " +
+						"slot does not change the response and T0 witnessed no resolution"
+				default:
+					ann["dotseg_unmeasurable"] = "no_witness: TR-T0 came back identical to the route " +
+						"control and TR-NC2, the probe that would say whether this slot is read at all, " +
+						"produced no honest response, so lexical resolution is not inferred from a " +
+						"sameness that has two explanations"
+				}
+			} else {
+				ann["dotseg_echoed"] = true
+			}
+		case faCmpDifferent:
+			// THE 4xx BRANCH HAD NO WITNESS AND THE SAME-AS-BASELINE BRANCH ABOVE HAS ONE. That
+			// asymmetry is the whole defect here.
+			//
+			// The inference is: T0 sends `<marker>/../<value>`, a POSIX kernel resolves `..`
+			// against a `<marker>` directory that does not exist, the open fails, and the 404 is
+			// evidence that the value reached a path. True on a stack that opens files. But
+			// "answers 4xx to a value it has not seen before" is the commonest behaviour a JSON
+			// API has, and it produces the identical observation. MEASURED on the operator's live
+			// JSON REST API: this branch fired on EVERY slot, dotsegResolved was true everywhere,
+			// and the class reported append_suspected on all of them, naming a filesystem
+			// mechanism it had not measured. A gate that fires everywhere is not a gate.
+			//
+			// TR-NC1 IS THE WITNESS AND THIS CLASS ALREADY SHIPS IT. It is `./`+value: no escape,
+			// no nonexistent prefix, the same file the baseline asked for. A stack that really is
+			// opening files answers it exactly as the baseline. A route that 4xxs anything
+			// unfamiliar 4xxs this too, and then the 4xx on T0 is about unfamiliarity and not
+			// about dot segments. It is the same witness the blind three-way below already
+			// requires, for the same reason, so the two arms now rest on one fact rather than on
+			// two different standards.
+			if t0.Obs.Status >= 400 && t0.Obs.Status < 500 {
+				nc1, haveNC1 := faFind(honest, trvNC1)
+				switch {
+				case !haveNC1:
+					ann["dotseg_unmeasurable"] = "no_witness: TR-T0 came back 4xx and different from the " +
+						"route control, and TR-NC1, the './'+value probe that would say whether this " +
+						"endpoint answers 4xx to anything unfamiliar, produced no honest response. A " +
+						"filesystem mechanism is not inferred from a status code with two explanations"
+				case faCompare(nc1.Obs, route) == faCmpSame:
+					ann["os_family"] = "posix"
+					dotsegResolved = true
+					ann["dotseg_resolved"] = true
+					ann["dotseg_witness"] = "TR-NC1 ('./'+value, which escapes nothing) reproduced the " +
+						"route control, so this endpoint does not answer 4xx to every unfamiliar value " +
+						"and TR-T0's 4xx is attributable to the dot segments"
+				default:
+					ann["dotseg_unmeasurable"] = "value_sensitive_4xx: TR-T0 came back 4xx and different " +
+						"from the route control, but so did TR-NC1, which is './'+value and escapes " +
+						"nothing. This endpoint reacts to an unfamiliar value on its own, so T0's status " +
+						"is not evidence that dot segments were resolved"
+				}
+			}
+		}
+	}
+	return dotsegResolved
+}
+
+// trvValueInsensitiveReason is the TR-NC2 reading: a nonexistent subdirectory in front of the
+// observed value and the response still byte-identical to the route control. See the call site
+// for why it is read at the bottom of the ladder and not with the controls.
+func trvValueInsensitiveReason(route triage.Observation, routeOK bool, honest []faOwnObs, ann map[string]any) string {
+	nc2, ok := faFind(honest, trvNC2)
+	if !ok || !routeOK {
+		return ""
+	}
+	if faCompare(nc2.Obs, route) != faCmpSame {
+		return ""
+	}
+	ann["value_insensitive"] = true
+	return "value_insensitive: NC2 put a nonexistent subdirectory in front of the observed value and the " +
+		"response was still byte-identical to the route control, so this endpoint's response does not " +
+		"depend on this slot, and every oracle above ran and stayed silent. Two things look like that and " +
+		"this class cannot tell them apart from an HTTP response: the slot is discarded before it reaches " +
+		"any sink, or it reaches one whose result never reaches the response. The second is a blind file " +
+		"read, which is the case this class is structurally unable to see, so this is NOT a clean. " +
+		trvBlindArmSentence(ann)
+}
+
+// trvBlindArmSentence is what the blind three-way contributes to a row it did not win. It is a
+// sentence and not a flag because the operator reading the row decides from it whether to spend a
+// tool run, and "the arm ran and was quiet" and "the arm could not run" send them to two
+// different places. blind() writes ann["blind_oracle"] on every path where it declines; reaching
+// the end of it without that key set means it ran.
+func trvBlindArmSentence(ann map[string]any) string {
+	if why, ok := ann["blind_oracle"].(string); ok {
+		return "The blind three-way did not run: " + why
+	}
+	if n, ok := ann["blind_pairs_differing_after_echo_strip"].(int); ok {
+		return "The blind three-way DID run and separated " + strconv.Itoa(n) + " of its three pairs after " +
+			"the echo was stripped, which was not enough to fire"
+	}
+	return "The blind three-way was not reached on this row, because one of its three arms (TR-C3a, " +
+		"TR-C1, TR-T1L) produced no honest response here"
 }
 
 // trvDisclosed applies the two-condition path-disclosure rule.
@@ -1340,11 +1782,13 @@ func (traversalClassifier) OracleCases() []faOracleCase {
 			Why: "already serves a canned passwd with ARS0N_CANARY_OK in the gecos field",
 		},
 		{
-			Name: "traversal_appends_extension", Route: "/trav/append", Expect: faExpectPositive, Exists: false,
+			Name: "traversal_appends_extension", Route: "/trav/append", Expect: faExpectPositive, Exists: true,
 			Probes: []triage.ProbeID{trvT1L}, WantState: triage.StateFinding,
-			Why: "appends '.json' to whatever it is given, so every content probe 404s and ONLY the " +
-				"path-disclosure oracle can fire. It is the route that proves the highest-yield oracle on " +
-				"a hardened application actually works",
+			Why: "appends '.html' to whatever it is given unless the value carries a NUL, which ends the " +
+				"filename the way a C string does and reaches etc/passwd. MEASURED 2026-09-19: the route " +
+				"exists now and this class reported cannot_determine (value_ignored) on it for a whole " +
+				"round, because NC2 also comes back as the baseline here and that reading sat ABOVE every " +
+				"oracle. The truncation probe was returning the file the whole time",
 		},
 		{
 			Name: "baseline_already_shows_passwd", Route: "/clean/passwddoc", Expect: faExpectNegative, Exists: false,
@@ -1354,11 +1798,12 @@ func (traversalClassifier) OracleCases() []faOracleCase {
 				"and must NOT report a finding and must NOT report a clean",
 		},
 		{
-			Name: "parameter_is_discarded", Route: "/trav/ignored", Expect: faExpectNegative, Exists: false,
+			Name: "parameter_is_discarded", Route: "/trav/ignored", Expect: faExpectNegative, Exists: true,
 			Probes: []triage.ProbeID{trvNC2}, WantState: triage.StateCannotDetermine,
 			Why: "the parameter is thrown away entirely, so NC2 comes back same as baseline and the " +
-				"verdict must be value_ignored. This is the control most scanners omit and it is what " +
-				"separates a real clean from a slot nobody reads",
+				"verdict must be value_insensitive. This is the control most scanners omit and it is what " +
+				"separates a real clean from a slot nobody reads. It is read at the BOTTOM of the ladder: " +
+				"/trav/append produces the identical observation and is a live traversal",
 		},
 		{
 			Name: "uniform_block_page", Route: "/clean/waf", Expect: faExpectNegative, Exists: true,
@@ -1375,11 +1820,12 @@ func (traversalClassifier) OracleCases() []faOracleCase {
 				"detector",
 		},
 		{
-			Name: "blind_read_no_content", Route: "/trav/blind", Expect: faExpectPositive, Exists: false,
+			Name: "blind_read_no_content", Route: "/trav/blind", Expect: faExpectPositive, Exists: true,
 			Probes: []triage.ProbeID{trvT1L, trvC3a, trvC1}, WantState: triage.StateFinding,
 			Why: "opens the named path, returns no content, and answers with three distinguishable " +
-				"error shapes for readable, unreadable and absent. Without it the blind oracle has never " +
-				"been observed firing at all",
+				"error shapes for readable, unreadable and absent. MEASURED 2026-09-19: the escapes that " +
+				"succeed all share one body, which faUniformBlock reads as a filter, and the whole ladder " +
+				"stopped at round 2 with TR-C3a unsent. See trvStopReason",
 		},
 		{
 			Name: "500_on_everything", Route: "/clean/always500", Expect: faExpectNegative, Exists: true,

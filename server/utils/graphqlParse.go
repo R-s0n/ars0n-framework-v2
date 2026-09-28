@@ -80,7 +80,10 @@ func graphqlNotTested(row vectorRow, tool, output string) []VectorFinding {
 	reason := "graphql-cop decided this endpoint is not running GraphQL and skipped every check. " +
 		"That is not a clean result: nothing was tested. If you know GraphQL is there, turn on " +
 		"\"Scan even when GraphQL is not detected\"."
-	if trimmed := strings.TrimSpace(output); trimmed != "" && len(trimmed) < 400 {
+	// WHATEVER IT SAID, HOWEVER LONG. The length gate here was backwards: a tool that printed 400
+	// characters explaining why it refused had all of them dropped, and the operator was left with
+	// a generic sentence and no way to tell a detection miss from a broken invocation.
+	if trimmed := strings.TrimSpace(output); trimmed != "" {
 		reason += " It said: " + trimmed
 	}
 	return []VectorFinding{{

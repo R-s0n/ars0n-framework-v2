@@ -529,3 +529,120 @@ func TestTheLabelSaysACallbackWithoutContentBelongsToSSRF(t *testing.T) {
 			"the fact that keeps this class alive when allow_url_include is off")
 	}
 }
+
+// ------------------------------------------------------------------------------------------------
+// THE CLEAN'S SECOND HALF IS A BODY SEARCH, AND IT HAD NO PRECONDITION
+// ------------------------------------------------------------------------------------------------
+
+// rfiFetchObs is one of this class's own responses after the collaborator has already called
+// back, so the only question left is whether the served bytes came back in the body.
+func rfiFetchObs(id triage.ProbeID, status int, body string) faOwnObs {
+	return faOwnObs{
+		ProbeID: id,
+		Obs: triage.Observation{
+			ObsID: string(id), Status: status, Body: []byte(body), BodyLen: len(body),
+			Proj:    triage.Projections{NormBodySHA256: rfiTestNorm(body)},
+			Payload: triage.PayloadWire{Wire: []byte(id), Survived: triage.WireSurvivalIntact},
+		},
+	}
+}
+
+// rfiTestNorm stands in for the runner's normalised body hash. faCompare prefers it and falls
+// back to the structural projection, and an observation carrying NEITHER compares as degraded
+// rather than as same, which is correct of the real thing and would make these fixtures measure
+// something other than what they claim.
+func rfiTestNorm(body string) [32]byte {
+	var norm [32]byte
+	for i, b := range []byte(body) {
+		norm[i%32] ^= b + byte(i)
+	}
+	return norm
+}
+
+func rfiRouteControl(status int, body string) triage.Observation {
+	return triage.Observation{ObsID: "route-control", Status: status, Body: []byte(body),
+		BodyLen: len(body), Proj: triage.Projections{NormBodySHA256: rfiTestNorm(body)}}
+}
+
+// A CALLBACK PROVES THE FETCH AND SAYS NOTHING ABOUT WHETHER THERE WAS A BODY TO SEARCH.
+//
+// This class's clean is two halves: the callback (out of band) and the absence of the served
+// thirty-two bytes (a search of the RESPONSE BODY). The second half is a pxReadsBody negative and
+// it shipped with no precondition at all, so "the served bytes were absent from the response in
+// every transform form searched" was allowed to be a statement about zero bytes.
+func TestAFetchWithNoBodyToSearchIsNotAnRFIClean(t *testing.T) {
+	honest := []faOwnObs{
+		rfiFetchObs(rfiR1, 204, ""),
+		rfiFetchObs(rfiNC1, 204, ""),
+	}
+	state, reason, _, _ := rfiAfterTheFetch(honest, rfiRouteControl(204, ""), true)
+	if state.CountsAsClean() {
+		t.Fatalf("RFI reported %s after a proven fetch into an endpoint that returned NO BODY AT ALL. "+
+			"The half of this clean that disproves the inclusion is a search of the response body, and "+
+			"it searched nothing: %s", state, reason)
+	}
+	if !strings.Contains(reason, "no_body_to_read") {
+		t.Errorf("the refusal does not name the empty surface it measured: %s", reason)
+	}
+}
+
+// AND THE OTHER ARM: an endpoint already failing hands back its error page, and the inclusion
+// this class would have seen is not in an error page whether or not it happened.
+func TestAFetchIntoAnAlreadyFailingEndpointIsNotAnRFIClean(t *testing.T) {
+	page := "<h1>Something went wrong</h1>"
+	honest := []faOwnObs{
+		rfiFetchObs(rfiR1, 500, page),
+		rfiFetchObs(rfiNC1, 500, page),
+	}
+	state, reason, _, _ := rfiAfterTheFetch(honest, rfiRouteControl(500, page), true)
+	if state.CountsAsClean() {
+		t.Fatalf("RFI reported %s after a proven fetch into an endpoint whose UNPERTURBED control "+
+			"returns the same error page. The fetch happened and the page searched is the failure's, "+
+			"so the inclusion is unproven in both directions: %s", state, reason)
+	}
+	if !strings.Contains(reason, "control_already_failing") {
+		t.Errorf("the refusal does not name control_already_failing: %s", reason)
+	}
+}
+
+// THE NARROWNESS, AND IT MATTERS MORE HERE THAN ANYWHERE. This class reaches clean on almost
+// nothing: a callback has to have arrived. Refusing one more shape than is warranted would take
+// the only conclusion it can draw.
+func TestAFetchIntoAnEndpointWithARealBodyStillReachesTheRFIClean(t *testing.T) {
+	honest := []faOwnObs{
+		rfiFetchObs(rfiR1, 200, "<html><body>nothing of yours here</body></html>"),
+		rfiFetchObs(rfiNC1, 200, "<html><body>nothing of yours here</body></html>"),
+	}
+	state, reason, oracle, preconds := rfiAfterTheFetch(honest, rfiRouteControl(200, "<html></html>"), true)
+	if state != triage.StateClean {
+		t.Fatalf("state %s, want clean: a callback proved the fetch, the endpoint returned a real "+
+			"body, and the served bytes were not in it: %s", state, reason)
+	}
+	if oracle != "callback_without_content" {
+		t.Errorf("oracle %q", oracle)
+	}
+	if len(preconds) == 0 {
+		t.Error("the clean does not name its preconditions")
+	}
+}
+
+// AND THE ARM THE 5xx TEST ABOVE CANNOT REACH. An endpoint that refuses the control and refuses
+// every one of this class's probes identically hands back the same refusal page to all of them,
+// and a fetch that WAS proven by a callback cannot be shown included or not included in it.
+func TestAFetchIntoAnEndpointThatRefusesEveryoneIsNotAnRFIClean(t *testing.T) {
+	page := `{"error":"unauthorized"}`
+	honest := []faOwnObs{
+		rfiFetchObs(rfiR1, 401, page),
+		rfiFetchObs(rfiH1, 401, page),
+		rfiFetchObs(rfiNC1, 401, page),
+	}
+	state, reason, _, _ := rfiAfterTheFetch(honest, rfiRouteControl(401, page), true)
+	if state.CountsAsClean() {
+		t.Fatalf("RFI reported %s after a proven fetch into an endpoint that answered 401 to the "+
+			"unperturbed control and to every probe alike. The body searched is the refusal's page: %s",
+			state, reason)
+	}
+	if !strings.Contains(reason, "control_refuses_everyone") {
+		t.Errorf("the refusal does not name control_refuses_everyone: %s", reason)
+	}
+}

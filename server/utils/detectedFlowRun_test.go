@@ -1263,10 +1263,21 @@ func TestDetectedFlowRunResolvesEngagementConfigAndFailsClosed(t *testing.T) {
 
 // Redirects must not be followed. A detected flow already contains the destination of every redirect
 // as its own node, so following one sends that destination twice.
+//
+// THE MECHANISM CHANGED AND SO DID THIS TEST. It used to grep for http.ErrUseLastResponse, which
+// turned out to guarantee nothing: net/http parses the Location header BEFORE it consults
+// CheckRedirect, so a 3xx whose Location will not parse as a URL made Client.Do return an error
+// and throw the response away with CheckRedirect never called. The sender now goes through
+// NoFollowClient, which never enters that loop at all.
 func TestDetectedFlowRunDoesNotFollowRedirects(t *testing.T) {
 	body := dfrSource(t)
-	if !strings.Contains(body, "http.ErrUseLastResponse") {
-		t.Error("the sender must capture 3xx rather than following it")
+	if !strings.Contains(body, "NewNoFollowClient") {
+		t.Error("the sender must capture 3xx rather than following it, and it must do so with a " +
+			"NoFollowClient: CheckRedirect alone does not keep a 3xx whose Location will not parse")
+	}
+	if strings.Contains(body, "http.ErrUseLastResponse") {
+		t.Error("ErrUseLastResponse is back, which means the redirect loop is reachable again and " +
+			"a 3xx with an unparseable Location can be discarded before anything sees it")
 	}
 }
 
@@ -1333,10 +1344,12 @@ func TestDetectedFlowRunSnapshotDoesNotShareStepsWithTheRun(t *testing.T) {
 }
 
 // A poll every second must not carry megabytes, and the preview must never read as the whole body.
+// A FINISHED run is not a poll: it answers with the whole body whatever the query string says.
 func TestDetectedFlowRunSnapshotTruncatesBodiesUnlessAsked(t *testing.T) {
 	nodes := []detectedFlowNode{dfrRoot("root", "GET", "https://app.example.com/x")}
 	run := dfrReport(dfrPlan(nodes, DetectedFlowRunOptions{}))
 	run.RunID = "bodies-test"
+	run.Status = detectedFlowRunRunning
 	run.Steps[0].ResponseBody = strings.Repeat("a", detectedFlowBodyPreview*3)
 	run.Steps[0].ResponseBytes = detectedFlowBodyPreview * 3
 
@@ -1363,6 +1376,23 @@ func TestDetectedFlowRunSnapshotTruncatesBodiesUnlessAsked(t *testing.T) {
 	if len(full.Steps[0].ResponseBody) != detectedFlowBodyPreview*3 {
 		t.Fatalf("bodies=1 must return the whole stored body, got %d bytes",
 			len(full.Steps[0].ResponseBody))
+	}
+
+	// The run is over, and the client's last poll carries no bodies=1. Clipping this answer would
+	// leave the response the operator ran the flow to see reachable only from a URL nothing builds,
+	// in a run that is retired half an hour later.
+	for _, status := range []string{
+		detectedFlowRunCompleted, detectedFlowRunStopped, detectedFlowRunCancelled,
+	} {
+		run.Status = status
+		done := reg.snapshot(run.RunID, false)
+		if len(done.Steps[0].ResponseBody) != detectedFlowBodyPreview*3 {
+			t.Fatalf("a %s run must hand back the whole body without bodies=1, got %d bytes",
+				status, len(done.Steps[0].ResponseBody))
+		}
+		if done.Steps[0].BodyTruncated {
+			t.Errorf("a %s run returned the whole body but flagged it truncated", status)
+		}
 	}
 }
 

@@ -141,6 +141,9 @@ func parseGitManifest(stdout, report string, row vectorRow, tool string) []Vecto
 	}
 	evidence += " from " + gitURLFor(row.EvidenceURL) + "."
 	if len(files) > 0 {
+		// A readable lead-in only. The COMPLETE file list is on RawResponse below, because a
+		// recovered repository is judged by what is in it and eight names out of four hundred
+		// decide nothing.
 		evidence += " Including: " + strings.Join(trimList(files, 8), ", ") + "."
 	}
 
@@ -156,7 +159,11 @@ func parseGitManifest(stdout, report string, row vectorRow, tool string) []Vecto
 		confidence = "the repository was reconstructed AND lines that look like credentials are present " +
 			"in its history. A secret deleted in a later commit is still recoverable, so check whether " +
 			"these are live before assuming the deletion fixed anything."
-		evidence += " Possible credentials: " + strings.Join(trimList(secrets, 6), " | ")
+		// EVERY ONE OF THEM, not the first six. These lines are the finding: each is a candidate
+		// credential recovered from the target's own object store, and one that was cut off the end
+		// of the list cannot be checked, rotated or reported. The cap was six, so a repository with
+		// forty secrets in its history reported six of them and gave no way to reach the other 34.
+		evidence += " Possible credentials: " + strings.Join(secrets, " | ")
 	}
 
 	findings := []VectorFinding{{
@@ -170,8 +177,11 @@ func parseGitManifest(stdout, report string, row vectorRow, tool string) []Vecto
 		URL:             gitURLFor(row.EvidenceURL),
 		Evidence:        evidence,
 		DetectionMethod: tool,
-		RawResponse:     strings.Join(commits, "\n"),
-		IsLeakTarget:    row.IsLeakTarget,
+		// THE WHOLE MANIFEST: every recovered filename, every commit and every candidate credential
+		// the object-store grep found. It used to hold the commit list alone, so the file tree and
+		// the secrets existed only in the trimmed one-line evidence above and nowhere else.
+		RawResponse:  report,
+		IsLeakTarget: row.IsLeakTarget,
 	}}
 	return findings
 }
@@ -312,9 +322,14 @@ func parseTruffleHogOutput(stdout, report string, row vectorRow) []VectorFinding
 			continue
 		}
 
-		shown := result.Redacted
+		// THE CREDENTIAL ITSELF, VERBATIM. TruffleHog's Raw field is the secret it found leaked on
+		// the target, and that secret IS the finding: it is what proves the leak, what the program
+		// needs in order to rotate it, and what an operator has to paste into a report. This used to
+		// prefer TruffleHog's own Redacted string and fall back to a 6+4 character stub, which threw
+		// away the only thing the scan was run to get. Redacted is used only when there is no Raw.
+		shown := result.Raw
 		if strings.TrimSpace(shown) == "" {
-			shown = truncateSecret(result.Raw)
+			shown = result.Redacted
 		}
 		key := result.DetectorName + "|" + shown
 		if seen[key] {
@@ -346,14 +361,4 @@ func parseTruffleHogOutput(stdout, report string, row vectorRow) []VectorFinding
 		})
 	}
 	return findings
-}
-
-// truncateSecret keeps enough of a match to recognise it without writing the whole credential into
-// the database.
-func truncateSecret(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if len(raw) <= 12 {
-		return raw
-	}
-	return raw[:6] + "..." + raw[len(raw)-4:]
 }

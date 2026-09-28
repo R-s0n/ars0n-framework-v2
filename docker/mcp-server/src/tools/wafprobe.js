@@ -463,14 +463,20 @@ function summarise(scan) {
 const getWafProbeResultsSchema = z.object({
   target_id: z.string().uuid().describe('The scope target UUID'),
   scan_id: z.string().uuid().optional().describe('A specific scan (default: the most recent).'),
-  section: z.enum(['verdict', 'findings', 'recommendations', 'tests', 'budget', 'log', 'all'])
+  section: z.enum(['verdict', 'findings', 'recommendations', 'tests', 'budget', 'log',
+                   'transcript', 'all'])
     .optional()
     .describe(
       'verdict (default): posture, the safe request rate other scans will pace at, and how that ' +
       'was established. findings: what the probe concluded, most severe first. ' +
       'recommendations: the per-tool settings it suggests, and what it deliberately withheld. ' +
-      'tests: per-test verdicts. budget: requests and trips spent. log: the request transcript, ' +
-      'which is long. all: everything.'),
+      'tests: per-test verdicts. budget: requests and trips spent. ' +
+      'log: one line per request the probe sent, which is long. ' +
+      'transcript: the same requests WITH both header sets, which is what an argument about a ' +
+      'WAF is actually made of: which edge answered, what it set, what it stripped. It was ' +
+      'recorded on every run and, until this section existed, unreachable, because log fell back ' +
+      'to it only when the shorter form was missing and the shorter form is never missing. ' +
+      'all: everything.'),
   test: z.string().optional().describe('tests section: one test by name, e.g. notfound_fingerprint'),
   max_results: z.number().optional().describe('Maximum rows for list sections (default 50).'),
 });
@@ -569,7 +575,37 @@ async function getWafProbeResults(params) {
 
     case 'log': {
       const log = r.probe_log || r.transcript || [];
-      return { ...head, ...limitResults(log, clampLimit(params.max_results)) };
+      return {
+        ...head,
+        ...limitResults(log, clampLimit(params.max_results)),
+        transcript_available: Array.isArray(r.transcript) && r.transcript.length
+          ? r.transcript.length : undefined,
+        note: Array.isArray(r.transcript) && r.transcript.length
+          ? 'These rows carry no headers. section:"transcript" has the same requests with both '
+            + 'header sets.'
+          : undefined,
+      };
+    }
+
+    case 'transcript': {
+      const rows = Array.isArray(r.transcript) ? r.transcript : [];
+      if (rows.length === 0) {
+        return {
+          ...head,
+          data: [],
+          total: 0,
+          note: 'This run stored no transcript. include_transcript is on by default in the probe '
+            + 'configuration; a run made with it off cannot be given headers after the fact.',
+        };
+      }
+      return {
+        ...head,
+        ...limitResults(rows, clampLimit(params.max_results)),
+        // Said here rather than left to be discovered. A value that reads as <redacted> was
+        // destroyed inside the probe container before it was stored, so no read can recover it.
+        note: 'Header values the probe classed as sensitive read as <redacted>: that happens in '
+          + 'the waf-probe container at capture time (probe/util.py, redact_headers), not here.',
+      };
     }
 
     default:

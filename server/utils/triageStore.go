@@ -1,7 +1,9 @@
 package utils
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -293,7 +295,40 @@ const (
 	TriageRunCancelled = "cancelled"
 	// TriageRunError: the runner died. Same reading, with a reason in triage_runs.error.
 	TriageRunError = "error"
+	// TriageRunIncomplete: THE RUN WORKED AND DID NOT FINISH ITS PLAN. Nothing failed; there was
+	// not enough budget, or something else bounded the sweep, and the reason is in
+	// triage_runs.error the same way it is for the other two non-certifying words.
+	//
+	// WHY IT HAD TO EXIST, MEASURED. Two runs over the same 30 query vectors of one JSON API:
+	//
+	//	run 1, 13 classes, per-run cap 4000:   status ERROR,     915 of 1209 probeable pairs, 152 conclusions
+	//	run 2, 18 classes, per-run cap 25000:  status completed, the whole plan,              372 conclusions
+	//
+	// Run 1 did not error. It sent 4000 probes, recorded every one of them, wrote a truncation
+	// sentence naming exactly how much of the plan that bought, and stopped at the cap the
+	// operator configured. Reported as error, it sends its operator looking for a crash, and the
+	// next reader downgrades the word until a real crash reads as routine.
+	//
+	// triageRun.go's terminalStatus carried the handoff comment for this: "A run that finished its
+	// work and did not finish its plan is none of those three... The right fix is a fourth value,
+	// incomplete, in triageStore.go's status vocabulary, in the same const block and the same
+	// switch." This is that value.
+	//
+	// IT CERTIFIES NOTHING. triageRunCertifies asks for TriageRunCompleted and nothing else, so
+	// adding a word here cannot widen what may be read as clean. That asymmetry is the reason a
+	// fourth value is safe to add at all.
+	TriageRunIncomplete = "incomplete"
 )
+
+// triageNoTerminalReason is what goes in triage_runs.error when a run finishes as incomplete and
+// nothing said why.
+//
+// IT IS A RECORDED ABSENCE AND NOT A REFUSAL. Refusing the write would leave the row on 'running',
+// which every "is something running" check in this package reads as a live run, so the run would
+// never finish and the next one would be blocked by a ghost. The same trade is made by
+// triageUnknownVerdict one table over, in the same words: the absence is named rather than
+// papered over, and the run still cannot certify because incomplete is not completed.
+const triageNoTerminalReason = "this run finished as incomplete and no reason was recorded, which is itself the defect: it did not finish its plan and nothing here can say what stopped it, so it must not be read as a finished sweep"
 
 // FinishTriageRun writes the terminal status. A run with no terminal status poisons every "is
 // something running" check that follows, which is the failure vector_scans.cancel_requested was
@@ -301,6 +336,15 @@ const (
 func FinishTriageRun(ctx context.Context, runUUID, status, errMsg string) error {
 	switch strings.TrimSpace(status) {
 	case TriageRunCompleted, TriageRunCancelled, TriageRunError:
+	case TriageRunIncomplete:
+		// THE ONE STATUS THAT REQUIRES ITS REASON. completed needs the error column EMPTY to
+		// certify, cancelled and error both already have a caller that fills it, and incomplete is
+		// the new word whose entire job is to say something the other three could not. An
+		// incomplete with a blank error column is a red word with nothing under it, which is the
+		// state this whole layer exists to refuse.
+		if strings.TrimSpace(errMsg) == "" {
+			errMsg = triageNoTerminalReason
+		}
 	case "":
 		return fmt.Errorf("triage store: a finished run needs a terminal status")
 	default:
@@ -309,8 +353,8 @@ func FinishTriageRun(ctx context.Context, runUUID, status, errMsg string) error 
 		// aggregate and completely opaque everywhere else: the card, the pointer layer and the
 		// MCP all have to guess what it meant. Refusing it keeps the vocabulary in one place, the
 		// way state_kind and is_unknown are kept in one place two tables over.
-		return fmt.Errorf("triage store: %q is not a terminal status this store defines (%s, %s or %s), and a status nothing recognises is an absence wearing the shape of a state",
-			status, TriageRunCompleted, TriageRunCancelled, TriageRunError)
+		return fmt.Errorf("triage store: %q is not a terminal status this store defines (%s, %s, %s or %s), and a status nothing recognises is an absence wearing the shape of a state",
+			status, TriageRunCompleted, TriageRunIncomplete, TriageRunCancelled, TriageRunError)
 	}
 	var errArg any
 	if strings.TrimSpace(errMsg) != "" {
@@ -358,10 +402,13 @@ func FinishTriageRun(ctx context.Context, runUUID, status, errMsg string) error 
 // RecordTriageSlots writes the unit inventory. All or nothing: a half-written inventory is a
 // coverage denominator that is quietly too small, and too small is the direction that hides work.
 //
-// A CREDENTIAL SLOT'S VALUE IS BLANKED HERE and value_redacted is set, so "we removed a session
-// token" stays distinguishable from "the capture carried an empty value". Measured: 1555 of the
-// 1655 cookie slots in the corpus are credential or analytics cookies. They are still written,
-// because deliberately skipped has to stay visibly different from does not exist.
+// A CREDENTIAL SLOT'S VALUE IS RECORDED LIKE ANY OTHER. Measured: 1555 of the 1655 cookie slots in
+// the corpus are credential or analytics cookies, and those are exactly the values worth reading:
+// the session the crawl was carrying, the Authorization header the application issued, the token a
+// login handed back. is_credential still says no class may PROBE the slot, because injecting into
+// it produces a 401 that looks like a finding and invalidates the session the rest of the run
+// depends on. Not probing a slot is a scanning decision; not recording what was captured in it
+// would be throwing away the evidence.
 func RecordTriageSlots(ctx context.Context, runUUID string, units []TriageUnit) (int, error) {
 	if len(units) == 0 {
 		return 0, nil
@@ -381,18 +428,13 @@ func RecordTriageSlots(ctx context.Context, runUUID string, units []TriageUnit) 
 		if kind == "" {
 			kind = UnitSlot
 		}
-		value := u.Slot.Value
-		redacted := false
-		if u.Slot.Constraints.IsCredential {
-			value, redacted = "", true
-		}
 		_, err = tx.Exec(ctx, `
 			INSERT INTO triage_slots (
 				run_id, vector_id, unit_kind, slot_key, kind, name, field_path, segment_index,
-				observed_value, value_redacted, value_origin, value_kind, wrapper, encoder, method,
+				observed_value, value_origin, value_kind, wrapper, encoder, method,
 				body_media, origin, server_reachable, impossible_bytes, decode_depth, pct_rejected,
 				field_limit, is_credential)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
 			ON CONFLICT (run_id, vector_id, slot_key) DO UPDATE SET
 				unit_kind = EXCLUDED.unit_kind,
 				kind = EXCLUDED.kind,
@@ -400,7 +442,6 @@ func RecordTriageSlots(ctx context.Context, runUUID string, units []TriageUnit) 
 				field_path = EXCLUDED.field_path,
 				segment_index = EXCLUDED.segment_index,
 				observed_value = EXCLUDED.observed_value,
-				value_redacted = EXCLUDED.value_redacted,
 				value_origin = EXCLUDED.value_origin,
 				value_kind = EXCLUDED.value_kind,
 				wrapper = EXCLUDED.wrapper,
@@ -415,7 +456,7 @@ func RecordTriageSlots(ctx context.Context, runUUID string, units []TriageUnit) 
 				field_limit = EXCLUDED.field_limit,
 				is_credential = EXCLUDED.is_credential`,
 			runUUID, u.Slot.VectorID, string(kind), string(u.Slot.Key), string(u.Slot.Kind),
-			u.Slot.Name, u.Slot.FieldPath, u.Slot.SegmentIndex, value, redacted,
+			u.Slot.Name, u.Slot.FieldPath, u.Slot.SegmentIndex, u.Slot.Value,
 			string(u.Slot.ValueOrigin), string(u.Slot.ValueKind), string(u.Slot.Wrapper),
 			string(u.Slot.Encoder), u.Slot.Method, string(u.Slot.BodyMedia), string(u.Slot.Origin),
 			u.Slot.ServerReachable, bytesOrEmpty(u.Slot.Constraints.Impossible), u.Slot.Constraints.DecodeDepth,
@@ -435,7 +476,7 @@ func RecordTriageSlots(ctx context.Context, runUUID string, units []TriageUnit) 
 func LoadTriageSlots(ctx context.Context, runUUID string) ([]TriageUnit, error) {
 	rows, err := dbPool.Query(ctx, `
 		SELECT vector_id, unit_kind, slot_key, kind, name, field_path, segment_index,
-		       observed_value, value_redacted, value_origin, value_kind, wrapper, encoder, method,
+		       observed_value, value_origin, value_kind, wrapper, encoder, method,
 		       body_media, origin, server_reachable, impossible_bytes, decode_depth, pct_rejected,
 		       field_limit, is_credential
 		FROM triage_slots WHERE run_id = $1 ORDER BY vector_id, slot_key`, runUUID)
@@ -448,9 +489,8 @@ func LoadTriageSlots(ctx context.Context, runUUID string) ([]TriageUnit, error) 
 	for rows.Next() {
 		var u TriageUnit
 		var unitKind, slotKey, kind, valueOrigin, valueKind, wrapper, encoder, bodyMedia, origin string
-		var redacted bool
 		if err := rows.Scan(&u.Slot.VectorID, &unitKind, &slotKey, &kind, &u.Slot.Name,
-			&u.Slot.FieldPath, &u.Slot.SegmentIndex, &u.Slot.Value, &redacted, &valueOrigin,
+			&u.Slot.FieldPath, &u.Slot.SegmentIndex, &u.Slot.Value, &valueOrigin,
 			&valueKind, &wrapper, &encoder, &u.Slot.Method, &bodyMedia, &origin,
 			&u.Slot.ServerReachable, &u.Slot.Constraints.Impossible, &u.Slot.Constraints.DecodeDepth,
 			&u.Slot.Constraints.PctRejected, &u.Slot.Constraints.FieldLimit,
@@ -476,6 +516,53 @@ func LoadTriageSlots(ctx context.Context, runUUID string) ([]TriageUnit, error) 
 // ---------------------------------------------------------------------------------------------
 
 // TriageCoverageRow is one (unit, class) pair the eligibility matrix says applies here.
+// triageCoverageEligibleColumn adds the one column that lets the denominator be counted over the
+// same population triage_runs.planned_pairs is counted over.
+//
+// =================================================================================================
+// WHY THE COLUMN HAD TO EXIST, AND WHY IT IS APPENDED FROM HERE
+// =================================================================================================
+//
+// writePlanRows writes a coverage row for EVERY pair, including the ones triagePairExclusion
+// refused outright, and that is deliberate: a credential slot with a row saying "never probed, and
+// here is why" is the half of this feature that must not be lost. It then records planned_pairs as
+// the ELIGIBLE pairs only. So the table and the column count two different populations by design,
+// and LoadTriageRunCoverage was counting count(*) of the table into a field named EligiblePairs.
+//
+// Measured on the operator's live run a218419a, read only:
+//
+//	triage_runs.planned_pairs                            20680
+//	count(*) FROM triage_coverage                        34500
+//	of those, carrying the is_credential plan refusal     13820   (1382 credential slots x 10 classes)
+//	20680 + 13820                                         34500   exactly
+//
+// The difference is not drift, a stale plan or a double write: every run in the table holds exactly
+// 34500 coverage rows scoped to its own run_id, and the older run acaff558 (before the planner
+// started counting eligible pairs) records planned_pairs = 34500 with zero credential refusals
+// recorded. One number changed meaning and the other did not follow it.
+//
+// The cost was witness 2 of the denominator reconciliation: PlannedPairs - EligiblePairs is
+// 20680 - 34500 = -13820, permanently negative, so the only witness that can see a pair which left
+// no trace of ANY kind could never fire. That is a zero (a shortfall that can never be positive)
+// read as a positive fact (nothing is missing), which is this file's oldest defect shape.
+//
+// DEFAULT TRUE, not FALSE. Every row already in the table was counted in the denominator, and the
+// migration must not change what an existing run says about itself; a default of FALSE would empty
+// the denominator of every historical run and turn EligiblePairs == 0 into the reason they do not
+// certify, which is a true answer for a false reason. A caller that has not been taught the flag
+// writes an eligible row, exactly as today, and the surplus witness added below is what makes that
+// state loud instead of silent.
+//
+// IT IS APPENDED TO TriageSchema RATHER THAN WRITTEN INTO triageSchema.go ONLY BECAUSE THIS CHANGE
+// WAS SCOPED TO THIS FILE. It belongs beside the CREATE TABLE it alters and should be folded into
+// the statement list there the next time that file is opened. The append happens in init(), which
+// runs after every package-level var is built and long before createTables reads the slice, so the
+// ALTER is always applied after the CREATE TABLE it depends on.
+const triageCoverageEligibleColumn = `ALTER TABLE triage_coverage
+	ADD COLUMN IF NOT EXISTS eligible BOOLEAN NOT NULL DEFAULT TRUE;`
+
+func init() { TriageSchema = append(TriageSchema, triageCoverageEligibleColumn) }
+
 type TriageCoverageRow struct {
 	VectorID      string
 	SlotKey       triage.SlotKey
@@ -485,6 +572,24 @@ type TriageCoverageRow struct {
 	PlannedProbes int
 	SentProbes    int
 	Skipped       []triage.ProbeSkip
+	// Ineligible is the planner's "this pair is not work this run is accountable for", and it is
+	// the negative sense on purpose: the zero value is ELIGIBLE, which is what every row in the
+	// table means today and what every caller that has not been taught this field will keep
+	// meaning. A positive-sense Eligible bool would silently empty the denominator of every caller
+	// that did not set it, and an empty denominator is the one shape that makes RanPairs ==
+	// EligiblePairs trivially true.
+	//
+	// It is the pair's triagePairExclusion answer and nothing else. A pair a class cannot reach, a
+	// vector whose request-target cannot be built, a slot no encoder can render into: all still
+	// eligible, because the mechanism may be there and we could not look. A credential slot is
+	// ineligible, because it is not work that was skipped, it is work that must never happen and
+	// no amount of running will ever retire it.
+	//
+	// THE STORE DOES NOT DERIVE IT. There is exactly one spelling of the eligibility rule and it
+	// lives in triagePairExclusion; a second spelling here, reconstructed from the refusal text or
+	// from triage_slots.is_credential plus a copy of the class rule, is how the two numbers came to
+	// disagree in the first place.
+	Ineligible bool
 	// Ran is the coverage fact and it is NOT "SentProbes > 0". A class can send probes and still
 	// have measured nothing: the prelude failed, the marker came back corrupted, or one of its own
 	// negative controls fired, which CATALOGUE 4.4 turns into cannot_determine
@@ -600,6 +705,11 @@ func triageInsertCoverageRow(ctx context.Context, tx pgx.Tx, runUUID string, r T
 	reach := triageSafeText(r.Reach.String())
 	reachReason := triageSafeText(r.ReachReason)
 	planned, sent, ran := r.PlannedProbes, r.SentProbes, r.Ran
+	// ELIGIBILITY IS A PLAN FACT AND SURVIVES THE DEGRADED FORM BELOW. Whether the store could
+	// write this row down says nothing about whether the pair was work the run is accountable for,
+	// and dropping a refused pair out of the denominator would shrink the question exactly when
+	// the store has just admitted it lost something.
+	eligible := !r.Ineligible
 	skipped, jsonErr := json.Marshal(nonNilSkips(r.Skipped))
 	if jsonErr != nil && cause == nil {
 		// Marshalling the skip list is the one failure that has not touched the database yet, so
@@ -624,10 +734,24 @@ func triageInsertCoverageRow(ctx context.Context, tx pgx.Tx, runUUID string, r T
 	_, err = sp.Exec(ctx, `
 		INSERT INTO triage_coverage (
 			run_id, vector_id, slot_key, class_id, class_name, reach, reach_reason,
-			planned_probes, sent_probes, skipped_probes, ran)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			planned_probes, sent_probes, skipped_probes, ran, eligible)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		ON CONFLICT (run_id, vector_id, slot_key, class_id) DO UPDATE SET
 			class_name = EXCLUDED.class_name,
+			-- INELIGIBLE IS STICKY, and it is the one column here that may not be reassigned.
+			-- The plan write is the only write that knows the answer: it comes straight off
+			-- triagePairExclusion before anything is sent. Every later write for the same pair is
+			-- a progress flush built from the runner's cached row, and a flush that has not been
+			-- taught the field carries the zero value, which is "eligible". A plain assignment
+			-- would let the first such flush silently put the pair back into the denominator and
+			-- the mismatch this column exists to end would come straight back.
+			--
+			-- A pair that must never be probed does not become probeable halfway through a run, so
+			-- there is no legitimate FALSE -> TRUE transition to preserve. The direction is also
+			-- the one the reconciliation can see: a denominator that is too small is reported by
+			-- the shortfall witness, and a pair marked ineligible still holds its coverage row and
+			-- its unknown verdict, so it stays inside PairsWithNoVerdict and inside Unknown.
+			eligible = (triage_coverage.eligible AND EXCLUDED.eligible),
 			reach = EXCLUDED.reach,
 			reach_reason = EXCLUDED.reach_reason,
 			planned_probes = EXCLUDED.planned_probes,
@@ -649,7 +773,7 @@ func triageInsertCoverageRow(ctx context.Context, tx pgx.Tx, runUUID string, r T
 			ran = EXCLUDED.ran,
 			updated_at = NOW()`,
 		runUUID, vectorID, slotKey, int16(r.Class), className,
-		reach, reachReason, planned, sent, string(skipped), ran)
+		reach, reachReason, planned, sent, string(skipped), ran, eligible)
 	if err != nil {
 		_ = sp.Rollback(ctx)
 		return err
@@ -755,9 +879,20 @@ func (r TriageVerdictRow) RendersAsClean() bool {
 // This codebase has already shipped one state made unreachable exactly that way.
 //
 // So a row taints its pair when its survival is EXPLICITLY bad (altered, dropped, refused), whatever
-// it carried, or when its survival was never measured AND it actually asked for bytes. A refused
+// it carried, or when its survival was never measured and the row is not the control. A refused
 // control still taints, which is right: a control that never went out is a run with no baseline.
-const triageUnprovenFidelity = `fid.survived NOT IN ('intact', 'encoded') AND (fid.logical_len > 0 OR fid.survived <> '')`
+//
+// THE EXEMPTION NAMES THE CONTROL RATHER THAN DESCRIBING IT, and that is a correction. It used to
+// read fid.logical_len > 0 OR a non-empty survived, which exempts the control by the fact that a
+// control carries no payload bytes. It also exempts EVERY OTHER ROW THAT CARRIES NONE: a real
+// class probe whose logical bytes were never recorded, from a sender that fills Wire and forgets
+// Logical, reads as zero bytes with unknown survival and is waved through as proven. That is a
+// probe about which nothing whatever is known, counted as evidence, which is the precise failure
+// the first clause exists to stop, reached through the exemption instead. The control has an
+// identity of its own in the schema (class_id 0 with ordinal 0, pinned by the stripe CHECK), so
+// the exemption is written as that identity. Measured on the operator's live database: 17,214
+// probe records, not one with logical_len = 0, so nothing legitimate is being newly tainted.
+const triageUnprovenFidelity = `fid.survived NOT IN ('intact', 'encoded') AND NOT (fid.class_id = 0 AND fid.ordinal = 0 AND fid.survived = '')`
 
 // triageMissingFidelityForThisPair counts the probe records this pair SHOULD have and does not.
 //
@@ -1002,31 +1137,82 @@ type triageVerdictKey struct {
 	arm      string
 }
 
-// triageLoadPositiveVerdictKeys reads the positives this run already holds, keyed the way the
-// table keys them. Only positives, because only a positive is protected from being overwritten.
-func triageLoadPositiveVerdictKeys(ctx context.Context, tx pgx.Tx, runUUID string) (map[triageVerdictKey]triage.TriageState, error) {
+// triageVerdictPrecedence ranks a state by WHAT IT COSTS TO LOSE IT, which is the only ordering
+// this store has ever needed and the one FinishTriageRun states in words one table over: between
+// two claims that cannot both hold, keep the one that cannot manufacture a clean.
+//
+//	2  positive   a finding. Losing it means the operator never points the tool at that slot.
+//	1  unknown    says nothing about the target. It cannot be read as clean by anything
+//	              downstream, so it is the safe survivor of a collision. IsUnknown and not
+//	              Kind, because not_applicable is structurally its own kind and is unknown to
+//	              every aggregate, and the vocabulary says IsUnknown is THE predicate.
+//	0  negative   clean and not_exploitable. The only tier a reader may act on as "nothing
+//	              here", so it is the only tier that can turn a collision into a false clean.
+//
+// An unrecognised state lands on 1 and not 0, because both Kind and IsUnknown fail closed on it,
+// and a state nobody defined must never be able to displace one that is defined.
+func triageVerdictPrecedence(s triage.TriageState) int {
+	switch {
+	case s.Kind() == triage.StateKindPositive:
+		return 2
+	case s.IsUnknown():
+		return 1
+	default:
+		return 0
+	}
+}
+
+// triageLoadVerdictStatesFor reads back, inside the caller's transaction, whatever this run
+// already holds on THE KEYS THIS BATCH IS ABOUT, so the guard below can compare each incoming row
+// against the row it is about to replace.
+//
+// SCOPED TO THE BATCH'S KEYS AND NOT TO THE RUN. Its predecessor read every positive on the run,
+// which was correct and cheap only while the rule was about positives: a full-registry run files
+// 77 pairs. The rule now needs the state of every key the batch names whatever that state is, and
+// flush() is called at EVERY unit boundary, so reading the whole table each time is quadratic in
+// the size of the run. A run over the measured corpus files thousands of rows and would re-read
+// all of them hundreds of times. The keys are handed to Postgres as four parallel arrays and the
+// read is bounded by the batch.
+//
+// It returns only the keys that exist. A key with no row is a first write and has nothing to
+// compare against.
+func triageLoadVerdictStatesFor(ctx context.Context, tx pgx.Tx, runUUID string, keys []triageVerdictKey) (map[triageVerdictKey]triage.TriageState, error) {
+	if len(keys) == 0 {
+		return map[triageVerdictKey]triage.TriageState{}, nil
+	}
+	vectors := make([]string, len(keys))
+	slots := make([]string, len(keys))
+	classes := make([]int16, len(keys))
+	arms := make([]string, len(keys))
+	for i, k := range keys {
+		vectors[i], slots[i], classes[i], arms[i] = k.vectorID, k.slotKey, k.class, k.arm
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT vector_id, slot_key, class_id, arm, state
-		FROM triage_verdicts WHERE run_id = $1 AND state_kind = 'positive'`, runUUID)
+		FROM triage_verdicts
+		WHERE run_id = $1
+		  AND (vector_id, slot_key, class_id, arm) IN (
+		        SELECT * FROM unnest($2::text[], $3::text[], $4::smallint[], $5::text[]))`,
+		runUUID, vectors, slots, classes, arms)
 	if err != nil {
-		return nil, fmt.Errorf("triage store: reading the positives already on this run: %w", err)
+		return nil, fmt.Errorf("triage store: reading the verdicts already on this run: %w", err)
 	}
 	defer rows.Close()
-	out := map[triageVerdictKey]triage.TriageState{}
+	out := make(map[triageVerdictKey]triage.TriageState, len(keys))
 	for rows.Next() {
 		var k triageVerdictKey
 		var state string
 		if err := rows.Scan(&k.vectorID, &k.slotKey, &k.class, &k.arm, &state); err != nil {
-			return nil, fmt.Errorf("triage store: scanning a prior positive: %w", err)
+			return nil, fmt.Errorf("triage store: scanning a prior verdict: %w", err)
 		}
 		out[k] = triage.TriageState(state)
 	}
 	if err := rows.Err(); err != nil {
 		// FAILING CLOSED, AND THIS IS THE ONE PLACE IN THIS FUNCTION IT MATTERS. An empty map here
-		// would mean "no positives to protect", which is the absence-read-as-a-fact shape this
-		// whole file is about, and the write it would wave through is precisely a clean landing
-		// on top of a finding.
-		return nil, fmt.Errorf("triage store: the positives already on this run could not be read, so no write can be shown not to overwrite one: %w", err)
+		// would mean "these keys are all first writes", which is the absence-read-as-a-fact shape
+		// this whole file is about, and the write it would wave through is precisely a clean
+		// landing on top of a finding or on top of an unknown.
+		return nil, fmt.Errorf("triage store: the verdicts already on this run could not be read, so no write can be shown not to destroy one: %w", err)
 	}
 	return out, nil
 }
@@ -1079,6 +1265,21 @@ func RecordTriageVerdicts(ctx context.Context, runUUID string, rows []TriageVerd
 		if strings.TrimSpace(string(r.Verdict.SlotKey)) == "" {
 			return 0, fmt.Errorf("triage store: verdict %d of %d has no unit key", i, len(rows))
 		}
+		// CLASS 0 IS THE UNOWNED CONTROL'S CLASS AND NO VERDICT MAY WEAR IT.
+		//
+		// triage.ClassNone is the zero value of ClassID, so a caller that forgets to set Class
+		// files a verdict under 0, and Validate does not look at the field. The row is then
+		// invisible to the one witness that would catch it: covorphan excludes class_id <> 0 by
+		// design, because the control belongs to no pair, so a class-0 verdict with no coverage
+		// row is a pair that did work and cannot be seen to be missing from the denominator. If
+		// its state is clean it raises Clean and VerdictRows by one each, the Clean == VerdictRows
+		// equality still holds, and a verdict nobody can attribute to a classifier sits inside a
+		// certificate. Refused here because there is no legitimate class-0 verdict: the control is
+		// a fidelity row and has never been a verdict, and the live database holds none.
+		if r.Verdict.Class == triage.ClassNone {
+			return 0, fmt.Errorf("triage store: verdict %d of %d on %q is filed under class 0, which is the unowned control's class and belongs to no pair; the reconciliation cannot see such a row at all, so it is refused rather than written where nothing will ever check it",
+				i, len(rows), r.Verdict.SlotKey)
+		}
 		if r.Verdict.State.Kind() == triage.StateKindPositive && !r.Provenance.Known() {
 			return 0, fmt.Errorf("triage store: class %s reported %s on %q with no provenance, and a positive nobody can trace to a source is not reportable",
 				r.Verdict.Class, r.Verdict.State, r.Verdict.SlotKey)
@@ -1117,39 +1318,86 @@ func RecordTriageVerdicts(ctx context.Context, runUUID string, rows []TriageVerd
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// THE CROSS-BATCH HALF, AND THE ONE THAT DESTROYED A FINDING FOR REAL.
+	// THE CROSS-CALL HALF, AND THE ONE THAT DESTROYED A FINDING FOR REAL.
 	//
 	// The intra-batch check above is defeated the moment the caller splits the batch, and the
-	// runner splits it on purpose: flush retries a refused batch ROW BY ROW so one bad verdict
-	// does not cost the good ones. Two colliding rows then arrive as two separate calls, and the
-	// unconditional DO UPDATE takes the later one whatever it says.
+	// runner splits it ON PURPOSE, in the rescue at triageRun.go:2227: a refused batch is retried
+	// ROW BY ROW so one bad verdict does not cost the good ones. Two colliding rows then arrive as
+	// two separate calls, one row each, and one row can never collide with itself.
 	//
-	// So the rule is stated on the data rather than on the batch: A POSITIVE ALREADY ON THE RECORD
-	// MAY ONLY BE REPLACED BY ANOTHER POSITIVE. It is deliberately asymmetric, for the standing
-	// reason that the two errors do not cost the same. Losing a clean costs a re-probe of one
-	// slot. Losing a finding means the operator never points the tool at that slot and the bug is
-	// never found, so between two rows that cannot both exist, the finding wins regardless of
-	// which order they arrive in.
+	// SO THE GUARD ABOVE WAS DEFEATED BY ITS OWN RESCUE PATH, and it was measured happening.
+	// Twice in one suite run:
 	//
-	// It does NOT freeze a pair: an unknown placeholder (every pair gets one from writePlanRows)
-	// is replaceable by anything, a clean is replaceable by anything, and a positive is
-	// replaceable by another positive, which is how a class upgrades its own suspicious to a
-	// finding. Only the one transition that manufactures a false clean is refused.
+	//	"the verdict batch was refused, retrying row by row: triage store: verdicts 11 and 12 of
+	//	 41 are both filed under vector 6d3db3c9 slot body:/filters:node class CMDI arm settle, so
+	//	 writing this batch would silently destroy one of them (cannot_determine and not_run); the
+	//	 whole batch is refused"
 	//
-	// Read inside the transaction and filtered to positives, so it stays a handful of rows on a
-	// table holding one per pair: a full-registry run against the oracle files 77 pairs.
-	priorPositives, err := triageLoadPositiveVerdictKeys(ctx, tx, runUUID)
+	// and then no "verdict refused" line at all, so both rows landed, the unconditional DO UPDATE
+	// took the second, and the row the guard had just named as the one that must not be destroyed
+	// was destroyed anyway. One log line, and nothing in the database. The live producer is the
+	// settle loop, which stamps every verdict a class's Settle returns with the single fixed arm
+	// "settle" instead of deriving one per verdict the way the classify loop does.
+	//
+	// So the rule is stated on the DATA rather than on the batch, where splitting the batch
+	// cannot reach it. It is one comparison, against the ordering FinishTriageRun already states
+	// in words for the run status: BETWEEN TWO CLAIMS THAT CANNOT BOTH HOLD, KEEP THE ONE THAT
+	// CANNOT MANUFACTURE A CLEAN. triageVerdictPrecedence is that ordering, three tiers:
+	// positive, then unknown, then negative.
+	//
+	//  1. A WEAKER TIER MAY NOT REPLACE A STRONGER ONE. A clean over a finding is a bug the
+	//     operator never hears about; a clean over a cannot_determine is a clean nobody measured.
+	//     Both are refused, and the refusal names both states so the caller can see which two
+	//     answers disagreed. The first of those was already refused here; the second was not, and
+	//     it is the same false clean with a cheaper-looking loser.
+	//
+	//  2. A STRONGER TIER MAY REPLACE A WEAKER ONE, silently, because that direction cannot
+	//     manufacture a clean and refusing it would leave the WEAKER row standing. An unknown
+	//     landing on top of a clean is the collision resolving in the safe direction and must not
+	//     be turned back.
+	//
+	//  3. TWO STATES IN THE SAME TIER ARE TWO ANSWERS AND THE STORE CANNOT PICK. Refused, with
+	//     both named, which is exactly what the intra-batch guard does and the whole point of
+	//     making the rescue path respect it. Two exceptions, and both are real transitions rather
+	//     than collisions:
+	//       - the same state twice is one answer, not two, so a resend or a refreshed detail is
+	//         written as it always was;
+	//       - inside the positives, a class upgrading its own suspicious to a finding (or being
+	//         less sure on a second arm) is the documented path and stays open;
+	//       - the runner's reserved placeholder arm, which recordUnreachedAsUntested rewrites on
+	//         purpose to say "cancelled" over "not_reached" on a pair that was never measured.
+	//
+	// IT DOES NOT FREEZE A PAIR. Every ordinary pair's placeholder is on TriagePlanArm and is
+	// RETIRED BY DELETE below, not overwritten, so a measurement never meets it on its own key.
+	keys := make([]triageVerdictKey, len(rows))
+	for i, r := range rows {
+		keys[i] = triageVerdictKey{r.VectorID, string(r.Verdict.SlotKey), int16(r.Verdict.Class), r.Arm}
+	}
+	prior, err := triageLoadVerdictStatesFor(ctx, tx, runUUID, keys)
 	if err != nil {
 		return 0, err
 	}
 	for i, r := range rows {
-		k := triageVerdictKey{r.VectorID, string(r.Verdict.SlotKey), int16(r.Verdict.Class), r.Arm}
-		was, held := priorPositives[k]
-		if !held || r.Verdict.State.Kind() == triage.StateKindPositive {
+		was, held := prior[keys[i]]
+		if !held || was == r.Verdict.State {
 			continue
 		}
-		return 0, fmt.Errorf("triage store: verdict %d of %d would replace the %s already recorded on vector %q slot %q class %s arm %q with %s, and a positive is never overwritten by anything weaker: a lost clean costs a re-probe, a lost finding costs the bug",
-			i, len(rows), was, r.VectorID, r.Verdict.SlotKey, r.Verdict.Class, r.Arm, r.Verdict.State)
+		now := r.Verdict.State
+		wasRank, nowRank := triageVerdictPrecedence(was), triageVerdictPrecedence(now)
+		if nowRank > wasRank {
+			continue
+		}
+		if nowRank == wasRank {
+			// The two in-tier transitions that are transitions and not collisions: a class
+			// upgrading or downgrading inside the positives, and the reserved placeholder arm.
+			if was.Kind() == triage.StateKindPositive || r.Arm == TriagePlanArm {
+				continue
+			}
+			return 0, fmt.Errorf("triage store: verdict %d of %d would replace the %s already recorded on vector %q slot %q class %s arm %q with %s, and the two say different things about the same key with nothing to choose between them: the row-by-row rescue is not a licence to do what the batch guard just refused",
+				i, len(rows), was, r.VectorID, r.Verdict.SlotKey, r.Verdict.Class, r.Arm, now)
+		}
+		return 0, fmt.Errorf("triage store: verdict %d of %d would replace the %s already recorded on vector %q slot %q class %s arm %q with %s, and between two claims that cannot both hold the store keeps the one that cannot manufacture a clean: a lost clean costs a re-probe, a lost finding costs the bug, and a clean written over an unknown is a clean nobody measured",
+			i, len(rows), was, r.VectorID, r.Verdict.SlotKey, r.Verdict.Class, r.Arm, now)
 	}
 
 	// =============================================================================================
@@ -1273,7 +1521,7 @@ func RecordTriageVerdicts(ctx context.Context, runUUID string, rows []TriageVerd
 			string(v.Grade), v.Oracle, ordinalsToInt64(v.Ordinals), string(untested),
 			string(annotations), string(label), string(r.Provenance), r.ProvenanceDetail,
 			r.DeltaChecked, int64(v.Evidence.Ordinal), v.Evidence.ObsID, bytesOrEmpty(v.Evidence.Matched),
-			v.Evidence.Offset, v.Evidence.Length, v.Evidence.Phrase, v.Evidence.MarkerForm)
+			triageEvidenceOffset(v.Evidence), v.Evidence.Length, v.Evidence.Phrase, v.Evidence.MarkerForm)
 		if err != nil {
 			return 0, fmt.Errorf("triage store: verdict %s/%s: %w", v.Class, v.SlotKey, err)
 		}
@@ -1283,6 +1531,27 @@ func RecordTriageVerdicts(ctx context.Context, runUUID string, rows []TriageVerd
 		return 0, fmt.Errorf("triage store: verdicts commit: %w", err)
 	}
 	return written, nil
+}
+
+// triageEvidenceOffset is the value that goes into evidence_offset, and it exists because the
+// column's documented sentinel was unreachable.
+//
+// MEASURED ON THE OPERATOR'S DATABASE: 299426 verdict rows, of which 299426 carry evidence_offset
+// >= 0 and ZERO carry any matched bytes. The schema declares the column DEFAULT -1 precisely so
+// that "nobody measured an offset" is distinguishable from "the match was at byte 0", and the
+// default was never used, because this writer always passes TriageEvidence.Offset and a verdict
+// with no evidence carries the zero value of an int. So every one of those rows claimed a match at
+// offset 0 of a response, which is the counts-that-are-not-counts shape: a field that reads like a
+// measurement and is a struct's zero value.
+//
+// LENGTH IS WHAT DECIDES IT, and it is not a heuristic. A span of zero bytes has no location: there
+// is no byte 0..0 to point at. So an offset is written only when the verdict recorded a span with
+// bytes in it, and otherwise the column says -1, which is what it was always documented to say.
+func triageEvidenceOffset(ev triage.TriageEvidence) int {
+	if ev.Length <= 0 && len(ev.Matched) == 0 {
+		return -1
+	}
+	return ev.Offset
 }
 
 // TriageVerdictFilter narrows a read. The zero value reads everything.
@@ -1321,12 +1590,25 @@ type triageVerdictCursor struct {
 	Arm      string `json:"a"`
 }
 
-func encodeTriageVerdictCursor(c triageVerdictCursor) string {
+// encodeTriageVerdictCursor renders a page boundary, and it RETURNS THE ERROR rather than an
+// empty string.
+//
+// The empty string was a fail-open, and a quiet one: LoadTriageVerdictPage sets HasMore = TRUE and
+// then takes the cursor from here, so a marshal failure produced a page that says "there is more"
+// with nothing to ask for it with. TriageVerdictPage's own doc says NextCursor is empty exactly
+// when HasMore is false, so a client obeying the contract reads that as the end of the list and a
+// verdict list that quietly stops short is the absence this whole layer exists to refuse.
+//
+// In practice json.Marshal cannot fail on a struct of strings and an int16 (invalid UTF-8 is
+// replaced, not refused), so this is a shape being closed rather than a failure being observed.
+// That is the point: the reason this file keeps finding the same bug is that the shapes were left
+// open where nobody could see them fire.
+func encodeTriageVerdictCursor(c triageVerdictCursor) (string, error) {
 	b, err := json.Marshal(c)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("triage store: this page boundary could not be encoded, so the next page cannot be asked for and the list must not be reported as finished: %w", err)
 	}
-	return base64.RawURLEncoding.EncodeToString(b)
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 func decodeTriageVerdictCursor(s string) (triageVerdictCursor, error) {
@@ -1533,10 +1815,14 @@ func LoadTriageVerdictPage(ctx context.Context, runUUID string, f TriageVerdictF
 	}
 	if f.Limit > 0 && len(rows) > f.Limit {
 		last := rows[f.Limit-1]
-		page.HasMore = true
-		page.NextCursor = encodeTriageVerdictCursor(triageVerdictCursor{
+		cursor, err := encodeTriageVerdictCursor(triageVerdictCursor{
 			VectorID: last.VectorID, SlotKey: string(last.Verdict.SlotKey),
 			Class: int16(last.Verdict.Class), Arm: last.Arm})
+		if err != nil {
+			return page, err
+		}
+		page.HasMore = true
+		page.NextCursor = cursor
 		rows = rows[:f.Limit]
 	}
 	page.Rows = rows
@@ -1573,12 +1859,251 @@ type TriageFidelityRow struct {
 	HTTPStatus int
 	Delivered  bool
 	SentAt     time.Time
+
+	// THE RESPONSE. A verdict's evidence is a span into these bytes, so without them a finding
+	// says "5 bytes at offset 412" and points at nothing.
+	//
+	// Body is the response body exactly as the observation holds it, capped at triageMaxBodyBytes.
+	// It is the SAME buffer the marker scanner and every signature oracle indexed, which is what
+	// makes a stored evidence_offset mean what it says; a normalised or re-decoded copy would be a
+	// different index space wearing the same numbers.
+	Body []byte
+	// BodyLen is how many bytes were offered for storage. IT IS -1 UNTIL SOMETHING ATTACHES A
+	// RESPONSE, and that is the whole point of it being a separate field from len(Body): zero is a
+	// real body length, so len(Body) == 0 cannot distinguish a 204 from a runner that forgot to
+	// hand the body over. The writer turns the second case into body_state 'not_attached' and
+	// names it, rather than storing an empty response the operator would read as the target's.
+	BodyLen       int
+	BodyTruncated bool
+	ContentType   string
+	// RespHeaders is every response header, ordered, duplicates preserved, as the observation
+	// recorded them. Several classes put their evidence in a header rather than in the body, and a
+	// reflection with no Content-Type is not a finding anybody can write up.
+	RespHeaders [][2]string
 }
 
 // NewTriageFidelityRow returns a row whose unknowns read as unknown. Use it rather than the zero
-// value, whose HTTPStatus of 0 is refused by the writer precisely so this constructor gets used.
+// value, whose HTTPStatus of 0 is refused by the writer precisely so this constructor gets used,
+// and whose BodyLen of 0 would claim a response body nobody measured.
 func NewTriageFidelityRow(class triage.ClassID, ordinal uint64) TriageFidelityRow {
-	return TriageFidelityRow{Class: class, Ordinal: ordinal, Attempt: 1, HTTPStatus: -1}
+	return TriageFidelityRow{Class: class, Ordinal: ordinal, Attempt: 1, HTTPStatus: -1, BodyLen: -1}
+}
+
+// AttachResponse copies an observation's response onto the probe record.
+//
+// IT IS THE ONLY WAY A BODY GETS ONTO A ROW, for the reason recordProbeAttempt is the only way a
+// row gets written: the send paths used to each copy six fields off the observation by hand and
+// they had already drifted once. A path that forgets to call this produces BodyLen -1 beside an
+// http_status, which the writer records as 'not_attached' and which is therefore visible, rather
+// than a row that silently claims the response was empty.
+func (r *TriageFidelityRow) AttachResponse(body []byte, truncated bool, contentType string, headers [][2]string) {
+	r.Body = body
+	r.BodyLen = len(body)
+	r.BodyTruncated = truncated
+	r.ContentType = contentType
+	r.RespHeaders = headers
+}
+
+// ---------------------------------------------------------------------------------------------
+// The response bodies themselves
+// ---------------------------------------------------------------------------------------------
+
+// The values of triage_fidelity.body_state. The schema comment on the column lists them together
+// with what each one tells an operator; they are constants here because the vocabulary is defined
+// in Go and read by the store, the API and the client, exactly as state and survived are.
+const (
+	// TriageBodyUnrecorded is the column default and the only value a row can carry without this
+	// file having put it there. It means a run that predates response storage, and it must never
+	// be read as an empty response.
+	TriageBodyUnrecorded = ""
+	// TriageBodyStored means the bytes are in triage_bodies under this row's body_sha256. An empty
+	// response body is stored, with body_len 0: zero bytes is a measurement.
+	TriageBodyStored = "stored"
+	// TriageBodyNoResponse means the probe never got a response, so there was no body to keep.
+	TriageBodyNoResponse = "no_response"
+	// TriageBodyNotAttached means a response arrived and nothing handed its body to the writer.
+	// That is a defect in the runner and it is recorded as one.
+	TriageBodyNotAttached = "not_attached"
+	// TriageBodyDroppedPrefix and TriageBodyUnstorablePrefix are followed by the reason. A body
+	// that is not there has to say why it is not there, or its absence is indistinguishable from
+	// an empty response, which is the failure this whole column exists to prevent.
+	TriageBodyDroppedPrefix    = "dropped:"
+	TriageBodyUnstorablePrefix = "unstorable:"
+)
+
+// triageBodyBudgetBytes is the most DISTINCT response body a single run may store.
+//
+// MEASURED, NOT GUESSED. The largest run in the operator's database, 2n6f, sent 5312 probes
+// against 19 endpoints whose captured responses average 12.7 KiB, so storing every response whole
+// with NO deduplication at all would have cost 64 MB. This cap is 512 MiB, eight times that worst
+// case, and the worst case already assumes the content addressing buys nothing. Measured on the
+// same corpus it buys a great deal: 8411 captures hold 1420 distinct bodies, and on a single
+// endpoint hit repeatedly the ratio runs from 12x to 109x.
+//
+// SO IT IS EXPECTED NEVER TO BITE, AND IT EXISTS ANYWAY, because "expected never to" is not a
+// disk-space guarantee. The one shape on this target that defeats content addressing is a live
+// market-data endpoint: /v1beta1/options/snapshots/AAPL was captured 395 times and holds 395
+// distinct bodies, because every response carries fresh prices. A run that pointed a few thousand
+// probes at an endpoint like that with a 93 KiB body is the case this number bounds.
+//
+// WHEN IT BITES, THE ROW SAYS SO. The body_state becomes dropped:body_budget_exhausted with the
+// numbers in it, so an operator who finds a body missing is told it was dropped and why, and never
+// shown an empty response. Bodies already stored are unaffected and a repeat of one of them still
+// costs nothing, so the budget stops the run growing and never makes it lose what it had.
+// IT IS A VAR AND NOT A CONST FOR EXACTLY ONE REASON: a cap that cannot be lowered cannot be shown
+// working. The drop path is the one path in this feature that loses bytes the target sent, so it
+// is the one that most has to be watched writing its reason down, and a test that had to produce
+// half a gigabyte of distinct response bodies to reach it would never be run. Nothing but a test
+// assigns to it.
+var triageBodyBudgetBytes int64 = 512 << 20
+
+// TriageStoredResponse is one probe's response as the run recorded it.
+//
+// BodyState is the field to read first. Body is meaningful only when BodyAvailable() is true; on
+// every other state Body is empty and BodyState is a sentence saying what happened to it.
+type TriageStoredResponse struct {
+	Ordinal     uint64
+	Attempt     int
+	Class       triage.ClassID
+	VectorID    string
+	SlotKey     triage.SlotKey
+	ProbeID     triage.ProbeID
+	HTTPStatus  int
+	Delivered   bool
+	ContentType string
+	Headers     [][2]string
+	BodyState   string
+	// BodyLen is how big the response body was, and it is filled even when the bytes were not
+	// kept, so a dropped body still says what was dropped.
+	BodyLen   int
+	Body      []byte
+	Truncated bool
+}
+
+// BodyAvailable reports whether Body holds the response. Everything else, the unrecorded default
+// included, means the bytes are not here and BodyState says why.
+func (r TriageStoredResponse) BodyAvailable() bool { return r.BodyState == TriageBodyStored }
+
+// triageBodyBudget is one run's remaining room, read once per batch and carried across the rows of
+// that batch. It is a read of the table rather than a counter the runner maintains: the bug family
+// this store keeps recording is two hand-maintained numbers over one population, and sum(body_len)
+// over the rows that exist cannot drift from the rows that exist.
+type triageBodyBudget struct {
+	used   int64
+	loaded bool
+}
+
+func (b *triageBodyBudget) load(ctx context.Context, q pgx.Tx, runUUID string) {
+	if b.loaded {
+		return
+	}
+	b.loaded = true
+	var used int64
+	if err := q.QueryRow(ctx,
+		`SELECT COALESCE(sum(body_len), 0) FROM triage_bodies WHERE run_id = $1`, runUUID).Scan(&used); err != nil {
+		// A failed read leaves used at zero, which spends the budget from the start again rather
+		// than refusing to store anything. Erring towards KEEPING the evidence is the right
+		// direction: the cost of being wrong here is disk, and the cost of the other direction is
+		// a finding nobody can read.
+		return
+	}
+	b.used = used
+}
+
+// triageStoreBody puts one response body in the run's content-addressed store and returns the key
+// and the state to record on the probe record.
+//
+// THE KEY IS SHA-256 OF EXACTLY THE BYTES BEING STORED, computed here rather than taken from the
+// observation. Observation.BodySHA256 is documented as being of the FULL body while the bytes it
+// carries are capped at triageMaxBodyBytes, so on a truncated response those are two different
+// digests; a key that addressed the uncapped body would point at bytes this table does not hold,
+// and two different truncated responses sharing a prefix would collide into one row. Hashing what
+// is written is the only version of this that cannot be wrong.
+//
+// It never returns an error. Every failure becomes a body_state that NAMES the failure, because a
+// probe record must land whatever happened to its body: losing the record to save the body is the
+// inversion this file's savepoints exist to prevent.
+func triageStoreBody(ctx context.Context, tx pgx.Tx, runUUID string, r TriageFidelityRow, budget *triageBodyBudget) ([]byte, string) {
+	if r.BodyLen < 0 {
+		if r.HTTPStatus > 0 {
+			return []byte{}, TriageBodyNotAttached
+		}
+		return []byte{}, TriageBodyNoResponse
+	}
+	body := bytesOrEmpty(r.Body)
+	sum := sha256.Sum256(body)
+	key := sum[:]
+
+	// EVERY STATEMENT HERE, THE READS INCLUDED, IS INSIDE ONE SAVEPOINT. A failed statement aborts
+	// the whole transaction in Postgres, and the caller is mid-batch with a probe record still to
+	// write, so a lookup that errors outside a savepoint would take that record and every record
+	// after it down with it. That is the inversion this file exists to prevent, reached through a
+	// SELECT instead of an INSERT.
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return []byte{}, TriageBodyUnstorablePrefix + "savepoint: " + triageSafeText(err.Error())
+	}
+
+	// ALREADY HELD IS THE COMMON CASE AND IT IS FREE. N probes that got the same response cost one
+	// copy, which is the whole reason this is affordable, and a repeat never touches the budget.
+	var present bool
+	if err := sp.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM triage_bodies WHERE run_id = $1 AND body_sha256 = $2)`,
+		runUUID, key).Scan(&present); err != nil {
+		_ = sp.Rollback(ctx)
+		return []byte{}, TriageBodyUnstorablePrefix + triageSafeText(err.Error())
+	}
+	if present {
+		if err := sp.Commit(ctx); err != nil {
+			return []byte{}, TriageBodyUnstorablePrefix + "savepoint commit: " + triageSafeText(err.Error())
+		}
+		return key, TriageBodyStored
+	}
+
+	budget.load(ctx, sp, runUUID)
+	if budget.used+int64(len(body)) > triageBodyBudgetBytes {
+		if err := sp.Commit(ctx); err != nil {
+			return []byte{}, TriageBodyUnstorablePrefix + "savepoint commit: " + triageSafeText(err.Error())
+		}
+		return []byte{}, fmt.Sprintf("%sbody_budget_exhausted: this run already holds %d bytes of distinct response bodies and the cap is %d, so this %d byte response was not kept. The response existed and was read; these bytes are the only thing missing",
+			TriageBodyDroppedPrefix, budget.used, triageBodyBudgetBytes, len(body))
+	}
+
+	tag, err := sp.Exec(ctx, `
+		INSERT INTO triage_bodies (run_id, body_sha256, body, body_len, truncated)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (run_id, body_sha256) DO NOTHING`,
+		runUUID, key, body, len(body), r.BodyTruncated)
+	if err != nil {
+		_ = sp.Rollback(ctx)
+		return []byte{}, TriageBodyUnstorablePrefix + triageSafeText(err.Error())
+	}
+	if err := sp.Commit(ctx); err != nil {
+		return []byte{}, TriageBodyUnstorablePrefix + "savepoint commit: " + triageSafeText(err.Error())
+	}
+	if tag.RowsAffected() > 0 {
+		budget.used += int64(len(body))
+	}
+	return key, TriageBodyStored
+}
+
+// triageRespHeadersJSON renders a response header list for storage, every name and value made
+// storable first. A header value carrying a NUL or invalid UTF-8 is exactly the shape that used to
+// refuse a whole batch, and a header list is one of the likelier places to meet one, because it
+// comes off the wire unfiltered.
+func triageRespHeadersJSON(headers [][2]string) string {
+	if len(headers) == 0 {
+		return "[]"
+	}
+	out := make([][2]string, 0, len(headers))
+	for _, h := range headers {
+		out = append(out, [2]string{triageSafeText(h[0]), triageSafeText(h[1])})
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
 }
 
 // triageNULEscape is what a NUL byte becomes on its way into a TEXT column.
@@ -1677,13 +2202,16 @@ func RecordTriageFidelity(ctx context.Context, runUUID string, rows []TriageFide
 
 	written, degraded := 0, 0
 	var lost []string
+	// One budget for the whole batch, read from the table on first use. Carried across the rows so
+	// a batch of 200 probes asks the database how much room is left once rather than 200 times.
+	budget := &triageBodyBudget{}
 	for i, r := range rows {
-		asMeasured := triageInsertFidelityRow(ctx, tx, runUUID, r, nil)
+		asMeasured := triageInsertFidelityRow(ctx, tx, runUUID, r, nil, budget)
 		if asMeasured == nil {
 			written++
 			continue
 		}
-		placeholder := triageInsertFidelityRow(ctx, tx, runUUID, r, asMeasured)
+		placeholder := triageInsertFidelityRow(ctx, tx, runUUID, r, asMeasured, budget)
 		if placeholder == nil {
 			// The measurement is gone but the fact that it is gone is on the record, and every
 			// read counts TriageSurvivalUnstorable as unproven.
@@ -1719,7 +2247,7 @@ func RecordTriageFidelity(ctx context.Context, runUUID string, rows []TriageFide
 // replaced, survived = TriageSurvivalUnstorable and the refusal itself in transport_msg. The
 // placeholder is deliberately as close to unrefusable as a row can be, because its whole job is to
 // leave a mark where a measurement should have been.
-func triageInsertFidelityRow(ctx context.Context, tx pgx.Tx, runUUID string, r TriageFidelityRow, cause error) error {
+func triageInsertFidelityRow(ctx context.Context, tx pgx.Tx, runUUID string, r TriageFidelityRow, cause error, budget *triageBodyBudget) error {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("savepoint: %w", err)
@@ -1750,6 +2278,15 @@ func triageInsertFidelityRow(ctx context.Context, tx pgx.Tx, runUUID string, r T
 	delivered := r.Delivered
 	httpStatus := r.HTTPStatus
 
+	// THE BODY GOES IN BEFORE THE ROW THAT POINTS AT IT, inside its own savepoint, so a body the
+	// database refuses cannot take the probe record with it. The reverse order would leave a row
+	// claiming body_state 'stored' with nothing behind the key if the body write then failed, and
+	// the schema's CHECK would not catch that: it checks the key is present, not that it resolves.
+	bodyKey, bodyState := triageStoreBody(ctx, tx, runUUID, r, budget)
+	bodyLen := r.BodyLen
+	respHeaders := triageRespHeadersJSON(r.RespHeaders)
+	contentType := triageSafeText(r.ContentType)
+
 	if cause != nil {
 		obsID, marker, integrity, container, encVersion = "", "", "", "", ""
 		chain = []string{}
@@ -1769,6 +2306,13 @@ func triageInsertFidelityRow(ctx context.Context, tx pgx.Tx, runUUID string, r T
 		// probe and the reason it could not be written, and gives up everything that could refuse
 		// it a second time.
 		sentAt = nil
+		// THE BODY LINK SURVIVES ON THE PLACEHOLDER when the body itself landed, because those
+		// bytes are the one thing here that is the target's rather than this runner's account of
+		// itself, and a 32 byte key cannot be the reason a row is refused twice. The HEADERS do
+		// not survive: they came off the wire unfiltered, they are a likely reason the row was
+		// refused in the first place, and the placeholder must not be refused for a second reason.
+		respHeaders = "[]"
+		contentType = ""
 	}
 
 	_, err = sp.Exec(ctx, `
@@ -1776,14 +2320,16 @@ func triageInsertFidelityRow(ctx context.Context, tx pgx.Tx, runUUID string, r T
 			run_id, ordinal, attempt, class_id, class_name, probe_id, vector_id, slot_key,
 			obs_id, obs_kind, marker, marker_integrity, container_name, encoder_chain,
 			encoder_version, logical, wire, container, logical_len, wire_len, container_len,
-			survived, altered_by, transport_err, transport_msg, http_status, delivered, sent_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)`,
+			survived, altered_by, transport_err, transport_msg, http_status, delivered, sent_at,
+			body_sha256, body_state, body_len, resp_content_type, resp_headers)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)`,
 		runUUID, int64(r.Ordinal), attempt, int16(r.Class), triageSafeText(r.Class.String()),
 		triageSafeText(string(r.ProbeID)), triageSafeText(r.VectorID), triageSafeText(string(r.SlotKey)),
 		obsID, triageSafeText(string(r.ObsKind)), marker, integrity, container, chain, encVersion,
 		logical, wire, body,
 		len(r.Wire.Logical), len(r.Wire.Wire), len(r.Wire.Container),
-		survived, alteredBy, transportErr, transportMsg, httpStatus, delivered, sentAt)
+		survived, alteredBy, transportErr, transportMsg, httpStatus, delivered, sentAt,
+		bodyKey, triageSafeText(bodyState), bodyLen, contentType, respHeaders)
 	if err != nil {
 		_ = sp.Rollback(ctx)
 		return err
@@ -1921,6 +2467,251 @@ func LoadTriageFidelityUnproven(ctx context.Context, runUUID string) ([]TriageFi
 }
 
 // ---------------------------------------------------------------------------------------------
+// Reading a response back
+// ---------------------------------------------------------------------------------------------
+
+// triageResponseSelect is the projection every response read shares, so the column list and the
+// scan below cannot drift apart in one caller.
+const triageResponseSelect = `
+	SELECT fid.ordinal, fid.attempt, fid.class_id, fid.probe_id, fid.vector_id, fid.slot_key,
+	       fid.http_status, fid.delivered, fid.resp_content_type, fid.resp_headers,
+	       fid.body_state, fid.body_len,
+	       COALESCE(b.body, ''::BYTEA), COALESCE(b.truncated, FALSE)
+	FROM triage_fidelity fid
+	LEFT JOIN triage_bodies b ON b.run_id = fid.run_id AND b.body_sha256 = fid.body_sha256`
+
+// THE JOIN IS A LEFT JOIN AND THAT IS NOT A DETAIL. An inner join would make a probe whose body
+// was dropped, refused or never attached VANISH from the result, and a reader asking "what did
+// this probe get back" would be answered with nothing at all, which is the absence-reads-as-a-
+// measurement failure one layer up from the one body_state was added to stop. Every probe record
+// comes back; body_state is what says whether the bytes came with it.
+func triageScanResponse(rows pgx.Rows) (TriageStoredResponse, error) {
+	var r TriageStoredResponse
+	var ordinal int64
+	var classID int16
+	var probeID, slotKey string
+	var headers []byte
+	if err := rows.Scan(&ordinal, &r.Attempt, &classID, &probeID, &r.VectorID, &slotKey,
+		&r.HTTPStatus, &r.Delivered, &r.ContentType, &headers, &r.BodyState, &r.BodyLen,
+		&r.Body, &r.Truncated); err != nil {
+		return r, err
+	}
+	r.Ordinal = uint64(ordinal)
+	r.Class = triage.ClassID(classID)
+	r.ProbeID = triage.ProbeID(probeID)
+	r.SlotKey = triage.SlotKey(slotKey)
+	if len(headers) > 0 {
+		_ = json.Unmarshal(headers, &r.Headers)
+	}
+	return r, nil
+}
+
+// LoadTriageResponse reads what one probe got back.
+//
+// A probe that has no record at all is an error and never an empty response, for the reason the
+// whole layer exists: a reader told "no rows" about a probe a verdict cites would have no way to
+// tell that from a target that answered with nothing.
+func LoadTriageResponse(ctx context.Context, runUUID string, ordinal uint64, attempt int) (TriageStoredResponse, error) {
+	if attempt < 1 {
+		attempt = 1
+	}
+	rows, err := dbPool.Query(ctx, triageResponseSelect+`
+		WHERE fid.run_id = $1 AND fid.ordinal = $2 AND fid.attempt = $3`,
+		runUUID, int64(ordinal), attempt)
+	if err != nil {
+		return TriageStoredResponse{}, fmt.Errorf("triage store: load response: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return TriageStoredResponse{}, fmt.Errorf("triage store: load response: %w", err)
+		}
+		return TriageStoredResponse{}, fmt.Errorf("triage store: run %s holds no probe record for ordinal %d attempt %d, so there is nothing that could say what that probe got back",
+			runUUID, ordinal, attempt)
+	}
+	out, err := triageScanResponse(rows)
+	if err != nil {
+		return TriageStoredResponse{}, fmt.Errorf("triage store: scan response: %w", err)
+	}
+	return out, rows.Err()
+}
+
+// LoadTriageResponses reads what each of a set of probes got back, ordered by ordinal then attempt.
+// It is the read behind a verdict's whole ordinal list: the probes a verdict rests on are the ones
+// an operator wants to page through.
+func LoadTriageResponses(ctx context.Context, runUUID string, ordinals []uint64) ([]TriageStoredResponse, error) {
+	if len(ordinals) == 0 {
+		return nil, nil
+	}
+	rows, err := dbPool.Query(ctx, triageResponseSelect+`
+		WHERE fid.run_id = $1 AND fid.ordinal = ANY($2)
+		ORDER BY fid.ordinal, fid.attempt`,
+		runUUID, ordinalsToInt64(ordinals))
+	if err != nil {
+		return nil, fmt.Errorf("triage store: load responses: %w", err)
+	}
+	defer rows.Close()
+	var out []TriageStoredResponse
+	for rows.Next() {
+		r, err := triageScanResponse(rows)
+		if err != nil {
+			return nil, fmt.Errorf("triage store: scan response: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// TriageEvidenceWindow is a verdict's evidence span resolved against the response it points into.
+//
+// IT IS ALLOWED TO SAY NO, and most of this type is that answer. A window with Resolved false
+// carries Why, which is a sentence an operator can act on, and Candidates, which is every response
+// the verdict rests on so they can look themselves. Returning a confident pointer at the wrong
+// response would be worse than returning none, because the offset would then name bytes that were
+// never the ones the oracle matched.
+type TriageEvidenceWindow struct {
+	// Resolved says a single response was identified as the one the span points into.
+	Resolved bool
+	// HowResolved is "evidence_ordinal" when the verdict named the probe, and "matched_bytes" when
+	// it did not and exactly one of its probes' responses carries the recorded bytes at the
+	// recorded offset. The second is a MEASUREMENT over the stored responses, not a guess: a
+	// candidate that does not hold those bytes at that offset is not offered.
+	HowResolved string
+	Response    TriageStoredResponse
+	Offset      int
+	Length      int
+	Matched     []byte
+	// OffsetVerified is the assertion this whole feature is for: the stored response really does
+	// hold Matched at Offset. It is false when the span could not be checked, and it is false with
+	// Resolved TRUE when the check was made and FAILED, which is a defect worth seeing rather than
+	// hiding: the stored bytes and the index space the oracle measured are not the same buffer.
+	OffsetVerified bool
+	// Why is empty when Resolved and OffsetVerified are both true, and otherwise says what is
+	// missing or wrong in the words an operator needs.
+	Why string
+	// Candidates is the responses of every probe the verdict cites, filled whenever the span did
+	// not resolve to one of them, so a finding is never a dead end.
+	Candidates []TriageStoredResponse
+}
+
+// LoadTriageEvidenceWindow resolves one verdict's evidence to the response it points into and
+// checks the offset against the stored bytes.
+//
+// =================================================================================================
+// WHY IT RESOLVES BY BYTES AND NOT ONLY BY THE ORDINAL
+// =================================================================================================
+//
+// TriageEvidence carries an Ordinal field and a good many classifiers do not fill it. SSTI's
+// computation oracle, the strongest verdict that class can produce, builds its evidence from an
+// sstiHit that has an offset, a length, the matched bytes and NO ordinal at all, so the verdict
+// reaches the table with evidence_ordinal 0 and an offset into a response it never named. Fixing
+// that is a change in each classifier, and until every one of them is fixed a reader that gave up
+// on a missing ordinal would answer "cannot show you" for the findings that matter most.
+//
+// So when the ordinal is absent the responses of the probes the verdict DOES cite are searched for
+// the recorded bytes at the recorded offset. If exactly one holds them, that is the response, and
+// it is identified by the same bytes the oracle matched rather than by an assumption. If several
+// do, or none does, the window says so and hands back the candidates.
+func LoadTriageEvidenceWindow(ctx context.Context, runUUID string, row TriageVerdictRow) (TriageEvidenceWindow, error) {
+	ev := row.Verdict.Evidence
+	w := TriageEvidenceWindow{Offset: ev.Offset, Length: ev.Length, Matched: ev.Matched}
+
+	if ev.Ordinal > 0 {
+		resp, err := LoadTriageResponse(ctx, runUUID, ev.Ordinal, 1)
+		if err != nil {
+			return w, err
+		}
+		w.Resolved = true
+		w.HowResolved = "evidence_ordinal"
+		w.Response = resp
+		w.Why = triageEvidenceSpanCheck(resp, ev.Offset, ev.Length, ev.Matched, &w.OffsetVerified)
+		return w, nil
+	}
+
+	candidates, err := LoadTriageResponses(ctx, runUUID, row.Verdict.Ordinals)
+	if err != nil {
+		return w, err
+	}
+	if len(ev.Matched) == 0 || ev.Offset < 0 {
+		w.Candidates = candidates
+		w.Why = fmt.Sprintf("this verdict records no span into a response (evidence_ordinal %d, offset %d, %d matched bytes), so there is nothing to point at one. The %d responses of the probes it rests on are in Candidates",
+			ev.Ordinal, ev.Offset, len(ev.Matched), len(candidates))
+		return w, nil
+	}
+
+	var hits []TriageStoredResponse
+	for _, c := range candidates {
+		verified := false
+		if triageEvidenceSpanCheck(c, ev.Offset, ev.Length, ev.Matched, &verified) == "" && verified {
+			hits = append(hits, c)
+		}
+	}
+	switch len(hits) {
+	case 1:
+		w.Resolved = true
+		w.HowResolved = "matched_bytes"
+		w.Response = hits[0]
+		w.OffsetVerified = true
+		return w, nil
+	case 0:
+		w.Candidates = candidates
+		w.Why = fmt.Sprintf("this verdict names no probe for its evidence (evidence_ordinal is 0) and none of the %d responses of the probes it rests on holds %q at offset %d, so the span cannot be attributed to any stored response. The classifier that emitted it does not fill TriageEvidence.Ordinal",
+			len(candidates), ev.Matched, ev.Offset)
+		return w, nil
+	default:
+		w.Candidates = hits
+		w.Why = fmt.Sprintf("this verdict names no probe for its evidence (evidence_ordinal is 0) and %d of the responses it rests on hold %q at offset %d, so the span cannot be attributed to one of them. Candidates holds all %d",
+			len(hits), ev.Matched, ev.Offset, len(hits))
+		return w, nil
+	}
+}
+
+// triageEvidenceSpanCheck compares a recorded span against a stored response and returns "" when
+// it holds, setting verified. Every other return is the sentence an operator is owed.
+func triageEvidenceSpanCheck(resp TriageStoredResponse, off, length int, matched []byte, verified *bool) string {
+	*verified = false
+	if !resp.BodyAvailable() {
+		return fmt.Sprintf("the response of probe ordinal %d is not stored (%s), so the offset cannot be checked against anything",
+			resp.Ordinal, triageBodyStateSentence(resp.BodyState))
+	}
+	if len(matched) == 0 || off < 0 {
+		return fmt.Sprintf("this verdict records no span (offset %d, %d matched bytes), so there is nothing to check against the %d byte response of probe ordinal %d",
+			off, len(matched), len(resp.Body), resp.Ordinal)
+	}
+	if length != len(matched) {
+		return fmt.Sprintf("the verdict records a span of %d bytes and %d matched bytes, which cannot both be true, so the offset into the %d byte response of probe ordinal %d is not trustworthy",
+			length, len(matched), len(resp.Body), resp.Ordinal)
+	}
+	if off+length > len(resp.Body) {
+		return fmt.Sprintf("the verdict points at bytes %d..%d of a response that is %d bytes long. Either the span is into something other than the body (a response header, for instance) or the oracle indexed a buffer this row does not hold",
+			off, off+length, len(resp.Body))
+	}
+	if got := resp.Body[off : off+length]; !bytes.Equal(got, matched) {
+		return fmt.Sprintf("the verdict recorded %q as the bytes it matched and offset %d of the stored response holds %q, so the stored response and the buffer the oracle indexed are not the same bytes",
+			matched, off, got)
+	}
+	*verified = true
+	return ""
+}
+
+// triageBodyStateSentence turns a body_state into something readable in a message. The prefixed
+// states already carry their reason, so they are passed through; the bare ones get a sentence.
+func triageBodyStateSentence(state string) string {
+	switch state {
+	case TriageBodyUnrecorded:
+		return "this run predates response storage, so nothing recorded what came back"
+	case TriageBodyStored:
+		return "stored"
+	case TriageBodyNoResponse:
+		return "the probe got no response at all"
+	case TriageBodyNotAttached:
+		return "a response arrived and the runner never handed its body to the store, which is a defect in the runner"
+	default:
+		return state
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
 // The read the report is built on
 // ---------------------------------------------------------------------------------------------
 
@@ -1991,21 +2782,134 @@ type TriageRunCoverage struct {
 	// and they were sitting in a column no reader opened.
 	RunError string `json:"RunError"`
 
-	// EligiblePairs is the denominator, fixed when the plan was made.
+	// EligiblePairs is the denominator, fixed when the plan was made: the coverage rows this run
+	// is ACCOUNTABLE FOR, which is the same population triage_runs.planned_pairs counts.
+	//
+	// IT IS NOT count(*) OF triage_coverage AND IT USED TO BE. The table holds a row for every
+	// pair the planner considered, refused ones included, so on the operator's live run this field
+	// read 34500 against a plan of 20680 and every comparison between the two was arithmetic on
+	// two different populations. See triageCoverageEligibleColumn for the measurement and for what
+	// it cost. CoverageRows below is the count(*) that reader wanted.
 	EligiblePairs int `json:"EligiblePairs"`
-	// RanPairs is how many of them were actually measured.
+	// CoverageRows is every row in the denominator table for this run, eligible or not. It is the
+	// size of the plan the planner walked, and it is carried separately rather than folded into
+	// EligiblePairs because the operator cannot act on the difference without seeing both: 13820
+	// pairs "refused by design" and 13820 pairs "we ran out of budget" are the same integer and
+	// opposite instructions, and telling them apart is what this whole layer is for.
+	CoverageRows int `json:"CoverageRows"`
+	// IneligiblePairs is CoverageRows minus EligiblePairs: pairs that hold a row and a reason and
+	// are not work this run can ever retire. A credential slot is the whole of this population
+	// today.
+	IneligiblePairs int `json:"IneligiblePairs"`
+	// IneligiblePairsThatRan is how many of those were nevertheless measured, and it is a hard
+	// fault rather than a statistic. The pairs in this population are the ones the planner said
+	// must never be probed, and the reason they must not is that they are the operator's own
+	// session credentials: a probe here logs the run out and sends a mangled token to the
+	// operator's target. A non-zero value means the runner sent a probe the plan forbade, so it
+	// blocks the certificate and is named in Untested.
+	IneligiblePairsThatRan int `json:"IneligiblePairsThatRan"`
+	// DenominatorSurplus is EligiblePairs minus PlannedPairs when the denominator holds MORE
+	// eligible pairs than the plan recorded.
+	//
+	// IT IS THE OTHER HALF OF WITNESS 2 AND IT WAS NEVER TAKEN. The reconciliation only ever asked
+	// whether the plan was bigger than the denominator, so the two numbers counting different
+	// populations produced a negative shortfall, which is not a shortfall, and the entire witness
+	// went quiet. Now that both sides count the same thing, a difference in EITHER direction is a
+	// bookkeeping failure: either the planner did not record what it planned, or rows exist that
+	// no plan accounts for, and neither is a run that may certify anything. On the live run as it
+	// stands, with a runner that does not yet set Ineligible, this reads 13820 and says so in
+	// words, which is the true statement of the defect rather than a silent -13820.
+	DenominatorSurplus int `json:"DenominatorSurplus"`
+	// RanPairs is how many ELIGIBLE pairs were actually measured, and the word eligible is the
+	// correction.
+	//
+	// It used to be count(*) of every coverage row with ran = TRUE, and RendersAsClean compares it
+	// against EligiblePairs. Two populations again, and this time the wrong one was the larger:
+	// two eligible pairs of which one ran, plus one INELIGIBLE pair that ran, reads RanPairs = 2
+	// against EligiblePairs = 2, the equality holds, and an eligible pair nobody measured is paid
+	// for by a pair the plan forbade. The certificate still refused that run, but through
+	// IneligiblePairsThatRan, a different gate entirely, so the broken term was load-bearing for
+	// nothing and read as sound. A gate that is correct only because another gate happens to fire
+	// is a gate the next edit removes.
+	//
+	// NARROWING IT DOES NOT HIDE THE INELIGIBLE POPULATION, which is what the comment in the query
+	// was protecting: IneligiblePairsThatRan counts exactly those, names them, and blocks the
+	// certificate on its own. RanPairs + IneligiblePairsThatRan is every coverage row that ran.
 	RanPairs int `json:"RanPairs"`
-	// PairsWithNoVerdict is eligible pairs that produced no verdict row at all. It is counted and
+	// PairsWithNoVerdict is coverage pairs that produced no verdict row at all, ELIGIBLE OR NOT,
+	// and the breadth is deliberate: a pair the planner refused still owes a verdict saying why it
+	// was refused, so a refused pair that is simply silent is as much a gap as a measured one. The
+	// comment here used to say "eligible pairs", which the query has never done, and a field label
+	// naming a narrower population than the count is how a reader comes to subtract it from
+	// EligiblePairs and get an answer about a different set. It is counted and
 	// named separately because it is the failure mode that has no row to look at: a crash, a
 	// cancellation or a budget cut leaves the pair silent, and silence has been read as clean here
 	// before.
 	PairsWithNoVerdict int `json:"PairsWithNoVerdict"`
 
+	// VerdictRows COUNTS ARMS AND NOTHING ELSE, and it is the number the card prints beside
+	// CoverageRows, which counts PAIRS.
+	//
+	// They are not comparable and they were never labelled as such. A class emits one verdict per
+	// arm, CATALOGUE 4.3 records NOSQL emitting six, and on the operator's finished run 34500
+	// pairs produced 46608 rows over 20 distinct arms. Set beside "coverage_rows 34500" with
+	// nothing to explain the difference, the two read as a bookkeeping fault in a run where there
+	// is none, and a number the operator cannot reconcile is a number the operator stops reading.
 	VerdictRows int `json:"VerdictRows"`
-	Positive    int `json:"Positive"`
-	Negative    int `json:"Negative"`
-	Clean       int `json:"Clean"`
-	Unknown     int `json:"Unknown"`
+	// VerdictPairs is how many DISTINCT (vector, unit, class) triples hold a verdict row. It is
+	// the count CoverageRows is comparable to, and it is what closes the reconciliation:
+	//
+	//	VerdictPairs + PairsWithNoVerdict == CoverageRows + OrphanCoveragePairs
+	//
+	// Every pair either holds a verdict or does not; every pair either holds a coverage row or is
+	// an orphan. TestTheArmCountAndThePairCountAreBothReportedSoTheThreeNumbersReconcile pins the
+	// identity, because the moment it fails two of these counts are over different populations
+	// again, which is this file's oldest defect shape.
+	VerdictPairs int `json:"VerdictPairs"`
+
+	// CredentialPairsInDenominator is how many ELIGIBLE coverage pairs name a slot the run's own
+	// inventory flags is_credential, and it is THE MEASURED CAUSE of the three counts that would
+	// not reconcile.
+	//
+	// Joined on the operator's finished run a218419a, from two tables this store already owns:
+	// 3450 slots of which 1382 are credentials, 34500 coverage rows (3450 x 10 classes),
+	// planned_pairs 20680 (2068 x 10), and 13820 coverage pairs whose slot is a credential slot.
+	// 34500 - 13820 = 20680 exactly. The coverage table holds a row for every triple the planner
+	// CONSIDERED and planned_pairs counts only the ones it kept, so the two numbers were never
+	// counting one population. Nothing is retained from a previous plan and nothing is counted
+	// across runs: each of the three runs on the database holds exactly 34500 rows under its own
+	// run_id, written in one batch at one timestamp.
+	//
+	// DenominatorSurplus ALONE DOES NOT CLOSE IT, which is why this witness exists beside it. On
+	// run acaff558 the planner recorded planned_pairs = 34500 against 34500 eligible rows: surplus
+	// zero, shortfall zero, both witnesses silent, and 13820 credential pairs sitting inside the
+	// denominator with nothing whatever to say so. Only the join to the inventory sees that one.
+	CredentialPairsInDenominator int `json:"CredentialPairsInDenominator"`
+	// CredentialPairsProbed is how many coverage pairs the inventory calls a credential were
+	// nevertheless measured, and it is a SAFETY fault, not a statistic.
+	//
+	// IT IS NOT IneligiblePairsThatRan. That field counts pairs the coverage row itself marks
+	// ineligible, which is the planner's own answer; a credential slot the planner FAILED to mark
+	// is eligible as far as it is concerned, reads zero, and the run certifies clean over a
+	// mangled session cookie sent to the operator's target. This one asks the inventory what the
+	// slot is, so it still fires when the plan has forgotten. The two are kept apart because they
+	// name different failures: one is a runner ignoring the plan, the other is a plan that was
+	// wrong.
+	CredentialPairsProbed int `json:"CredentialPairsProbed"`
+	// CoveragePairsWithNoSlotRow is how many coverage pairs name a slot the run never inventoried,
+	// so nothing can say what that slot is.
+	//
+	// It exists because the two fields above ask triage_slots a question, and a pair with no slot
+	// row returns no answer. Reading no answer as "not a credential" is the family defect one join
+	// along: the pair whose inventory row went missing is exactly the pair whose description
+	// nobody can check. Measured on the live run: 0 of 34500 coverage pairs, so nothing legitimate
+	// is refused by counting it.
+	CoveragePairsWithNoSlotRow int `json:"CoveragePairsWithNoSlotRow"`
+
+	Positive int `json:"Positive"`
+	Negative int `json:"Negative"`
+	Clean    int `json:"Clean"`
+	Unknown  int `json:"Unknown"`
 
 	// UnprovenProbes is how many of this run's probes cannot be shown to have reached the wire as
 	// asked: dropped, altered, refused, or never measured at all. See triageUnprovenFidelity.
@@ -2118,6 +3022,24 @@ func (c TriageRunCoverage) RendersAsClean() bool {
 	if c.MissingCoveragePairs != 0 || c.OrphanCoveragePairs != 0 || c.PlanUnrecorded {
 		return false
 	}
+	// THE SURPLUS SIDE OF THE SAME WITNESS, and it is stated separately because the line above can
+	// only ever see the denominator being too SMALL. The two numbers count one population now, so
+	// an excess of eligible coverage rows over the recorded plan is the same class of fault as a
+	// shortfall: one of the two records of what this run was for is wrong, and a run that cannot
+	// say how big its own question was cannot answer it. Measured before this existed: 34500
+	// against a plan of 20680, shortfall -13820, witness silent, run not flagged.
+	if c.DenominatorSurplus != 0 {
+		return false
+	}
+	// A PAIR THE PLAN FORBADE AND THE RUNNER MEASURED ANYWAY. These are the credential slots: the
+	// operator's own session cookies and Authorization headers. A probe here does not merely waste
+	// a request, it invalidates the session every later pair depends on and sends a mangled
+	// credential to the operator's target, so every verdict after it is suspect and none of them
+	// may certify. It is counted from triage_coverage.ran, which is the runner's own record of
+	// having measured the pair, not from anything this read infers.
+	if c.IneligiblePairsThatRan != 0 {
+		return false
+	}
 	// A COUNTER DISAGREEMENT IS NOT A SMALL BOOKKEEPING FAULT, it is the loss of a witness. Where
 	// triage_coverage.sent_probes is smaller than the number of distinct probe records the pair
 	// holds, the subtraction that catches a destroyed record on that pair cannot fire, because the
@@ -2126,7 +3048,38 @@ func (c TriageRunCoverage) RendersAsClean() bool {
 	if c.CounterDisagreementPairs != 0 {
 		return false
 	}
+	// THE INVENTORY'S OWN TERMS, AND THEY CATCH WHAT THE PLAN CANNOT SAY ABOUT ITSELF.
+	//
+	// Everything above reasons from triage_coverage, which is the PLANNER'S account of the run. A
+	// credential slot the planner never marked is eligible in that account, so IneligiblePairsThatRan
+	// reads zero over a probe into the operator's own session cookie, and the surplus witness reads
+	// zero too whenever planned_pairs was recorded from the same wrong number: measured on run
+	// acaff558, plan 34500, eligible 34500, surplus 0, with 13820 credential pairs inside the
+	// denominator and not one witness able to see them. triage_slots is a second, independently
+	// written account of what each unit IS, and these three terms are what makes it load-bearing.
+	//
+	// A credential pair in the denominator blocks because it is work that can never be retired, so
+	// a denominator holding one can never be fully measured and a run reporting it as outstanding
+	// is reporting work nobody will ever do. A credential pair that was PROBED blocks because it
+	// invalidated the session every later pair depends on. A pair with no inventory row blocks
+	// because nothing can say which of the two it is, and unknown is not "ordinary".
+	if c.CredentialPairsInDenominator != 0 || c.CredentialPairsProbed != 0 {
+		return false
+	}
+	if c.CoveragePairsWithNoSlotRow != 0 {
+		return false
+	}
 	if c.Unknown != 0 || c.Positive != 0 {
+		return false
+	}
+	// THE THREE COUNTS HAVE TO RECONCILE BEFORE ANY OF THEM MAY CERTIFY. Every pair either holds
+	// a verdict or is counted in PairsWithNoVerdict, and every pair either holds a coverage row or
+	// is an orphan, so the two sides are the same population counted two ways. They have disagreed
+	// before, for a whole week, at 34500 against 20680, and the disagreement was invisible because
+	// nothing ever set the two sides beside each other. VerdictRows is NOT in this identity, on
+	// purpose: it counts arms, not pairs, and putting it here is the mistake the identity exists
+	// to make impossible to repeat.
+	if c.VerdictPairs+c.PairsWithNoVerdict != c.CoverageRows+c.OrphanCoveragePairs {
 		return false
 	}
 	return c.Clean == c.VerdictRows
@@ -2154,10 +3107,35 @@ func LoadTriageRunCoverage(ctx context.Context, runUUID string) (TriageRunCovera
 
 	// planned_pairs IS READ BESIDE THE COUNT IT IS THE WITNESS FOR, not somewhere else, because a
 	// witness consulted in another function is a witness the next refactor drops.
+	//
+	// THE FIRST TWO COUNTS ARE THE SAME TABLE READ OVER TWO DIFFERENT POPULATIONS, and keeping
+	// them apart is the fix for the dead witness. `AND eligible` is what makes EligiblePairs
+	// comparable to planned_pairs; count(*) beside it is what the screen needs so "refused by
+	// design" stays visibly different from "never got to it".
+	//
+	// RanPairs IS NARROWED TO ELIGIBLE ROWS AND IT USED TO NOT BE. RendersAsClean compares it
+	// against EligiblePairs, so it has to count that same population: while it counted every row,
+	// an ineligible pair that ran paid for an eligible pair that did not and the equality held
+	// over an unmeasured pair. The ineligible population stays fully observable through
+	// IneligiblePairsThatRan, which is the column beside it, so nothing is hidden by the
+	// narrowing; the two together are every coverage row that ran.
+	//
+	// PairsWithNoVerdict is still NOT narrowed, and that one is deliberate: a pair the planner
+	// refused still owes a verdict saying why, so a silent refused pair is as much a gap as a
+	// silent measured one. It is never subtracted from EligiblePairs anywhere.
+	//
+	// THE LAST THREE ARE THE JOIN TO THE RUN'S OWN INVENTORY, and they are the fix for the three
+	// counts that would not reconcile. triage_slots knows which units are the operator's
+	// credentials; triage_coverage.eligible is the planner's opinion of the same question, and
+	// when the planner is wrong or was never taught the flag, the inventory is the only witness
+	// left. The third counts the pairs the inventory cannot answer for at all, because "no slot
+	// row" is not the same answer as "not a credential".
 	err = tx.QueryRow(ctx, `
 		SELECT
+			(SELECT count(*) FROM triage_coverage WHERE run_id = $1 AND eligible),
 			(SELECT count(*) FROM triage_coverage WHERE run_id = $1),
-			(SELECT count(*) FROM triage_coverage WHERE run_id = $1 AND ran),
+			(SELECT count(*) FROM triage_coverage WHERE run_id = $1 AND NOT eligible AND ran),
+			(SELECT count(*) FROM triage_coverage WHERE run_id = $1 AND eligible AND ran),
 			(SELECT count(*) FROM triage_coverage c WHERE c.run_id = $1 AND NOT EXISTS (
 				SELECT 1 FROM triage_verdicts v
 				WHERE v.run_id = c.run_id AND v.vector_id = c.vector_id
@@ -2165,21 +3143,42 @@ func LoadTriageRunCoverage(ctx context.Context, runUUID string) (TriageRunCovera
 			COALESCE((SELECT planned_pairs FROM triage_runs WHERE id = $1), 0),
 			COALESCE((SELECT status FROM triage_runs WHERE id = $1), ''),
 			COALESCE((SELECT cancel_requested FROM triage_runs WHERE id = $1), FALSE),
-			COALESCE((SELECT error FROM triage_runs WHERE id = $1), '')`,
-		runUUID).Scan(&c.EligiblePairs, &c.RanPairs, &c.PairsWithNoVerdict, &c.PlannedPairs,
-		&c.RunStatus, &c.RunCancelRequested, &c.RunError)
+			COALESCE((SELECT error FROM triage_runs WHERE id = $1), ''),
+			(SELECT count(*) FROM triage_coverage c
+			   JOIN triage_slots s ON s.run_id = c.run_id AND s.vector_id = c.vector_id
+			                      AND s.slot_key = c.slot_key
+			  WHERE c.run_id = $1 AND c.eligible AND s.is_credential),
+			(SELECT count(*) FROM triage_coverage c
+			   JOIN triage_slots s ON s.run_id = c.run_id AND s.vector_id = c.vector_id
+			                      AND s.slot_key = c.slot_key
+			  WHERE c.run_id = $1 AND c.ran AND s.is_credential),
+			(SELECT count(*) FROM triage_coverage c WHERE c.run_id = $1 AND NOT EXISTS (
+				SELECT 1 FROM triage_slots s
+				WHERE s.run_id = c.run_id AND s.vector_id = c.vector_id
+				  AND s.slot_key = c.slot_key))`,
+		runUUID).Scan(&c.EligiblePairs, &c.CoverageRows, &c.IneligiblePairsThatRan, &c.RanPairs,
+		&c.PairsWithNoVerdict, &c.PlannedPairs,
+		&c.RunStatus, &c.RunCancelRequested, &c.RunError,
+		&c.CredentialPairsInDenominator, &c.CredentialPairsProbed, &c.CoveragePairsWithNoSlotRow)
 	if err != nil {
 		return c, fmt.Errorf("triage store: coverage counts: %w", err)
 	}
+	c.IneligiblePairs = c.CoverageRows - c.EligiblePairs
 
+	// THE PAIR COUNT IS TAKEN BESIDE THE ROW COUNT. count(*) here is ARMS: a class files one
+	// verdict per arm and the live run holds 46608 rows over 34500 pairs, which is 20 arms doing
+	// their job and looks exactly like 12108 rows too many next to a coverage table of 34500.
+	// Carrying both is what lets the reader tell those two apart at all.
 	err = tx.QueryRow(ctx, `
 		SELECT count(*),
 		       count(*) FILTER (WHERE state_kind = 'positive'),
 		       count(*) FILTER (WHERE state_kind = 'negative'),
 		       count(*) FILTER (WHERE state = 'clean'),
-		       count(*) FILTER (WHERE is_unknown)
+		       count(*) FILTER (WHERE is_unknown),
+		       count(DISTINCT (vector_id, slot_key, class_id))
 		FROM triage_verdicts WHERE run_id = $1`,
-		runUUID).Scan(&c.VerdictRows, &c.Positive, &c.Negative, &c.Clean, &c.Unknown)
+		runUUID).Scan(&c.VerdictRows, &c.Positive, &c.Negative, &c.Clean, &c.Unknown,
+		&c.VerdictPairs)
 	if err != nil {
 		return c, fmt.Errorf("triage store: verdict counts: %w", err)
 	}
@@ -2231,6 +3230,15 @@ func LoadTriageRunCoverage(ctx context.Context, runUUID string) (TriageRunCovera
 	//  2. THE PLAN SIZE. triage_runs.planned_pairs against count(*) of the coverage rows. It is the
 	//     only witness that can see a pair which left no trace of any kind, and it is the weaker
 	//     one: see PlannedPairs on the struct for why it cannot be trusted alone.
+	//
+	// WITNESS 2 IS NOW TAKEN IN BOTH DIRECTIONS, and that is the half that was missing. While
+	// EligiblePairs was count(*) of a table holding refused pairs and planned_pairs counted only
+	// the eligible ones, the subtraction below was 20680 - 34500 on the operator's live run: a
+	// negative shortfall, never greater than OrphanCoveragePairs, so the witness the comment above
+	// calls "the only one that can see a pair which left no trace of any kind" could not fire on
+	// any corpus holding a single credential slot. Both sides count the same population now, so a
+	// difference either way is a fault: short means rows were lost, surplus means rows exist that
+	// the plan does not account for, or that the planner never recorded what it planned.
 	c.MissingCoveragePairs = c.OrphanCoveragePairs
 	if short := c.PlannedPairs - c.EligiblePairs; short > c.MissingCoveragePairs {
 		c.MissingCoveragePairs = short
@@ -2240,7 +3248,19 @@ func LoadTriageRunCoverage(ctx context.Context, runUUID string) (TriageRunCovera
 	// plan" are the same value, and the runner only LOGS a failed SetTriageRunPlan. Read as a plan
 	// of zero it makes witness 2 silently unusable, which is this whole bug family in one integer:
 	// a zero count read as a positive fact. It is reported instead.
-	c.PlanUnrecorded = c.PlannedPairs == 0 && c.EligiblePairs > 0
+	//
+	// IT ASKS CoverageRows AND NOT EligiblePairs. A plan made entirely of pairs the planner refused
+	// is a real shape (one deselected vector of credential slots), it holds rows, and its plan was
+	// just as unrecorded; keyed on the narrowed count it would read as "no rows, so no plan was
+	// owed", which is the absence-as-a-fact reading one field along.
+	c.PlanUnrecorded = c.PlannedPairs == 0 && c.CoverageRows > 0
+	// THE SURPLUS IS NOT TAKEN WHEN THERE IS NO PLAN TO COMPARE AGAINST. With planned_pairs never
+	// recorded, every eligible row is trivially "more than the plan", which would report the whole
+	// denominator as a surplus and bury the one fact that matters, which PlanUnrecorded already
+	// states. Both block the certificate, so nothing is waved through by saying it once.
+	if over := c.EligiblePairs - c.PlannedPairs; over > 0 && !c.PlanUnrecorded {
+		c.DenominatorSurplus = over
+	}
 
 	// Naming the gaps, in six groups, because they fail for different reasons and the operator's
 	// next move differs. An unknown verdict has a reason the class wrote. A pair with no verdict at
@@ -2320,7 +3340,97 @@ func LoadTriageRunCoverage(ctx context.Context, runUUID string) (TriageRunCovera
 	}
 	if c.PlanUnrecorded {
 		c.Untested = append(c.Untested, fmt.Sprintf("unowned:run:plan_size_never_recorded_with_%d_coverage_rows_present",
-			c.EligiblePairs))
+			c.CoverageRows))
+	}
+	// THE SURPLUS, SAID IN THE SAME SHAPE AS THE SHORTFALL. It has no pair to name either: the
+	// rows are all present and it is the plan that disagrees with them, so the arithmetic goes in
+	// the line. The word "eligible" is in it because the whole failure was two numbers counting
+	// different populations, and a reader has to be able to see which population is meant.
+	if c.DenominatorSurplus > 0 {
+		c.Untested = append(c.Untested, fmt.Sprintf("unowned:run:denominator_holds_%d_more_eligible_pairs_than_the_plan_recorded_%d_of_%d",
+			c.DenominatorSurplus, c.EligiblePairs, c.PlannedPairs))
+	}
+	// THE PAIRS THAT WERE NEVER TO BE PROBED AND WERE. Named rather than counted, because the
+	// operator's next move is to look at what went out, and "some credential slot somewhere in
+	// 218 vectors" is not an instruction. Capped, because a runner that ignores the plan ignores
+	// it for thousands of pairs at a time and the list is a report line, not a table.
+	if c.IneligiblePairsThatRan > 0 {
+		named, err := tx.Query(ctx, `
+			SELECT class_name, slot_key FROM triage_coverage
+			WHERE run_id = $1 AND NOT eligible AND ran
+			ORDER BY class_name, slot_key LIMIT 50`, runUUID)
+		if err != nil {
+			return c, fmt.Errorf("triage store: naming the pairs the plan refused and the runner measured: %w", err)
+		}
+		for named.Next() {
+			var class, slot string
+			if err := named.Scan(&class, &slot); err != nil {
+				named.Close()
+				return c, fmt.Errorf("triage store: scan a refused pair that ran: %w", err)
+			}
+			c.Untested = append(c.Untested, fmt.Sprintf("%s:%s:probed_although_the_plan_refused_this_pair_as_ineligible",
+				triageOrUnowned(class), triageOrUnowned(slot)))
+		}
+		named.Close()
+		if err := named.Err(); err != nil {
+			return c, fmt.Errorf("triage store: naming the pairs the plan refused and the runner measured: %w", err)
+		}
+		if c.IneligiblePairsThatRan > 50 {
+			c.Untested = append(c.Untested, fmt.Sprintf("unowned:run:and_%d_further_pairs_the_plan_refused_were_probed_anyway",
+				c.IneligiblePairsThatRan-50))
+		}
+	}
+	// THE INVENTORY'S GAPS, NAMED. A count of credential pairs is not an instruction; the slot
+	// key is, because the operator's next move is to look at what went out on that cookie and
+	// whether the session survived it. Capped at 50 for the same reason the refused-pair list is:
+	// a planner that mismarks one credential slot mismarks a thousand, and this is a report line.
+	if c.CredentialPairsProbed > 0 {
+		named, err := tx.Query(ctx, `
+			SELECT c.class_name, c.slot_key FROM triage_coverage c
+			  JOIN triage_slots s ON s.run_id = c.run_id AND s.vector_id = c.vector_id
+			                     AND s.slot_key = c.slot_key
+			WHERE c.run_id = $1 AND c.ran AND s.is_credential
+			ORDER BY c.class_name, c.slot_key LIMIT 50`, runUUID)
+		if err != nil {
+			return c, fmt.Errorf("triage store: naming the credential slots that were probed: %w", err)
+		}
+		for named.Next() {
+			var class, slot string
+			if err := named.Scan(&class, &slot); err != nil {
+				named.Close()
+				return c, fmt.Errorf("triage store: scan a probed credential slot: %w", err)
+			}
+			c.Untested = append(c.Untested, fmt.Sprintf("%s:%s:probed_although_the_inventory_says_this_slot_is_a_credential",
+				triageOrUnowned(class), triageOrUnowned(slot)))
+		}
+		named.Close()
+		if err := named.Err(); err != nil {
+			return c, fmt.Errorf("triage store: naming the credential slots that were probed: %w", err)
+		}
+		if c.CredentialPairsProbed > 50 {
+			c.Untested = append(c.Untested, fmt.Sprintf("unowned:run:and_%d_further_credential_slots_were_probed",
+				c.CredentialPairsProbed-50))
+		}
+	}
+	// The denominator's own version of the same fact, said once with its arithmetic rather than
+	// once per pair: 13820 lines would bury every other gap in the list. The numbers are in the
+	// text because the whole failure was two counts over two populations and the reader has to be
+	// able to do the subtraction.
+	if c.CredentialPairsInDenominator > 0 {
+		c.Untested = append(c.Untested, fmt.Sprintf("unowned:run:the_denominator_counts_%d_of_%d_eligible_pairs_as_work_whose_slots_are_credential_slots_the_plan_counted_as_work_and_can_never_retire",
+			c.CredentialPairsInDenominator, c.EligiblePairs))
+	}
+	// And the pairs nothing can describe at all.
+	if c.CoveragePairsWithNoSlotRow > 0 {
+		c.Untested = append(c.Untested, fmt.Sprintf("unowned:run:%d_of_%d_coverage_pairs_have_no_inventory_row_so_nothing_can_say_what_this_slot_is_including_whether_it_is_a_credential",
+			c.CoveragePairsWithNoSlotRow, c.CoverageRows))
+	}
+	// THE RECONCILIATION ITSELF, WHEN IT DOES NOT CLOSE. It is the identity RendersAsClean checks,
+	// printed with both sides, because "the run does not certify" with nothing to point at is not
+	// something the operator can act on and this is the one gap that belongs to no single pair.
+	if lhs, rhs := c.VerdictPairs+c.PairsWithNoVerdict, c.CoverageRows+c.OrphanCoveragePairs; lhs != rhs {
+		c.Untested = append(c.Untested, fmt.Sprintf("unowned:run:the_counts_do_not_reconcile_verdict_pairs_%d_plus_pairs_with_no_verdict_%d_is_%d_against_coverage_rows_%d_plus_orphans_%d_is_%d",
+			c.VerdictPairs, c.PairsWithNoVerdict, lhs, c.CoverageRows, c.OrphanCoveragePairs, rhs))
 	}
 	// THE RUN'S OWN STATE, NAMED THE SAME WAY EVERY OTHER GAP IS. RendersAsClean already refuses a
 	// run that did not finish cleanly, but a false predicate with an empty Untested list reads to
@@ -2378,6 +3488,16 @@ func bytesOrEmpty(b []byte) []byte {
 		return []byte{}
 	}
 	return b
+}
+
+// triageOrUnowned keeps an empty class or unit name out of a report line. A line reading
+// "::probed_although..." names nothing and is not something anyone can look up, which is the same
+// reason the Untested branches above substitute 'unowned' and 'run'.
+func triageOrUnowned(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "unowned"
+	}
+	return s
 }
 
 // nonNilSkips keeps an empty skip list rendering as [] and not as null, for the same reason.

@@ -1,6 +1,7 @@
 const { z } = require('zod');
 const { apiGet, apiPost } = require('../api');
 const { limitResults, clampLimit } = require('../utils/truncate');
+const { clip, bodyOptions, DEFAULTS } = require('../utils/clip');
 
 // Manual crawl over MCP: the capture sessions the browser extension records into, the traffic it
 // recorded, and the authentication exchanges hiding inside that traffic. Everything the Manual
@@ -26,11 +27,18 @@ const { limitResults, clampLimit } = require('../utils/truncate');
 // response is snake_case because it comes off a Go struct tag (session_id, status_code). This
 // module speaks snake_case to its caller in both directions and does the translation in one place.
 // Second, size: a recorded corpus is thousands of requests each carrying whole HTML pages, so
-// nothing returns whole by default. Lists collapse to one row per distinct endpoint, bodies are
-// clipped, and the verbose half of every row sits behind detail:"full".
+// nothing returns whole by default. Lists collapse to one row per distinct endpoint, bodies carry
+// a budget, and the verbose half of every row sits behind detail:"full".
+//
+// THE BUDGET IS NOT A CEILING. This table is the closest thing the framework has to the target's
+// own traffic: the session cookie it set, the JSON it returned for an account, the token in a
+// login response. Those are the bytes a finding is written from, so max_body_chars raises any of
+// the figures below up to the shared ceiling, and body_match returns the window around a string
+// instead of the head of the document. The true length is always reported next to a clipped
+// field, so a caller can tell a short body from a shortened one.
 
-// The ceiling on anything that came off the wire, applied per field.
-const BODY_LIMIT = 2000;
+// The starting budget for anything that came off the wire, applied per field.
+const BODY_LIMIT = DEFAULTS.record;
 
 // Structured fields need the same ceiling the string fields have.
 //
@@ -178,10 +186,25 @@ const manageManualCrawlSchema = z.object({
   detail: z.enum(['compact', 'full']).optional().describe(
     'compact (default) is the verb, URL, status, body sizes, timing, and the parameter and cookie ' +
     'names, which is enough to choose what to look at. full adds both header sets, both bodies ' +
-    `clipped to ${BODY_LIMIT} chars each, the parsed parameter values, the redirect chain, and on ` +
-    'auth_candidates the rebuilt raw HTTP request. full over a whole corpus is enormous, so narrow ' +
-    'with host, pattern, scope or max_results first.'),
+    `at ${BODY_LIMIT} chars each by default, the parsed parameter values, the redirect chain, and ` +
+    'on auth_candidates the rebuilt raw HTTP request. full over a whole corpus is enormous, so ' +
+    'narrow with host, pattern, scope or max_results first, then raise max_body_chars on what is ' +
+    'left.'),
   max_results: z.number().optional().describe('Maximum rows (default 50, max 1000)'),
+
+  max_body_chars: z.number().int().positive().optional().describe(
+    'Characters of post_data, response_body and raw_request to return, per field, on ' +
+    `detail:"full" (default ${BODY_LIMIT}, ceiling 200000). This is what you raise when the thing ` +
+    'the capture proves is further into the body than the default reaches: a session token in a ' +
+    'login response, another account\'s record in a JSON list, a key in a bootstrap blob. ' +
+    'response_body_chars and post_data_chars report the true length on every row, clipped or not, ' +
+    'so narrow to one capture and raise this rather than concluding a body ended where it stops.'),
+  body_match: z.string().optional().describe(
+    'Return the window around the FIRST case-insensitive occurrence of this string in a body ' +
+    'instead of the head of it. Cheaper than raising max_body_chars across a listing: ask for ' +
+    '"csrf", an account id, or a field name, and read what surrounds it.'),
+  body_match_window: z.number().int().positive().optional().describe(
+    'Characters either side of a body_match hit (default 400).'),
 });
 
 async function manageManualCrawl(params) {
@@ -373,7 +396,8 @@ async function manageManualCrawl(params) {
         by_category[k] = (by_category[k] || 0) + 1;
       }
 
-      const projected = rows.map((c) => compactAuthCandidate(c, full));
+      const abopts = bodyOptions(params, BODY_LIMIT, rows.length || 1);
+      const projected = rows.map((c) => compactAuthCandidate(c, full, abopts));
       return {
         by_category,
         // The two fields that separate the submission from the page around it. A candidate that
@@ -587,7 +611,8 @@ function captureListing(raw, params, full) {
   if (collapse) rows = groupByEndpoint(rows);
   rows.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
 
-  const projected = rows.map((c) => compactCapture(c, full));
+  const bopts = bodyOptions(params, BODY_LIMIT, rows.length || 1);
+  const projected = rows.map((c) => compactCapture(c, full, bopts));
   return {
     // Three numbers because they answer three different questions: how much was recorded, how much
     // survived the filters, and how much of that is distinct. Reporting only the last one makes a
@@ -673,8 +698,11 @@ function compactSession(s) {
   });
 }
 
-function compactCapture(c, full) {
+// bopts is {limit, match, window} from bodyOptions: the caller's budget for this call, already
+// divided by the row count so raising it on a wide listing degrades instead of exploding.
+function compactCapture(c, full, bopts) {
   if (!c || typeof c !== 'object') return c;
+  const opts = bopts || bodyOptions({}, BODY_LIMIT, 1);
   const responseHeaders = c.response_headers || {};
 
   return clean({
@@ -712,6 +740,13 @@ function compactCapture(c, full) {
     // target sent, and anything replayed from it will differ from what was observed.
     request_body_truncated: c.request_body_truncated ? true : undefined,
     response_body_truncated: c.response_body_truncated ? true : undefined,
+    // The stored lengths, on every row, whether or not the body is being returned. Without these a
+    // caller cannot tell a capture with no body from one whose body is simply not in this response,
+    // and cannot tell what to set max_body_chars to.
+    post_data_chars: typeof c.post_data === 'string' && c.post_data.length
+      ? c.post_data.length : undefined,
+    response_body_chars: typeof c.response_body === 'string' && c.response_body.length
+      ? c.response_body.length : undefined,
     redirect_count: Array.isArray(c.redirect_chain) && c.redirect_chain.length
       ? c.redirect_chain.length : undefined,
 
@@ -719,23 +754,24 @@ function compactCapture(c, full) {
       scope_target_id: c.scope_target_id,
       initiator: c.initiator,
       tab_id: c.tab_id,
-      headers: clipObject(c.headers),
-      response_headers: clipObject(responseHeaders),
-      get_params: clipObject(c.get_params),
+      headers: clipObject(c.headers, opts.limit),
+      response_headers: clipObject(responseHeaders, opts.limit),
+      get_params: clipObject(c.get_params, opts.limit),
       // post_params carries the same bytes as post_data. The extension parses a JSON request body
       // into an object and stores both, so clipping only the string left the identical payload
       // travelling uncapped through the object. Its body ceiling is 128 KB, and a thousand rows of
       // that in one response is a hundred megabytes.
-      post_params: clipObject(c.post_params),
-      post_data: clip(c.post_data, BODY_LIMIT),
-      response_body: clip(c.response_body, BODY_LIMIT),
-      redirect_chain: clipObject(c.redirect_chain),
+      post_params: clipObject(c.post_params, opts.limit),
+      post_data: clip(c.post_data, opts.limit, opts) || undefined,
+      response_body: clip(c.response_body, opts.limit, opts) || undefined,
+      redirect_chain: clipObject(c.redirect_chain, opts.limit),
     } : {}),
   });
 }
 
-function compactAuthCandidate(c, full) {
+function compactAuthCandidate(c, full, bopts) {
   if (!c || typeof c !== 'object') return c;
+  const opts = bopts || bodyOptions({}, BODY_LIMIT, 1);
   return clean({
     capture_id: c.capture_id,
     session_id: c.session_id,
@@ -758,7 +794,9 @@ function compactAuthCandidate(c, full) {
     // The rebuilt HTTP/1.1 request, already stripped of pseudo-headers and framing headers, in the
     // exact form an auth flow step stores. Behind full because a login request with a full cookie
     // jar is a kilobyte on its own and there are usually dozens of candidates.
-    raw_request: full ? clip(c.raw_request, BODY_LIMIT) : undefined,
+    raw_request: full ? (clip(c.raw_request, opts.limit) || undefined) : undefined,
+    raw_request_chars: typeof c.raw_request === 'string' && c.raw_request.length
+      ? c.raw_request.length : undefined,
   });
 }
 
@@ -847,12 +885,6 @@ function clean(obj) {
     out[k] = v;
   }
   return out;
-}
-
-function clip(text, limit) {
-  if (typeof text !== 'string' || !text) return undefined;
-  if (text.length <= limit) return text;
-  return text.slice(0, limit) + `\n... [truncated, ${text.length - limit} chars remaining]`;
 }
 
 // Strips the transport wrapper off a thrown API error and unpacks the JSON error body these handlers

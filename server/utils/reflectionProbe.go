@@ -281,9 +281,14 @@ const reflectionCanaryPrefix = "rs0nR"
 // a fact about whether the echo finished rather than about how it was encoded.
 const reflectionCanarySentinel = "rs0nE"
 
-// reflectionEvidenceCap bounds the stored snippet. Full bodies are never persisted anywhere in this
-// codebase and a reflection needs its surroundings, not its document.
-const reflectionEvidenceCap = 400
+// reflectionEvidenceCap bounds the excerpt stored as evidence, centred on the reflection.
+//
+// WIDE ENOUGH TO SHOW WHERE THE ECHO LANDED. 400 was the old value and it was too narrow to answer
+// the only question the evidence is for: an echo inside a script block, inside an attribute and
+// inside page text are three different findings, and the tag or block that encloses a reflection
+// routinely starts further back than 133 bytes. This is the ONLY copy of the response kept for a
+// probe, so what it leaves out is gone; see the note on reflectionSnippet.
+const reflectionEvidenceCap = 4096
 
 // reflectionTailWindow is how far past the token the classifier will walk looking for the four probe
 // characters. Generous enough for the longest encoding of four characters (< and friends, 24
@@ -515,9 +520,8 @@ func ClassifyReflectionResponse(token string, resp ScanResponse) ReflectionOutco
 // /login" and "redirected to /dashboard" are different pieces of news to the operator.
 func reflectionLocationSuffix(resp ScanResponse) string {
 	if loc := strings.TrimSpace(resp.Location); loc != "" {
-		if len(loc) > 120 {
-			loc = loc[:120] + "..."
-		}
+		// IN FULL. Where a redirect points is the finding when it is one, and a Location cut off
+		// at 120 characters loses exactly the tail an open redirect hides its payload in.
 		return " to " + loc
 	}
 	return ""
@@ -688,7 +692,12 @@ func stripReflectionEncodings(middle string) (residue string, encodings []string
 	return kept.String(), encodings, encodedCount
 }
 
-// reflectionSnippet is the bounded excerpt stored as evidence, centred on the reflection.
+// reflectionSnippet is the excerpt stored as evidence, centred on the reflection.
+//
+// This is the whole record of what came back: the probe's response body is held only for as long as
+// it takes to classify it, so anything outside this window cannot be recovered from the row. The row
+// keeps probe_url and canary, and the canary is derived rather than random, so the request can be
+// re-sent from the repeater - but that is a NEW response, not this one.
 func reflectionSnippet(body string, idx int) string {
 	if idx < 0 {
 		return ""

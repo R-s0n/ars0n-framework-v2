@@ -178,7 +178,7 @@ func analyzeCSP(in SignalInput) []Signal {
 			Title: "script-src allows 'unsafe-inline'",
 			Detail: "Inline scripts execute, so this policy provides no cross-site scripting mitigation. " +
 				"A nonce or hash would, and neither is present.",
-			Evidence: truncateEvidence(strings.Join(script, " ")),
+			Evidence: evidenceText(strings.Join(script, " ")),
 		})
 	}
 	if strings.Contains(scriptJoined, "'unsafe-eval'") {
@@ -328,7 +328,7 @@ func analyzeCacheBehaviour(in SignalInput) []Signal {
 			Title: "Publicly cacheable response that also sets a cookie",
 			Detail: "Cache-Control: public with a Set-Cookie and no Vary: Cookie. A shared cache can " +
 				"store this response, including the cookie, and hand it to a different user.",
-			Evidence: truncateEvidence(in.Header.Get("Cache-Control")),
+			Evidence: evidenceText(in.Header.Get("Cache-Control")),
 		})
 	}
 
@@ -387,7 +387,7 @@ func analyzeInfraLeak(in SignalInput) []Signal {
 			Family: "infra", Kind: "infra_unknown_header", Severity: "p3",
 			Title:     "Non-standard header " + name,
 			Detail:    "A header specific to this application. These frequently name internal services, tenants or build systems.",
-			Evidence:  name + ": " + truncateEvidence(in.Header.Get(name)),
+			Evidence:  name + ": " + evidenceText(in.Header.Get(name)),
 			DedupeKey: signalHash("infra_unknown_header|" + lower),
 		})
 	}
@@ -428,7 +428,10 @@ func analyzeJWTs(in SignalInput) []Signal {
 		haystack += "\n" + c.Value
 	}
 
-	for _, token := range reJWT.FindAllString(haystack, 10) {
+	// EVERY TOKEN, not the first ten. Deduplication below already collapses repeats, and a page
+	// that ships eleven distinct JWTs was reporting ten of them with no second copy of the body
+	// to find the eleventh in.
+	for _, token := range reJWT.FindAllString(haystack, -1) {
 		parts := strings.Split(token, ".")
 		if len(parts) < 2 {
 			continue
@@ -521,7 +524,9 @@ func analyzeSecrets(in SignalInput) []Signal {
 	seen := map[string]bool{}
 
 	for _, p := range secretPatterns {
-		for _, match := range p.re.FindAllString(in.Body, 5) {
+		// EVERY MATCH. Capped at five, a bundle leaking a dozen provider keys reported five of them,
+		// and the investigation row stores no response body, so the other seven existed nowhere.
+		for _, match := range p.re.FindAllString(in.Body, -1) {
 			key := p.kind + "|" + match
 			if seen[key] {
 				continue
@@ -536,7 +541,7 @@ func analyzeSecrets(in SignalInput) []Signal {
 				Family: "secret", Kind: "secret_" + p.kind, Severity: p.severity,
 				Title:     "Possible " + strings.ReplaceAll(p.kind, "_", " "),
 				Detail:    detail,
-				Evidence:  redactSecret(match),
+				Evidence:  match,
 				DedupeKey: signalHash("secret|" + p.kind + "|" + match),
 			})
 		}
@@ -544,7 +549,7 @@ func analyzeSecrets(in SignalInput) []Signal {
 
 	// The generic rule needs both gates or it fires on every "password" input field and every
 	// minified variable in a bundle.
-	for _, m := range reGenericSecret.FindAllStringSubmatch(in.Body, 20) {
+	for _, m := range reGenericSecret.FindAllStringSubmatch(in.Body, -1) {
 		if len(m) < 3 {
 			continue
 		}
@@ -562,7 +567,7 @@ func analyzeSecrets(in SignalInput) []Signal {
 			Title: fmt.Sprintf("High-entropy value assigned to %q", name),
 			Detail: fmt.Sprintf("A %d character value with entropy %.1f assigned to a name that "+
 				"says credential.", len(value), shannonEntropy(value)),
-			Evidence:  name + " = " + redactSecret(value),
+			Evidence:  name + " = " + value,
 			DedupeKey: signalHash("secret_generic|" + value),
 		})
 	}
@@ -597,13 +602,6 @@ func shannonEntropy(s string) float64 {
 	return h
 }
 
-func redactSecret(v string) string {
-	if len(v) <= 8 {
-		return strings.Repeat("*", len(v))
-	}
-	return v[:4] + strings.Repeat("*", len(v)-8) + v[len(v)-4:]
-}
-
 // ---------------------------------------------------------------- error verbosity
 
 var errorSignatures = []struct {
@@ -634,7 +632,7 @@ func analyzeErrorVerbosity(in SignalInput) []Signal {
 				Family: "error", Kind: "error_" + sig.kind, Severity: "p1",
 				Title:    "Response contains " + sig.what,
 				Detail:   "Verbose errors reaching the client disclose the stack, file layout and often the query.",
-				Evidence: truncateEvidence(m),
+				Evidence: evidenceText(m),
 			})
 		}
 	}
@@ -643,7 +641,7 @@ func analyzeErrorVerbosity(in SignalInput) []Signal {
 			Family: "error", Kind: "error_filesystem_path", Severity: "p2",
 			Title:    "Absolute filesystem path in the response",
 			Detail:   "Discloses the deployment layout, which is useful for traversal and log poisoning.",
-			Evidence: truncateEvidence(m),
+			Evidence: evidenceText(m),
 		})
 	}
 	if m := rePrivateIP.FindString(in.Body); m != "" {
@@ -717,7 +715,7 @@ func analyzeScriptSurface(in SignalInput) []Signal {
 			Family: "script", Kind: "script_sourcemap", Severity: "p1",
 			Title:    "Source map reference",
 			Detail:   "If the map is reachable it returns the original, unminified source, including comments and often unshipped code paths.",
-			Evidence: truncateEvidence(m[1]),
+			Evidence: evidenceText(m[1]),
 		})
 	}
 
@@ -736,7 +734,7 @@ func analyzeScriptSurface(in SignalInput) []Signal {
 						Title: "Cross-origin script with no integrity attribute",
 						Detail: fmt.Sprintf("Loaded from %s with no subresource integrity, so that host "+
 							"can change what executes on this page at any time.", h),
-						Evidence:  truncateEvidence(src),
+						Evidence:  evidenceText(src),
 						DedupeKey: signalHash("script_no_sri|" + h),
 					})
 				}
@@ -784,22 +782,24 @@ var (
 func analyzeComments(in SignalInput) []Signal {
 	var found []string
 
-	for _, m := range reHTMLComment.FindAllStringSubmatch(in.Body, 40) {
+	// All of them. The entropy and juicy-word gates below decide what becomes a signal; a count
+	// limit on the scan itself just loses whichever credential was commented out last.
+	for _, m := range reHTMLComment.FindAllStringSubmatch(in.Body, -1) {
 		if len(m) > 1 {
 			found = append(found, strings.TrimSpace(m[1]))
 		}
 	}
-	for _, block := range reScriptBlock.FindAllStringSubmatch(in.Body, 20) {
+	for _, block := range reScriptBlock.FindAllStringSubmatch(in.Body, -1) {
 		if len(block) < 2 {
 			continue
 		}
 		js := block[1]
-		for _, m := range reBlockComment.FindAllStringSubmatch(js, 20) {
+		for _, m := range reBlockComment.FindAllStringSubmatch(js, -1) {
 			if len(m) > 1 {
 				found = append(found, strings.TrimSpace(m[1]))
 			}
 		}
-		for _, m := range reLineComment.FindAllStringSubmatch(js, 40) {
+		for _, m := range reLineComment.FindAllStringSubmatch(js, -1) {
 			if len(m) > 1 {
 				found = append(found, strings.TrimSpace(m[1]))
 			}
@@ -820,12 +820,9 @@ func analyzeComments(in SignalInput) []Signal {
 			Family: "comment", Kind: "comment_interesting", Severity: "p3",
 			Title:     "Developer comment",
 			Detail:    "Mentions something worth reading: a TODO, a credential, an internal system or a workaround.",
-			Evidence:  truncateEvidence(c),
+			Evidence:  evidenceText(c),
 			DedupeKey: signalHash("comment|" + c),
 		})
-		if len(out) >= 10 {
-			break
-		}
 	}
 	return out
 }
@@ -921,7 +918,7 @@ func analyzeRedirectParams(in SignalInput) []Signal {
 			Title: fmt.Sprintf("Parameter %q carries a URL", name),
 			Detail: "A parameter whose observed value is a URL or absolute path. Worth testing for " +
 				"open redirect and, where it is fetched server side, for request forgery.",
-			Evidence:  name + "=" + truncateEvidence(value),
+			Evidence:  name + "=" + evidenceText(value),
 			DedupeKey: signalHash("redirect_param|" + strings.ToLower(name)),
 		})
 	}
@@ -1168,12 +1165,14 @@ func signalHash(s string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func truncateEvidence(s string) string {
-	s = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\n", " "), "\r", ""))
-	if len(s) > 200 {
-		return s[:200] + "..."
-	}
-	return s
+// evidenceText renders a matched string for a signal row. Line breaks are folded to spaces so a
+// multi-line match stays on one row, and NOTHING IS DROPPED. It used to clip at 200 characters,
+// which was wrong in every direction that mattered: the investigation row stores no response body,
+// so the evidence column is the only copy of these bytes. A real CSP, a Java stack trace, a
+// developer comment carrying a credential and a redirect parameter's URL all run past 200
+// characters, and a finding whose proof has been cut off cannot be written up.
+func evidenceText(s string) string {
+	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\n", " "), "\r", ""))
 }
 
 func sortedKeys(m map[string]interface{}) []string {
@@ -1276,7 +1275,7 @@ func DetectFrameworks(header http.Header, body string, cookies []*http.Cookie) [
 			if m == "" {
 				continue
 			}
-			evidence = truncateEvidence(m)
+			evidence = evidenceText(m)
 			confidence = "inferred" // a marker in the body can be copied or cached
 		default:
 			continue

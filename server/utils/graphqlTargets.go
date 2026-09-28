@@ -399,17 +399,24 @@ func GraphQLCandidateEndpoints(w http.ResponseWriter, r *http.Request) {
 		return out[i].URL < out[j].URL
 	})
 
-	limit := 500
-	truncated := false
-	if len(out) > limit {
-		out, truncated = out[:limit], true
+	// A page-size limit on a picker, NOT a filter on what exists. total is the real number and
+	// withheld says how many are past the page, because count used to be measured AFTER the cut and
+	// so reported 500 for a target with 5000 candidates. Every one of these URLs is a row in the
+	// endpoint tables this handler unions over, so nothing here is the only copy of anything.
+	const limit = 500
+	total := len(out)
+	withheld := 0
+	if total > limit {
+		out, withheld = out[:limit], total-limit
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"candidates": out,
 		"count":      len(out),
-		"truncated":  truncated,
+		"total":      total,
+		"withheld":   withheld,
+		"truncated":  withheld > 0,
 	})
 }
 
@@ -616,18 +623,23 @@ func DeniedEndpoints(w http.ResponseWriter, r *http.Request) {
 		summary = append(summary, map[string]int{"status_code": code, "count": counts[code]})
 	}
 
-	limit := 400
-	truncated := false
-	if len(out) > limit {
-		out, truncated = out[:limit], true
+	// Same page-size rule as the candidate picker: total is the real number, withheld says how many
+	// are past the page, and every row here is also a row in the tables this handler reads.
+	const limit = 400
+	total := len(out)
+	withheld := 0
+	if total > limit {
+		out, withheld = out[:limit], total-limit
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"denied":    out,
 		"count":     len(out),
+		"total":     total,
+		"withheld":  withheld,
 		"by_status": summary,
-		"truncated": truncated,
+		"truncated": withheld > 0,
 		// The boundary that produced every in_scope badge above, in the same words the flow
 		// runner's dry run uses. It replaces a bare "scope_host", which described a comparison
 		// this handler no longer makes and no caller ever read.

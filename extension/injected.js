@@ -15,6 +15,10 @@
 (() => {
   const CHANNEL = '__ars0n_capture__';
   const CONTROL = '__ars0n_control__';
+  // Marks a stored body that is base64 of the wire bytes rather than the bytes themselves. Same
+  // spelling as lib/deepcapture.js, because a reader should not have to know which source captured
+  // a given request.
+  const BASE64_BODY_PREFIX = 'base64,';
 
   if (window[CHANNEL + '_installed']) return;
   window[CHANNEL + '_installed'] = true;
@@ -62,14 +66,78 @@
     return { body: text.slice(0, config.maxBodyBytes), truncated: true };
   }
 
+  // Nothing is skipped for its content type any more. octet-stream, pdf and zip used to be skipped
+  // alongside images, and those are what an export or download endpoint answers with, so the
+  // response that carried another account's records was stored empty. Anything that is not valid
+  // UTF-8 is kept as base64 rather than dropped.
+  //
+  // Rendered media has no text form, so it takes the blob path instead: the bytes are stored
+  // content addressed, because an IDOR that returns another user's uploaded photo cannot be proved
+  // from a capture table that threw the photo away.
   const NON_TEXT = /^(image|video|audio|font)\//i;
-  function bodyIsWorthReading(contentType) {
-    if (!config.captureResponseBodies) return false;
-    const type = String(contentType || '').toLowerCase();
-    if (!type) return true;
-    if (NON_TEXT.test(type)) return false;
-    if (type.includes('octet-stream') || type.includes('application/pdf') || type.includes('zip')) return false;
-    return true;
+  // SVG carries an image/ type but IS text, and an SVG is a place script hides, so it stays on the
+  // text path and stays greppable. Same rule as lib/scope.js isTextualMime.
+  const TEXTUAL_MEDIA = /^image\/svg(\+xml)?$/i;
+  const MEDIA_BODY_MAX_BYTES = 2 * 1024 * 1024;
+
+  // 'text' | 'media' | 'skip'
+  function responseBodyPlan(contentType) {
+    if (!config.captureResponseBodies) return 'skip';
+    const type = String(contentType || '').toLowerCase().split(';')[0].trim();
+    if (!type) return 'text';
+    if (TEXTUAL_MEDIA.test(type)) return 'text';
+    if (NON_TEXT.test(type)) return config.captureMediaBodies === false ? 'skip' : 'media';
+    return 'text';
+  }
+
+  function maxMediaBytes() {
+    const configured = config.maxMediaBytes;
+    return typeof configured === 'number' && configured > 0 ? configured : MEDIA_BODY_MAX_BYTES;
+  }
+
+  // The digest is added in the service worker, which is always a secure context; crypto.subtle is
+  // not available on an http page and a body without a hash is still a body worth having.
+  function buildMediaBlob(bytes, contentType) {
+    const cap = maxMediaBytes();
+    const wireBytes = bytes.length;
+    const capped = wireBytes > cap;
+    const stored = capped ? bytes.subarray(0, cap) : bytes;
+    return {
+      bytes: wireBytes,
+      capped,
+      mimeType: String(contentType || ''),
+      base64: bytesToBase64(stored),
+    };
+  }
+
+  function bytesToBase64(bytes) {
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  // Decodes wire bytes losslessly. A strict UTF-8 decode either gives back exactly what was sent or
+  // throws; on a throw the bytes are base64-encoded, because a body full of replacement characters
+  // is a body nobody can use as proof.
+  function decodeBytes(bytes) {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch (error) {
+      return BASE64_BODY_PREFIX + bytesToBase64(bytes);
+    }
+  }
+
+  // Reads a response without disturbing the one the page is about to receive.
+  async function readResponseBytes(response) {
+    const buffer = await response.clone().arrayBuffer();
+    return new Uint8Array(buffer);
+  }
+
+  async function readResponsePayload(response) {
+    return decodeBytes(await readResponseBytes(response));
   }
 
   function report(record) {
@@ -105,40 +173,56 @@
     return result;
   }
 
-  // Request bodies come in many shapes. Only the ones that are cheap and safe to stringify are
-  // read; a stream or a large binary blob is described rather than consumed, because consuming it
-  // would break the page's own request.
+  // Request bodies come in many shapes and every shape is read in full.
+  //
+  // A Blob, an ArrayBuffer and a typed array can all be read without consuming anything the page
+  // still needs, so they are. They used to be replaced with "[blob 4096 bytes]" past a size
+  // threshold, which meant the one upload worth writing up, the large one, was the one stored as a
+  // sentence about itself. A FormData file part is now read too: what was uploaded is the whole
+  // question in an upload-bypass finding, and "[file:avatar.png]" cannot answer it.
+  //
+  // A ReadableStream is the single exception. Reading it consumes it, the page's own request would
+  // then send nothing, and this hook must never change what the page does. The record says so.
   async function readRequestBody(body) {
     if (body === undefined || body === null || body === '') return null;
     try {
       if (typeof body === 'string') return body;
       if (body instanceof URLSearchParams) return body.toString();
       if (typeof FormData !== 'undefined' && body instanceof FormData) {
+        const entries = [];
+        body.forEach((value, key) => entries.push([key, value]));
         const out = {};
-        body.forEach((value, key) => {
-          out[key] = typeof value === 'string' ? value : `[file:${value && value.name ? value.name : 'blob'}]`;
-        });
+        for (const [key, value] of entries) {
+          if (typeof value === 'string') {
+            out[key] = value;
+            continue;
+          }
+          const name = (value && value.name) || 'blob';
+          try {
+            out[key] = { filename: name, type: (value && value.type) || '', content: await readBlob(value) };
+          } catch (error) {
+            out[key] = { filename: name, type: (value && value.type) || '', content: '' };
+          }
+        }
         return JSON.stringify(out);
       }
-      if (typeof Blob !== 'undefined' && body instanceof Blob) {
-        if (body.size > config.maxBodyBytes) return `[blob ${body.size} bytes]`;
-        return await body.text();
-      }
-      if (body instanceof ArrayBuffer) {
-        if (body.byteLength > config.maxBodyBytes) return `[arraybuffer ${body.byteLength} bytes]`;
-        return new TextDecoder('utf-8').decode(new Uint8Array(body));
-      }
+      if (typeof Blob !== 'undefined' && body instanceof Blob) return await readBlob(body);
+      if (body instanceof ArrayBuffer) return decodeBytes(new Uint8Array(body));
       if (ArrayBuffer.isView(body)) {
-        if (body.byteLength > config.maxBodyBytes) return `[binary ${body.byteLength} bytes]`;
-        return new TextDecoder('utf-8').decode(new Uint8Array(body.buffer, body.byteOffset, body.byteLength));
+        return decodeBytes(new Uint8Array(body.buffer, body.byteOffset, body.byteLength));
       }
       if (typeof ReadableStream !== 'undefined' && body instanceof ReadableStream) {
-        return '[stream]';
+        return '[stream: reading it would consume the body the page is sending]';
       }
       return String(body);
     } catch (error) {
       return null;
     }
+  }
+
+  async function readBlob(blob) {
+    const buffer = await blob.arrayBuffer();
+    return decodeBytes(new Uint8Array(buffer));
   }
 
   /* ------------------------------------------------------------------ fetch */
@@ -190,14 +274,20 @@
             const contentType = responseHeaders['content-type'] || '';
             let responseBody = '';
             let responseTruncated = false;
+            let responseBodyBlob = null;
 
             // An opaque (no-cors) response has no readable body by design; do not try.
-            if (response.type !== 'opaque' && bodyIsWorthReading(contentType)) {
+            const plan = responseBodyPlan(contentType);
+            if (response.type !== 'opaque' && plan !== 'skip') {
               try {
-                const text = await response.clone().text();
-                const trimmed = truncate(text);
-                responseBody = trimmed.body;
-                responseTruncated = trimmed.truncated;
+                const bytes = await readResponseBytes(response);
+                if (plan === 'media') {
+                  responseBodyBlob = buildMediaBlob(bytes, contentType);
+                } else {
+                  const trimmed = truncate(decodeBytes(bytes));
+                  responseBody = trimmed.body;
+                  responseTruncated = trimmed.truncated;
+                }
               } catch (error) {
                 /* body already disturbed or unreadable */
               }
@@ -214,6 +304,7 @@
               requestBodyTruncated: requestBody.truncated,
               responseBody,
               responseBodyTruncated: responseTruncated,
+              responseBodyBlob,
               mimeType: contentType,
               resourceType: 'fetch',
               durationMs: Math.round(now() - started),
@@ -312,9 +403,17 @@
           const contentType = responseHeaders['content-type'] || '';
           let responseBody = '';
           let responseTruncated = false;
+          let responseBodyBlob = null;
 
-          if (!errorMessage && bodyIsWorthReading(contentType)) {
-            const raw = readXHRResponse(xhr);
+          const plan = errorMessage ? 'skip' : responseBodyPlan(contentType);
+          if (plan === 'media') {
+            // Only a binary responseType hands back the real bytes. With responseType '' the
+            // browser has already decoded an image through a charset, and what is left is not the
+            // response: storing it would be inventing a body rather than keeping one.
+            const bytes = await readXHRResponseBytes(xhr);
+            if (bytes !== null) responseBodyBlob = buildMediaBlob(bytes, contentType);
+          } else if (plan === 'text') {
+            const raw = await readXHRResponse(xhr);
             if (raw !== null) {
               const trimmed = truncate(raw);
               responseBody = trimmed.body;
@@ -333,6 +432,7 @@
             requestBodyTruncated: requestBody.truncated,
             responseBody,
             responseBodyTruncated: responseTruncated,
+            responseBodyBlob,
             mimeType: contentType,
             resourceType: 'xhr',
             error: errorMessage || '',
@@ -377,14 +477,33 @@
     return result;
   }
 
-  // responseText throws for arraybuffer/blob response types, so check before reading.
-  function readXHRResponse(xhr) {
+  // responseText throws for arraybuffer/blob response types, so those are read through the
+  // response object instead. Returning null for them, which is what this did, meant a download or
+  // export fetched as a blob was recorded with no body at all and no second chance at it.
+  async function readXHRResponse(xhr) {
     try {
       const type = xhr.responseType;
       if (type === '' || type === 'text') return xhr.responseText;
       if (type === 'json') return JSON.stringify(xhr.response);
       if (type === 'document' && xhr.responseXML) {
         return new XMLSerializer().serializeToString(xhr.responseXML);
+      }
+      if (type === 'arraybuffer' && xhr.response) return decodeBytes(new Uint8Array(xhr.response));
+      if (type === 'blob' && xhr.response) return await readBlob(xhr.response);
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  // The raw bytes of an XHR response, for the media path. Only the binary response types can
+  // produce them; everything else has already been through a text decode by the time we are here.
+  async function readXHRResponseBytes(xhr) {
+    try {
+      const type = xhr.responseType;
+      if (type === 'arraybuffer' && xhr.response) return new Uint8Array(xhr.response);
+      if (type === 'blob' && xhr.response) {
+        return new Uint8Array(await xhr.response.arrayBuffer());
       }
       return null;
     } catch (error) {

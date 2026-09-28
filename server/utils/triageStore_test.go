@@ -38,7 +38,11 @@ func triageTestDB(t *testing.T) context.Context {
 		dsn = os.Getenv("DATABASE_URL")
 	}
 	if dsn == "" {
-		t.Skip("NOT MEASURED: no TRIAGE_TEST_DATABASE_URL or DATABASE_URL in the environment, so the triage store was not exercised against a database at all. This is a gap in coverage, not a pass.")
+		// Routed through the ledger in triageNotMeasured_test.go. The comment above says a quiet
+		// skip is the same failure this feature exists to stop, and it was right; the skip was
+		// still quiet, because go test throws away the output of a package that passes.
+		triageNotMeasured(t, triageFacilityDatabase,
+			"no TRIAGE_TEST_DATABASE_URL or DATABASE_URL in the environment, so the triage store was not exercised against a database at all")
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
@@ -122,9 +126,14 @@ func triageTestCompletedRun(t *testing.T, ctx context.Context) string {
 // that deliberately break the denominator set planned_pairs themselves and do not call this.
 func triageTestPlanIsWhatWasRecorded(t *testing.T, ctx context.Context, runUUID string) {
 	t.Helper()
+	// IT COUNTS THE ELIGIBLE ROWS, because planned_pairs counts eligible pairs and a helper that
+	// counted every row would hand the reconciliation two numbers over two populations, which is
+	// the exact defect the surplus witness exists to catch. No test in this file wrote an
+	// ineligible row when this was count(*); the next one to do so would otherwise have found the
+	// helper quietly recording a plan that is too big and every assertion around it moving.
 	var rows int
 	if err := dbPool.QueryRow(ctx,
-		`SELECT count(*) FROM triage_coverage WHERE run_id = $1`, runUUID).Scan(&rows); err != nil {
+		`SELECT count(*) FROM triage_coverage WHERE run_id = $1 AND eligible`, runUUID).Scan(&rows); err != nil {
 		t.Fatalf("count the coverage rows to record the plan size: %v", err)
 	}
 	if rows == 0 {
@@ -214,12 +223,14 @@ func TestTheStoreRefusesACleanCarryingNoProbeOrdinals(t *testing.T) {
 		VectorID: "v1",
 		Verdict: triage.ClassVerdict{
 			Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4 + 64},
+			Reason: "measured_in_a_test",
 		},
 	}
 	bad := TriageVerdictRow{
 		VectorID: "v1",
 		Verdict: triage.ClassVerdict{
 			Class: triage.ClassLDAP, SlotKey: "query:sort", State: triage.StateClean,
+			Reason: "measured_in_a_test",
 		},
 	}
 
@@ -336,6 +347,7 @@ func TestEveryStateInTheVocabularyRoundTripsWithItsOwnKind(t *testing.T) {
 	// is the clean, and the six unknowns (five unknown-kind plus the structural not_applicable,
 	// which CATALOGUE 4.1 says every aggregate treats as unknown).
 	triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage: %v", err)
@@ -390,6 +402,7 @@ func TestAnEligiblePairWithNoVerdictIsCountedAndNamedRatherThanAbsent(t *testing
 		VectorID: "v1",
 		Verdict: triage.ClassVerdict{
 			Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean,
+			Reason:   "measured_in_a_test",
 			Ordinals: []uint64{68, 132, 196, 260, 324, 388},
 			Annotations: map[string]any{
 				"quote_survival_unproven": true,
@@ -400,6 +413,7 @@ func TestAnEligiblePairWithNoVerdictIsCountedAndNamedRatherThanAbsent(t *testing
 	}
 
 	triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage: %v", err)
@@ -473,14 +487,15 @@ func TestARunRendersAsCleanOnlyWhenEveryEligiblePairWasMeasured(t *testing.T) {
 		t.Fatalf("fidelity: %v", err)
 	}
 	verdicts := []TriageVerdictRow{
-		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{68}}},
-		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSSTI, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{65}}},
+		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{68}, Reason: "measured_in_a_test"}},
+		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSSTI, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{65}, Reason: "measured_in_a_test"}},
 	}
 	if _, err := RecordTriageVerdicts(ctx, runUUID, verdicts); err != nil {
 		t.Fatalf("verdicts: %v", err)
 	}
 
 	triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage: %v", err)
@@ -497,6 +512,7 @@ func TestARunRendersAsCleanOnlyWhenEveryEligiblePairWasMeasured(t *testing.T) {
 		t.Fatalf("demote: %v", err)
 	}
 	triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err = LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage: %v", err)
@@ -640,18 +656,23 @@ func TestAPerHostUnitIsStoredAsAHostAndNotAsASlot(t *testing.T) {
 	}
 }
 
-// 1555 of the 1655 cookie slots in the measured corpus are credential or analytics cookies. They
-// are recorded, because deliberately skipped has to stay visibly different from does not exist, but
-// their values are not, and the flag keeps that distinguishable from an empty captured value.
-func TestACredentialSlotIsRecordedWithoutItsValue(t *testing.T) {
+// 1555 of the 1655 cookie slots in the measured corpus are credential or analytics cookies. Their
+// values used to be blanked on the way into triage_slots and flagged value_redacted. Both are gone:
+// a session cookie the crawl was carrying is the single most useful thing on the row, and the same
+// value has to come back out of LoadTriageSlots for the operator and for anything that replays it.
+//
+// is_credential is still set and still means what it meant, which this asserts too: no class probes
+// the slot. Not probing is a scanning decision about not burning the session; recording is not.
+func TestACredentialSlotIsRecordedWithItsValue(t *testing.T) {
 	ctx := triageTestDB(t)
 	runUUID := triageTestRun(t, ctx)
 
+	const secret = "eyJhbGciOiJIUzI1NiJ9.super-secret"
 	cons := triage.NewSlotConstraints()
 	cons.IsCredential = true
 	if _, err := RecordTriageSlots(ctx, runUUID, []TriageUnit{
 		{Slot: triage.Slot{VectorID: "v1", Kind: triage.KindCookie, Key: "cookie:session", Name: "session",
-			Value: "eyJhbGciOiJIUzI1NiJ9.super-secret", Constraints: cons}},
+			Value: secret, Constraints: cons}},
 		{Slot: triage.Slot{VectorID: "v1", Kind: triage.KindCookie, Key: "cookie:theme", Name: "theme",
 			Value: "", Constraints: triage.NewSlotConstraints()}},
 	}); err != nil {
@@ -659,26 +680,48 @@ func TestACredentialSlotIsRecordedWithoutItsValue(t *testing.T) {
 	}
 
 	var value string
-	var redacted bool
+	var isCredential bool
 	if err := dbPool.QueryRow(ctx, `
-		SELECT observed_value, value_redacted FROM triage_slots
-		WHERE run_id = $1 AND slot_key = 'cookie:session'`, runUUID).Scan(&value, &redacted); err != nil {
+		SELECT observed_value, is_credential FROM triage_slots
+		WHERE run_id = $1 AND slot_key = 'cookie:session'`, runUUID).Scan(&value, &isCredential); err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if value != "" {
-		t.Errorf("a credential value was stored: %q", value)
+	if value != secret {
+		t.Errorf("the credential slot came back as %q, want the captured value %q", value, secret)
 	}
-	if !redacted {
-		t.Error("the credential slot is not flagged redacted, so a blank value reads as a captured empty value")
+	if !isCredential {
+		t.Error("is_credential was not recorded, so nothing stops a class probing this slot")
 	}
 
 	if err := dbPool.QueryRow(ctx, `
-		SELECT observed_value, value_redacted FROM triage_slots
-		WHERE run_id = $1 AND slot_key = 'cookie:theme'`, runUUID).Scan(&value, &redacted); err != nil {
+		SELECT observed_value, is_credential FROM triage_slots
+		WHERE run_id = $1 AND slot_key = 'cookie:theme'`, runUUID).Scan(&value, &isCredential); err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if redacted {
-		t.Error("an ordinary empty value was flagged redacted, which loses the distinction the flag exists for")
+	if value != "" || isCredential {
+		t.Errorf("the ordinary slot came back value=%q is_credential=%v, want an empty value and false", value, isCredential)
+	}
+
+	// And the same bytes have to survive the read path, not just the write.
+	units, err := LoadTriageSlots(ctx, runUUID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	found := false
+	for _, u := range units {
+		if u.Slot.Key != "cookie:session" {
+			continue
+		}
+		found = true
+		if u.Slot.Value != secret {
+			t.Errorf("LoadTriageSlots returned %q for the credential slot, want %q", u.Slot.Value, secret)
+		}
+		if !u.Slot.Constraints.IsCredential {
+			t.Error("LoadTriageSlots dropped is_credential")
+		}
+	}
+	if !found {
+		t.Fatal("the credential slot did not come back from LoadTriageSlots at all")
 	}
 }
 
@@ -869,7 +912,7 @@ func TestOneSlotCarriesAnIndependentVerdictPerClassIncludingAnUnregisteredOne(t 
 	runUUID := triageTestRun(t, ctx)
 
 	rows := []TriageVerdictRow{
-		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:q", State: triage.StateClean, Ordinals: []uint64{68}}},
+		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:q", State: triage.StateClean, Ordinals: []uint64{68}, Reason: "measured_in_a_test"}},
 		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSSTI, SlotKey: "query:q", State: triage.StateNotApplicable, Reason: "no_reflection"}},
 		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassCSVI, SlotKey: "query:q", State: triage.StateNotPlanned, Reason: "no probe table for this class yet"}},
 		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassID(28), SlotKey: "query:q", State: triage.StateNotPlanned, Reason: "a class that does not exist in the register"}},
@@ -914,7 +957,7 @@ func TestArmsThatDisagreeAreKeptAsSeparateRows(t *testing.T) {
 		state triage.TriageState
 		why   string
 	}{
-		{"op", triage.StateClean, ""},
+		{"op", triage.StateClean, "no_operator_document_was_accepted"},
 		{"type", triage.StateNotExploitable, "odm_cast_rejected"},
 		{"js", triage.StateNotApplicable, "dollar_filtered"},
 		{"es", triage.StateCannotDetermine, "object_not_parsed"},
@@ -941,6 +984,7 @@ func TestArmsThatDisagreeAreKeptAsSeparateRows(t *testing.T) {
 		t.Fatalf("six arms disagreed and %d rows survived", len(got))
 	}
 	triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage: %v", err)
@@ -990,7 +1034,8 @@ func TestAPositiveVerdictWithNoProvenanceIsRefused(t *testing.T) {
 		VectorID: "v1",
 		Verdict: triage.ClassVerdict{
 			Class: triage.ClassSQL, SlotKey: "query:q", State: triage.StateFinding,
-			Grade: triage.GradeHigh, Oracle: "computation", Ordinals: []uint64{68},
+			Reason: "measured_in_a_test",
+			Grade:  triage.GradeHigh, Oracle: "computation", Ordinals: []uint64{68},
 		},
 	}})
 	if err == nil {
@@ -1014,7 +1059,8 @@ func TestAFindingRoundTripsWithItsEvidenceAndItsLabel(t *testing.T) {
 		DeltaChecked:     true,
 		Verdict: triage.ClassVerdict{
 			Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateFinding,
-			Grade: triage.GradeHigh, Oracle: "computation", Ordinals: []uint64{68, 132},
+			Reason: "arithmetic_evaluated: the response carried the product rather than the expression",
+			Grade:  triage.GradeHigh, Oracle: "computation", Ordinals: []uint64{68, 132},
 			Untested: []triage.ProbeSkip{{ProbeID: "SQL-T3", Reason: "probe_budget_exhausted"}},
 			Annotations: map[string]any{
 				"quote_survival_unproven": false,
@@ -1195,12 +1241,14 @@ func TestARunWhosePayloadNeverReachedTheWireCannotRenderAsClean(t *testing.T) {
 				VectorID: "v1",
 				Verdict: triage.ClassVerdict{
 					Class: triage.ClassSQL, SlotKey: "cookie:sid", State: triage.StateClean, Ordinals: []uint64{68},
+					Reason: "measured_in_a_test",
 				},
 			}}); err != nil {
 				t.Fatalf("verdict: %v", err)
 			}
 
 			triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+			triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 			cov, err := LoadTriageRunCoverage(ctx, runUUID)
 			if err != nil {
 				t.Fatalf("coverage read: %v", err)
@@ -1273,8 +1321,8 @@ func TestThePerPairReadNamesTheVectorWhoseProbeNeverReachedTheWire(t *testing.T)
 		t.Fatalf("coverage: %v", err)
 	}
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{
-		{VectorID: "v-mangled", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "cookie:sid", State: triage.StateClean, Ordinals: []uint64{68}}},
-		{VectorID: "v-good", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{132}}},
+		{VectorID: "v-mangled", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "cookie:sid", State: triage.StateClean, Ordinals: []uint64{68}, Reason: "measured_in_a_test"}},
+		{VectorID: "v-good", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{132}, Reason: "measured_in_a_test"}},
 	}); err != nil {
 		t.Fatalf("verdicts: %v", err)
 	}
@@ -1357,12 +1405,13 @@ func TestAProvenPayloadStillRendersAsCleanSoTheNewTermIsNotABlanketRefusal(t *te
 	}
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
 		VectorID: "v1",
-		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{68, 132}},
+		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{68, 132}, Reason: "measured_in_a_test"},
 	}}); err != nil {
 		t.Fatalf("verdict: %v", err)
 	}
 
 	triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage read: %v", err)
@@ -1411,12 +1460,13 @@ func TestTheUnprovenCountIsScopedToItsOwnRun(t *testing.T) {
 	}
 	if _, err := RecordTriageVerdicts(ctx, cleanRun, []TriageVerdictRow{{
 		VectorID: "v1",
-		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{68}},
+		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{68}, Reason: "measured_in_a_test"},
 	}}); err != nil {
 		t.Fatalf("verdict: %v", err)
 	}
 
 	triageTestPlanIsWhatWasRecorded(t, ctx, cleanRun)
+	triageTestInventoryForEveryCoveragePair(t, ctx, cleanRun)
 	cov, err := LoadTriageRunCoverage(ctx, cleanRun)
 	if err != nil {
 		t.Fatalf("coverage read: %v", err)
@@ -1472,12 +1522,13 @@ func TestTheUnperturbedControlDoesNotTaintTheRunButARefusedOneDoes(t *testing.T)
 	}
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
 		VectorID: "v1",
-		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{68}},
+		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{68}, Reason: "measured_in_a_test"},
 	}}); err != nil {
 		t.Fatalf("verdict: %v", err)
 	}
 
 	triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage read: %v", err)
@@ -1521,11 +1572,12 @@ func TestTheUnperturbedControlDoesNotTaintTheRunButARefusedOneDoes(t *testing.T)
 	}
 	if _, err := RecordTriageVerdicts(ctx, refusedRun, []TriageVerdictRow{{
 		VectorID: "v1",
-		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{68}},
+		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{68}, Reason: "measured_in_a_test"},
 	}}); err != nil {
 		t.Fatalf("verdict: %v", err)
 	}
 	triageTestPlanIsWhatWasRecorded(t, ctx, refusedRun)
+	triageTestInventoryForEveryCoveragePair(t, ctx, refusedRun)
 	cov, err = LoadTriageRunCoverage(ctx, refusedRun)
 	if err != nil {
 		t.Fatalf("coverage read: %v", err)
@@ -1587,12 +1639,14 @@ func TestManyProbesIntoOneManglingAreCountedInFullAndNamedOnce(t *testing.T) {
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
 		VectorID: "v1",
 		Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "cookie:sid", State: triage.StateClean,
+			Reason:   "measured_in_a_test",
 			Ordinals: []uint64{4, 68, 132, 196, 260, 324}},
 	}}); err != nil {
 		t.Fatalf("verdict: %v", err)
 	}
 
 	triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage read: %v", err)
@@ -1717,6 +1771,7 @@ func TestANULInOneProbeRecordDoesNotDestroyTheBatchAndAMissingRecordNeverReadsAs
 			VectorID: "v1",
 			Verdict: triage.ClassVerdict{
 				Class: triage.ClassTraversal, SlotKey: "query:file", State: triage.StateClean,
+				Reason:   "measured_in_a_test",
 				Ordinals: []uint64{first.Ordinal, nul.Ordinal, third.Ordinal},
 			},
 		}}); err != nil {
@@ -1732,6 +1787,7 @@ func TestANULInOneProbeRecordDoesNotDestroyTheBatchAndAMissingRecordNeverReadsAs
 		// back clean: either the NUL row is there and taints its pair, or it is not there and the
 		// shortfall against sent_probes taints it. The one answer that is never allowed is clean.
 		triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 		cov, err := LoadTriageRunCoverage(ctx, runUUID)
 		if err != nil {
 			t.Fatalf("coverage read: %v", err)
@@ -1804,6 +1860,7 @@ func TestANULInOneProbeRecordDoesNotDestroyTheBatchAndAMissingRecordNeverReadsAs
 		}
 
 		triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 		cov, err = LoadTriageRunCoverage(ctx, runUUID)
 		if err != nil {
 			t.Fatalf("coverage read: %v", err)
@@ -1849,6 +1906,7 @@ func TestANULInOneProbeRecordDoesNotDestroyTheBatchAndAMissingRecordNeverReadsAs
 			VectorID: "v1",
 			Verdict: triage.ClassVerdict{
 				Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{68, 132},
+				Reason: "measured_in_a_test",
 			},
 		}}); err != nil {
 			t.Fatalf("verdict: %v", err)
@@ -1857,6 +1915,7 @@ func TestANULInOneProbeRecordDoesNotDestroyTheBatchAndAMissingRecordNeverReadsAs
 		// The control: with both records present this run is genuinely clean, so the check below
 		// is a predicate and not a constant.
 		triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 		cov, err := LoadTriageRunCoverage(ctx, runUUID)
 		if err != nil {
 			t.Fatalf("coverage read: %v", err)
@@ -1876,6 +1935,7 @@ func TestANULInOneProbeRecordDoesNotDestroyTheBatchAndAMissingRecordNeverReadsAs
 		}
 
 		triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 		cov, err = LoadTriageRunCoverage(ctx, runUUID)
 		if err != nil {
 			t.Fatalf("coverage read: %v", err)
@@ -2011,11 +2071,13 @@ func TestARowTheDatabaseRefusesEvenSanitisedLeavesARecordSayingSo(t *testing.T) 
 		VectorID: "v1",
 		Verdict: triage.ClassVerdict{
 			Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{68, 132},
+			Reason: "measured_in_a_test",
 		},
 	}}); err != nil {
 		t.Fatalf("verdict: %v", err)
 	}
 	triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage read: %v", err)
@@ -2104,14 +2166,15 @@ func TestAPairMissingFromTheDenominatorIsNamedRatherThanRemovedFromTheQuestion(t
 			t.Fatalf("fidelity: %v", err)
 		}
 		if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{
-			{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4}}},
-			{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:page", State: triage.StateClean, Ordinals: []uint64{68}}},
+			{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4}, Reason: "measured_in_a_test"}},
+			{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:page", State: triage.StateClean, Ordinals: []uint64{68}, Reason: "measured_in_a_test"}},
 		}); err != nil {
 			t.Fatalf("verdicts: %v", err)
 		}
 
 		// The control, so the assertion below is a predicate and not a constant: with both
 		// coverage rows present this run really is clean.
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 		cov, err := LoadTriageRunCoverage(ctx, runUUID)
 		if err != nil {
 			t.Fatalf("coverage read: %v", err)
@@ -2130,6 +2193,7 @@ func TestAPairMissingFromTheDenominatorIsNamedRatherThanRemovedFromTheQuestion(t
 			t.Fatalf("delete: %v", err)
 		}
 
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 		cov, err = LoadTriageRunCoverage(ctx, runUUID)
 		if err != nil {
 			t.Fatalf("coverage read: %v", err)
@@ -2182,11 +2246,12 @@ func TestAPairMissingFromTheDenominatorIsNamedRatherThanRemovedFromTheQuestion(t
 		}
 		if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
 			VectorID: "v1",
-			Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4}},
+			Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4}, Reason: "measured_in_a_test"},
 		}}); err != nil {
 			t.Fatalf("verdict: %v", err)
 		}
 
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 		cov, err := LoadTriageRunCoverage(ctx, runUUID)
 		if err != nil {
 			t.Fatalf("coverage read: %v", err)
@@ -2224,6 +2289,7 @@ func TestAPairMissingFromTheDenominatorIsNamedRatherThanRemovedFromTheQuestion(t
 			t.Fatalf("plan size: %v", err)
 		}
 
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 		cov, err := LoadTriageRunCoverage(ctx, runUUID)
 		if err != nil {
 			t.Fatalf("coverage read: %v", err)
@@ -2269,11 +2335,12 @@ func TestAPairMissingFromTheDenominatorIsNamedRatherThanRemovedFromTheQuestion(t
 		}
 		if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
 			VectorID: "v1",
-			Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4}},
+			Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4}, Reason: "measured_in_a_test"},
 		}}); err != nil {
 			t.Fatalf("verdict: %v", err)
 		}
 
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 		cov, err := LoadTriageRunCoverage(ctx, runUUID)
 		if err != nil {
 			t.Fatalf("coverage read: %v", err)
@@ -2357,7 +2424,7 @@ func TestAnUncountedProbeRecordCannotBuyTheSilentLossOfARealOne(t *testing.T) {
 	// record the verdict never mentioned.
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
 		VectorID: "v1",
-		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4}},
+		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4}, Reason: "measured_in_a_test"},
 	}}); err != nil {
 		t.Fatalf("verdict: %v", err)
 	}
@@ -2378,6 +2445,7 @@ func TestAnUncountedProbeRecordCannotBuyTheSilentLossOfARealOne(t *testing.T) {
 
 	// The control: nothing is wrong yet, so this run genuinely is clean and the check below is a
 	// predicate rather than a constant.
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage read: %v", err)
@@ -2398,6 +2466,7 @@ func TestAnUncountedProbeRecordCannotBuyTheSilentLossOfARealOne(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err = LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage read: %v", err)
@@ -2458,7 +2527,7 @@ func TestAPairHoldingMoreProbeRecordsThanWereCountedIsNotCertifiable(t *testing.
 	}
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
 		VectorID: "v1",
-		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4, 68, 132}},
+		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4, 68, 132}, Reason: "measured_in_a_test"},
 	}}); err != nil {
 		t.Fatalf("verdict: %v", err)
 	}
@@ -2470,6 +2539,7 @@ func TestAPairHoldingMoreProbeRecordsThanWereCountedIsNotCertifiable(t *testing.
 		t.Fatalf("lower the counter: %v", err)
 	}
 
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage read: %v", err)
@@ -2537,7 +2607,7 @@ func TestARetryIsNotASecondProbeAndCannotAbsorbALostRecord(t *testing.T) {
 	}
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
 		VectorID: "v1",
-		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4}},
+		Verdict:  triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4}, Reason: "measured_in_a_test"},
 	}}); err != nil {
 		t.Fatalf("verdict: %v", err)
 	}
@@ -2553,6 +2623,7 @@ func TestARetryIsNotASecondProbeAndCannotAbsorbALostRecord(t *testing.T) {
 		t.Errorf("a retry of one probe was counted as another probe sent: sent_probes is %d, want 2. A floor that counts attempts is a floor that will fire on every retried pair, and a signal that is always on is one nobody reads", sent)
 	}
 
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage read: %v", err)
@@ -2568,6 +2639,7 @@ func TestARetryIsNotASecondProbeAndCannotAbsorbALostRecord(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err = LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage read: %v", err)
@@ -2630,12 +2702,13 @@ func TestACleanMustCiteItsOwnProbeRecordsAndNotAnotherPairs(t *testing.T) {
 	// satisfied because ordinal 68 exists SOMEWHERE, and witness two is satisfied because
 	// query:sort holds as many records as its counter claims.
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{
-		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4, 68}}},
-		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:page", State: triage.StateClean, Ordinals: []uint64{68}}},
+		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort", State: triage.StateClean, Ordinals: []uint64{4, 68}, Reason: "measured_in_a_test"}},
+		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:page", State: triage.StateClean, Ordinals: []uint64{68}, Reason: "measured_in_a_test"}},
 	}); err != nil {
 		t.Fatalf("verdicts: %v", err)
 	}
 
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage read: %v", err)
@@ -2698,7 +2771,7 @@ func triageTestFullyMeasuredPair(t *testing.T, ctx context.Context, runUUID stri
 	}
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{
 		{VectorID: "v1", Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort",
-			State: triage.StateClean, Ordinals: []uint64{uint64(triage.ClassSQL)}}},
+			State: triage.StateClean, Reason: "measured_in_a_test", Ordinals: []uint64{uint64(triage.ClassSQL)}}},
 	}); err != nil {
 		t.Fatalf("verdict: %v", err)
 	}
@@ -2725,6 +2798,7 @@ func TestARunThatDidNotFinishCleanlyDoesNotRenderAsClean(t *testing.T) {
 	if err := FinishTriageRun(ctx, okRun, TriageRunCompleted, ""); err != nil {
 		t.Fatalf("finish: %v", err)
 	}
+	triageTestInventoryForEveryCoveragePair(t, ctx, okRun)
 	cov, err := LoadTriageRunCoverage(ctx, okRun)
 	if err != nil {
 		t.Fatalf("coverage: %v", err)
@@ -2795,6 +2869,7 @@ func TestARunThatDidNotFinishCleanlyDoesNotRenderAsClean(t *testing.T) {
 			runUUID := triageTestRun(t, ctx)
 			triageTestFullyMeasuredPair(t, ctx, runUUID)
 			tc.finish(t, ctx, runUUID)
+			triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 			cov, err := LoadTriageRunCoverage(ctx, runUUID)
 			if err != nil {
 				t.Fatalf("coverage: %v", err)
@@ -2851,10 +2926,10 @@ func TestTwoVerdictsWithTheSameKeyInOneBatchAreNotSilentlyCollapsed(t *testing.T
 	batch := []TriageVerdictRow{
 		{VectorID: "v1", Provenance: ProvenanceNativeProbe, ProvenanceDetail: "own probe",
 			Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:b",
-				State: triage.StateFinding, Grade: triage.GradeHigh, Ordinals: []uint64{68}}},
+				State: triage.StateFinding, Reason: "measured_in_a_test", Grade: triage.GradeHigh, Ordinals: []uint64{68}}},
 		{VectorID: "v1",
 			Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:b",
-				State: triage.StateClean, Ordinals: []uint64{132}}},
+				State: triage.StateClean, Reason: "measured_in_a_test", Ordinals: []uint64{132}}},
 	}
 	n, err := RecordTriageVerdicts(ctx, runUUID, batch)
 	if err == nil {
@@ -2892,14 +2967,14 @@ func TestACleanMayNotOverwriteAPositiveAlreadyOnTheRecord(t *testing.T) {
 	finding := TriageVerdictRow{VectorID: "v1", Provenance: ProvenanceNativeProbe,
 		ProvenanceDetail: "own probe",
 		Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:b",
-			State: triage.StateFinding, Grade: triage.GradeHigh, Ordinals: []uint64{68}}}
+			State: triage.StateFinding, Reason: "measured_in_a_test", Grade: triage.GradeHigh, Ordinals: []uint64{68}}}
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{finding}); err != nil {
 		t.Fatalf("finding: %v", err)
 	}
 
 	clean := TriageVerdictRow{VectorID: "v1",
 		Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:b",
-			State: triage.StateClean, Ordinals: []uint64{132}}}
+			State: triage.StateClean, Reason: "measured_in_a_test", Ordinals: []uint64{132}}}
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{clean}); err == nil {
 		t.Error("a clean was allowed to overwrite a finding on the same key")
 	} else if !strings.Contains(err.Error(), "query:b") {
@@ -2918,25 +2993,243 @@ func TestACleanMayNotOverwriteAPositiveAlreadyOnTheRecord(t *testing.T) {
 
 	// Not a blanket freeze. A positive may be replaced by another positive (a class upgrading its
 	// own suspicious to a finding, or the reverse when a second arm is less sure), and an unknown
-	// placeholder may still be replaced by anything at all, which is the normal path every pair
-	// takes out of writePlanRows.
+	// placeholder still goes when the pair is measured, which is the normal path every pair takes
+	// out of writePlanRows.
 	upgrade := finding
 	upgrade.Verdict.State = triage.StateSuspicious
 	upgrade.Verdict.Grade = triage.GradeMedium
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{upgrade}); err != nil {
 		t.Errorf("a positive was refused as a replacement for a positive: %v", err)
 	}
-	placeholder := TriageVerdictRow{VectorID: "v1",
+
+	// THE PLACEHOLDER IS ON TriagePlanArm AND IS RETIRED BY DELETE, NOT OVERWRITTEN, and this
+	// block used to file it under the empty arm and then write the measurement on the same key.
+	// That stopped being the runner's path when classify() started deriving a distinct arm per
+	// verdict: addPlanVerdict files under TriagePlanArm, addVerdict never does, and the two
+	// therefore never share a key. Writing it the old way asserted that a clean may land on top
+	// of an unknown, which is a false clean the store now refuses, so the assertion was pinning
+	// a route the runner does not use AGAINST the rule that closes it.
+	placeholder := TriageVerdictRow{VectorID: "v1", Arm: TriagePlanArm,
 		Verdict: triage.ClassVerdict{Class: triage.ClassSSTI, SlotKey: "query:c",
 			State: triage.StateNotRun, Reason: "not_reached: the run ended before this pair was measured"}}
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{placeholder}); err != nil {
 		t.Fatalf("placeholder: %v", err)
 	}
-	real := TriageVerdictRow{VectorID: "v1",
+	real := TriageVerdictRow{VectorID: "v1", Arm: "S-D1",
 		Verdict: triage.ClassVerdict{Class: triage.ClassSSTI, SlotKey: "query:c",
-			State: triage.StateClean, Ordinals: []uint64{65}}}
+			State: triage.StateClean, Reason: "measured_in_a_test", Ordinals: []uint64{65}}}
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{real}); err != nil {
-		t.Errorf("a real verdict was refused as a replacement for an unknown placeholder, which is the path every pair takes: %v", err)
+		t.Errorf("a real verdict was refused on a pair holding only its plan placeholder, which is the path every pair takes: %v", err)
+	}
+	var states []string
+	rowsBack, err := dbPool.Query(ctx,
+		`SELECT state FROM triage_verdicts WHERE run_id = $1 AND slot_key = 'query:c' ORDER BY arm`, runUUID)
+	if err != nil {
+		t.Fatalf("read back query:c: %v", err)
+	}
+	for rowsBack.Next() {
+		var s string
+		if err := rowsBack.Scan(&s); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		states = append(states, s)
+	}
+	rowsBack.Close()
+	if len(states) != 1 || states[0] != string(triage.StateClean) {
+		t.Errorf("query:c holds %v, want exactly the measured clean: the placeholder must be retired by the measurement, not left beside it", states)
+	}
+}
+
+// =================================================================================================
+// F-A2c: THE RESCUE PATH DEFEATS THE GUARD IT WAS RESCUING
+// =================================================================================================
+
+// Observed twice in ONE suite run, and the two lines together are the whole defect:
+//
+//	"the verdict batch was refused, retrying row by row: triage store: verdicts 11 and 12 of 41
+//	 are both filed under vector 6d3db3c9 slot body:/filters:node class CMDI arm settle, so
+//	 writing this batch would silently destroy one of them (cannot_determine and not_run); the
+//	 whole batch is refused"
+//
+// and then NOTHING. No "verdict refused" line followed, because the row-by-row retry at
+// triageRun.go:2227 calls this function twice with one row each, and one row can never collide
+// with itself. Both landed on (run, vector, slot, class, arm), the unconditional ON CONFLICT DO
+// UPDATE took the second, and the cannot_determine the guard had just protected was gone. The
+// guard printed a sentence and the fallback then did the thing the sentence described.
+//
+// The live producer is the settle loop: cmdiClassifier.Settle IS Classify, so it returns the same
+// several verdicts, and the settle loop stamps EVERY one of them with the fixed arm "settle"
+// instead of deriving a distinct arm per verdict the way the classify loop does.
+//
+// Both losers here are unknowns, so today no clean is manufactured. That is luck and not a
+// property: the same path with the states the other way round writes a clean over a
+// cannot_determine, and the upsert had no opinion at all about which of two rows is the one that
+// cannot manufacture a clean.
+func TestTheRowByRowRescueMayNotDestroyTheVerdictTheBatchGuardJustSaved(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+
+	// Exactly the pair from the log, arriving the way the rescue sends them: two calls, one row
+	// each, same (vector, slot, class, arm).
+	first := TriageVerdictRow{VectorID: "6d3db3c9", Arm: "settle",
+		Verdict: triage.ClassVerdict{Class: triage.ClassCMDI, SlotKey: "body:/filters:node",
+			State:  triage.StateCannotDetermine,
+			Reason: "C-OOB: no callback arrived inside the grace window"}}
+	second := TriageVerdictRow{VectorID: "6d3db3c9", Arm: "settle",
+		Verdict: triage.ClassVerdict{Class: triage.ClassCMDI, SlotKey: "body:/filters:node",
+			State:  triage.StateNotRun,
+			Reason: "C-T2: the second tier was not sent because the first tier was silent"}}
+
+	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{first}); err != nil {
+		t.Fatalf("the first of the two rescued rows was refused: %v", err)
+	}
+	_, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{second})
+	if err == nil {
+		var state, reason string
+		if scanErr := dbPool.QueryRow(ctx,
+			`SELECT state, reason FROM triage_verdicts WHERE run_id = $1 AND arm = 'settle'`,
+			runUUID).Scan(&state, &reason); scanErr != nil {
+			t.Fatalf("read back: %v", scanErr)
+		}
+		t.Fatalf("the rescue path wrote both colliding rows: the key now holds %q (%q), and the %s the batch guard had just refused to destroy is gone, with nothing in the database and nothing in the log to say it ever existed",
+			state, reason, triage.StateCannotDetermine)
+	}
+	for _, want := range []string{"body:/filters:node", "settle", string(triage.StateCannotDetermine), string(triage.StateNotRun)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q, so the operator cannot tell which two answers disagreed: %v", want, err)
+		}
+	}
+
+	var held int
+	if err := dbPool.QueryRow(ctx,
+		`SELECT count(*) FROM triage_verdicts WHERE run_id = $1 AND arm = 'settle'`, runUUID).Scan(&held); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if held != 1 {
+		t.Fatalf("the key holds %d rows, want the one the first call wrote", held)
+	}
+	var state string
+	if err := dbPool.QueryRow(ctx,
+		`SELECT state FROM triage_verdicts WHERE run_id = $1 AND arm = 'settle'`, runUUID).Scan(&state); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if state != string(triage.StateCannotDetermine) {
+		t.Fatalf("the surviving row is %q, so the refusal did not actually stop the write", state)
+	}
+}
+
+// THE WHOLE ORDER, AS DATA, BECAUSE THE POSITIVE RULE WAS ONLY ONE THIRD OF IT.
+//
+// FinishTriageRun states the principle one table over: "between two claims that cannot both hold,
+// keep the one that cannot manufacture a clean". The verdict upsert had that rule for positives
+// only, so the OTHER false-clean route was open: an unknown already on the record, replaced by a
+// clean, on a key where the two answers cannot both be true. Nothing refused it, and a clean that
+// overwrote a cannot_determine is a clean nobody measured.
+//
+// Three tiers, and they are the three the vocabulary already defines:
+//
+//	positive  (Kind == positive)        a finding; losing it costs the bug
+//	unknown   (IsUnknown)               says nothing; cannot manufacture a clean; includes not_applicable
+//	negative  (clean, not_exploitable)  the only tier a reader may act on as "nothing here"
+//
+// A stronger tier may replace a weaker one. A weaker tier may NOT replace a stronger one. Two
+// rows in the SAME tier with different states are two answers the store cannot choose between, so
+// they are refused and named, with the two exceptions that are real transitions: a positive
+// upgrading or downgrading within the positives, and the runner's own reserved placeholder arm,
+// which recordUnreachedAsUntested refreshes on purpose.
+func TestTheVerdictUpsertKeepsTheClaimThatCannotManufactureAClean(t *testing.T) {
+	ctx := triageTestDB(t)
+
+	positive := func(s triage.TriageState) triage.ClassVerdict {
+		return triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:b", State: s,
+			Reason: "measured_in_a_test",
+			Grade:  triage.GradeHigh, Ordinals: []uint64{68}}
+	}
+	negative := func(s triage.TriageState) triage.ClassVerdict {
+		return triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:b", State: s,
+			Reason: "S-D1: this class's own probes ran and its oracle stayed silent", Ordinals: []uint64{132}}
+	}
+	unknown := func(s triage.TriageState) triage.ClassVerdict {
+		return triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:b", State: s,
+			Reason: "S-F2: the reason this row knows nothing"}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		arm        string
+		prior, now triage.ClassVerdict
+		allowed    bool
+		// survivor is the state the table must hold afterwards, refused or not.
+		survivor triage.TriageState
+	}{
+		// The clean-over-something rows. These are the false-clean routes, and only the first of
+		// them was closed.
+		{"a clean may not overwrite a finding", "", positive(triage.StateFinding), negative(triage.StateClean), false, triage.StateFinding},
+		{"a clean may not overwrite a cannot_determine", "", unknown(triage.StateCannotDetermine), negative(triage.StateClean), false, triage.StateCannotDetermine},
+		{"a clean may not overwrite a not_run", "", unknown(triage.StateNotRun), negative(triage.StateClean), false, triage.StateNotRun},
+		{"a clean may not overwrite a not_applicable", "", unknown(triage.StateNotApplicable), negative(triage.StateClean), false, triage.StateNotApplicable},
+		{"a not_exploitable may not overwrite a cannot_determine", "", unknown(triage.StateCannotDetermine), negative(triage.StateNotExploitable), false, triage.StateCannotDetermine},
+
+		// A weaker tier may never take a positive, whatever the weaker tier is.
+		{"an unknown may not overwrite a finding", "", positive(triage.StateFinding), unknown(triage.StateCannotDetermine), false, triage.StateFinding},
+
+		// The safe direction. The replacement says LESS, so no clean is manufactured and the row
+		// that survives is the one a reader cannot act on. The principle requires this direction,
+		// so it is allowed rather than refused: refusing it would leave the clean standing.
+		{"an unknown may overwrite a clean", "", negative(triage.StateClean), unknown(triage.StateCannotDetermine), true, triage.StateCannotDetermine},
+		{"a finding may overwrite a clean", "", negative(triage.StateClean), positive(triage.StateFinding), true, triage.StateFinding},
+		{"a finding may overwrite an unknown", "", unknown(triage.StateNotRun), positive(triage.StateFinding), true, triage.StateFinding},
+
+		// Same tier. The same answer twice is one answer; two different answers are two, and the
+		// store has no ground to pick.
+		{"the same clean twice is one answer", "", negative(triage.StateClean), negative(triage.StateClean), true, triage.StateClean},
+		{"the same unknown twice is one answer", "", unknown(triage.StateNotRun), unknown(triage.StateNotRun), true, triage.StateNotRun},
+		{"two different unknowns on one measurement arm are refused", "settle", unknown(triage.StateNotRun), unknown(triage.StateCannotDetermine), false, triage.StateNotRun},
+		{"a clean and a not_exploitable on one arm are refused", "", negative(triage.StateClean), negative(triage.StateNotExploitable), false, triage.StateClean},
+
+		// The two real transitions inside a tier.
+		{"a positive may be upgraded by another positive", "", positive(triage.StateSuspicious), positive(triage.StateFinding), true, triage.StateFinding},
+		{"a positive may be downgraded by another positive", "", positive(triage.StateFinding), positive(triage.StateSuspicious), true, triage.StateSuspicious},
+		{"the reserved placeholder arm may be refreshed with another unknown", TriagePlanArm, unknown(triage.StateNotApplicable), unknown(triage.StateNotRun), true, triage.StateNotRun},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A run of its own per case, so the order of the cases cannot decide any of them.
+			runUUID := triageTestRun(t, ctx)
+			stamp := func(v triage.ClassVerdict) TriageVerdictRow {
+				r := TriageVerdictRow{VectorID: "v1", Arm: tc.arm, Verdict: v}
+				if v.State.Kind() == triage.StateKindPositive {
+					r.Provenance = ProvenanceNativeProbe
+					r.ProvenanceDetail = "own probe"
+				}
+				return r
+			}
+			if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{stamp(tc.prior)}); err != nil {
+				t.Fatalf("writing the prior %s: %v", tc.prior.State, err)
+			}
+			_, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{stamp(tc.now)})
+			if tc.allowed && err != nil {
+				t.Errorf("%s over %s was refused: %v", tc.now.State, tc.prior.State, err)
+			}
+			if !tc.allowed && err == nil {
+				t.Errorf("%s was allowed to replace the %s already on the record", tc.now.State, tc.prior.State)
+			}
+			if !tc.allowed && err != nil {
+				for _, want := range []string{string(tc.prior.State), string(tc.now.State), "query:b"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("the refusal does not name %q: %v", want, err)
+					}
+				}
+			}
+			var state string
+			if err := dbPool.QueryRow(ctx,
+				`SELECT state FROM triage_verdicts WHERE run_id = $1 AND slot_key = 'query:b'`,
+				runUUID).Scan(&state); err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			if state != string(tc.survivor) {
+				t.Errorf("the key holds %q, want %q", state, tc.survivor)
+			}
+		})
 	}
 }
 
@@ -3081,6 +3374,7 @@ func TestARunThatRecordedAWorseOutcomeIsNotReCertifiedAsCompleted(t *testing.T) 
 			if status != worse {
 				t.Fatalf("the run is now %q and was %q: the worse outcome was overwritten", status, worse)
 			}
+			triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 			cov, err := LoadTriageRunCoverage(ctx, runUUID)
 			if err != nil {
 				t.Fatalf("coverage: %v", err)
@@ -3206,12 +3500,14 @@ func TestAMeasuredVerdictSupersedesItsPlanPlaceholder(t *testing.T) {
 	measured := []TriageVerdictRow{
 		{VectorID: "v1", Arm: "N-ES", Verdict: triage.ClassVerdict{
 			Class: triage.ClassNoSQL, SlotKey: "query:id", State: triage.StateClean,
+			Reason:   "measured_in_a_test",
 			Ordinals: []uint64{69}}},
 		{VectorID: "v1", Arm: "N-OP", Verdict: triage.ClassVerdict{
 			Class: triage.ClassNoSQL, SlotKey: "query:id", State: triage.StateCannotDetermine,
 			Reason: "N-OP: the operator form was rejected by the parser"}},
 		{VectorID: "v1", Arm: "N-JS", Verdict: triage.ClassVerdict{
 			Class: triage.ClassNoSQL, SlotKey: "query:id", State: triage.StateClean,
+			Reason:   "measured_in_a_test",
 			Ordinals: []uint64{133}}},
 	}
 	if _, err := RecordTriageVerdicts(ctx, runUUID, measured); err != nil {
@@ -3229,6 +3525,7 @@ func TestAMeasuredVerdictSupersedesItsPlanPlaceholder(t *testing.T) {
 		}
 	}
 
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage: %v", err)
@@ -3293,6 +3590,7 @@ func TestSupersedingThePlaceholderNeverRemovesAPositive(t *testing.T) {
 	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{
 		{VectorID: "v1", Arm: "S-EVAL", Verdict: triage.ClassVerdict{
 			Class: triage.ClassSSTI, SlotKey: "query:tpl", State: triage.StateClean,
+			Reason:   "measured_in_a_test",
 			Ordinals: []uint64{261}}},
 	}); err != nil {
 		t.Fatalf("write the measured arm: %v", err)
@@ -3508,6 +3806,7 @@ func TestATriagePassThatNeverStartedLeavesARowAndNotAnAbsence(t *testing.T) {
 		t.Errorf("a pass that never started planned %d pairs", planned)
 	}
 
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
 	cov, err := LoadTriageRunCoverage(ctx, runUUID)
 	if err != nil {
 		t.Fatalf("coverage: %v", err)
@@ -3545,5 +3844,1448 @@ func TestAGapIsNotRecordedOverARunningTriageRun(t *testing.T) {
 	}
 	if newest != live {
 		t.Fatalf("the newest run for this target is %s and the running one is %s", newest, live)
+	}
+}
+
+// =================================================================================================
+// THE DENOMINATOR'S TWO NUMBERS HAVE TO COUNT THE SAME POPULATION
+// =================================================================================================
+//
+// MEASURED ON THE OPERATOR'S LIVE RUN a218419a, READ ONLY:
+//
+//	triage_runs.planned_pairs                                       20680
+//	count(*) FROM triage_coverage                                   34500
+//	of those, carrying the is_credential plan-time refusal          13820
+//	20680 + 13820                                                   34500   exactly
+//
+// Nothing was writing rows twice and nothing was counting another plan's rows: every run in that
+// table holds exactly 34500 rows under its own run_id, and the older run acaff558, from before the
+// planner started counting eligible pairs, records planned_pairs = 34500 with zero credential
+// refusals on its rows. One of the two numbers changed meaning and the other did not follow it.
+//
+// The damage is witness 2 of the denominator reconciliation. PlannedPairs - EligiblePairs was
+// 20680 - 34500, permanently negative, never greater than OrphanCoveragePairs, so the one witness
+// that can see a pair which left NO trace anywhere could not fire on any corpus holding a single
+// credential slot. A subtraction that can only ever be negative is not a check, and reading its
+// clamped zero as "nothing is missing" is this file's oldest defect wearing new clothes.
+//
+// These four tests are that reconciliation, both directions, plus the two ways the population can
+// be corrupted after the plan is written.
+func TestTheDenominatorIsCountedOverThePopulationThePlanCounts(t *testing.T) {
+	ctx := triageTestDB(t)
+
+	// THE WITNESS, RESURRECTED. Three pairs planned, one of them refused by the planner as
+	// ineligible, so the plan is two. Then one of the two eligible pairs is removed from every
+	// table at once, which is exactly what a refused coverage batch plus a lost verdict leaves
+	// behind: no row, no verdict, no probe record, nothing anywhere to name it from.
+	//
+	// BEFORE THE FIX THIS WAS SILENT. EligiblePairs was count(*) of the table, so it read 3 with
+	// the ineligible pair present and 2 after the deletion, against a plan of 2: shortfall zero,
+	// witness quiet, and a whole pair gone from the question with nothing said. The ineligible
+	// pair was paying for the missing one.
+	t.Run("a pair that left no trace at all is seen even when the plan holds refused pairs", func(t *testing.T) {
+		runUUID := triageTestCompletedRun(t, ctx)
+
+		plan := []TriageCoverageRow{
+			{VectorID: "v1", SlotKey: "query:sort", Class: triage.ClassSQL, Reach: triage.ReachAlways,
+				PlannedProbes: 1, SentProbes: 1, Ran: true},
+			{VectorID: "v1", SlotKey: "query:page", Class: triage.ClassSQL, Reach: triage.ReachAlways,
+				PlannedProbes: 1, SentProbes: 1, Ran: true},
+			// The credential slot. It has a row and a reason, it is not work this run can ever
+			// retire, and the planner did not count it.
+			{VectorID: "v1", SlotKey: "cookie:session", Class: triage.ClassSQL, Reach: triage.ReachAlways,
+				Ineligible: true, Ran: false,
+				Skipped: []triage.ProbeSkip{{Reason: "is_credential: a probe here logs the run out"}}},
+		}
+		if _, err := RecordTriageCoverage(ctx, runUUID, plan); err != nil {
+			t.Fatalf("coverage: %v", err)
+		}
+		if err := SetTriageRunPlan(ctx, runUUID, 2); err != nil {
+			t.Fatalf("plan size: %v", err)
+		}
+		for _, p := range []struct {
+			slot triage.SlotKey
+			ord  uint64
+		}{{"query:sort", 4}, {"query:page", 68}} {
+			fid := NewTriageFidelityRow(triage.ClassSQL, p.ord)
+			fid.VectorID = "v1"
+			fid.SlotKey = p.slot
+			fid.ObsKind = triage.ObsProbe
+			fid.HTTPStatus = 200
+			fid.Delivered = true
+			fid.Wire = triage.PayloadWire{Logical: []byte("probe"), Wire: []byte("probe"),
+				ContainerName: "request-target", Survived: triage.WireSurvivalIntact}
+			if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{fid}); err != nil {
+				t.Fatalf("fidelity: %v", err)
+			}
+			if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
+				VectorID: "v1",
+				Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: p.slot,
+					State: triage.StateClean, Reason: "measured_in_a_test", Ordinals: []uint64{p.ord}},
+			}}); err != nil {
+				t.Fatalf("verdict: %v", err)
+			}
+		}
+		// The refused pair still owes a verdict saying why, exactly as writePlanRows files one.
+		if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
+			VectorID: "v1", Arm: TriagePlanArm,
+			Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "cookie:session",
+				State: triage.StateNotProbed, Reason: "is_credential: a probe here logs the run out"},
+		}}); err != nil {
+			t.Fatalf("refusal verdict: %v", err)
+		}
+
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
+		cov, err := LoadTriageRunCoverage(ctx, runUUID)
+		if err != nil {
+			t.Fatalf("coverage read: %v", err)
+		}
+		t.Logf("roll-up with 2 eligible pairs and 1 refused: %+v", cov)
+		if cov.EligiblePairs != 2 || cov.CoverageRows != 3 || cov.IneligiblePairs != 1 {
+			t.Fatalf("the denominator read %d eligible of %d rows with %d ineligible, want 2 of 3 with 1: the two numbers the reconciliation compares are still counting different populations: %+v",
+				cov.EligiblePairs, cov.CoverageRows, cov.IneligiblePairs, cov)
+		}
+		if cov.MissingCoveragePairs != 0 || cov.DenominatorSurplus != 0 {
+			t.Fatalf("an intact plan reported a shortfall of %d and a surplus of %d, so the reconciliation disagrees with a run nothing is wrong with: %+v",
+				cov.MissingCoveragePairs, cov.DenominatorSurplus, cov)
+		}
+
+		// Now lose one ELIGIBLE pair the way a refused batch loses one: every trace of it, at once.
+		for _, stmt := range []string{
+			`DELETE FROM triage_coverage WHERE run_id = $1 AND slot_key = 'query:page'`,
+			`DELETE FROM triage_verdicts WHERE run_id = $1 AND slot_key = 'query:page'`,
+			`DELETE FROM triage_fidelity WHERE run_id = $1 AND slot_key = 'query:page'`,
+		} {
+			if _, err := dbPool.Exec(ctx, stmt, runUUID); err != nil {
+				t.Fatalf("delete: %v", err)
+			}
+		}
+
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
+		cov, err = LoadTriageRunCoverage(ctx, runUUID)
+		if err != nil {
+			t.Fatalf("coverage read: %v", err)
+		}
+		t.Logf("roll-up after one eligible pair left no trace at all: %+v", cov)
+		if cov.RendersAsClean() {
+			t.Errorf("A PAIR LEFT NO TRACE ANYWHERE AND THE RUN RENDERED AS CLEAN: %+v", cov)
+		}
+		if cov.OrphanCoveragePairs != 0 {
+			t.Errorf("the pair left no verdict and no probe record, so the exact witness has nothing to see and must be silent, got %d: %+v",
+				cov.OrphanCoveragePairs, cov)
+		}
+		if cov.MissingCoveragePairs != 1 {
+			t.Errorf("THE ONLY WITNESS THAT CAN SEE THIS PAIR REPORTED %d MISSING, WANT 1. With the denominator counted over every row including the refused one, the refused pair pays for the lost one and the subtraction reads zero: %+v",
+				cov.MissingCoveragePairs, cov)
+		}
+		var said bool
+		for _, u := range cov.Untested {
+			if strings.Contains(u, "coverage_rows_missing_1_of_2") {
+				said = true
+			}
+		}
+		if !said {
+			t.Errorf("the shortfall no witness can name was not said out loud with its arithmetic: %v", cov.Untested)
+		}
+	})
+
+	// THE OTHER DIRECTION, AND IT IS THE SHAPE THE LIVE RUN IS IN RIGHT NOW. Every coverage row
+	// says eligible (a runner that has not been taught the flag writes exactly that) and the
+	// planner recorded a smaller number. Before the surplus witness existed the subtraction went
+	// negative, GREATEST clamped it to zero, and a run whose two records of its own size disagree
+	// by 13820 pairs was indistinguishable from one where they agree.
+	t.Run("a denominator larger than the recorded plan is reported rather than clamped to nothing", func(t *testing.T) {
+		runUUID := triageTestCompletedRun(t, ctx)
+
+		var plan []TriageCoverageRow
+		for _, slot := range []triage.SlotKey{"query:a", "query:b", "query:c"} {
+			plan = append(plan, TriageCoverageRow{VectorID: "v1", SlotKey: slot, Class: triage.ClassSQL,
+				Reach: triage.ReachAlways, PlannedProbes: 1, SentProbes: 1, Ran: true})
+		}
+		if _, err := RecordTriageCoverage(ctx, runUUID, plan); err != nil {
+			t.Fatalf("coverage: %v", err)
+		}
+		for i, p := range plan {
+			// The ordinal has to sit in this class's own stripe: the schema CHECK is
+			// (ordinal %% 64) = class_id, which is what attributes a marker found in a response
+			// to the class that minted it.
+			ord := uint64(triage.ClassSQL) + uint64(64*i)
+			fid := NewTriageFidelityRow(triage.ClassSQL, ord)
+			fid.VectorID = "v1"
+			fid.SlotKey = p.SlotKey
+			fid.ObsKind = triage.ObsProbe
+			fid.HTTPStatus = 200
+			fid.Delivered = true
+			fid.Wire = triage.PayloadWire{Logical: []byte("probe"), Wire: []byte("probe"),
+				ContainerName: "request-target", Survived: triage.WireSurvivalIntact}
+			if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{fid}); err != nil {
+				t.Fatalf("fidelity: %v", err)
+			}
+			if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
+				VectorID: "v1",
+				Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: p.SlotKey,
+					State: triage.StateClean, Reason: "measured_in_a_test", Ordinals: []uint64{ord}},
+			}}); err != nil {
+				t.Fatalf("verdict: %v", err)
+			}
+		}
+
+		// The control: with the plan recording what is actually there, this run IS clean, so the
+		// assertion below is a predicate and not a constant.
+		if err := SetTriageRunPlan(ctx, runUUID, 3); err != nil {
+			t.Fatalf("plan size: %v", err)
+		}
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
+		cov, err := LoadTriageRunCoverage(ctx, runUUID)
+		if err != nil {
+			t.Fatalf("coverage read: %v", err)
+		}
+		if !cov.RendersAsClean() {
+			t.Fatalf("three measured, proven, clean pairs against a plan of three did not render as clean: %+v", cov)
+		}
+
+		// Now the live shape: the plan says fewer pairs than the denominator holds.
+		if err := SetTriageRunPlan(ctx, runUUID, 2); err != nil {
+			t.Fatalf("plan size: %v", err)
+		}
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
+		cov, err = LoadTriageRunCoverage(ctx, runUUID)
+		if err != nil {
+			t.Fatalf("coverage read: %v", err)
+		}
+		t.Logf("roll-up with 3 eligible coverage rows against a recorded plan of 2: %+v", cov)
+		if cov.DenominatorSurplus != 1 {
+			t.Errorf("the denominator holds one more eligible pair than the plan recorded and the surplus was counted as %d, want 1: %+v",
+				cov.DenominatorSurplus, cov)
+		}
+		if cov.RendersAsClean() {
+			t.Errorf("A RUN WHOSE TWO RECORDS OF ITS OWN SIZE DISAGREE RENDERED AS CLEAN. One of planned_pairs and the coverage table is wrong, and a run that cannot say how big its question was cannot answer it: %+v", cov)
+		}
+		var said bool
+		for _, u := range cov.Untested {
+			if strings.Contains(u, "denominator_holds_1_more_eligible_pairs_than_the_plan_recorded_3_of_2") {
+				said = true
+			}
+		}
+		if !said {
+			t.Errorf("the surplus was counted and never said, so the operator sees a run that is not clean with nothing to point at: %v", cov.Untested)
+		}
+	})
+
+	// A PAIR THE PLAN REFUSED AND THE RUNNER MEASURED ANYWAY. The ineligible population is the
+	// operator's own session credentials, and the reason they are ineligible is that a probe there
+	// logs the run out and sends a mangled credential to the operator's target. A run that did it
+	// anyway does not get to certify what came after it, and the pair has to be NAMED: "a
+	// credential slot somewhere in 218 vectors" is not something anyone can act on.
+	t.Run("a pair the plan refused as ineligible and the runner measured is named and blocks the certificate", func(t *testing.T) {
+		runUUID := triageTestCompletedRun(t, ctx)
+
+		if _, err := RecordTriageCoverage(ctx, runUUID, []TriageCoverageRow{
+			{VectorID: "v1", SlotKey: "query:sort", Class: triage.ClassSQL, Reach: triage.ReachAlways,
+				PlannedProbes: 1, SentProbes: 1, Ran: true},
+			{VectorID: "v1", SlotKey: "cookie:session", Class: triage.ClassSQL, Reach: triage.ReachAlways,
+				Ineligible: true, PlannedProbes: 1, SentProbes: 1, Ran: true},
+		}); err != nil {
+			t.Fatalf("coverage: %v", err)
+		}
+		if err := SetTriageRunPlan(ctx, runUUID, 1); err != nil {
+			t.Fatalf("plan size: %v", err)
+		}
+		// Both pairs get an honest probe record and a clean verdict, so that nothing ELSE about
+		// this run is wrong: the only fault on the record is that a pair the plan refused was
+		// measured, and the credential slot is sitting there with a green tick on it.
+		for _, p := range []struct {
+			slot triage.SlotKey
+			ord  uint64
+		}{{"query:sort", uint64(triage.ClassSQL)}, {"cookie:session", uint64(triage.ClassSQL) + 64}} {
+			fid := NewTriageFidelityRow(triage.ClassSQL, p.ord)
+			fid.VectorID = "v1"
+			fid.SlotKey = p.slot
+			fid.ObsKind = triage.ObsProbe
+			fid.HTTPStatus = 200
+			fid.Delivered = true
+			fid.Wire = triage.PayloadWire{Logical: []byte("probe"), Wire: []byte("probe"),
+				ContainerName: "request-target", Survived: triage.WireSurvivalIntact}
+			if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{fid}); err != nil {
+				t.Fatalf("fidelity: %v", err)
+			}
+			if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
+				VectorID: "v1",
+				Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: p.slot,
+					State: triage.StateClean, Reason: "measured_in_a_test", Ordinals: []uint64{p.ord}},
+			}}); err != nil {
+				t.Fatalf("verdict: %v", err)
+			}
+		}
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
+		cov, err := LoadTriageRunCoverage(ctx, runUUID)
+		if err != nil {
+			t.Fatalf("coverage read: %v", err)
+		}
+		t.Logf("roll-up with a refused pair the runner measured: %+v", cov)
+		if cov.IneligiblePairsThatRan != 1 {
+			t.Errorf("one pair the plan refused was measured and the count read %d, want 1: %+v",
+				cov.IneligiblePairsThatRan, cov)
+		}
+		if cov.RendersAsClean() {
+			t.Errorf("A RUN THAT PROBED A PAIR ITS OWN PLAN FORBADE RENDERED AS CLEAN: %+v", cov)
+		}
+		var named bool
+		for _, u := range cov.Untested {
+			if strings.Contains(u, "cookie:session") && strings.Contains(u, "probed_although_the_plan_refused") {
+				named = true
+			}
+		}
+		if !named {
+			t.Errorf("the pair the plan refused and the runner probed was not named, so the operator is told something went to a credential slot without being told which: %v", cov.Untested)
+		}
+	})
+
+	// INELIGIBILITY IS A PLAN FACT AND A LATER FLUSH MAY NOT UNDO IT. Every write after the plan is
+	// a progress flush built from the runner's cached row, and a flush that has not been taught the
+	// field carries the zero value, which is "eligible". An unconditional assignment in the upsert
+	// would let the first such write put the refused pair back into the denominator, and the two
+	// numbers would be counting different populations again by the end of the first unit.
+	t.Run("a later write cannot put a refused pair back into the denominator", func(t *testing.T) {
+		runUUID := triageTestCompletedRun(t, ctx)
+
+		if _, err := RecordTriageCoverage(ctx, runUUID, []TriageCoverageRow{{
+			VectorID: "v1", SlotKey: "cookie:session", Class: triage.ClassSQL,
+			Reach: triage.ReachAlways, Ineligible: true,
+		}}); err != nil {
+			t.Fatalf("plan write: %v", err)
+		}
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
+		before, err := LoadTriageRunCoverage(ctx, runUUID)
+		if err != nil {
+			t.Fatalf("coverage read: %v", err)
+		}
+		if before.EligiblePairs != 0 || before.CoverageRows != 1 {
+			t.Fatalf("the plan write put %d eligible pairs of %d rows into the denominator, want 0 of 1: %+v",
+				before.EligiblePairs, before.CoverageRows, before)
+		}
+
+		// The flush that forgot. Same pair, same identity, Ineligible left at its zero value.
+		if _, err := RecordTriageCoverage(ctx, runUUID, []TriageCoverageRow{{
+			VectorID: "v1", SlotKey: "cookie:session", Class: triage.ClassSQL,
+			Reach: triage.ReachAlways, PlannedProbes: 3,
+		}}); err != nil {
+			t.Fatalf("progress write: %v", err)
+		}
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
+		after, err := LoadTriageRunCoverage(ctx, runUUID)
+		if err != nil {
+			t.Fatalf("coverage read: %v", err)
+		}
+		if after.EligiblePairs != 0 || after.IneligiblePairs != 1 {
+			t.Errorf("A PROGRESS FLUSH PUT A PAIR THE PLAN REFUSED BACK INTO THE DENOMINATOR: %d eligible and %d ineligible after the second write, want 0 and 1: %+v",
+				after.EligiblePairs, after.IneligiblePairs, after)
+		}
+	})
+}
+
+// Two more members of the same family, found by sweeping this file for the shape rather than for
+// the bug: a zero or an absence read as a positive fact. Neither is the denominator; both end in a
+// clean nobody can see through.
+func TestTheUnownedControlsExemptionsCannotBeBorrowedByARealProbe(t *testing.T) {
+	ctx := triageTestDB(t)
+
+	// A VERDICT FILED UNDER CLASS 0 IS INVISIBLE TO THE WITNESS THAT WOULD CATCH IT.
+	//
+	// triage.ClassNone is the zero value of ClassID and ClassVerdict.Validate never looks at the
+	// field, so a caller that forgets to set Class writes a verdict under 0. covorphan excludes
+	// class_id <> 0 on purpose, because the unowned control belongs to no pair and would otherwise
+	// put one orphan in every run ever recorded. So the exclusion that keeps the orphan witness
+	// usable is also a hole a real verdict can fall through: no coverage row, no orphan reported,
+	// and if the state is clean it lifts Clean and VerdictRows together so the equality still
+	// holds. Nothing anywhere in the run says a verdict arrived from no classifier.
+	t.Run("a verdict filed under the control's class is refused rather than hidden", func(t *testing.T) {
+		runUUID := triageTestCompletedRun(t, ctx)
+
+		_, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
+			VectorID: "v1",
+			Verdict: triage.ClassVerdict{Class: triage.ClassNone, SlotKey: "query:sort",
+				State: triage.StateClean, Reason: "measured_in_a_test", Ordinals: []uint64{0}},
+		}})
+		if err == nil {
+			t.Fatalf("A CLEAN VERDICT FILED UNDER CLASS 0 WAS ACCEPTED. It has no coverage row, covorphan cannot see it, and it counts as a clean in the roll-up: a green tick from no classifier at all.")
+		}
+		if !strings.Contains(err.Error(), "class 0") {
+			t.Errorf("the refusal does not say what is wrong with the row, so the caller cannot fix it: %v", err)
+		}
+
+		// The control, so this is a predicate and not a blanket refusal: the same row under a real
+		// class is written.
+		if _, err := RecordTriageCoverage(ctx, runUUID, []TriageCoverageRow{{
+			VectorID: "v1", SlotKey: "query:sort", Class: triage.ClassSQL,
+			Reach: triage.ReachAlways, PlannedProbes: 1, SentProbes: 1, Ran: true,
+		}}); err != nil {
+			t.Fatalf("coverage: %v", err)
+		}
+		if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
+			VectorID: "v1",
+			Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort",
+				State: triage.StateClean, Reason: "measured_in_a_test", Ordinals: []uint64{uint64(triage.ClassSQL)}},
+		}}); err != nil {
+			t.Fatalf("a verdict under a real class was refused too, so the guard is a blanket: %v", err)
+		}
+	})
+
+	// A PROBE THAT RECORDED NO LOGICAL BYTES BORROWED THE CONTROL'S EXEMPTION.
+	//
+	// triageUnprovenFidelity exempts a row whose survival was never measured AND which carries no
+	// payload bytes, because that describes the unperturbed control, which asks for nothing and so
+	// cannot have had anything survive. It also describes a real class probe whose logical bytes
+	// were never recorded, and that row is the opposite case: a probe about which nothing at all
+	// is known, counted as proven. The pair then renders clean on evidence nobody took.
+	t.Run("a class probe with no recorded payload and no measured survival is unproven", func(t *testing.T) {
+		runUUID := triageTestCompletedRun(t, ctx)
+
+		if _, err := RecordTriageCoverage(ctx, runUUID, []TriageCoverageRow{{
+			VectorID: "v1", SlotKey: "query:sort", Class: triage.ClassSQL,
+			Reach: triage.ReachAlways, PlannedProbes: 1, SentProbes: 1, Ran: true,
+		}}); err != nil {
+			t.Fatalf("coverage: %v", err)
+		}
+		// The sender filled the wire bytes and never filled Logical, and nothing established what
+		// survived. Every other column is the picture of a healthy probe.
+		fid := NewTriageFidelityRow(triage.ClassSQL, uint64(triage.ClassSQL))
+		fid.VectorID = "v1"
+		fid.SlotKey = "query:sort"
+		fid.ObsKind = triage.ObsProbe
+		fid.HTTPStatus = 200
+		fid.Delivered = true
+		fid.Wire = triage.PayloadWire{ContainerName: "request-target"}
+		if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{fid}); err != nil {
+			t.Fatalf("fidelity: %v", err)
+		}
+		if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
+			VectorID: "v1",
+			Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort",
+				State: triage.StateClean, Reason: "measured_in_a_test", Ordinals: []uint64{uint64(triage.ClassSQL)}},
+		}}); err != nil {
+			t.Fatalf("verdict: %v", err)
+		}
+		triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
+		cov, err := LoadTriageRunCoverage(ctx, runUUID)
+		if err != nil {
+			t.Fatalf("coverage read: %v", err)
+		}
+		t.Logf("roll-up for a probe that recorded no payload and no survival: %+v", cov)
+		if cov.UnprovenProbes != 1 {
+			t.Errorf("a probe whose payload was never recorded and whose survival was never measured was counted as %d unproven, want 1: it borrowed the exemption written for the unowned control: %+v",
+				cov.UnprovenProbes, cov)
+		}
+		if cov.RendersAsClean() {
+			t.Errorf("A RUN WHOSE ONLY PROBE RECORDED NOTHING ABOUT ITSELF RENDERED AS CLEAN. Nothing is known about what went out or whether anything did, and the run certified the slot: %+v", cov)
+		}
+	})
+
+	// AND THE CONTROL ITSELF STILL GOES FREE, so the tightening above is a correction and not a
+	// signal that is permanently on. A run whose control was never perturbed is not an impure run.
+	t.Run("the unowned control is still exempt", func(t *testing.T) {
+		runUUID := triageTestCompletedRun(t, ctx)
+
+		if _, err := RecordTriageCoverage(ctx, runUUID, []TriageCoverageRow{{
+			VectorID: "v1", SlotKey: "query:sort", Class: triage.ClassSQL,
+			Reach: triage.ReachAlways, PlannedProbes: 1, SentProbes: 1, Ran: true,
+		}}); err != nil {
+			t.Fatalf("coverage: %v", err)
+		}
+		control := NewTriageFidelityRow(triage.ClassNone, 0)
+		control.ObsKind = triage.ObsBaseline
+		control.HTTPStatus = 200
+		control.Delivered = true
+		probe := NewTriageFidelityRow(triage.ClassSQL, uint64(triage.ClassSQL))
+		probe.VectorID = "v1"
+		probe.SlotKey = "query:sort"
+		probe.ObsKind = triage.ObsProbe
+		probe.HTTPStatus = 200
+		probe.Delivered = true
+		probe.Wire = triage.PayloadWire{Logical: []byte("probe"), Wire: []byte("probe"),
+			ContainerName: "request-target", Survived: triage.WireSurvivalIntact}
+		if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{control, probe}); err != nil {
+			t.Fatalf("fidelity: %v", err)
+		}
+		if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
+			VectorID: "v1",
+			Verdict: triage.ClassVerdict{Class: triage.ClassSQL, SlotKey: "query:sort",
+				State: triage.StateClean, Reason: "measured_in_a_test", Ordinals: []uint64{uint64(triage.ClassSQL)}},
+		}}); err != nil {
+			t.Fatalf("verdict: %v", err)
+		}
+		triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+
+		triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
+		cov, err := LoadTriageRunCoverage(ctx, runUUID)
+		if err != nil {
+			t.Fatalf("coverage read: %v", err)
+		}
+		t.Logf("roll-up for a measured pair beside an unperturbed control: %+v", cov)
+		if cov.UnprovenProbes != 0 {
+			t.Errorf("the unperturbed control was counted as an unproven probe, which would put one in every run ever recorded and make the signal useless: %+v", cov)
+		}
+		if !cov.RendersAsClean() {
+			t.Errorf("a measured, proven, clean pair beside an untouched control did not render as clean: %+v", cov)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------------------------
+// The denominator has to know WHAT it is counting, not only how many
+// ---------------------------------------------------------------------------------------------
+
+// triageTestSlotRow writes one row of the run's addressing inventory.
+//
+// It exists because the roll-up now JOINS triage_coverage to triage_slots, and a test that writes
+// a coverage row without one is writing a pair the store cannot describe. That is a real shape and
+// it has its own witness (CoveragePairsWithNoSlotRow), but it is not the shape most of this file
+// is about, so the tests that are about something else say what their slots are.
+func triageTestSlotRow(t *testing.T, ctx context.Context, runUUID, vectorID string, slot triage.SlotKey, credential bool) {
+	t.Helper()
+	unit := TriageUnit{Kind: UnitSlot, Slot: triage.Slot{
+		VectorID: vectorID, Key: slot, Kind: triage.KindQuery, Name: string(slot),
+		Value: "v", ValueOrigin: triage.ValueObserved,
+	}}
+	unit.Slot.Constraints.IsCredential = credential
+	if _, err := RecordTriageSlots(ctx, runUUID, []TriageUnit{unit}); err != nil {
+		t.Fatalf("record slot %s/%s: %v", vectorID, slot, err)
+	}
+}
+
+// triageTestInventoryForEveryCoveragePair gives every coverage row this run holds an ordinary,
+// non-credential slot row, for the tests whose subject is something other than the inventory.
+//
+// IT IS NOT A CONVENIENCE. A coverage pair whose slot the run never inventoried is a pair the
+// store cannot say anything about, the credential question included, and the roll-up refuses to
+// certify one. Writing the inventory here is the test saying "these are ordinary slots", which is
+// a fact about the fixture; leaving it out would be the test asserting a clean over pairs nothing
+// can describe, which is the family defect wearing a green tick.
+func triageTestInventoryForEveryCoveragePair(t *testing.T, ctx context.Context, runUUID string) {
+	t.Helper()
+	rows, err := dbPool.Query(ctx, `
+		SELECT DISTINCT c.vector_id, c.slot_key FROM triage_coverage c
+		WHERE c.run_id = $1 AND NOT EXISTS (
+			SELECT 1 FROM triage_slots s
+			WHERE s.run_id = c.run_id AND s.vector_id = c.vector_id AND s.slot_key = c.slot_key)`,
+		runUUID)
+	if err != nil {
+		t.Fatalf("find the coverage pairs with no slot row: %v", err)
+	}
+	type pair struct {
+		vectorID string
+		slot     triage.SlotKey
+	}
+	var missing []pair
+	for rows.Next() {
+		var p pair
+		var slot string
+		if err := rows.Scan(&p.vectorID, &slot); err != nil {
+			rows.Close()
+			t.Fatalf("scan: %v", err)
+		}
+		p.slot = triage.SlotKey(slot)
+		missing = append(missing, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("find the coverage pairs with no slot row: %v", err)
+	}
+	for _, p := range missing {
+		triageTestSlotRow(t, ctx, runUUID, p.vectorID, p.slot, false)
+	}
+}
+
+// triageTestOneMeasuredCleanPair writes the smallest run that is allowed to certify: one eligible
+// coverage pair, one intact probe record, one clean verdict citing it, a plan of one, and the
+// inventory row that says what the slot is. The tests below start from it and break one thing.
+func triageTestOneMeasuredCleanPair(t *testing.T, ctx context.Context, runUUID string, credential bool) {
+	t.Helper()
+	triageTestFullyMeasuredPair(t, ctx, runUUID)
+	triageTestSlotRow(t, ctx, runUUID, "v1", "query:sort", credential)
+}
+
+// A CREDENTIAL SLOT INSIDE THE DENOMINATOR IS THE MEASURED CAUSE OF THE THREE COUNTS THAT WOULD
+// NOT RECONCILE, AND NOTHING IN THE STORE COULD SEE IT.
+//
+// Measured on the operator's finished run a218419a, by joining the two tables the store already
+// owns:
+//
+//	coverage rows                                   34500
+//	planned_pairs                                   20680
+//	slots                                            3450, of which 1382 is_credential
+//	coverage pairs whose slot is a credential slot  13820   (= 1382 x 10 classes)
+//	coverage pairs with no slot row at all              0
+//
+// 3450 - 1382 = 2068 units, times ten classes, is 20680: the plan. The coverage table holds a row
+// for every triple the planner CONSIDERED and planned_pairs counts only the ones it kept, so the
+// two numbers were never counting the same population and the reconciliation between them was
+// arithmetic across two different sets. That is the cause, and it is nothing to do with rows
+// retained from a previous plan: every one of the three runs on the database holds exactly 34500
+// coverage rows scoped to its own run_id, all written in a single batch at one timestamp.
+//
+// THE SURPLUS WITNESS ALONE DOES NOT CLOSE IT. On run acaff558 the planner recorded
+// planned_pairs = 34500 against 34500 eligible rows: surplus zero, shortfall zero, both witnesses
+// silent, and 13820 credential pairs sitting inside the denominator with nothing to say so. Only
+// the join to the inventory can see that one, so the join is now taken.
+//
+// AND IT IS A SAFETY WITNESS BEFORE IT IS A BOOKKEEPING ONE. IneligiblePairsThatRan counts pairs
+// the coverage row itself marks ineligible. A credential pair the planner FAILED to mark is
+// eligible as far as that witness is concerned, so a probe into the operator's own session cookie
+// is invisible to it and the run certifies clean over a mangled credential. The inventory knows
+// what the slot is even when the plan has forgotten.
+func TestACredentialSlotInsideTheDenominatorIsSeenEvenWhenThePlanForgotToRefuseIt(t *testing.T) {
+	ctx := triageTestDB(t)
+
+	// THE BEFORE SHAPE, and it is the live run's. One pair, measured, proven, clean, plan
+	// recorded, every existing witness satisfied, and the slot is the operator's session cookie.
+	t.Run("a probed credential slot cannot be certified clean", func(t *testing.T) {
+		runUUID := triageTestCompletedRun(t, ctx)
+		triageTestOneMeasuredCleanPair(t, ctx, runUUID, true)
+
+		cov, err := LoadTriageRunCoverage(ctx, runUUID)
+		if err != nil {
+			t.Fatalf("coverage read: %v", err)
+		}
+		t.Logf("one measured pair whose slot is a credential: %+v", cov)
+		if cov.RendersAsClean() {
+			t.Errorf("A CREDENTIAL SLOT WAS PROBED AND THE RUN RENDERED AS CLEAN. The coverage row says eligible because the planner never marked it, so IneligiblePairsThatRan reads 0, and nothing else in the roll-up ever asks the inventory what the slot is: %+v", cov)
+		}
+		if cov.CredentialPairsInDenominator != 1 {
+			t.Errorf("the denominator holds %d credential pairs, want 1: %+v", cov.CredentialPairsInDenominator, cov)
+		}
+		if cov.CredentialPairsProbed != 1 {
+			t.Errorf("%d credential pairs were probed, want 1: %+v", cov.CredentialPairsProbed, cov)
+		}
+		var named bool
+		for _, u := range cov.Untested {
+			if strings.Contains(u, "probed_although_the_inventory_says_this_slot_is_a_credential") {
+				named = true
+			}
+		}
+		if !named {
+			t.Errorf("the probed credential slot was counted and not NAMED, and a pair the operator cannot find is a pair the operator cannot re-check: %v", cov.Untested)
+		}
+	})
+
+	// The same pair, not probed, still inside the denominator. It is not a safety fault and it is
+	// still a bookkeeping one: the pair can never be retired, so a denominator holding it can
+	// never be fully measured, and a run that reports it as outstanding work is reporting work
+	// that will never be done.
+	t.Run("an unprobed credential pair in the denominator is reported as one", func(t *testing.T) {
+		runUUID := triageTestCompletedRun(t, ctx)
+		if _, err := RecordTriageCoverage(ctx, runUUID, []TriageCoverageRow{
+			{VectorID: "v1", SlotKey: "cookie:session", Class: triage.ClassSQL,
+				Reach: triage.ReachAlways, PlannedProbes: 1, Ran: false},
+		}); err != nil {
+			t.Fatalf("coverage: %v", err)
+		}
+		triageTestSlotRow(t, ctx, runUUID, "v1", "cookie:session", true)
+		triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+
+		cov, err := LoadTriageRunCoverage(ctx, runUUID)
+		if err != nil {
+			t.Fatalf("coverage read: %v", err)
+		}
+		t.Logf("an unprobed credential pair inside the denominator: %+v", cov)
+		if cov.CredentialPairsInDenominator != 1 || cov.CredentialPairsProbed != 0 {
+			t.Errorf("want 1 credential pair in the denominator and 0 probed, got %d and %d: %+v",
+				cov.CredentialPairsInDenominator, cov.CredentialPairsProbed, cov)
+		}
+		var named bool
+		for _, u := range cov.Untested {
+			if strings.Contains(u, "credential_slots_the_plan_counted_as_work") {
+				named = true
+			}
+		}
+		if !named {
+			t.Errorf("the denominator holds work that can never be retired and did not say so: %v", cov.Untested)
+		}
+	})
+
+	// The control on the whole witness: an ordinary slot marked is_credential = FALSE must still
+	// certify. A gate that refuses everything is a gate nobody keeps.
+	t.Run("an ordinary slot is untouched by the credential witness", func(t *testing.T) {
+		runUUID := triageTestCompletedRun(t, ctx)
+		triageTestOneMeasuredCleanPair(t, ctx, runUUID, false)
+
+		cov, err := LoadTriageRunCoverage(ctx, runUUID)
+		if err != nil {
+			t.Fatalf("coverage read: %v", err)
+		}
+		if cov.CredentialPairsInDenominator != 0 || cov.CredentialPairsProbed != 0 {
+			t.Errorf("an ordinary slot was counted as a credential: %+v", cov)
+		}
+		if !cov.RendersAsClean() {
+			t.Errorf("a measured, proven, clean pair on an ordinary inventoried slot did not render as clean, so the new witness is a blanket refusal: %+v", cov)
+		}
+	})
+}
+
+// A COVERAGE PAIR THE RUN NEVER INVENTORIED IS A PAIR THE STORE CANNOT DESCRIBE, AND UNKNOWN IS
+// NOT "ORDINARY".
+//
+// The witness above asks triage_slots what the slot is. A coverage row with no slot row gets no
+// answer, and treating no answer as "not a credential" is the same absence-as-a-fact the whole
+// file is about, one join along: the pair that most needs the question asked is exactly the one
+// whose inventory row went missing.
+//
+// Measured on the live run: 0 of 34500 coverage pairs lack a slot row, so nothing legitimate is
+// being newly refused.
+func TestACoveragePairWithNoInventoryRowCannotBeCertified(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestCompletedRun(t, ctx)
+
+	// Everything a certificate needs EXCEPT a row saying what the slot is.
+	triageTestFullyMeasuredPair(t, ctx, runUUID)
+
+	cov, err := LoadTriageRunCoverage(ctx, runUUID)
+	if err != nil {
+		t.Fatalf("coverage read: %v", err)
+	}
+	t.Logf("a fully measured pair whose slot was never inventoried: %+v", cov)
+	if cov.CoveragePairsWithNoSlotRow != 1 {
+		t.Errorf("%d coverage pairs hold no inventory row, want 1: %+v", cov.CoveragePairsWithNoSlotRow, cov)
+	}
+	if cov.RendersAsClean() {
+		t.Errorf("A PAIR NOTHING CAN DESCRIBE RENDERED AS CLEAN. The credential witness asks the inventory what the slot is and got no row, which is not the same answer as an ordinary slot: %+v", cov)
+	}
+	var named bool
+	for _, u := range cov.Untested {
+		if strings.Contains(u, "no_inventory_row_so_nothing_can_say_what_this_slot_is") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the undescribable pair was counted and not named: %v", cov.Untested)
+	}
+
+	// And it closes the moment the inventory arrives, which is what makes it a gap rather than a
+	// permanent refusal.
+	triageTestSlotRow(t, ctx, runUUID, "v1", "query:sort", false)
+	cov, err = LoadTriageRunCoverage(ctx, runUUID)
+	if err != nil {
+		t.Fatalf("coverage read: %v", err)
+	}
+	if cov.CoveragePairsWithNoSlotRow != 0 || !cov.RendersAsClean() {
+		t.Errorf("the inventory row arrived and the run still does not certify: %+v", cov)
+	}
+}
+
+// RanPairs WAS COUNTED OVER EVERY COVERAGE ROW AND COMPARED AGAINST A DENOMINATOR OF ELIGIBLE ONES.
+//
+// RendersAsClean asks RanPairs != EligiblePairs. While RanPairs counted ineligible rows too, an
+// ineligible pair that ran PAID FOR an eligible pair that did not: two eligible pairs of which one
+// ran, plus one ineligible pair that ran, reads RanPairs = 2 against EligiblePairs = 2 and the
+// equality holds with a whole eligible pair unmeasured.
+//
+// It is the identical shape as the denominator defect one column over, and it was live: two
+// independently scoped counts compared as though they counted one population. Today the
+// certificate still refuses this run, but by a DIFFERENT gate (IneligiblePairsThatRan), so the
+// broken term is load-bearing for nothing and reads as sound. A gate that is correct only because
+// another gate happens to fire is a gate the next edit removes.
+func TestAnEligiblePairThatNeverRanIsNotPaidForByAnIneligiblePairThatDid(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestCompletedRun(t, ctx)
+
+	if _, err := RecordTriageCoverage(ctx, runUUID, []TriageCoverageRow{
+		{VectorID: "v1", SlotKey: "query:sort", Class: triage.ClassSQL, Reach: triage.ReachAlways,
+			PlannedProbes: 1, SentProbes: 1, Ran: true},
+		{VectorID: "v1", SlotKey: "query:page", Class: triage.ClassSQL, Reach: triage.ReachAlways,
+			PlannedProbes: 1, Ran: false},
+		// The pair the plan forbade, measured anyway. It is the row that used to pay for the one
+		// above it.
+		{VectorID: "v1", SlotKey: "cookie:session", Class: triage.ClassSQL, Reach: triage.ReachAlways,
+			Ineligible: true, PlannedProbes: 1, SentProbes: 1, Ran: true},
+	}); err != nil {
+		t.Fatalf("coverage: %v", err)
+	}
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
+	if err := SetTriageRunPlan(ctx, runUUID, 2); err != nil {
+		t.Fatalf("plan size: %v", err)
+	}
+
+	cov, err := LoadTriageRunCoverage(ctx, runUUID)
+	if err != nil {
+		t.Fatalf("coverage read: %v", err)
+	}
+	t.Logf("2 eligible (1 ran) beside 1 ineligible that ran: %+v", cov)
+	if cov.EligiblePairs != 2 {
+		t.Fatalf("the denominator read %d eligible, want 2: %+v", cov.EligiblePairs, cov)
+	}
+	if cov.RanPairs != 1 {
+		t.Errorf("RanPairs read %d, want 1. It is compared against EligiblePairs, so it has to count the same population: counting the ineligible pair that ran lets it pay for the eligible pair that did not, and the equality RanPairs == EligiblePairs then holds over a pair nobody measured: %+v",
+			cov.RanPairs, cov)
+	}
+	if cov.IneligiblePairsThatRan != 1 {
+		t.Errorf("narrowing RanPairs must not make the ineligible pair that ran unobservable: IneligiblePairsThatRan read %d, want 1: %+v",
+			cov.IneligiblePairsThatRan, cov)
+	}
+	if cov.RendersAsClean() {
+		t.Errorf("an unmeasured eligible pair rendered as clean: %+v", cov)
+	}
+}
+
+// VerdictRows COUNTS ARMS AND CoverageRows COUNTS PAIRS, AND THE CARD PRINTS THEM SIDE BY SIDE.
+//
+// On the operator's finished run: coverage_rows 34500, verdict_rows 46608, planned_pairs 20680.
+// The third is explained by the credential witness above. The second is not a defect at all: a
+// class emits one verdict per ARM and CATALOGUE 4.3 records NOSQL emitting six, so 46608 rows over
+// 34500 pairs is 20 distinct arms doing exactly what they are supposed to. Nothing said so, and a
+// number the operator cannot reconcile is a number the operator cannot use: the three counts read
+// as three irreconcilable claims about one run.
+//
+// So the pair count is carried beside the row count, and the identity that closes the
+// reconciliation is asserted here rather than left for a reader to notice:
+//
+//	VerdictPairs + PairsWithNoVerdict == CoverageRows + OrphanCoveragePairs
+//
+// Every pair either holds a verdict or does not, and every pair either holds a coverage row or is
+// an orphan. If that identity ever fails, two of these counts are over different populations again.
+func TestTheArmCountAndThePairCountAreBothReportedSoTheThreeNumbersReconcile(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestCompletedRun(t, ctx)
+
+	if _, err := RecordTriageCoverage(ctx, runUUID, []TriageCoverageRow{
+		{VectorID: "v1", SlotKey: "query:sort", Class: triage.ClassNoSQL, Reach: triage.ReachAlways,
+			PlannedProbes: 3, SentProbes: 3, Ran: true},
+		{VectorID: "v1", SlotKey: "query:page", Class: triage.ClassNoSQL, Reach: triage.ReachAlways,
+			PlannedProbes: 1, Ran: false},
+	}); err != nil {
+		t.Fatalf("coverage: %v", err)
+	}
+	triageTestInventoryForEveryCoveragePair(t, ctx, runUUID)
+	triageTestPlanIsWhatWasRecorded(t, ctx, runUUID)
+
+	// One pair, three arms, exactly as a class whose arms disagree files them.
+	for i, arm := range []string{"expr", "regex", "where"} {
+		// The ordinal has to land in this class's own stripe: the schema CHECK is
+		// (ordinal %% 64) = class_id, so ordinals are minted 64 apart from the class id.
+		ord := uint64(triage.ClassNoSQL) + uint64(i)*64
+		fid := NewTriageFidelityRow(triage.ClassNoSQL, ord)
+		fid.VectorID = "v1"
+		fid.SlotKey = "query:sort"
+		fid.ObsKind = triage.ObsProbe
+		fid.HTTPStatus = 200
+		fid.Delivered = true
+		fid.Wire = triage.PayloadWire{Logical: []byte("p"), Wire: []byte("p"),
+			ContainerName: "request-target", Survived: triage.WireSurvivalIntact}
+		if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{fid}); err != nil {
+			t.Fatalf("fidelity: %v", err)
+		}
+		if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{{
+			VectorID: "v1", Arm: arm,
+			Verdict: triage.ClassVerdict{Class: triage.ClassNoSQL, SlotKey: "query:sort",
+				State: triage.StateClean, Reason: "measured_in_a_test", Ordinals: []uint64{ord}},
+		}}); err != nil {
+			t.Fatalf("verdict %s: %v", arm, err)
+		}
+	}
+
+	cov, err := LoadTriageRunCoverage(ctx, runUUID)
+	if err != nil {
+		t.Fatalf("coverage read: %v", err)
+	}
+	t.Logf("three arms on one pair beside one pair with no verdict: %+v", cov)
+	if cov.VerdictRows != 3 {
+		t.Errorf("VerdictRows read %d, want 3 arms: %+v", cov.VerdictRows, cov)
+	}
+	if cov.VerdictPairs != 1 {
+		t.Errorf("VerdictPairs read %d, want 1 pair. Without it the operator is handed 3 verdict rows beside 2 coverage rows and no way to tell a class with three arms from a run with a bookkeeping fault: %+v",
+			cov.VerdictPairs, cov)
+	}
+	if cov.PairsWithNoVerdict != 1 {
+		t.Errorf("PairsWithNoVerdict read %d, want 1: %+v", cov.PairsWithNoVerdict, cov)
+	}
+	if got, want := cov.VerdictPairs+cov.PairsWithNoVerdict, cov.CoverageRows+cov.OrphanCoveragePairs; got != want {
+		t.Errorf("THE RECONCILIATION IDENTITY FAILED: VerdictPairs + PairsWithNoVerdict = %d and CoverageRows + OrphanCoveragePairs = %d. Two of these counts are over different populations again: %+v",
+			got, want, cov)
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE FOURTH TERMINAL STATUS
+// ---------------------------------------------------------------------------------------------
+
+// A RUN THAT WORKED AND HIT ITS CAP IS NOT AN ERROR, AND SAYING error MAKES THE OPERATOR LOOK FOR
+// A CRASH THAT NEVER HAPPENED.
+//
+// MEASURED: run 1 of two runs over the same 30 query vectors reported status error after covering
+// 915 of 1209 probeable pairs and writing 152 conclusions. Nothing failed. The per-run probe cap
+// was 4000 and the plan wanted more. terminalStatus had three words to choose from and the least
+// wrong of them was error, which the runner's own comment called out as the WRONG WORD and handed
+// off to this file.
+//
+// incomplete is the missing value: the run did what it was asked and did not finish its plan. It
+// is terminal, it can never certify (only completed certifies, see triageRunCertifies), and it is
+// distinguishable from a crash, which is the whole point.
+func TestIncompleteIsATerminalStatusTheStoreAccepts(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+
+	const why = "BUDGET TRUNCATED AT 76% OF THE PLAN: the per-run cap of 4000 probes ran out."
+	if err := FinishTriageRun(ctx, runUUID, TriageRunIncomplete, why); err != nil {
+		t.Fatalf("the store refused %q as a terminal status: %v", TriageRunIncomplete, err)
+	}
+
+	var status, errText string
+	if err := dbPool.QueryRow(ctx, `SELECT status, COALESCE(error,'') FROM triage_runs WHERE id = $1`, runUUID).
+		Scan(&status, &errText); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if status != TriageRunIncomplete {
+		t.Errorf("status came back %q, want %q", status, TriageRunIncomplete)
+	}
+	if errText != why {
+		t.Errorf("the reason came back %q, want %q", errText, why)
+	}
+
+	// AND IT MUST NOT CERTIFY. incomplete is not completed, so the one gate that matters is shut.
+	if triageRunCertifies(TriageRunIncomplete, false, "") {
+		t.Error("an incomplete run certifies, which would make a budget cut read as a finished sweep")
+	}
+	cov, err := LoadTriageRunCoverage(ctx, runUUID)
+	if err != nil {
+		t.Fatalf("load coverage: %v", err)
+	}
+	if cov.RunCertifies() {
+		t.Errorf("the roll-up certifies an incomplete run: %+v", cov)
+	}
+}
+
+// AN incomplete WITH NOTHING IN THE error COLUMN IS AN OPAQUE STATE, and the whole reason the
+// fourth word exists is to say something the other three could not. It is not refused, because a
+// refusal here leaves the run on 'running' forever, which is worse; it is recorded with the
+// absence named, the same way triageUnknownVerdict records a reason nobody gave it.
+func TestAnIncompleteRunWithNoReasonRecordsThatAsTheDefect(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+
+	if err := FinishTriageRun(ctx, runUUID, TriageRunIncomplete, "   "); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	var errText string
+	if err := dbPool.QueryRow(ctx, `SELECT COALESCE(error,'') FROM triage_runs WHERE id = $1`, runUUID).Scan(&errText); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if strings.TrimSpace(errText) == "" {
+		t.Fatal("an incomplete run recorded no reason at all, so the card shows a status with nothing under it")
+	}
+	if !strings.Contains(errText, "no reason") {
+		t.Errorf("the placeholder does not say the reason is missing: %q", errText)
+	}
+}
+
+// completed IS STILL COMPLETED. A run that finished its plan must not be swept up by the new word.
+func TestAFinishedRunStillReportsCompleted(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+	if err := FinishTriageRun(ctx, runUUID, TriageRunCompleted, ""); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	var status, errText string
+	if err := dbPool.QueryRow(ctx, `SELECT status, COALESCE(error,'') FROM triage_runs WHERE id = $1`, runUUID).
+		Scan(&status, &errText); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if status != TriageRunCompleted {
+		t.Errorf("status came back %q, want %q", status, TriageRunCompleted)
+	}
+	if errText != "" {
+		t.Errorf("a completed run grew an error text %q, which would stop it certifying", errText)
+	}
+	// AND completed IS STILL UNREACHABLE FROM A WORSE OUTCOME.
+	if err := FinishTriageRun(ctx, runUUID, TriageRunIncomplete, "cut"); err != nil {
+		t.Fatalf("a completed run should still accept a downgrade to incomplete: %v", err)
+	}
+	if err := FinishTriageRun(ctx, runUUID, TriageRunCompleted, ""); err == nil {
+		t.Error("a run that recorded incomplete was re-certified as completed")
+	}
+}
+
+// A STATUS NOBODY DEFINED IS STILL REFUSED. Adding a fourth word must not open the vocabulary.
+func TestAnUndefinedTerminalStatusIsStillRefused(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+	for _, bad := range []string{"truncated", "partial", "done", "INCOMPLETE "} {
+		if err := FinishTriageRun(ctx, runUUID, bad, "x"); err == nil {
+			t.Errorf("%q was accepted as a terminal status", bad)
+		}
+	}
+	if err := FinishTriageRun(ctx, runUUID, TriageRunIncomplete, "x"); err != nil {
+		t.Fatalf("after the refusals the run is still finishable: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// The response bodies
+// ---------------------------------------------------------------------------------------------
+
+// triageBodyProbe builds a delivered probe record carrying a response, for the body tests below.
+// The ordinal is chosen by the caller and has to sit in the class's own stripe, which is what the
+// schema's stripe CHECK enforces.
+func triageBodyProbe(class triage.ClassID, ordinal uint64, body string) TriageFidelityRow {
+	r := NewTriageFidelityRow(class, ordinal)
+	r.ProbeID = "TEST-B1"
+	r.VectorID = "v1"
+	r.SlotKey = "query:q"
+	r.ObsKind = triage.ObsProbe
+	r.HTTPStatus = 200
+	r.Delivered = true
+	r.SentAt = time.Now().UTC()
+	r.Wire = triage.PayloadWire{Logical: []byte("x"), Wire: []byte("x"), Survived: triage.WireSurvivalIntact}
+	r.AttachResponse([]byte(body), false, "text/html; charset=utf-8",
+		[][2]string{{"Content-Type", "text/html; charset=utf-8"}, {"Server", "canary"}})
+	return r
+}
+
+// THE WHOLE REASON THIS IS AFFORDABLE. A run sends thousands of probes at a handful of endpoints
+// and most of them get the same bytes back: measured on the operator's corpus, one paper-account
+// positions endpoint was captured 218 times and holds TWO distinct bodies. Content addressing
+// means those 218 responses cost two copies, and if it did not, this feature would be a decision
+// between storing 64 MB a run and storing nothing.
+func TestNIdenticalResponsesCostOneStoredBody(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+
+	same := `{"orders":[],"next_page_token":null}`
+	var rows []TriageFidelityRow
+	for i := 0; i < 40; i++ {
+		rows = append(rows, triageBodyProbe(triage.ClassSQL, uint64(4+64*(i+1)), same))
+	}
+	// One response that really is different, so the test can tell deduplication from a store that
+	// simply keeps the first body and throws the rest away.
+	rows = append(rows, triageBodyProbe(triage.ClassSQL, 4+64*41, `{"orders":[{"id":"1"}]}`))
+
+	if _, err := RecordTriageFidelity(ctx, runUUID, rows); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	var bodies, bytesHeld int
+	if err := dbPool.QueryRow(ctx,
+		`SELECT count(*), COALESCE(sum(body_len), 0) FROM triage_bodies WHERE run_id = $1`,
+		runUUID).Scan(&bodies, &bytesHeld); err != nil {
+		t.Fatalf("count bodies: %v", err)
+	}
+	if bodies != 2 {
+		t.Errorf("41 probes over 2 distinct responses stored %d bodies, want 2", bodies)
+	}
+	if want := len(same) + len(`{"orders":[{"id":"1"}]}`); bytesHeld != want {
+		t.Errorf("stored %d bytes, want %d", bytesHeld, want)
+	}
+
+	// EVERY ONE OF THE 41 PROBES STILL READS BACK ITS OWN RESPONSE. Sharing a copy is an
+	// implementation detail and must not cost a single probe the ability to answer for itself.
+	for _, r := range rows {
+		got, err := LoadTriageResponse(ctx, runUUID, r.Ordinal, 1)
+		if err != nil {
+			t.Fatalf("read back ordinal %d: %v", r.Ordinal, err)
+		}
+		if !got.BodyAvailable() {
+			t.Fatalf("ordinal %d reads back body_state %q", r.Ordinal, got.BodyState)
+		}
+		if string(got.Body) != string(r.Body) {
+			t.Errorf("ordinal %d read back %q, want %q", r.Ordinal, got.Body, r.Body)
+		}
+		if got.BodyLen != len(r.Body) {
+			t.Errorf("ordinal %d reports body_len %d for a %d byte response", r.Ordinal, got.BodyLen, len(r.Body))
+		}
+		if got.ContentType == "" || len(got.Headers) != 2 {
+			t.Errorf("ordinal %d lost its response headers: content type %q, %d headers", r.Ordinal, got.ContentType, len(got.Headers))
+		}
+	}
+}
+
+// A MISSING BODY MUST NEVER READ AS AN EMPTY ONE, and the three ways a body can be missing are
+// three different facts about the run.
+func TestEveryWayAResponseCanBeMissingSaysWhichOneItWas(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+
+	// A probe that never got a response. There was no body to keep.
+	none := NewTriageFidelityRow(triage.ClassSQL, 4+64)
+	none.VectorID, none.SlotKey = "v1", "query:q"
+	none.TransportErr = triage.TransportTimeout
+	none.TransportMsg = "context deadline exceeded"
+	none.Wire = triage.PayloadWire{Logical: []byte("x"), Survived: triage.WireSurvivalRefused}
+
+	// A probe that DID get a response and whose body nothing handed over. That is a defect in the
+	// runner and the row says so, rather than rendering as a target that answered with nothing.
+	forgotten := NewTriageFidelityRow(triage.ClassSQL, 4+128)
+	forgotten.VectorID, forgotten.SlotKey = "v1", "query:q"
+	forgotten.HTTPStatus = 200
+	forgotten.Delivered = true
+	forgotten.Wire = triage.PayloadWire{Logical: []byte("x"), Survived: triage.WireSurvivalIntact}
+
+	// A 204, which really did answer with nothing. Zero bytes is a measurement.
+	empty := triageBodyProbe(triage.ClassSQL, 4+192, "")
+	empty.HTTPStatus = 204
+
+	if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{none, forgotten, empty}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	for _, tc := range []struct {
+		ordinal   uint64
+		wantState string
+		wantLen   int
+	}{
+		{4 + 64, TriageBodyNoResponse, -1},
+		{4 + 128, TriageBodyNotAttached, -1},
+		{4 + 192, TriageBodyStored, 0},
+	} {
+		got, err := LoadTriageResponse(ctx, runUUID, tc.ordinal, 1)
+		if err != nil {
+			t.Fatalf("read ordinal %d: %v", tc.ordinal, err)
+		}
+		if got.BodyState != tc.wantState {
+			t.Errorf("ordinal %d reads body_state %q, want %q", tc.ordinal, got.BodyState, tc.wantState)
+		}
+		if got.BodyLen != tc.wantLen {
+			t.Errorf("ordinal %d reads body_len %d, want %d", tc.ordinal, got.BodyLen, tc.wantLen)
+		}
+	}
+
+	// THE ONE THAT MATTERS. The 204 and the two absences all read back with an empty Body, so a
+	// caller reading Body alone cannot tell them apart. BodyAvailable is the answer, and only the
+	// 204 gets it.
+	for _, ordinal := range []uint64{4 + 64, 4 + 128} {
+		got, _ := LoadTriageResponse(ctx, runUUID, ordinal, 1)
+		if got.BodyAvailable() {
+			t.Errorf("ordinal %d reports its response is available when it is %q", ordinal, got.BodyState)
+		}
+	}
+	got, _ := LoadTriageResponse(ctx, runUUID, 4+192, 1)
+	if !got.BodyAvailable() {
+		t.Error("a 204 with a genuinely empty body reads as a response nobody stored")
+	}
+}
+
+// A BODY THE RUN COULD NOT AFFORD IS DROPPED WITH ITS REASON ON THE ROW, never silently. The
+// budget is measured against what runs actually cost and is expected never to bite; the reason it
+// exists at all is the endpoint shape that defeats content addressing, which this target really
+// has: one market-data endpoint was captured 395 times and holds 395 distinct bodies.
+func TestABodyTheBudgetRefusesSaysSoOnTheRow(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+
+	prev := triageBodyBudgetBytes
+	triageBodyBudgetBytes = 64
+	t.Cleanup(func() { triageBodyBudgetBytes = prev })
+
+	first := triageBodyProbe(triage.ClassSQL, 4+64, strings.Repeat("a", 50))
+	second := triageBodyProbe(triage.ClassSQL, 4+128, strings.Repeat("b", 50))
+	// A REPEAT OF A BODY ALREADY HELD, which must still link even with the budget exhausted: it
+	// costs nothing, and refusing it would lose evidence to save no bytes at all.
+	repeat := triageBodyProbe(triage.ClassSQL, 4+192, strings.Repeat("a", 50))
+
+	if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{first, second, repeat}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	kept, err := LoadTriageResponse(ctx, runUUID, 4+64, 1)
+	if err != nil {
+		t.Fatalf("read the first: %v", err)
+	}
+	if !kept.BodyAvailable() {
+		t.Fatalf("the first body was not kept: %q", kept.BodyState)
+	}
+
+	dropped, err := LoadTriageResponse(ctx, runUUID, 4+128, 1)
+	if err != nil {
+		t.Fatalf("read the second: %v", err)
+	}
+	if dropped.BodyAvailable() {
+		t.Fatal("the second body was stored although the budget was already spent")
+	}
+	if !strings.HasPrefix(dropped.BodyState, TriageBodyDroppedPrefix) {
+		t.Errorf("a dropped body reads %q, which does not say it was dropped", dropped.BodyState)
+	}
+	if !strings.Contains(dropped.BodyState, "body_budget_exhausted") {
+		t.Errorf("a dropped body does not name the budget: %q", dropped.BodyState)
+	}
+	// THE SIZE SURVIVES THE DROP. An operator who finds a body missing is owed the fact that it
+	// was 50 bytes, not a row that says nothing at all about what was there.
+	if dropped.BodyLen != 50 {
+		t.Errorf("a dropped body reports body_len %d, want the 50 bytes that were there", dropped.BodyLen)
+	}
+
+	shared, err := LoadTriageResponse(ctx, runUUID, 4+192, 1)
+	if err != nil {
+		t.Fatalf("read the repeat: %v", err)
+	}
+	if !shared.BodyAvailable() || string(shared.Body) != strings.Repeat("a", 50) {
+		t.Errorf("a repeat of a body already held was refused by the budget: %q", shared.BodyState)
+	}
+}
+
+// THE ROWS AN EXISTING DATABASE ALREADY HOLDS MUST STILL READ HONESTLY. The operator has a live
+// database with seven completed runs and 299426 verdicts in it, written before any of this
+// existed, and the schema change is ADD COLUMN with a default. Those rows have to come back saying
+// nobody recorded a response, never saying the response was empty.
+func TestAProbeRecordFromBeforeResponseStorageReadsAsUnrecorded(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+
+	// Written the way the old code wrote it: every column the old INSERT named, and none of the
+	// new ones, so the defaults are what the row carries.
+	if _, err := dbPool.Exec(ctx, `
+		INSERT INTO triage_fidelity (run_id, ordinal, attempt, class_id, class_name, probe_id,
+		                             vector_id, slot_key, survived, http_status, delivered)
+		VALUES ($1, $2, 1, $3, 'SQL', 'SQL-B1', 'v1', 'query:q', 'intact', 200, TRUE)`,
+		runUUID, int64(4+64), int16(triage.ClassSQL)); err != nil {
+		t.Fatalf("write an old-shaped row: %v", err)
+	}
+
+	got, err := LoadTriageResponse(ctx, runUUID, 4+64, 1)
+	if err != nil {
+		t.Fatalf("read it back: %v", err)
+	}
+	if got.BodyState != TriageBodyUnrecorded {
+		t.Errorf("an old row reads body_state %q, want the unrecorded default", got.BodyState)
+	}
+	if got.BodyAvailable() {
+		t.Error("an old row claims its response is available")
+	}
+	if got.BodyLen != -1 {
+		t.Errorf("an old row reads body_len %d, and 0 would be indistinguishable from a 204", got.BodyLen)
+	}
+	// Everything the old row DID hold is still there. This is the half that says the migration
+	// took nothing away.
+	if got.HTTPStatus != 200 || !got.Delivered || got.SlotKey != "query:q" {
+		t.Errorf("the old row lost something: %+v", got)
+	}
+}
+
+// A PROBE RECORD THE STORE HAS TO DEGRADE STILL KEEPS THE TARGET'S BYTES. The placeholder path
+// exists for a row the database refuses, and what it gives up is this runner's account of itself.
+// The response is not that: it is the one thing on the row that came from the target.
+func TestADegradedProbeRecordStillKeepsTheResponseItGot(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+
+	body := `{"error":"unterminated quoted string at or near"}`
+	row := triageBodyProbe(triage.ClassSQL, 4+64, body)
+	// A marker carrying a byte sequence Postgres will not take in a TEXT column. triageSafeText
+	// handles it on the way in; what is being checked here is that the body survives whatever the
+	// row does.
+	row.TransportMsg = "malformed MIME header line: \x00\xff"
+
+	if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{row}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	got, err := LoadTriageResponse(ctx, runUUID, 4+64, 1)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !got.BodyAvailable() || string(got.Body) != body {
+		t.Errorf("the response did not survive: state %q body %q", got.BodyState, got.Body)
+	}
+}
+
+// THE ASSERTION THE WHOLE FEATURE IS FOR, at the unit level: a verdict's span resolves to a stored
+// response and the offset still names the bytes the oracle matched. The end-to-end version of this
+// against the canary oracle is in triageRun_test.go; this one covers the shapes a real run does
+// not reliably produce.
+func TestAVerdictSpanResolvesAgainstTheStoredResponse(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+
+	body := `<html><body>hello 1571033 world</body></html>`
+	offset := strings.Index(body, "1571033")
+	probe := triageBodyProbe(triage.ClassSSTI, 1+64, body)
+	probe.Class = triage.ClassSSTI
+	if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{probe}); err != nil {
+		t.Fatalf("record probe: %v", err)
+	}
+
+	verdict := TriageVerdictRow{
+		VectorID:   "v1",
+		Provenance: ProvenanceNativeProbe,
+		Verdict: triage.ClassVerdict{
+			Class:    triage.ClassSSTI,
+			SlotKey:  "query:q",
+			State:    triage.StateFinding,
+			Grade:    triage.GradeHigh,
+			Reason:   "the arithmetic was evaluated",
+			Oracle:   "computation",
+			Ordinals: []uint64{1 + 64},
+			Evidence: triage.TriageEvidence{
+				Ordinal: 1 + 64,
+				Matched: []byte("1571033"),
+				Offset:  offset,
+				Length:  len("1571033"),
+				Phrase:  "computation freemarker",
+			},
+		},
+	}
+	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{verdict}); err != nil {
+		t.Fatalf("record verdict: %v", err)
+	}
+
+	loaded, err := LoadTriageVerdicts(ctx, runUUID, TriageVerdictFilter{})
+	if err != nil {
+		t.Fatalf("load verdicts: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("want one verdict, got %d", len(loaded))
+	}
+
+	w, err := LoadTriageEvidenceWindow(ctx, runUUID, loaded[0])
+	if err != nil {
+		t.Fatalf("resolve the evidence: %v", err)
+	}
+	if !w.Resolved {
+		t.Fatalf("the span did not resolve: %s", w.Why)
+	}
+	if w.HowResolved != "evidence_ordinal" {
+		t.Errorf("resolved by %q, want the ordinal the verdict named", w.HowResolved)
+	}
+	if !w.OffsetVerified {
+		t.Fatalf("the offset was not verified against the stored bytes: %s", w.Why)
+	}
+	if got := string(w.Response.Body[w.Offset : w.Offset+w.Length]); got != "1571033" {
+		t.Errorf("offset %d of the stored response holds %q", w.Offset, got)
+	}
+}
+
+// A CLASSIFIER THAT RECORDS A SPAN AND NO ORDINAL IS THE COMMON CASE AND IT STILL HAS TO RESOLVE.
+// SSTI's computation oracle, the strongest verdict that class produces, builds its evidence from a
+// hit record that carries an offset, a length and the matched bytes and NO ordinal at all. The
+// window finds the response by the bytes themselves, which is a measurement over the stored
+// responses rather than a guess, and says how it did it.
+func TestASpanWithNoOrdinalIsResolvedByTheBytesOrNotAtAll(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+
+	hit := `<p>answer 1571033</p>`
+	miss := `<p>answer {1721*913}</p>`
+	offset := strings.Index(hit, "1571033")
+
+	a := triageBodyProbe(triage.ClassSSTI, 1+64, miss)
+	b := triageBodyProbe(triage.ClassSSTI, 1+128, hit)
+	c := triageBodyProbe(triage.ClassSSTI, 1+192, miss)
+	if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{a, b, c}); err != nil {
+		t.Fatalf("record probes: %v", err)
+	}
+
+	verdict := TriageVerdictRow{
+		VectorID:   "v1",
+		Provenance: ProvenanceNativeProbe,
+		Verdict: triage.ClassVerdict{
+			Class: triage.ClassSSTI, SlotKey: "query:q", State: triage.StateFinding,
+			Grade: triage.GradeHigh, Reason: "the arithmetic was evaluated", Oracle: "computation",
+			Ordinals: []uint64{1 + 64, 1 + 128, 1 + 192},
+			Evidence: triage.TriageEvidence{
+				Matched: []byte("1571033"), Offset: offset, Length: len("1571033"),
+				Phrase: "computation freemarker",
+			},
+		},
+	}
+	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{verdict}); err != nil {
+		t.Fatalf("record verdict: %v", err)
+	}
+	loaded, err := LoadTriageVerdicts(ctx, runUUID, TriageVerdictFilter{})
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("load verdicts: %v (%d rows)", err, len(loaded))
+	}
+
+	w, err := LoadTriageEvidenceWindow(ctx, runUUID, loaded[0])
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !w.Resolved {
+		t.Fatalf("a span with no ordinal did not resolve although exactly one response holds it: %s", w.Why)
+	}
+	if w.HowResolved != "matched_bytes" {
+		t.Errorf("resolved by %q, want the bytes", w.HowResolved)
+	}
+	if w.Response.Ordinal != 1+128 {
+		t.Errorf("resolved to ordinal %d, want the one response that holds those bytes", w.Response.Ordinal)
+	}
+	if !w.OffsetVerified {
+		t.Errorf("the offset was not verified: %s", w.Why)
+	}
+}
+
+// AND IT REFUSES TO GUESS. A span whose bytes are in none of the responses the verdict rests on
+// resolves to nothing, says why, and hands back the candidates so the operator is never at a dead
+// end. Pointing confidently at the wrong response would be worse than pointing at none.
+func TestASpanThatMatchesNoStoredResponseRefusesToNameOne(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+
+	probe := triageBodyProbe(triage.ClassSSTI, 1+64, `<p>answer {1721*913}</p>`)
+	if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{probe}); err != nil {
+		t.Fatalf("record probe: %v", err)
+	}
+	verdict := TriageVerdictRow{
+		VectorID:   "v1",
+		Provenance: ProvenanceNativeProbe,
+		Verdict: triage.ClassVerdict{
+			Class: triage.ClassSSTI, SlotKey: "query:q", State: triage.StateFinding,
+			Grade: triage.GradeHigh, Reason: "the arithmetic was evaluated", Oracle: "computation",
+			Ordinals: []uint64{1 + 64},
+			Evidence: triage.TriageEvidence{
+				Matched: []byte("1571033"), Offset: 9, Length: 7, Phrase: "computation freemarker",
+			},
+		},
+	}
+	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{verdict}); err != nil {
+		t.Fatalf("record verdict: %v", err)
+	}
+	loaded, err := LoadTriageVerdicts(ctx, runUUID, TriageVerdictFilter{})
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("load verdicts: %v (%d rows)", err, len(loaded))
+	}
+	w, err := LoadTriageEvidenceWindow(ctx, runUUID, loaded[0])
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if w.Resolved {
+		t.Fatalf("a span matching nothing was attributed to ordinal %d anyway", w.Response.Ordinal)
+	}
+	if w.Why == "" {
+		t.Error("nothing said why the span could not be resolved")
+	}
+	if len(w.Candidates) != 1 {
+		t.Errorf("the operator was left with %d candidate responses to look at, want the 1 the verdict rests on", len(w.Candidates))
+	}
+}
+
+// A VERDICT WITH NO EVIDENCE MUST NOT CLAIM A MATCH AT BYTE 0.
+//
+// MEASURED ON THE OPERATOR'S LIVE DATABASE: all 299426 verdict rows carry evidence_offset >= 0 and
+// not one carries any matched bytes, because the writer passed TriageEvidence.Offset unconditionally
+// and an int's zero value is 0. The column is declared DEFAULT -1 for exactly this reason and the
+// default was unreachable. A zero-length span has no location, so it is written as -1.
+func TestAVerdictWithNoEvidenceRecordsNoOffsetRatherThanByteZero(t *testing.T) {
+	ctx := triageTestDB(t)
+	runUUID := triageTestRun(t, ctx)
+
+	probe := triageBodyProbe(triage.ClassSQL, 4+64, "ok")
+	if _, err := RecordTriageFidelity(ctx, runUUID, []TriageFidelityRow{probe}); err != nil {
+		t.Fatalf("record probe: %v", err)
+	}
+	verdict := TriageVerdictRow{
+		VectorID:   "v1",
+		Provenance: ProvenanceNativeProbe,
+		Verdict: triage.ClassVerdict{
+			Class: triage.ClassSQL, SlotKey: "query:q", State: triage.StateClean,
+			Reason: "every probe went out proven and nothing moved", Ordinals: []uint64{4 + 64},
+		},
+	}
+	if _, err := RecordTriageVerdicts(ctx, runUUID, []TriageVerdictRow{verdict}); err != nil {
+		t.Fatalf("record verdict: %v", err)
+	}
+	var offset int
+	if err := dbPool.QueryRow(ctx,
+		`SELECT evidence_offset FROM triage_verdicts WHERE run_id = $1`, runUUID).Scan(&offset); err != nil {
+		t.Fatalf("read the offset: %v", err)
+	}
+	if offset != -1 {
+		t.Errorf("a verdict with no evidence recorded evidence_offset %d, which reads as a match at the first byte of a response", offset)
 	}
 }

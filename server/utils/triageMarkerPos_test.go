@@ -19,8 +19,9 @@ import (
 // fired on any input on any target. Across the ten classifiers, lfi declares MarkerPos 31 times
 // and spells a placeholder 0 times; traversal 22 and 0; sql 8 and 0; rfi 8 and 0.
 func TestMarkerPosPlacesAMarkerOnAPayloadThatSpellsNone(t *testing.T) {
-	mk := triageTestMarker(t, triage.ClassCSTI, 10)
-	bare := []byte("{{7919*6271}}")
+	// ELI, because placement is now OPT-IN and ELI is one of the two classes that asks for it.
+	mk := triageTestMarker(t, triage.ClassELI, 2)
+	bare := []byte("1*((1).valueOf('1900000000')+1900000000)")
 
 	cases := []struct {
 		name string
@@ -37,7 +38,7 @@ func TestMarkerPosPlacesAMarkerOnAPayloadThatSpellsNone(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			spec := triage.ProbeSpec{ID: "T-1", Class: triage.ClassCSTI, Logical: bare, MarkerPos: tc.pos}
+			spec := triage.ProbeSpec{ID: "T-1", Class: triage.ClassELI, Logical: bare, MarkerPos: tc.pos}
 			got, why := triageRenderPayload(spec, triage.ProbeRequest{}, triage.Slot{}, mk)
 			if why != "" {
 				t.Fatalf("render refused: %s", why)
@@ -62,9 +63,9 @@ func TestMarkerPosPlacesAMarkerOnAPayloadThatSpellsNone(t *testing.T) {
 // ${1721*913} and CMDI's ${IFS} are payloads, not tokens, and a runner that rewrote them would
 // turn the two classes with the cheapest true positives into two that never send anything.
 func TestAPayloadThatSpellsItsOwnMarkerIsNotGivenASecond(t *testing.T) {
-	mk := triageTestMarker(t, triage.ClassCSTI, 10)
-	spec := triage.ProbeSpec{ID: "T-2", Class: triage.ClassCSTI,
-		Logical: []byte(triage.MarkerPlaceholder + "{{7919*6271}}"), MarkerPos: triage.MarkerPrefix}
+	mk := triageTestMarker(t, triage.ClassELI, 2)
+	spec := triage.ProbeSpec{ID: "T-2", Class: triage.ClassELI,
+		Logical: []byte(triage.MarkerPlaceholder + "1*(2+2)"), MarkerPos: triage.MarkerPrefix}
 
 	got, why := triageRenderPayload(spec, triage.ProbeRequest{}, triage.Slot{}, mk)
 	if why != "" {

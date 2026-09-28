@@ -12,6 +12,8 @@
 // Attach failures are reported per tab rather than failing the session, so losing one tab to an
 // open DevTools window does not stop the recording.
 
+import { BASE64_BODY_PREFIX } from './scope.js';
+
 const DEBUGGER_VERSION = '1.3';
 
 // Response bodies must be fetched while the request is still in the debugger's buffer, so records
@@ -270,15 +272,35 @@ async function emitRecord(tabId, requestId, record, config, errorText) {
 
   let responseBody = '';
   let responseBodyTruncated = false;
+  let responseBodyBlob = null;
 
-  if (!errorText && config.captureResponseBodies && config.isTextualMime(record.mimeType)) {
+  // Deep capture is the ONLY source that sees an <img>, <video> or @font-face load: those are not
+  // fetch or XHR, so the page hook never observes them, and webRequest never carries a body. If an
+  // IDOR that answers with another user's photo is to be provable from the capture table, the bytes
+  // have to be taken here.
+  const isMedia = !config.isTextualMime(record.mimeType);
+  const wantBody = !errorText && config.captureResponseBodies &&
+    (!isMedia || config.captureMediaBodies !== false);
+
+  if (wantBody) {
     try {
       const result = await chrome.debugger.sendCommand({ tabId }, 'Network.getResponseBody', { requestId });
       if (result && typeof result.body === 'string') {
-        // base64Encoded is set for binary payloads; those are described, not decoded.
-        if (result.base64Encoded) {
-          responseBody = `[base64 ${result.body.length} chars]`;
+        // base64Encoded is set for a payload the debugger could not hand over as text. The
+        // debugger has already given us every byte; storing "[base64 N chars]" in its place threw
+        // away the one copy we will ever have.
+        if (isMedia && result.base64Encoded) {
+          responseBodyBlob = config.buildMediaBlob(
+            config.base64ToBytes(result.body), record.mimeType, config.maxMediaBytes);
+        } else if (result.base64Encoded) {
+          // The base64 is kept verbatim, prefixed so a reader knows to decode it, and the prefix is
+          // the only thing added.
+          const trimmed = config.truncate(BASE64_BODY_PREFIX + result.body);
+          responseBody = trimmed.body;
+          responseBodyTruncated = trimmed.truncated;
         } else {
+          // A media content type the debugger handed over AS TEXT, which is what image/svg+xml is.
+          // It is text, so it is stored as text and stays greppable and readable.
           const trimmed = config.truncate(result.body);
           responseBody = trimmed.body;
           responseBodyTruncated = trimmed.truncated;
@@ -302,6 +324,7 @@ async function emitRecord(tabId, requestId, record, config, errorText) {
     requestBodyTruncated: requestBody.truncated,
     responseBody,
     responseBodyTruncated,
+    responseBodyBlob,
     mimeType: record.mimeType || '',
     resourceType: record.resourceType || '',
     initiator: record.initiator || '',

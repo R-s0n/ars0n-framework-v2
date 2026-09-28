@@ -1391,3 +1391,105 @@ func TestTheCorpusVersionStillWinsOverTheURL(t *testing.T) {
 		t.Fatalf("version %q, want the corpus's 1.5.8 rather than the URL's 1.2.29", got)
 	}
 }
+
+// =================================================================================================
+// A DELIMITER PAIR NOBODY SHOWED THIS ENGINE USING IS NOT A POINTER
+// =================================================================================================
+//
+// MEASURED on the 80-route canary exam: this class reported suspicious
+// (template_delimiters_reach_compiler) on /csti/escaped, whose own declaration here says clean.
+// The handler strips every brace with a regexp, so the DEFAULT {{ }} run was deleted; what
+// survived into the ng-app subtree was CS-1B's [[ ]], a pair this class sends only because the
+// served-JavaScript corpus could not prove the defaults are in use, and in this build that
+// corpus is never fetched at all. The sentence "a region the detected engine compiles" was true
+// of the region and said nothing about whether AngularJS reads [[ ]] there.
+//
+// The alternates keep the job they were bought for, which is to refuse a clean, and lose the one
+// they were not, which is to manufacture a pointer.
+
+func cstiIncompleteCorpusFixture(t *testing.T) cstiEligibility {
+	t.Helper()
+	el := cstiAssess([]byte(cstiFixAngularJS), cstiCorpus(false, cstiAngularAsset))
+	if len(el.Interpolating) == 0 {
+		t.Fatal("the AngularJS fixture did not read as eligible, so this test would be exercising the wrong branch")
+	}
+	if el.CorpusComplete {
+		t.Fatal("the fixture reports a COMPLETE corpus, so it cannot stand for the build in which the alternates are always sent")
+	}
+	return el
+}
+
+func TestAnAlternateDelimiterPairTheCorpusNeverNamedIsNotAPointer(t *testing.T) {
+	m := cstiTestMarker(t)
+	slot := cstiHTMLSlot()
+	doc := func(inner string) string {
+		return `<html><head><script src="/static/angular.min.js"></script></head><body ng-app="shop">` + inner + `</body></html>`
+	}
+
+	t.Run("the brace-stripping route: only the unverified pair survived", func(t *testing.T) {
+		in := cstiPlanInputOK(t, slot)
+		in.El = cstiIncompleteCorpusFixture(t)
+		// /csti/escaped: reCSTIBraces deletes { and }, so CS-1's run is gone and CS-1B's is not.
+		reads := []cstiProbeRead{
+			cstiRead(cstiProbeCS1, m, doc(`<div>`+string(m)+`7919*6271</div>`)),
+			cstiRead(cstiProbeCS1B, m, doc(`<div>`+string(m)+string(cstiBytesCS1B)+`</div>`)),
+		}
+		sum := cstiSummarise(reads, in.El, in.ProductInCtrl)
+		if !sum.speculativeCompiled {
+			t.Fatal("the alternate pair landed in the compiled region and was not recorded as a speculative landing, so this case does not exercise the rule")
+		}
+		if sum.httpFlagged {
+			t.Error("the HTTP tier was flagged by a pair nobody showed this engine using, which is the 30-route noise this round is removing")
+		}
+		v := cstiVerdict(cstiScoreEnvOK(slot), in, sum)
+		if v.State == triage.StateSuspicious {
+			t.Fatalf("state suspicious on a route whose own defence deleted the engine's delimiters: %s", v.Reason)
+		}
+		if v.State != triage.StateCannotDetermine {
+			t.Fatalf("state %s, want cannot_determine: the pair ARRIVED, which bars a clean, and nothing showed the engine reading it, which bars a pointer. Reason: %s", v.State, v.Reason)
+		}
+		if !strings.Contains(v.Reason, "alternate_delimiters_unverified") {
+			t.Errorf("reason %q does not name what fired", v.Reason)
+		}
+		if !strings.Contains(v.Reason, string(cstiProbeCS1B)) {
+			t.Errorf("reason %q does not name the probe that produced the landing", v.Reason)
+		}
+		if err := v.Validate(); err != nil {
+			t.Errorf("the verdict does not satisfy the record's own invariants: %v", err)
+		}
+	})
+
+	t.Run("the DEFAULT pair landing compiled is still a pointer", func(t *testing.T) {
+		in := cstiPlanInputOK(t, slot)
+		in.El = cstiIncompleteCorpusFixture(t)
+		reads := []cstiProbeRead{
+			cstiRead(cstiProbeCS1, m, doc(`<div>`+string(m)+string(cstiBytesCS1)+`</div>`)),
+			cstiRead(cstiProbeCS1B, m, doc(`<div>`+string(m)+string(cstiBytesCS1B)+`</div>`)),
+		}
+		sum := cstiSummarise(reads, in.El, in.ProductInCtrl)
+		if !sum.httpFlagged {
+			t.Fatal("the engine's own {{ }} pair reached a compiled region and the HTTP tier was not flagged, which is the false negative this round must not buy")
+		}
+		v := cstiVerdict(cstiScoreEnvOK(slot), in, sum)
+		if v.State != triage.StateSuspicious {
+			t.Fatalf("state %s, want suspicious on /csti/angular's own shape: %s", v.State, v.Reason)
+		}
+		if !strings.Contains(v.Reason, "template_delimiters_reach_compiler") {
+			t.Errorf("reason %q does not name the oracle", v.Reason)
+		}
+	})
+
+	t.Run("a pair the corpus NAMED is not speculative", func(t *testing.T) {
+		el := cstiIncompleteCorpusFixture(t)
+		if !cstiSpeculativeRun(cstiProbeCS1B, el) {
+			t.Fatal("CS-1B is speculative when nothing named [[ ]], and this fixture named nothing")
+		}
+		el.CustomDelims = append(el.CustomDelims, [2]string{"[[", "]]"})
+		if cstiSpeculativeRun(cstiProbeCS1B, el) {
+			t.Error("the corpus named [[ ]] through startSymbol and the pair is still treated as unverified, so reconfigured delimiters could never produce a pointer at all")
+		}
+		if cstiSpeculativeRun(cstiProbeCS1, el) {
+			t.Error("CS-1 carries the default pair every interpolating engine in this class's table shares, and it was called speculative")
+		}
+	})
+}

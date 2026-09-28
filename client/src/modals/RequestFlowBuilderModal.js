@@ -3010,11 +3010,15 @@ export const RequestFlowBuilderModal = ({ show, handleClose, activeTarget, initi
                   ))}
                 </div>
               )}
+              {/* The captured value whole. It is usually a token or an id that the next step
+                  substitutes, so a shortened one is not a shorter credential, it is a wrong one,
+                  and this is the only place it is printed. */}
               {Array.isArray(selectedStep.captured) && selectedStep.captured.map((outcome) => (
-                <div key={outcome.name} className={outcome.matched ? 'text-success' : 'text-warning'}>
+                <div key={outcome.name} className={outcome.matched ? 'text-success' : 'text-warning'}
+                     style={{ wordBreak: 'break-all' }}>
                   <i className={`bi ${outcome.matched ? 'bi-check-lg' : 'bi-exclamation-triangle'} me-1`} />
                   {outcome.name}: {outcome.matched
-                    ? `captured ${outcome.value ? `"${outcome.value.slice(0, 80)}"` : 'a value'}`
+                    ? `captured ${outcome.value ? `"${outcome.value}"` : 'a value'}`
                     : (outcome.problem || 'matched nothing')}
                 </div>
               ))}

@@ -503,7 +503,16 @@ func checkForWebService(scanID, ipAddr string, port int, timeout time.Duration) 
 
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-		resp, err := client.Do(req)
+		// DoFollowing, not client.Do. This client follows redirects, and net/http returns an
+		// error and no response at all when a hop carries a Location it cannot parse. The error
+		// path here is "try the next protocol", and after https it is "return nil", so a port
+		// that answered a full 302 NEVER BECOMES A LiveWebServer. It then vanishes from the
+		// attack surface before any scanner is offered it, and an asset that is not in the list
+		// is not scanned and not reported: the quietest false clean there is.
+		//
+		// On the recovery path this is two requests, so responseTime covers both. That is a
+		// worse latency number on a response that would otherwise not exist at all.
+		resp, err := DoFollowing(client, req)
 		responseTime := float64(time.Since(startTime).Nanoseconds()) / 1e6 // Convert to milliseconds
 
 		if err != nil {

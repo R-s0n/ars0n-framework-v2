@@ -249,13 +249,20 @@ func EncodeSlotInto(tmpl RequestTemplate, s triage.Slot, mode triage.EncoderMode
 		mode = DefaultEncoderFor(s)
 	}
 
-	// A fragment is not sent. RFC 3986 section 3.5 makes it a client-side reference and no
-	// conforming client puts it in the request-target, so there is no such thing as a faithful
-	// HTTP delivery into a fragment slot. This is the one insertion point that is impossible by
-	// construction rather than by payload.
-	if s.Kind == triage.KindFragment || !s.ServerReachable {
-		return triageRefuse(s, mode, logical, ReasonFragmentNotTransmitted,
-			"the fragment is stripped by every conforming client, so no HTTP-level probe reaches it")
+	// EVERY REFUSAL THAT NEEDS NEITHER THE PAYLOAD NOR THE REQUEST IS ASKED HERE, THROUGH THE ONE
+	// TABLE THE PLANNER ALSO ASKS. That includes the fragment, which is not sent at all because
+	// RFC 3986 section 3.5 makes it a client-side reference; the mode that cannot render into this
+	// slot kind; the mode that has no implementation; and the container that needs a name from a
+	// slot that has none. They are asked first, ahead of the payload checks, because a slot this
+	// mode can never reach refuses the same way for every payload, so reporting the payload's
+	// problem instead would name the second-most-fundamental fact about the probe.
+	//
+	// The planner calls SlotAcceptsEncoder before a probe is planned, so in a healthy run none of
+	// these fires here at all. It stays as the floor: a caller that reaches the encoder without
+	// having asked still cannot put a refusal on the wire, and the two answers are the same
+	// function, so they cannot drift apart.
+	if reason, detail := SlotAcceptsEncoder(s, mode); reason != "" {
+		return triageRefuse(s, mode, logical, reason, detail)
 	}
 
 	// The measured per-slot impossibility table. A class whose payload needs one of these bytes
@@ -265,10 +272,6 @@ func EncodeSlotInto(tmpl RequestTemplate, s triage.Slot, mode triage.EncoderMode
 			return triageRefuse(s, mode, logical, ReasonSlotImpossibleByte,
 				fmt.Sprintf("byte 0x%02x is on this slot's measured impossible list", b))
 		}
-	}
-
-	if err := triageModeFitsKind(mode, s.Kind); err != nil {
-		return triageRefuse(s, mode, logical, ReasonEncoderWrongKind, err.Error())
 	}
 
 	prefix, path, query, ok := triageSplitWireURL(tmpl.URL)
@@ -300,13 +303,30 @@ func EncodeSlotInto(tmpl RequestTemplate, s triage.Slot, mode triage.EncoderMode
 		return triageEncodeForm(tmpl, s, mode, logical)
 	case triage.EncodeJSONString, triage.EncodeJSONNodeReplace:
 		return triageEncodeJSON(tmpl, s, mode, logical)
-	case triage.EncodeXMLCDATA, triage.EncodeXMLDocReplace, triage.EncodeMultipartValue, triage.EncodeMultipartName, triage.EncodeIISUnicode:
-		// Declared, not implemented. The corpus measured 218 vectors across query, body, header,
-		// cookie and path with no XML and no multipart body, so these were left out rather than
-		// written untested. They refuse by name so that adding an XML vector produces a visible
-		// not_reachable instead of a silent clean.
+	case triage.EncodeIISUnicode:
+		// A query pair or a path segment, decided by the slot kind, because the overlong bytes are
+		// the same in both and only the container around them differs.
+		if s.Kind == triage.KindPath {
+			return triageEncodePath(tmpl, s, mode, logical, ov, prefix, path, query)
+		}
+		return triageEncodeQuery(tmpl, s, mode, logical, prefix, path, query)
+	case triage.EncodeXMLCDATA, triage.EncodeXMLDocReplace, triage.EncodeMultipartValue, triage.EncodeMultipartName:
+		// Declared, not implemented, AND THE JUSTIFICATION IS NOW ONLY THE ONE THAT IS TRUE OF
+		// THESE FOUR. The corpus measured 218 vectors across query, body, header, cookie and path
+		// with no XML and no multipart body, so these were left out rather than written untested.
+		//
+		// iis_unicode used to be refused in this same line under that same sentence, and the
+		// sentence WAS FALSE FOR IT: it renders into a query or a path slot and the corpus has
+		// thousands of both. It was not a missing corpus, it was a missing implementation, and it
+		// cost TRAVERSAL every clean in the layer, because that class asks for it on every query
+		// and path slot. It is implemented above. A reason that guesses at a cause is the defect
+		// this file exists to stop, and one of them was shipped here.
+		//
+		// These four refuse by name so that adding an XML vector produces a visible not_reachable
+		// instead of a silent clean.
 		return triageRefuse(s, mode, logical, ReasonEncoderNotImplemented,
-			fmt.Sprintf("encoder %q has no implementation in %s", mode, TriageEncoderVersion))
+			fmt.Sprintf("encoder %q has no implementation in %s, and the measured corpus carried no XML and no multipart body, so no vector has needed one",
+				mode, TriageEncoderVersion))
 	default:
 		return triageRefuse(s, mode, logical, ReasonEncoderNotImplemented,
 			fmt.Sprintf("encoder %q is not a known mode", mode))
@@ -377,6 +397,144 @@ func triageModeFitsKind(mode triage.EncoderMode, kind triage.SlotKind) error {
 }
 
 // ---------------------------------------------------------------------------------------------
+// 4b. THE PLAN-TIME CAPABILITY QUESTION
+// ---------------------------------------------------------------------------------------------
+
+// TriageEncoderModes is every mode this encoder knows a name for, including the ones it refuses.
+//
+// It exists so that a caller sweeping the modes cannot sweep a stale copy of the list. A mode
+// added to triage.EncoderMode and left out here is invisible to the divergence test below, which
+// is the test that keeps the plan-time answer and the runtime answer in step.
+func TriageEncoderModes() []triage.EncoderMode {
+	return []triage.EncoderMode{
+		triage.EncodeNone, triage.EncodeQuery, triage.EncodeForm, triage.EncodePathSegment,
+		triage.EncodeCookie, triage.EncodeHeaderValue, triage.EncodeJSONString,
+		triage.EncodeJSONNodeReplace, triage.EncodeXMLCDATA, triage.EncodeXMLDocReplace,
+		triage.EncodeLiteralPct, triage.EncodePctTwice, triage.EncodeIISUnicode,
+		triage.EncodeNameSlot, triage.EncodeMultipartValue, triage.EncodeMultipartName,
+	}
+}
+
+// SlotAcceptsEncoder answers, with no payload and no request, whether mode could ever render into
+// this slot. It returns "" when it could, and the reason with its detail when it could not.
+//
+// WHY THIS EXISTS AND WHY IT IS ASKED BEFORE A PROBE IS PLANNED. Measured on live run acaff558
+// against a real corpus: 6931 of 7425 probes, 93 percent, were refused INSIDE the process. Each
+// had already been planned, counted against the per-slot budget, issued an ordinal from the
+// minter, and written to triage_fidelity as an attempt. The operator was charged for 7425 probes
+// and asked 494 questions. Three of the four refusal reasons on that run need nothing but the slot
+// and the mode to reach:
+//
+//	slot_has_no_name                       971   every one of them a form encoder aimed at a JSON body
+//	encoder_mode_not_valid_for_slot_kind   256   128 pct_twice and 128 iis_unicode, into bodies
+//	fragment_not_transmitted                 -   structural, and already checked first
+//
+// A probe the runner refused to send is not the application being mysterious. It is us wasting the
+// operator's time and then charging them an unknown for it. The honest answer is not to plan it.
+//
+// THE KIND TABLE ALONE IS NOT THE ANSWER, and believing it was is what produced the 971.
+// triageModeFitsKind says form renders into a body, which is true of a form-encoded body and false
+// of a JSON one: a JSON slot is addressed by pointer and carries no Name, so the form encoder has
+// no field to write into and refuses on every single payload. The media is the deciding fact and
+// the slot has carried it all along.
+//
+// EncodeSlotInto calls this first, so there is exactly one table and the two answers cannot
+// disagree. TestThePlanTimeAnswerAndTheRuntimeAnswerCannotDiverge sweeps every mode against every
+// slot kind and fails if the plan is either stricter than the encoder (dropped coverage) or looser
+// than it (the refusals back on the wire).
+func SlotAcceptsEncoder(s triage.Slot, mode triage.EncoderMode) (DeliveryReason, string) {
+	if s.Kind == triage.KindFragment || !s.ServerReachable {
+		return ReasonFragmentNotTransmitted,
+			"the fragment is stripped by every conforming client, so no HTTP-level probe reaches it"
+	}
+	if mode == triage.EncodeNone || mode == "" {
+		mode = DefaultEncoderFor(s)
+	}
+	if err := triageModeFitsKind(mode, s.Kind); err != nil {
+		return ReasonEncoderWrongKind, err.Error()
+	}
+
+	switch mode {
+	case triage.EncodeQuery, triage.EncodeLiteralPct, triage.EncodePctTwice:
+		// All three are dispatched to the query container, which writes a named name=value pair.
+		// literal_pct and pct_twice are declared valid for a path in the kind table and there is
+		// no path implementation behind them, so a path slot gets a named gap rather than a
+		// slot_has_no_name that reads like a defect in the corpus. Double-encoding a path segment
+		// is perfectly deliverable and simply is not written yet; saying so is the point.
+		if s.Kind != triage.KindQuery {
+			return ReasonEncoderNotImplemented, fmt.Sprintf(
+				"encoder %q is dispatched to the query container, which renders a named name=value pair, so it cannot reach a %s slot in %s",
+				mode, s.Kind, TriageEncoderVersion)
+		}
+		if s.Name == "" {
+			return ReasonSlotHasNoName, "a query slot must name its parameter"
+		}
+	case triage.EncodeNameSlot:
+		if s.Name == "" {
+			return ReasonSlotHasNoName, "a name-slot probe must name the parameter it replaces"
+		}
+	case triage.EncodeCookie:
+		if s.Name == "" {
+			return ReasonSlotHasNoName, "a cookie slot must name its cookie"
+		}
+	case triage.EncodeHeaderValue:
+		if s.Name == "" {
+			return ReasonSlotHasNoName, "a header slot must name its field"
+		}
+	case triage.EncodeForm:
+		if m := triageSlotBodyMedia(s); m != triage.BodyForm {
+			return ReasonEncoderWrongKind, fmt.Sprintf(
+				"encoder %q renders a urlencoded form field and this body slot carries %s, which is addressed by JSON pointer and has no field name",
+				mode, m)
+		}
+		if s.Name == "" {
+			return ReasonSlotHasNoName, "a form slot must name its field"
+		}
+	case triage.EncodeJSONString, triage.EncodeJSONNodeReplace:
+		// BodyGraphQL and an unset media both render as a JSON envelope; that is what
+		// DefaultEncoderFor resolves them to. Form, multipart and XML are not JSON and the JSON
+		// encoder refuses them once it has the body, which is a request away and knowable now.
+		switch triageSlotBodyMedia(s) {
+		case triage.BodyForm, triage.BodyMultipart, triage.BodyXML:
+			return ReasonEncoderWrongKind, fmt.Sprintf(
+				"encoder %q renders into a JSON document and this body slot carries %s",
+				mode, triageSlotBodyMedia(s))
+		}
+	case triage.EncodeIISUnicode:
+		// A path segment is addressed by index and needs no name. A query pair is a name and a
+		// value, so an unnamed query slot is refused here for the reason it is really refused
+		// for, which is the same reason the query container gives.
+		if s.Kind == triage.KindQuery && s.Name == "" {
+			return ReasonSlotHasNoName, "a query slot must name its parameter"
+		}
+	case triage.EncodeXMLCDATA, triage.EncodeXMLDocReplace, triage.EncodeMultipartValue,
+		triage.EncodeMultipartName:
+		// Declared, not implemented. Same refusal the dispatch switch gives, with the same
+		// corrected justification, moved forward so it costs no ordinal and no fidelity row.
+		return ReasonEncoderNotImplemented, fmt.Sprintf(
+			"encoder %q has no implementation in %s, and the measured corpus carried no XML and no multipart body, so no vector has needed one",
+			mode, TriageEncoderVersion)
+	case triage.EncodePathSegment:
+		// A path segment is addressed by index, so there is no static precondition. The
+		// out-of-range and unencodable-slash refusals need the request.
+	default:
+		return ReasonEncoderNotImplemented, fmt.Sprintf("encoder %q is not a known mode", mode)
+	}
+	return "", ""
+}
+
+// triageSlotBodyMedia is the media a body slot is treated as carrying. An unset media is JSON, for
+// the same reason DefaultEncoderFor resolves it to the JSON encoder: every GraphQL POST in the
+// corpus is a JSON envelope, and guessing form for an unset media would aim the one encoder that
+// needs a field name at the one slot shape that has none.
+func triageSlotBodyMedia(s triage.Slot) triage.BodyMedia {
+	if s.BodyMedia == "" || s.BodyMedia == triage.BodyNone {
+		return triage.BodyJSON
+	}
+	return s.BodyMedia
+}
+
+// ---------------------------------------------------------------------------------------------
 // 5. QUERY AND FORM: THE SAME CONTAINER IN TWO PLACES
 // ---------------------------------------------------------------------------------------------
 
@@ -403,7 +561,7 @@ func triageEncodeQuery(tmpl RequestTemplate, s triage.Slot, mode triage.EncoderM
 	out := tmpl.Clone()
 	out.URL = triageJoinWireURL(prefix, path, newQuery)
 	return triageDelivered(s, mode, logical, wire, []byte(newQuery), "request-target query", out,
-		triageDupNote(dup, s.Name))
+		triageJoinNotes(triageDupNote(dup, s.Name), triageIISUnicodeNote(mode, logical)))
 }
 
 func triageEncodeForm(tmpl RequestTemplate, s triage.Slot, mode triage.EncoderMode, logical []byte) Encoded {
@@ -534,6 +692,12 @@ func triageDupNote(dup bool, name string) string {
 // escaping changed anything, which is what decides whether a percent-rejecting slot can carry it.
 func triageEscapeQueryValue(logical []byte, mode triage.EncoderMode) (wire []byte, needsPct bool) {
 	switch mode {
+	case triage.EncodeIISUnicode:
+		// The two separators become their overlong forms and every other byte takes the ordinary
+		// escaping, so the ONLY difference from the plain query encoder is the two bytes this
+		// mode exists for. Anything else it changed would be a second variable in the comparison.
+		w := triageIISUnicodeEscape(logical, triageQueryUnreserved)
+		return w, !bytes.Equal(w, logical)
 	case triage.EncodePctTwice:
 		once := url.QueryEscape(string(logical))
 		return []byte(url.QueryEscape(once)), true
@@ -547,6 +711,103 @@ func triageEscapeQueryValue(logical []byte, mode triage.EncoderMode) (wire []byt
 		w := []byte(url.QueryEscape(string(logical)))
 		return w, string(w) != string(logical)
 	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// 5b. IIS UNICODE: THE OVERLONG UTF-8 SEPARATORS
+// ---------------------------------------------------------------------------------------------
+
+// THE ENCODING, WRITTEN OUT, BECAUSE GETTING IT WRONG IS SILENT. UTF-8 (RFC 3629 section 3) gives
+// U+002F '/' exactly one encoding, the single byte 0x2F. A two-byte sequence decodes to the same
+// code point when a decoder does not reject the leading zero bits:
+//
+//	0xC0 = 110_00000   two-byte lead, payload bits 00000
+//	0xAF = 10_101111   continuation,  payload bits 101111
+//	                   00000 101111 = 0x2F = '/'
+//
+//	0xC1 = 110_00001   payload 00001
+//	0x9C = 10_011100   payload 011100
+//	                   00001 011100 = 0x5C = '\'
+//
+// Those are the OVERLONG forms, which RFC 3629 forbids precisely because a lenient decoder turns
+// them into a separator that nothing upstream recognised as one. 0xC0 and 0xC1 can begin no other
+// kind of sequence, which is why they are excluded from UTF-8 outright. Percent-encoded for the
+// wire they are %C0%AF and %C1%9C: the two sequences of the IIS Unicode bug, CVE-2000-0884, where
+// the docroot check ran on the once-decoded request and the Unicode decode ran afterwards.
+//
+// WHY IT IS AN ENCODER AND NOT A PAYLOAD. Any class's escape can be asked in this form, and
+// TRAVERSAL asks for it on every query and path slot. Writing it as a second payload per class
+// would duplicate every ladder and would fail the build-time isolation check the moment two
+// classes wrote the same overlong bytes.
+//
+// THE HEX IS UPPER CASE, matching triageEscapeBytes, so one request-target does not carry two
+// spellings of the same escape and read as an anomaly by itself. RFC 3986 section 6.2.2.1 makes
+// the hex digits case-insensitive, so %C0%AF and %c0%af decode identically; the literature writes
+// the lower-case form and any decoder that disagreed would be refusing valid percent-encoding.
+var (
+	triageIISOverlongSlash     = []byte("%C0%AF")
+	triageIISOverlongBackslash = []byte("%C1%9C")
+)
+
+// triageIISUnicodeEscape renders logical with the two separators replaced by their overlong forms
+// and every other byte escaped by the container's own rule.
+//
+// IT WALKS BYTES AND NEVER RUNES. A payload that already carries raw overlong bytes, which is
+// exactly what TRAVERSAL's TR-T6 is, becomes one percent triplet per byte and is NOT normalised
+// into its shortest UTF-8 form on the way out. Re-encoding it would send a different payload than
+// the one the class declared and record it as the one it asked for.
+//
+// A LITERAL PERCENT IN THE PAYLOAD BECOMES %25 AND IS NEVER PASSED THROUGH RAW, unlike the
+// literal_pct mode, which exists to do the opposite. If a payload's own text says %c0%af it has
+// to arrive as those six characters, or nothing downstream can tell the payload's bytes from the
+// encoder's work.
+//
+// The space becomes %20 and not '+', which is where this differs from url.QueryEscape: '+' means
+// a space only to a form parser, and this mode is aimed at path handling code.
+func triageIISUnicodeEscape(logical []byte, allow func(byte) bool) []byte {
+	out := make([]byte, 0, len(logical)*3)
+	for _, c := range logical {
+		switch {
+		case c == '/':
+			out = append(out, triageIISOverlongSlash...)
+		case c == '\\':
+			out = append(out, triageIISOverlongBackslash...)
+		case allow(c):
+			out = append(out, c)
+		default:
+			out = append(out, '%', triageHexUpper[c>>4], triageHexUpper[c&0x0f])
+		}
+	}
+	return out
+}
+
+// triageIISUnicodeNote is what keeps an iis_unicode row honest when the mode had nothing to do.
+//
+// A payload with no separator in it renders byte-identically under this mode and under the plain
+// one. That is a true and unremarkable fact about those bytes, and it is SAID rather than left to
+// be inferred, because a coverage row reading "tested under iis_unicode" over a payload the mode
+// could not touch is the same half-truth as a clean over a probe that never ran.
+func triageIISUnicodeNote(mode triage.EncoderMode, logical []byte) string {
+	if mode != triage.EncodeIISUnicode {
+		return ""
+	}
+	if bytes.IndexByte(logical, '/') >= 0 || bytes.IndexByte(logical, '\\') >= 0 {
+		return ""
+	}
+	return "this payload carries no forward slash and no backslash, so the overlong encoding had " +
+		"nothing to replace and these bytes are the plain container escaping"
+}
+
+// triageJoinNotes joins the container notes that are not failures, dropping the empty ones, so a
+// delivered encode can carry two facts without either of them being lost to the other.
+func triageJoinNotes(parts ...string) string {
+	kept := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, "; ")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -568,22 +829,45 @@ func triageEncodePath(tmpl RequestTemplate, s triage.Slot, mode triage.EncoderMo
 			fmt.Sprintf("segment index %d but %q has %d segments", s.SegmentIndex, path, len(segs)))
 	}
 
+	// WHICH OF THE TWO FIRED IS NAMED AND NOT GUESSED AT. rawPercent is reached either because the
+	// PROBE declared it or because the SLOT was measured to reject percent-encoding, and the
+	// refusals below used to blame the probe in both cases. A reason that names the wrong cause
+	// sends the reader to the wrong file, and this layer has already shipped two of those.
 	rawPercent := ov.RawPercent || s.Constraints.PctRejected
+	var why string
+	switch {
+	case ov.RawPercent && s.Constraints.PctRejected:
+		why = "this probe requires a raw percent sign and this slot was also measured to reject percent-encoding"
+	case ov.RawPercent:
+		why = "this probe requires a raw percent sign"
+	case s.Constraints.PctRejected:
+		why = "this slot was measured to reject percent-encoding"
+	}
+
+	if mode == triage.EncodeIISUnicode && rawPercent {
+		// Every byte this mode emits for a separator is a percent triplet, so no rendering
+		// satisfies both requests at once. Saying so is the honest answer and it is not a clean.
+		return triageRefuse(s, mode, logical, ReasonSlotRejectsPercentEnc,
+			"the overlong encoding is percent triplets and nothing else, and "+why)
+	}
 	if rawPercent {
 		if bytes.IndexByte(logical, '/') >= 0 {
 			return triageRefuse(s, mode, logical, ReasonPathSlashUnencodable,
-				"the payload carries a slash and this probe requires a raw percent sign, so the payload cannot stay inside one segment")
+				"the payload carries a slash and "+why+", so the payload cannot stay inside one segment")
 		}
 		if i := triageFirstByteNeedingEscape(logical, triagePathUnreserved(ov.PathSemicolonRaw)); i >= 0 && logical[i] != '%' {
 			return triageRefuse(s, mode, logical, ReasonSlotRejectsPercentEnc,
-				fmt.Sprintf("byte 0x%02x at offset %d needs percent-encoding and this slot rejects it", logical[i], i))
+				fmt.Sprintf("byte 0x%02x at offset %d needs percent-encoding and %s", logical[i], i, why))
 		}
 	}
 
 	var wire []byte
-	if rawPercent {
+	switch {
+	case mode == triage.EncodeIISUnicode:
+		wire = triageIISUnicodeEscape(logical, triagePathUnreserved(ov.PathSemicolonRaw))
+	case rawPercent:
 		wire = append([]byte(nil), logical...)
-	} else {
+	default:
 		wire = triageEscapeBytes(logical, triagePathUnreserved(ov.PathSemicolonRaw))
 	}
 
@@ -592,7 +876,8 @@ func triageEncodePath(tmpl RequestTemplate, s triage.Slot, mode triage.EncoderMo
 
 	out := tmpl.Clone()
 	out.URL = triageJoinWireURL(prefix, newPath, query)
-	return triageDelivered(s, mode, logical, wire, []byte(newPath), "request-target path", out, "")
+	return triageDelivered(s, mode, logical, wire, []byte(newPath), "request-target path", out,
+		triageIISUnicodeNote(mode, logical))
 }
 
 // triagePathUnreserved is RFC 3986 pchar minus the characters that would end the segment. The
@@ -1523,7 +1808,7 @@ const (
 // are pinned.
 var (
 	triageClientOnce sync.Once
-	triageClient     *http.Client
+	triageClient     *NoFollowClient
 )
 
 // TriageClient is the client every triage probe that does not need header order goes through.
@@ -1537,16 +1822,26 @@ var (
 // Redirects are NOT followed. Following one replaces the response the probe was measuring with
 // the response of a different URL, under the same observation, which is a different class of the
 // same mistake: a verdict recorded against bytes the probe never addressed.
-func TriageClient() *http.Client {
+//
+// IT IS A NoFollowClient RATHER THAN AN http.Client, and that is not a style choice. Setting
+// CheckRedirect to ErrUseLastResponse does NOT keep the response: net/http parses the Location
+// header before it consults CheckRedirect, so a 3xx whose Location will not parse as a URL makes
+// Client.Do return an error and throw the response away, with CheckRedirect never called.
+//
+// Measured on the oracle route /hosthdr/location, which answers Location: https://<our payload>/
+// account/reset. Every host-header probe whose payload made that Location unparseable came back
+// to the runner as a transport error, was classified reset (the classifier substring-matches
+// "reset" against a message that embeds our own payload), and ten in a row fired
+// abort("transport_collapse") against a host that had answered every request in full.
+func TriageClient() *NoFollowClient {
 	triageClientOnce.Do(func() {
-		triageClient = &http.Client{
+		triageClient = NewNoFollowClient(&http.Client{
 			Transport: &http.Transport{
 				Proxy:              http.ProxyFromEnvironment,
 				DisableCompression: true,
 				TLSClientConfig:    &tls.Config{InsecureSkipVerify: true},
 			},
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		}
+		})
 	})
 	return triageClient
 }

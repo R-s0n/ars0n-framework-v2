@@ -87,7 +87,6 @@ const (
 const (
 	bypassMaxScreened  = 60
 	bypassScreenBudget = 4 * time.Minute
-	bypassBodyKeep     = 3000
 )
 
 // bypassProbeRequest is one request the control logic wants sent.
@@ -757,11 +756,12 @@ func bypassArmText(r bypassProbeResult) string {
 		b.WriteString(", " + r.ContentType)
 	}
 	b.WriteString("\n\n")
-	body := r.Body
-	if len(body) > bypassBodyKeep {
-		body = body[:bypassBodyKeep] + "\n... [truncated at " + strconv.Itoa(bypassBodyKeep) + " bytes]"
-	}
-	b.WriteString(body)
+	// THE BODY GOES IN WHOLE. It used to be cut at 3000 bytes. On this section that is exactly
+	// backwards: an access bypass is PROVED by what the protected page returned, and the page
+	// a bypass reaches is routinely an admin dashboard or a user record much larger than 3 KB,
+	// with the part that proves someone else's data was read nowhere near the first 3000 bytes.
+	// This text is the finding row, and there is no second copy of the response anywhere.
+	b.WriteString(r.Body)
 	return b.String()
 }
 
@@ -801,31 +801,30 @@ func bypassRejectionNote(tool string, row vectorRow, candidates []bypassCandidat
 		}
 		buckets[j.Slug].count++
 
-		if len(lines) < 30 {
-			c := candidates[i]
-			line := "- " + firstNonEmpty(c.Technique, "(technique not named)") + ": " +
-				strings.ToUpper(firstNonEmpty(c.Method, "GET")) + " " + c.RequestedURL + " -> " +
-				strconv.Itoa(c.Status) + ", " + strconv.Itoa(c.Length) + "b."
-			if c.OriginalURL != "" && c.RequestedURL != c.OriginalURL {
-				line += " NOTE: that is not the url this scan was aimed at, which was " + c.OriginalURL + "."
-			}
-			line += " " + j.Slug + ": " + j.Reason
-			if j.Control.URL != "" && j.Control.Err == "" {
-				line += " The control (" + j.ControlKind + ") requested " + j.Control.URL +
-					" and got " + strconv.Itoa(j.Control.Status) + ", " +
-					strconv.Itoa(j.Control.Bytes) + " bytes."
-			}
-			if c.Curl != "" {
-				line += " " + c.Curl
-			}
-			lines = append(lines, line)
+		// A LINE PER CANDIDATE. This used to stop at thirty, which made the note claim exactly
+		// what it was built to stop. The header above says an operator can disagree with any
+		// individual judgement and check it by hand; past the thirtieth there was nothing to check.
+		// A run that screens 156 rejections now records 156 of them, each with its own curl.
+		c := candidates[i]
+		line := "- " + firstNonEmpty(c.Technique, "(technique not named)") + ": " +
+			strings.ToUpper(firstNonEmpty(c.Method, "GET")) + " " + c.RequestedURL + " -> " +
+			strconv.Itoa(c.Status) + ", " + strconv.Itoa(c.Length) + "b."
+		if c.OriginalURL != "" && c.RequestedURL != c.OriginalURL {
+			line += " NOTE: that is not the url this scan was aimed at, which was " + c.OriginalURL + "."
 		}
+		line += " " + j.Slug + ": " + j.Reason
+		if j.Control.URL != "" && j.Control.Err == "" {
+			line += " The control (" + j.ControlKind + ") requested " + j.Control.URL +
+				" and got " + strconv.Itoa(j.Control.Status) + ", " +
+				strconv.Itoa(j.Control.Bytes) + " bytes."
+		}
+		if c.Curl != "" {
+			line += " " + c.Curl
+		}
+		lines = append(lines, line)
 	}
 	if dropped == 0 {
 		return nil
-	}
-	if dropped > len(lines) {
-		lines = append(lines, "- and "+strconv.Itoa(dropped-len(lines))+" more, same reasons.")
 	}
 
 	var summary []string

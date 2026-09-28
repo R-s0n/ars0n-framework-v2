@@ -209,7 +209,7 @@ func flowCardFlowsMetric(scopeTargetID string) FlowCardMetric {
 		SELECT id, session_id, tab_id, COALESCE(method,''), COALESCE(url,''),
 		       COALESCE(resource_type,''), timestamp,
 		       COALESCE(redirect_chain,'[]'::jsonb),
-		       COALESCE(capture_source,'passive')
+		       COALESCE(capture_source,'passive'), COALESCE(status_code,0)
 		  FROM manual_crawl_captures
 		 WHERE scope_target_id = $1
 		 ORDER BY timestamp ASC
@@ -226,8 +226,9 @@ func flowCardFlowsMetric(scopeTargetID string) FlowCardMetric {
 		var tabID *int
 		var chainJSON []byte
 		var source string
+		var status int
 		if err := rows.Scan(&c.ID, &c.SessionID, &tabID, &c.Method, &c.URL,
-			&c.ResourceType, &c.Timestamp, &chainJSON, &source); err != nil {
+			&c.ResourceType, &c.Timestamp, &chainJSON, &source, &status); err != nil {
 			// One unreadable row loses one capture, not the whole number. The same choice
 			// queryFlowCaptures makes, and for the same reason: the alternative is a card that goes
 			// blank because a single column somewhere is malformed.
@@ -246,7 +247,8 @@ func flowCardFlowsMetric(scopeTargetID string) FlowCardMetric {
 			}
 		}
 		captures = append(captures, c)
-		sources[c.ID] = source
+		// A blocked active capture must not count as a reproduction; see flowEffectiveSource.
+		sources[c.ID] = flowEffectiveSource(source, status)
 	}
 	if err := rows.Err(); err != nil {
 		return unavailableMetric(err, started)
@@ -345,9 +347,13 @@ func flowCardVersionsMetric(scopeTargetID string) FlowCardMetric {
 	if err != nil {
 		return unavailableMetric(err, started)
 	}
-	return availableMetric(total, map[string]int{
+	// The headline is the EDITS the operator actually made, not the total rows. A materialised
+	// original is not work: crediting it would turn "opened the repeater" into a count. The total and
+	// the originals stay in Parts for anyone who wants them.
+	return availableMetric(edited, map[string]int{
 		"originals": originals,
 		"edited":    edited,
+		"total":     total,
 	}, started)
 }
 

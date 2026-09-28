@@ -22,6 +22,76 @@ CONF_INFERRED = "inferred"
 CONF_ASSUMED = "assumed"
 
 
+# Bot-management / interactive-challenge detection.
+#
+# A managed challenge (Cloudflare "Just a moment", Turnstile, DataDome, PerimeterX, Akamai) is not
+# a content block: it refuses the CLIENT on TLS/JA3 + JavaScript-challenge grounds, whatever the
+# payload is. It gets its own posture and finding because the remediation is the OPPOSITE of every
+# other block here: a browser User-Agent does not help, and only a real browser that solves the
+# challenge (or a Chrome-fingerprint-impersonating client) gets through. v1 folded this into the
+# generic "benign traffic is being blocked", which hid the one fact the operator most needs: that no
+# raw-HTTP tool will ever pass, and why.
+_BOT_MANAGER_NAMES = [
+    (("cf-mitigated", "__cf_bm", "cf_chl", "cloudflare"), "Cloudflare Bot Management"),
+    (("datadome",), "DataDome"),
+    (("_px", "x-px", "perimeterx", "px-captcha", "human"), "PerimeterX / HUMAN"),
+    (("incap", "incapsula", "imperva"), "Imperva Incapsula"),
+    (("akamai", "ak_bmsc", "bm_sz", "reese84"), "Akamai Bot Manager"),
+]
+
+
+def _challenge_signals(ctx):
+    """Every signal that says 'a bot-management challenge is refusing our client', combined.
+
+    challenge_hits comes from the response classifier (a challenge body served at any status). It is
+    the robust signal: it survives cookie redaction and does not depend on the fingerprint test
+    having run. The vendor fingerprint's bot_manager markers and the response-mode verdict
+    corroborate it and, crucially, name who is doing it.
+    """
+    r = ctx.results
+    log = getattr(getattr(ctx, "rec", None), "log", None) or []
+    challenge_hits = sum(1 for e in log if e.get("class") == "challenge")
+
+    fp = r.get("waf_vendor_fingerprint") or {}
+    markers = list((fp.get("bot_manager") or {}).get("markers") or [])
+    cdn_vendors = list((fp.get("cdn") or {}).get("vendors") or [])
+    waf_vendors = list((fp.get("waf_vendor") or {}).get("vendors") or [])
+    mode_challenge = (r.get("waf_response_mode") or {}).get("verdict") == "challenge"
+
+    named = []
+    for v in cdn_vendors + waf_vendors:
+        if v and v not in named:
+            named.append(v)
+
+    haystack = " ".join(markers + named + cdn_vendors + waf_vendors).lower()
+    product = None
+    for needles, label in _BOT_MANAGER_NAMES:
+        if any(n in haystack for n in needles):
+            product = label
+            break
+
+    blocking = (r.get("waf_control_arm") or {}).get("verdict") == "blocks_benign_traffic"
+    # A hard 403/geo/IP block is NOT a challenge wall: it needs a positive challenge signal, either
+    # a challenge-classed response or a named bot-manager marker or the response-mode verdict.
+    is_wall = blocking and (challenge_hits > 0 or bool(markers) or mode_challenge)
+
+    return {
+        "is_challenge_wall": is_wall,
+        "challenge_hits": challenge_hits,
+        "bot_markers": sorted(set(markers)),
+        "vendors": named,
+        "product": product,
+        "blocking": blocking,
+    }
+
+
+def _challenge_actor(chal):
+    """A human-readable name for whatever is throwing the challenge."""
+    return (chal["product"]
+            or (chal["vendors"][0] + " edge" if chal["vendors"] else None)
+            or "A bot-management / anti-automation control")
+
+
 def build_findings(ctx):
     """Turn raw test output into ranked, actionable findings."""
     r = ctx.results
@@ -83,10 +153,35 @@ def build_findings(ctx):
 
     matrix = r.get("waf_class_matrix") or {}
     control = r.get("waf_control_arm") or {}
+    chal = _challenge_signals(ctx)
     if control.get("verdict") == "blocks_benign_traffic":
-        add("blanket_block", P0, "Benign traffic is being blocked",
-            control.get("note", ""), CONF_MEASURED, ["all"], "waf_control_arm",
-            "Benign control requests returning 200 would disprove this.")
+        if chal["is_challenge_wall"]:
+            who = _challenge_actor(chal)
+            evidence = []
+            if chal["challenge_hits"]:
+                evidence.append(f"{chal['challenge_hits']} benign request(s) were answered with an "
+                                "interactive challenge page")
+            if chal["bot_markers"]:
+                evidence.append("bot-manager markers were set (" + ", ".join(chal["bot_markers"])
+                                + ")")
+            detail = (
+                f"{who} is challenging our client rather than blocking a payload: benign control "
+                "requests are met with a JavaScript/CAPTCHA interstitial. "
+                + ("; ".join(evidence) + ". " if evidence else "")
+                + "This gates on the TLS/JA3 and HTTP2 client fingerprint plus a JavaScript "
+                "challenge, so a browser User-Agent alone does NOT get through. Only a real browser "
+                "that solves the challenge (the manual-crawl extension, or a headless Chrome), or a "
+                "Chrome-fingerprint-impersonating client, will reach the application. No raw-HTTP "
+                "tool (ffuf, katana, nuclei, endpoint_replay, curl) can scan or characterise this "
+                "target."
+            )
+            add("bot_challenge_wall", P0, f"{who} is blocking automated traffic",
+                detail, CONF_MEASURED, ["all"], "waf_control_arm",
+                "A bare scripted client receiving 200 on the control path would disprove this.")
+        else:
+            add("blanket_block", P0, "Benign traffic is being blocked",
+                control.get("note", ""), CONF_MEASURED, ["all"], "waf_control_arm",
+                "Benign control requests returning 200 would disprove this.")
     elif matrix.get("verdict") == "enforcing":
         add("waf_enforcing", P1,
             f"WAF enforces on {len(matrix.get('classes_inspected', []))} payload class(es)",
@@ -231,8 +326,13 @@ def build_verdict(ctx, findings, rate):
     control = r.get("waf_control_arm") or {}
     ramp = r.get("load_ramp") or {}
     conc = r.get("load_concurrency") or {}
+    chal = _challenge_signals(ctx)
 
-    if control.get("verdict") == "blocks_benign_traffic":
+    if chal["is_challenge_wall"]:
+        # Not "we could not tell": there is a bot-management challenge wall in front of everything,
+        # and that is a nameable, actionable posture of its own.
+        posture = "CHALLENGE_WALL"
+    elif control.get("verdict") == "blocks_benign_traffic":
         posture = "INCONCLUSIVE"
     elif matrix.get("verdict") == "enforcing" and ramp.get("verdict") == "rate_limited":
         posture = "DEFENDED"
@@ -263,6 +363,11 @@ def build_verdict(ctx, findings, rate):
         "safe_concurrency": conc.get("safe_concurrency"),
         "time_to_first_block": _first_block(ctx),
         "will_break": [{"tier": f["tier"], "title": f["title"]} for f in (p0 + p1)[:3]],
+        # Who is in front of the app, when a fingerprint named it. Null when nothing was identified,
+        # so a consumer can tell "no edge named" from "named as Cloudflare".
+        "edge": ({"vendors": chal["vendors"], "bot_manager": chal["product"],
+                  "markers": chal["bot_markers"], "is_challenge_wall": chal["is_challenge_wall"]}
+                 if (chal["vendors"] or chal["product"] or chal["bot_markers"]) else None),
         "counts": {
             "p0": len(p0), "p1": len(p1),
             "total": len(findings),
@@ -356,7 +461,21 @@ def build_recommendations(ctx, rate):
         rec("ffuf", "stopOnAll", False, "Same reason", CONF_MEASURED, finding="waf_enforcing")
 
     persona = r.get("waf_bot_persona") or {}
-    if persona.get("recommended_user_agent"):
+    chal = _challenge_signals(ctx)
+    if chal["is_challenge_wall"]:
+        # The persona test can suggest "set a browser UA", but on a fingerprint + JS challenge that
+        # is a dead end: a UA-only client is still challenged (measured: full Chrome headers over
+        # HTTP/2 still get the interstitial). Reporting the UA as a fix would send the operator down
+        # it, so it is withheld with the reason instead.
+        suppressed.append({
+            "field": "User-Agent / browser headers",
+            "reason": (_challenge_actor(chal) + " gates on the client TLS/JA3 + HTTP2 fingerprint "
+                       "and a JavaScript challenge, not the User-Agent. A browser header set alone "
+                       "will not get a scripted tool through. Drive a real browser (the manual-crawl "
+                       "extension or a headless Chrome that solves the challenge), or use a "
+                       "Chrome-fingerprint-impersonating client (e.g. curl-impersonate)."),
+        })
+    elif persona.get("recommended_user_agent"):
         rec("ffuf", "headers", [{"name": "User-Agent", "value": persona["recommended_user_agent"]}],
             "The target treats non-browser clients differently", CONF_MEASURED,
             restrictive=False)

@@ -272,12 +272,15 @@ func getHTTPInfo(domain, companyName string) (*HTTPInfo, bool) {
 		},
 	}
 
+	// GetFollowing, not client.Get: this client follows up to three hops, and net/http throws the
+	// whole response away when any hop carries a Location it cannot parse. Falling through to the
+	// http:// attempt on that error would report the host as HTTPS-less when it answered fine.
 	url := "https://" + domain
-	resp, err := client.Get(url)
+	resp, err := GetFollowing(client, url)
 	if err != nil {
 		// Try HTTP if HTTPS fails
 		url = "http://" + domain
-		resp, err = client.Get(url)
+		resp, err = GetFollowing(client, url)
 		if err != nil {
 			log.Printf("[WARN] Failed to get HTTP info for %s: %v", domain, err)
 			return nil, false

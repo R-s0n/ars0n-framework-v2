@@ -268,11 +268,20 @@ export function buildEndpointName(url, method, rawBody) {
 
 /* ------------------------------------------------------------------ bodies and headers */
 
+// Repeated header names keep every value, as an array. Last-wins used to be the rule here, and the
+// header that pays for it is Set-Cookie: a login response routinely sets several at once and the
+// session is rarely the last of them, so the one header a session-fixation or IDOR write-up needs
+// was the one guaranteed to be thrown away. A single-valued header is still a plain string, so
+// every reader that expects one keeps working.
 export function lowerHeaderMap(headerArray) {
   const map = {};
   (headerArray || []).forEach((header) => {
     if (!header || !header.name) return;
-    map[header.name.toLowerCase()] = header.value !== undefined ? header.value : (header.binaryValue || '');
+    const key = header.name.toLowerCase();
+    const value = header.value !== undefined ? header.value : (header.binaryValue || '');
+    if (map[key] === undefined) map[key] = value;
+    else if (Array.isArray(map[key])) map[key].push(value);
+    else map[key] = [map[key], value];
   });
   return map;
 }
@@ -280,10 +289,16 @@ export function lowerHeaderMap(headerArray) {
 export function headerValue(map, name) {
   if (!map) return '';
   const key = String(name).toLowerCase();
-  if (map[key] !== undefined) return map[key];
+  if (map[key] !== undefined) return flattenHeaderValue(map[key]);
   // Sources other than webRequest (CDP, the page hook) may not be pre-normalized.
   const found = Object.keys(map).find((k) => k.toLowerCase() === key);
-  return found ? map[found] : '';
+  return found ? flattenHeaderValue(map[found]) : '';
+}
+
+// Callers of headerValue want one string to test or to serialize. The stored map keeps the array.
+function flattenHeaderValue(value) {
+  if (Array.isArray(value)) return value.filter((item) => item !== undefined && item !== null).join(', ');
+  return value === undefined || value === null ? '' : value;
 }
 
 export function parseParams(rawBody, contentType) {
@@ -331,17 +346,49 @@ function looksLikeJSON(body) {
   return trimmed.startsWith('{') || trimmed.startsWith('[');
 }
 
-// Best-effort field extraction from a raw multipart body. Values are not reconstructed; the point
-// is knowing which fields exist, and which of them carry a file, so they can be targeted later.
-// The leading boundary in the pattern is what keeps `filename="..."` from being read as a second
-// field called "name".
+// Field extraction from a raw multipart body, VALUES INCLUDED.
+//
+// This used to record every field name against an empty string, on the grounds that knowing which
+// fields exist was the point. It is not: post_params is what attack-vector discovery and the
+// parameter tooling read, and a parameter with no baseline value cannot be fuzzed from, while a
+// password submitted through a multipart form was stored as "". The bytes were in post_data all
+// along, so nothing was unrecoverable, but the map that everything downstream reads was blank.
+//
+// A file part keeps its filename and the file's own content, when the capture source managed to
+// read it. The leading boundary in the name pattern is what keeps `filename="..."` from being read
+// as a second field called "name".
 export function parseMultipartBody(rawBody) {
-  const pattern = /(?:^|[;\s])name="([^"]+)"(?:;\s*filename="([^"]*)")?/g;
+  const text = String(rawBody);
   const result = {};
-  let match;
-  while ((match = pattern.exec(String(rawBody))) !== null) {
-    result[match[1]] = match[2] !== undefined ? `[file:${match[2]}]` : '';
-  }
+
+  // Parts are delimited by the boundary line, which always begins with "--" at the start of a line.
+  const boundaryMatch = text.match(/^--[^\r\n]+/);
+  if (!boundaryMatch) return null;
+  const boundary = boundaryMatch[0];
+
+  text.split(boundary).forEach((part) => {
+    const split = part.search(/\r?\n\r?\n/);
+    const headerBlock = split === -1 ? part : part.slice(0, split);
+    const nameMatch = /(?:^|[;\s])name="([^"]*)"/.exec(headerBlock);
+    if (!nameMatch) return;
+
+    const fileMatch = /;\s*filename="([^"]*)"/.exec(headerBlock);
+    let value = '';
+    if (split !== -1) {
+      value = part
+        .slice(split)
+        .replace(/^\r?\n\r?\n/, '')
+        .replace(/\r?\n--$/, '')
+        .replace(/\r?\n$/, '');
+    }
+
+    const stored = fileMatch ? { filename: fileMatch[1], content: value } : value;
+    const key = nameMatch[1];
+    if (result[key] === undefined) result[key] = stored;
+    else if (Array.isArray(result[key])) result[key].push(stored);
+    else result[key] = [result[key], stored];
+  });
+
   return Object.keys(result).length ? result : null;
 }
 
@@ -414,6 +461,32 @@ export function encodeFormBody(formData, contentType) {
 
 // Pulls out what chrome gave us WITHOUT deciding a wire format yet. Returns the structured form
 // when there is one, so the caller can encode it once the content type is in hand.
+// Marks a stored body that is base64 of the wire bytes rather than the bytes themselves. The page
+// hook and deep capture use the same spelling, so a reader never has to know which source produced
+// a given capture.
+export const BASE64_BODY_PREFIX = 'base64,';
+
+export function bytesToBase64(bytes) {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+// Turns wire bytes into something storable without losing any of them. A strict UTF-8 decode
+// either reproduces exactly what was sent or throws; on a throw the bytes are base64-encoded. The
+// old non-strict decode replaced every undecodable byte with U+FFFD, which is unrecoverable: a
+// binary upload came back as a field of replacement characters and the real bytes were gone.
+export function decodeBytesLossless(bytes) {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch (error) {
+    return BASE64_BODY_PREFIX + bytesToBase64(bytes);
+  }
+}
+
 export function extractWebRequestBody(requestBody) {
   const empty = { text: '', formData: null };
   if (!requestBody) return empty;
@@ -424,19 +497,29 @@ export function extractWebRequestBody(requestBody) {
 
   if (Array.isArray(requestBody.raw) && requestBody.raw.length > 0) {
     try {
-      const decoder = new TextDecoder('utf-8');
-      const text = requestBody.raw
-        .map((chunk) => {
-          if (!chunk) return '';
-          if (chunk.bytes) return decoder.decode(new Uint8Array(chunk.bytes));
-          // An uploaded file arrives as a PATH, never as bytes. Contributing nothing for it made
-          // the recorded body silently short with no sign a part was missing; naming it at least
-          // records that a file part was there.
-          if (chunk.file) return `[file:${chunk.file}]`;
-          return '';
-        })
-        .join('');
-      return { text, formData: null };
+      // Concatenated before decoding, not decoded chunk by chunk: chrome splits raw bodies at
+      // arbitrary byte offsets, so a multi-byte character straddling two chunks would otherwise
+      // decode as two broken ones.
+      const parts = [];
+      requestBody.raw.forEach((chunk) => {
+        if (!chunk) return;
+        if (chunk.bytes) {
+          parts.push(new Uint8Array(chunk.bytes));
+          return;
+        }
+        // An uploaded file arrives as a PATH, never as bytes. This is a chrome limitation, not a
+        // choice: webRequest does not carry the file's contents. The page hook reads the real
+        // bytes when the upload goes through fetch or XHR, and its record wins the merge.
+        if (chunk.file) parts.push(new TextEncoder().encode(`[file:${chunk.file}]`));
+      });
+
+      let total = 0;
+      parts.forEach((part) => { total += part.length; });
+      const joined = new Uint8Array(total);
+      let offset = 0;
+      parts.forEach((part) => { joined.set(part, offset); offset += part.length; });
+
+      return { text: decodeBytesLossless(joined), formData: null };
     } catch (error) {
       return empty;
     }
@@ -470,18 +553,67 @@ export function truncateBody(body, maxBytes) {
   return { body: text.slice(0, maxBytes), truncated: true };
 }
 
+// Only rendered media is skipped. application/octet-stream, pdf, zip, gzip and wasm used to be on
+// this list and they are exactly the content types an export endpoint answers with, so a report
+// that dumped another account's records came back with an empty body and no way to get it again.
+// The bytes of a non-UTF-8 payload still reach storage base64-encoded rather than not at all.
 const NON_TEXT_MIME_PREFIXES = ['image/', 'video/', 'audio/', 'font/'];
-const NON_TEXT_MIME_EXACT = [
-  'application/octet-stream', 'application/pdf', 'application/zip',
-  'application/gzip', 'application/wasm',
-];
+// SVG carries an image/ type but IS text, and an SVG is a place script hides, so it has to stay
+// greppable rather than becoming an opaque blob nobody can search.
+const TEXTUAL_MEDIA_MIMES = ['image/svg+xml', 'image/svg'];
 
 export function isTextualMime(mimeType) {
   const mime = String(mimeType || '').toLowerCase().split(';')[0].trim();
   if (!mime) return true;
+  if (TEXTUAL_MEDIA_MIMES.includes(mime)) return true;
   if (NON_TEXT_MIME_PREFIXES.some((prefix) => mime.startsWith(prefix))) return false;
-  if (NON_TEXT_MIME_EXACT.includes(mime)) return false;
   return true;
+}
+
+// Rendered media. These have no text form, which is why they were skipped; they are now stored as
+// bytes, content addressed, because an IDOR that returns another user's uploaded photo cannot be
+// proved from a capture table that threw the photo away.
+export function isMediaMime(mimeType) {
+  return !isTextualMime(mimeType);
+}
+
+// 2 MB of stored bytes per media object. Measured against a real 8,411-capture corpus: 161 of the
+// 163 distinct media objects in it fit under this, and the two that do not are videos. A capped
+// body is marked capped on its row, so it is never mistaken for a complete one.
+export const MEDIA_BODY_MAX_BYTES = 2 * 1024 * 1024;
+
+export function base64ToBytes(base64) {
+  const binary = atob(String(base64 || ''));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+// Packages media bytes for storage. `bytes` is the size ON THE WIRE, which stays on the record even
+// when the stored copy is a prefix, so a reader can see that a 40 MB video was kept as its first
+// 2 MB rather than being told it was 2 MB long.
+export function buildMediaBlob(bytes, mimeType, maxBytes) {
+  const cap = typeof maxBytes === 'number' && maxBytes > 0 ? maxBytes : MEDIA_BODY_MAX_BYTES;
+  const wireBytes = bytes.length;
+  const capped = wireBytes > cap;
+  const stored = capped ? bytes.subarray(0, cap) : bytes;
+  return {
+    bytes: wireBytes,
+    capped,
+    mimeType: String(mimeType || ''),
+    base64: bytesToBase64(stored),
+  };
+}
+
+// The digest of the bytes actually stored, which is both the dedupe key and the identity. Two
+// responses with the same digest are byte for byte the same response, which is how you show that
+// user B's endpoint returned user A's avatar. The framework recomputes it from what arrives, so a
+// wrong value here is caught rather than trusted.
+export async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 // Correlation key for merging records that describe the same HTTP request but arrive from

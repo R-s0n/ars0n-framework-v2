@@ -85,7 +85,11 @@ import (
 //	not_exploitable (scripting_disabled)        the engine refused $where in its own words
 //	cannot_determine(dollar_filtered)           a literal $ string is blocked, so nothing is testable
 //	cannot_determine(no_known_good_value)       a canary or synthesized value has no baseline to widen from
-//	cannot_determine(cardinality_unavailable)   the body has no array, so N-D3 has nothing to count
+//	cannot_determine(cardinality_unavailable)   the body has no array, so a row counter has nothing
+//	                                            to count. It is a per-ORACLE blindness, not a
+//	                                            per-arm one: it stops N-TYPE, which is row counts
+//	                                            and nothing else, and it only narrows an arm that
+//	                                            also owns a named-string oracle (see nosqlCleanOn)
 //	cannot_determine(probe_not_observed)        planned, and no observation came back
 //	cannot_determine(payload_not_on_the_wire)   the encoder dropped or altered the bytes
 //	cannot_determine(transport_failed)          the request never reached the application
@@ -718,7 +722,17 @@ func nosqlEligible(ctx triage.PlanCtx) nosqlEligibility {
 		e.stop, e.state = "prelude_failed ("+string(ctx.Prelude)+"): without the token every probe fails validation identically, which reads as a stable endpoint with no differential, which reads as clean", triage.StateCannotDetermine
 		return e
 	case ctx.Budget.Exhausted():
-		e.stop, e.state = "probe_budget_exhausted: the cap bit before this slot was reached and no NoSQL probe was sent", triage.StateNotRun
+		// THE SENTENCE HERE USED TO DATE THE CAP: "the cap bit before this slot was reached".
+		// nosqlEligible is asked by Plan AND by Classify, and only Classify turns the answer
+		// into a row, so the string is only ever read as a CLASSIFY-time verdict: a budget read
+		// after every probe on the slot has gone out, describing a decision taken before any of
+		// them did. pxbudgetarm.go has the measurement and the one sentence this arm may say.
+		//
+		// WHAT IS NOT FIXED HERE AND IS IN THE ROUND'S REPORT: this arm still sits ABOVE the
+		// route_control_unresolved check in Classify, so on a capped run a slot with no control
+		// is reported as a budget problem. Moving it is a change to a shared eligibility
+		// function and to an existing test's expectation, and this round did not own that file.
+		e.stop, e.state = pxBudgetArmReason("a NoSQL probe"), triage.StateNotRun
 		return e
 	}
 
@@ -759,8 +773,37 @@ func nosqlEligible(ctx triage.PlanCtx) nosqlEligibility {
 	return e
 }
 
+// nosqlRootSiblingPlaced reads the request that actually went out and reports whether operator
+// landed as a key at the ROOT of the body document, which is what placement=filter_root_sibling
+// asks the runner for.
+//
+// It answers with TWO booleans on purpose. known is false when there is nothing to read: no
+// recorded request body, or a body that is not a JSON object. An unrecorded request is not
+// evidence of a misplacement, and accusing the runner on an absence would be the same mistake in
+// the other direction as reading an absence as a clean.
+func nosqlRootSiblingPlaced(o triage.Observation, operator string) (placed, known bool) {
+	if len(o.ReqBody) == 0 {
+		return false, false
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(o.ReqBody, &doc); err != nil {
+		return false, false
+	}
+	_, ok := doc[operator]
+	return ok, true
+}
+
 // nosqlIsTopLevelMember reports whether an RFC 6901 pointer names a direct member of the document
 // root. Only there is a sibling key a member of the filter root.
+//
+// "/" IS A TOP-LEVEL MEMBER AND THAT IS NOT A BUG HERE. RFC 6901 gives the empty pointer the whole
+// document and gives "/" the member whose key is the empty string, so a sibling added next to it
+// is still at the root. Run a218419a produced eleven slots keyed body:/:node with field_path "/"
+// and an empty name, and every class that tried to write to one got
+// json_pointer_not_found: no member "" in the object at this pointer, 468 refusals across nine
+// classes, 27 of them this one. THAT IS THE SLOT DERIVATION, NOT THIS FUNCTION: the pointer is
+// the slot's, not the class's, and every class was handed the same one. Making "/" false here
+// would be wrong by the RFC and would hide a real filter root whose field really is named "".
 func nosqlIsTopLevelMember(ptr string) bool {
 	if ptr == "" || ptr == "/" {
 		return true
@@ -927,10 +970,26 @@ func nosqlRound2(e nosqlEligibility, key triage.SlotKey, ctx triage.PlanCtx) []t
 	}
 	// The string arms reach an object-capable slot too, and they test a different sink: an app
 	// can build a $where string out of the same parameter it also passes as an object.
+	//
+	// NSQ-J7 AND NSQ-E1 WERE MISSING FROM THIS LIST AND THEIR CONTROLS WERE NOT, which made two
+	// oracles structurally blind on every object-capable slot in the layer. MEASURED, canary
+	// oracle, the 80-route exam, triage_fidelity for the whole run: NSQ-J5, NSQ-J6 and NSQ-J8 have
+	// 79 rows each and NSQ-J7 has ZERO. NSQ-J8 is NSQ-J7's repair control, so seventy-nine
+	// requests went out carrying the control for a probe nobody sent. The cost is not the wasted
+	// requests: N-JS's TIER-1 oracle is NSQ-J7's computation, this run's marker glued to a product
+	// the server computed, and it is the only oracle in that arm that is attributable rather than
+	// a bare differential. Without it the arm owns nothing but a row count on an object-capable
+	// slot, which is why it reported zero cleans and 78 unknowns across 80 query slots. NSQ-E1,
+	// the Lucene boolean widening, was missing for the same reason next to NSQ-E2 and NSQ-E3.
+	//
+	// The argument in the sentence above is what settles it: if an app can build a $where string
+	// out of a parameter it also passes as an object, then J7 belongs here exactly as J5, J6 and
+	// J8 do, and there was never a reason for the three to travel without the fourth.
 	if e.value != "" {
 		out = append(out,
-			nosqlReq("NSQ-J5", key, e), nosqlReq("NSQ-J6", key, e), nosqlReq("NSQ-J8", key, e),
-			nosqlReq("NSQ-E2", key, e), nosqlReq("NSQ-E3", key, e))
+			nosqlReq("NSQ-J5", key, e), nosqlReq("NSQ-J6", key, e),
+			nosqlReq("NSQ-J7", key, e), nosqlReq("NSQ-J8", key, e),
+			nosqlReq("NSQ-E1", key, e), nosqlReq("NSQ-E2", key, e), nosqlReq("NSQ-E3", key, e))
 	}
 	return out
 }
@@ -960,6 +1019,36 @@ func nosqlReq(id triage.ProbeID, key triage.SlotKey, e nosqlEligibility) triage.
 	}
 	if off := nosqlMarkerOffset(id); off >= 0 {
 		v["marker_offset"] = strconv.Itoa(off)
+	} else {
+		// AN ABSENT KEY IS NOT AN INSTRUCTION, AND THIS IS WHAT THAT COST.
+		//
+		// The comment above says the absence of marker_offset means no marker may be spliced in.
+		// The runner does not read absence that way and never did: MarkerInline with no offset
+		// clamps the splice point to the end of the payload and appends triage.MarkerLen bytes
+		// there. Every bare probe in this class went out corrupted.
+		//
+		// MEASURED, run a218419a, 384 of this class's 965 fidelity rows:
+		//
+		//	NSQ-T3   107 refused  8123zqjfkqv000091umk
+		//	NSQ-F2    95 refused  {"$expr":{...56861]}}zqjfkqv00003p9hc
+		//	NSQ-F3    95 refused  {"$expr":{...56862]}}zqjfkqv00005hdxs
+		//	NSQ-OP0   87 refused  {"$eq":"0"}zqjfkqv0001dxm52
+		//
+		// all json_node_payload_is_not_valid_json, because 16 alphanumeric bytes glued to a JSON
+		// value stop it being one. Two of those four are the arms of this class's tier-1
+		// arithmetic oracle and one is the parse control four of the six arms depend on, so the
+		// run reported cannot_determine (probe_not_observed) where it should have concluded.
+		//
+		// The string arms failed the same way without being refused, which is worse because it
+		// looks like a measurement: NSQ-J5 is <v>' && 8123*7==56861 && 'a'=='a and the appended
+		// marker turns its final comparison into 'a'=='azqj..., which is false, so the TRUE arm of
+		// the $where differential could never be true. 86 delivered probes that could not fire.
+		//
+		// The runner already has the opt-out this needs and ELI grew it for exactly this reason
+		// after ELI-EL6 reported bare_expression_marker_attached. The spelling is the runner's,
+		// which is why it is a literal here: see triageVarMarkerPlacement in triageRun.go and
+		// eliVariantFor in eli.go, which spell it the same way.
+		v["marker_placement"] = "omitted"
 	}
 	// The four N-FILTER probes and the two $where node probes are SIBLINGS of the slot inside the
 	// filter document, not replacements for it. Named so the runner cannot get it wrong silently.
@@ -1349,9 +1438,24 @@ func (nosqlClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerdict {
 				"has measured nothing, and the fail-closed answer is an unknown", nil)
 	}
 	if len(seen) == 0 {
+		// THE CAUSE THIS USED TO NAME WAS THE ONE nosqlUsable HAS ALREADY RETRACTED. It said
+		// "this is a fact about the tool and not about the target" and pointed at
+		// triage_fidelity rows carrying survived=refused. Neither half is this class's to
+		// assert: zero observations is equally what a target that refuses every connection
+		// produces, and the operator's run 2n6f holds no survived=refused rows at all, so the
+		// encoder-refusal story it sent the reader after was refuted by measurement. The same
+		// sentence was corrected ten lines into nosqlUsable and left standing here, which is how
+		// one file ends up contradicting itself.
 		return nosqlAllArms(key, triage.StateCannotDetermine,
-			"probe_not_observed: probes were planned for this slot and not one observation came back, "+
-				"so nothing about this slot was measured", nil)
+			"probe_not_observed: probes were planned for this slot and not one observation came "+
+				"back to this class, so nothing about this slot was measured. THIS CLASS CANNOT SEE "+
+				"WHY FROM HERE: a request never issued, a per-slot cap, a payload the encoder "+
+				"refused and a target that refused every connection all arrive here as the same "+
+				"empty set, and the last of those is a fact about the target. THE QUERY THAT "+
+				"SEPARATES THEM: a triage_fidelity row for this slot means an ordinal was minted "+
+				"and the probe died after planning, and that row carries the reason; no row at all "+
+				"means no ordinal was ever minted and the request never reached the encoder. "+
+				"Nothing here is a measurement, and not a measurement is never a clean", nil)
 	}
 
 	ev := nosqlEvidenceSet{slot: ctx.Slot, el: el, seen: seen}
@@ -1421,6 +1525,24 @@ func nosqlDrifted(ctx triage.ClassifyCtx) bool {
 	return pre.Proj.NormBodySHA256 != [32]byte{} && pre.Proj.NormBodySHA256 != post.Proj.NormBodySHA256
 }
 
+// nosqlNotObservedContext reports what this class CAN see about a missing observation, which is
+// how many of its own probes did come back on this slot and which. One probe missing out of eleven
+// and eleven missing out of eleven are different failures with different next steps, and the
+// sentence that used to be here said the same thing for both.
+func nosqlNotObservedContext(ev nosqlEvidenceSet) string {
+	if len(ev.seen) == 0 {
+		return "NOT ONE of this class's own probes produced an observation on this slot, so this is " +
+			"the whole class and not this probe: whatever happened, it happened to all of them."
+	}
+	got := make([]string, 0, len(ev.seen))
+	for id := range ev.seen {
+		got = append(got, string(id))
+	}
+	sort.Strings(got)
+	return strconv.Itoa(len(got)) + " of this class's own probes DID come back on this slot (" +
+		strings.Join(got, ", ") + "), so the delivery path works here and this probe is the exception."
+}
+
 // nosqlControlState reads NSQ-NC1, which is the only probe whose answer changes every other row.
 func nosqlControlState(ev nosqlEvidenceSet) (blocked, junkSensitive bool) {
 	nc, ok := ev.seen["NSQ-NC1"]
@@ -1450,7 +1572,39 @@ func nosqlControlState(ev nosqlEvidenceSet) (blocked, junkSensitive bool) {
 func (ev nosqlEvidenceSet) usable(id triage.ProbeID) (nosqlSeen, string) {
 	s, ok := ev.seen[id]
 	if !ok {
-		return s, "probe_not_observed (" + string(id) + "): it was planned and no observation came back"
+		// WHOSE SILENCE IS IT. This class planned the probe and got nothing back, and whatever
+		// the cause is, it is not a measurement of the endpoint. Saying only "no observation
+		// came back" reads as a measurement of a quiet endpoint, and it is not a measurement at
+		// all.
+		//
+		// THE CAUSE THIS COMMENT USED TO STATE AS FACT HAS BEEN REFUTED, AND THE STRING BELOW
+		// ALREADY SAYS SO. It read: "on run a218419a every single one of these was the encoder
+		// refusing the probe before it left the process, 384 of them, recorded in
+		// triage_fidelity with survived=refused". The operator's run 2n6f holds ZERO rows with
+		// survived=refused: survival is only encoded or intact there, and the two total exactly
+		// probes_sent, so the probes behind these verdicts left NO FIDELITY ROW AT ALL. That is
+		// a different failure with a different fix, and the encoder is not known to be involved.
+		//
+		// THE COMMENT IS CARRIED HERE RATHER THAN DELETED because a future reader trusts the
+		// comment over the string beside it, and this pair was contradicting itself for a round.
+		// What separates the remaining candidates is the query the string names: a
+		// triage_fidelity row for this slot carrying this probe id means an ordinal was minted
+		// and the probe died after planning; no row means no ordinal was ever minted.
+		return s, "probe_not_observed (" + string(id) + "): this class planned it and the RUNNER " +
+			"returned no observation for it, so this is a fact about the tool and not about the " +
+			"target. " +
+			nosqlNotObservedContext(ev) + " THIS CLASS CANNOT SEE WHY FROM HERE, and the cause it " +
+			"used to name was refuted by the run that found it. It said the commonest cause is the " +
+			"encoder refusing the probe before it was sent, recorded against this ordinal in " +
+			"triage_fidelity with survived=refused; the operator's run 2n6f holds ZERO refused rows " +
+			"- survived is only encoded and intact, and the two total exactly probes_sent - so those " +
+			"probes left NO FIDELITY ROW AT ALL, which is a different failure with a different fix. " +
+			"WHAT SEPARATES THE CANDIDATES is one query, and it is worth running before anything " +
+			"else: a triage_fidelity row for this slot carrying this probe id means an ordinal WAS " +
+			"minted and the probe was refused or dropped after planning, and that row carries the " +
+			"reason; no row at all means no ordinal was ever minted, so the request never reached " +
+			"the encoder and the question is why this class's planned request was not issued. " +
+			"Nothing here is a measurement, and not a measurement is never a clean"
 	}
 	if !s.obs.Delivered() {
 		return s, "transport_failed (" + string(id) + ", " + string(s.obs.TransportErr) +
@@ -1582,16 +1736,18 @@ func nosqlArmOPVerdict(ev nosqlEvidenceSet) triage.ClassVerdict {
 		}
 	}
 
-	if !nosqlHaveCards(ev) {
-		return nosqlCD(v, "cardinality_unavailable: the parse control proved the object reaches the "+
-			"query, so this arm IS applicable, but the response carries no JSON array for the widening "+
-			"oracle to count. N-D3 counts rows and never body length, so with no rows to count there "+
-			"is no measurement. This is the one place where being applicable and being undecidable "+
-			"meet, and it is not a clean")
-	}
-	return nosqlClean(ev, v, "the parse control proved the object reaches the query, the operator "+
-		"probes ran and reached the wire, no named engine phrase appeared that was absent from the "+
-		"baseline, and no array in the response grew")
+	return nosqlCleanOn(ev, v, []nosqlCleanClaim{
+		// The named half read NSQ-OP1, which ev.usable proved delivered at the top of this arm.
+		{Kind: nosqlOracleNamed, Ready: true,
+			Claim: "no named engine phrase appeared that was absent from the baseline"},
+		// The row-count half reads the widening probes, and nosqlWideningVerdict skips any that
+		// were not delivered with their survival proven. With none of them in hand there is no
+		// widening oracle here to have stayed silent.
+		{Kind: nosqlOracleCount, Ready: nosqlAnyWidening(ev, "NSQ-OP2", "NSQ-OP3"),
+			Reads: []triage.ProbeID{"NSQ-OP2", "NSQ-OP3"},
+			Claim: "no array in the response grew"},
+	}, "the parse control proved the object reaches the query and the operator probes ran and "+
+		"reached the wire")
 }
 
 // nosqlArmFilterVerdict is an operator at the filter ROOT, and it carries the strongest oracle.
@@ -1620,71 +1776,157 @@ func nosqlArmFilterVerdict(ev nosqlEvidenceSet) triage.ClassVerdict {
 	}
 	v.Ordinals = []uint64{f2.ordinal, f3.ordinal}
 
-	c2 := nosqlCompareCards(ev.baseCard, nosqlCards(f2.obs))
-	c3 := nosqlCompareCards(ev.baseCard, nosqlCards(f3.obs))
-
-	switch {
-	case c2 == nosqlCardsUnavailable || c3 == nosqlCardsUnavailable:
-		// Fall through to the error-shaped oracles below; the computation cannot be read.
-	case c2 == nosqlCardsWider && (c3 == nosqlCardsNarrower || c3 == nosqlCardsSame):
-		v.State = triage.StateFinding
-		v.Grade = triage.GradeHigh
-		v.Oracle = "computation"
-		v.Reason = "expr_arithmetic: the server evaluated $multiply(8123,7) and compared it with " +
-			"56861, which is true of every document, and the result set widened; the 56862 twin, " +
-			"which is true of none, did not. That is a computation the server performed, not a " +
-			"difference we interpreted, and it is VERIFIED to work with server-side scripting " +
-			"disabled. The whole request body reaches the query as a filter. Point sqlmap's NoSQL " +
-			"arm, or a manual session, at this endpoint"
-		v.Label = nosqlLabel("mongodb", nosqlArmFilter)
-		return v
-	case c2 == c3 && c2 != nosqlCardsSame:
-		v.State = triage.StateSuspicious
-		v.Grade = triage.GradeLow
-		v.Oracle = "computation"
-		v.Reason = "expr_pair_moved_together (" + string(c2) + "): both arms of the arithmetic pair " +
-			"changed the result set in the same direction, which arithmetic cannot do. Something " +
-			"other than the computation moved the response, most likely the extra key being rejected " +
-			"or ignored, so the pair proves nothing on its own"
-		return v
+	// DID THE PROBE GO WHERE THIS ARM AIMED IT. nosqlReq marks these four
+	// placement=filter_root_sibling, which asks the runner to add the operator as a SIBLING of the
+	// slot inside the filter document. A runner that instead replaces the slot's own node sends
+	// {"name":{"$expr":{...}}}, a field-level $expr, which is not a thing in any engine and which
+	// every one of them rejects identically for both arms. That reads as object_not_parsed, which
+	// is a sentence about the target, when the truth is that the tool put the key in the wrong
+	// place. The request body is recorded on the observation, so this arm can check rather than
+	// assume, and says so when it cannot.
+	if placed, known := nosqlRootSiblingPlaced(f2.obs, "$expr"); known && !placed {
+		return nosqlCD(v, "filter_root_placement_not_made (NSQ-F2): this arm asked the runner for "+
+			"placement=filter_root_sibling and the request that went out carries no $expr key at the "+
+			"root of the body document. The probe was aimed at the filter root and did not land "+
+			"there, so nothing was tested here and the answer is about the RUNNER, not about this "+
+			"endpoint")
 	}
 
-	// The marker-bearing root probes.
+	c2 := nosqlCompareCards(ev.baseCard, nosqlCards(f2.obs))
+	c3 := nosqlCompareCards(ev.baseCard, nosqlCards(f3.obs))
+	paired := nosqlExprPairVerdict(v, c2, c3)
+	if paired.State == triage.StateFinding {
+		return paired
+	}
+
+	// The marker-bearing root probes. They are consulted BEFORE the pair's own inconclusive answer
+	// is returned, because an engine naming this run's marker as a top-level operator is a
+	// stronger reading than any row count and it must not be shadowed by a pair that did not
+	// separate.
 	for _, id := range []triage.ProbeID{"NSQ-F1", "NSQ-F4"} {
-		s, ok := ev.seen[id]
-		if !ok || !s.obs.Delivered() {
+		sn, ok := ev.seen[id]
+		if !ok || !sn.obs.Delivered() {
 			continue
 		}
-		v.Ordinals = append(v.Ordinals, s.ordinal)
-		if h, found := nosqlFindPhrase(s.obs.Body, nosqlBaseBody(ev), s.marker, nosqlEnginePhrases); found && h.MarkerNear {
+		v.Ordinals = append(v.Ordinals, sn.ordinal)
+		paired.Ordinals = v.Ordinals
+		if h, found := nosqlFindPhrase(sn.obs.Body, nosqlBaseBody(ev), sn.marker, nosqlEnginePhrases); found && h.MarkerNear {
 			v.State = triage.StateFinding
 			v.Grade = triage.GradeHigh
 			v.Oracle = "parser_error"
-			v.Reason = "root_operator_rejected (" + h.Phrase.Name + ", " + h.Phrase.Engine + ", " +
+			v.Reason = nosqlArmOf(v) + ": root_operator_rejected (" + h.Phrase.Name + ", " + h.Phrase.Engine + ", " +
 				string(id) + "): the engine named an operator that is this run's marker, at the filter " +
 				"root. 'unknown top level operator' is a different sentence from 'unknown operator' " +
 				"and it says the whole document reaches the query, which is the more serious of the two"
-			v.Evidence = nosqlEv(s, h)
+			v.Evidence = nosqlEv(sn, h)
 			v.Label = nosqlLabel(h.Phrase.Engine, nosqlArmFilter)
 			return v
 		}
 	}
 
-	if c2 == nosqlCardsUnavailable || c3 == nosqlCardsUnavailable {
-		return nosqlCD(v, "cardinality_unavailable: the $expr pair was sent and came back, and the "+
-			"response carries no JSON array whose length the widening oracle could count. The "+
-			"arithmetic may well have run; nothing in the response can tell us. N-D3 counts rows and "+
-			"never body length, and a body-length oracle here would have graded a longer error string "+
-			"as a widened result set")
-	}
-	if c2 == nosqlCardsSame && c3 == nosqlCardsSame {
+	return paired
+}
+
+// nosqlExprPairVerdict reads the two cardinalities the $expr pair produced. It is TOTAL over every
+// combination of the two readings, and CLEAN IS NOT ONE OF THE ANSWERS IT CAN GIVE.
+//
+// THE DEFECT THIS REPLACES, and it is the worst kind this system can produce. The old code asked
+// for the TRUE arm to WIDEN before it would call anything a finding, then let every combination it
+// had not named fall out of the bottom of the function into a clean whose sentence read "the true
+// arm did not widen while the false arm did not narrow". The four N-FILTER probes are SIBLINGS of
+// the slot inside the filter document, which nosqlReq says in as many words and marks with
+// placement=filter_root_sibling. Sibling keys at a filter root are ANDed. AN AND CAN NEVER WIDEN.
+// So the finding branch was structurally unreachable for the only placement this arm has, and the
+// exact shape a working $expr produces landed in the clean.
+//
+// MEASURED against the oracle's own declared positive route for this arm, POST /nosqli/noscripting:
+//
+//	{"name":"hello"}                                              count 1   baseline
+//	{"name":"hello","$expr":{"$eq":[{"$multiply":[8123,7]},56861]}} count 1   true arm, SAME
+//	{"name":"hello","$expr":{"$eq":[{"$multiply":[8123,7]},56862]}} count 0   false arm, NARROWER
+//
+// same-then-narrower, which the old code called clean.
+//
+// WHAT MAKES THE SEPARATION PROOF. F2 and F3 differ by ONE BYTE, 56861 against 56862. Nothing that
+// rejects, ignores, strips or sanitises an extra root key can tell them apart, so a rejection can
+// only move both arms together. A pair that SEPARATES, with the false arm losing rows the true arm
+// kept, can only have separated because the server evaluated $multiply(8123,7) and compared it.
+// That is a computation the server performed, not a difference we interpreted.
+//
+// WHY THERE IS NO CLEAN HERE AND WHY THAT IS NOT A GAP. Under a sibling placement there are three
+// outcomes and none of them is clean: the key is evaluated (the pair separates, finding), the key
+// is accepted and ignored (both arms are the baseline, which is object_not_parsed and
+// not_applicable, because the probe never reached where it was aimed), or the key is refused (an
+// error envelope, which shows up as a shape change or as no countable rows at all). An arm whose
+// probe cannot reach its sink has not found the sink absent.
+func nosqlExprPairVerdict(v triage.ClassVerdict, c2, c3 nosqlCardVerdict) triage.ClassVerdict {
+	both := "(true arm " + string(c2) + ", false arm " + string(c3) + ")"
+
+	switch {
+	case c3 == nosqlCardsNarrower && (c2 == nosqlCardsSame || c2 == nosqlCardsWider):
+		// THE FINDING. Both placements land here: a sibling key is ANDed so the always-true arm
+		// holds the baseline steady, and a sink that takes the whole document as its filter widens
+		// instead. Either way the false twin took rows away and the true twin did not.
+		v.State = triage.StateFinding
+		v.Grade = triage.GradeHigh
+		v.Oracle = "computation"
+		held := "held the result set at the baseline, which is what an always-true predicate ANDed " +
+			"into the filter root does"
+		if c2 == nosqlCardsWider {
+			held = "widened the result set, which is what an always-true predicate does when the " +
+				"whole document is taken as the filter"
+		}
+		v.Reason = nosqlArmOf(v) + ": expr_arithmetic " + both + ": the server evaluated $multiply(8123,7) and " +
+			"compared it with 56861, which is true of every document, and that arm " + held +
+			"; the 56862 twin, which is true of no document, took rows away. The two payloads " +
+			"differ by ONE BYTE, so nothing that rejects, ignores or strips an extra root key can " +
+			"separate them, and a separation is therefore a computation the server performed and " +
+			"not a difference we interpreted. VERIFIED to work with server-side scripting " +
+			"disabled. The whole request body reaches the query as a filter. Point sqlmap's NoSQL " +
+			"arm, or a manual session, at this endpoint"
+		v.Label = nosqlLabel("mongodb", nosqlArmFilter)
+		return v
+
+	case c2 == nosqlCardsSame && c3 == nosqlCardsSame:
 		return nosqlNA(v, "object_not_parsed: both arms of the arithmetic pair returned exactly the "+
 			"baseline result set, so the extra root key was dropped or ignored before the query was "+
 			"built and the filter root is not reachable from this body. Not clean: the probe never "+
 			"got to where it was aimed")
+
+	case c2 == c3:
+		v.State = triage.StateSuspicious
+		v.Grade = triage.GradeLow
+		v.Oracle = "computation"
+		v.Reason = nosqlArmOf(v) + ": expr_pair_moved_together (" + string(c2) + "): both arms of the arithmetic pair " +
+			"changed the result set in the same direction, which arithmetic cannot do, because the " +
+			"two payloads differ by one byte and are true and false respectively. So something other " +
+			"than the computation moved the response and the pair proves nothing on its own. WHICH " +
+			"something is not visible from here: an extra root key rejected, an extra root key " +
+			"ignored but changing the serialised request enough to change a cache key, and a route " +
+			"that is simply unstable all produce this, and naming one would be an invention"
+		return v
+
+	case c2 == nosqlCardsShapeChanged || c3 == nosqlCardsShapeChanged:
+		v.State = triage.StateSuspicious
+		v.Grade = triage.GradeLow
+		v.Oracle = "differential"
+		v.Reason = nosqlArmOf(v) + ": expr_pair_shape_diverged " + both + ": one arm came back as a different document " +
+			"from the baseline and the other did not, off a one-byte difference in the payload. The " +
+			"row oracle cannot read two documents that share no array pointer, so the computation " +
+			"was not measured, but a one-byte differential is not nothing and this endpoint is worth " +
+			"a manual look"
+		return v
 	}
-	return nosqlClean(ev, v, "the $expr pair ran, reached the wire and came back, the true arm did "+
-		"not widen while the false arm did not narrow, and no engine named a root operator")
+
+	// EVERY REMAINING COMBINATION, AND IT IS A cannot_determine RATHER THAN A FALL-THROUGH.
+	// True-wider-false-same, true-narrower-anything, either arm mixed: arithmetic cannot produce
+	// any of them, so something other than the computation moved this endpoint and the computation
+	// was not measured. That is not knowing, and not knowing is not clean. The old code reached
+	// its clean through exactly this gap.
+	return nosqlCD(v, "expr_pair_unexplained "+both+": the arithmetic pair moved in a way the "+
+		"arithmetic cannot account for. An always-true predicate cannot take rows away and an "+
+		"always-false one cannot add them, so the movement came from something other than the "+
+		"computation and the computation itself was not measured here")
 }
 
 // nosqlArmJSVerdict is $where, as a node and through string concatenation.
@@ -1803,9 +2045,16 @@ func nosqlArmJSVerdict(ev nosqlEvidenceSet) triage.ClassVerdict {
 		}
 		return nosqlCD(v, "probe_not_observed: no N-JS probe produced an observation for this slot")
 	}
-	return nosqlClean(ev, v, "the $where probes ran, reached the wire and came back, no marker was "+
-		"returned glued to this class's product, no interpreter named this run's marker, and the "+
-		"concatenated true and false arms produced the same result set")
+	return nosqlCleanOn(ev, v, []nosqlCleanClaim{
+		// The computation and ReferenceError oracles read NSQ-J3, NSQ-J7 and NSQ-J4.
+		{Kind: nosqlOracleNamed, Ready: nosqlAnyDelivered(ev, "NSQ-J3", "NSQ-J7", "NSQ-J4"),
+			Reads: []triage.ProbeID{"NSQ-J3", "NSQ-J7", "NSQ-J4"},
+			Claim: "no marker was returned glued to this class's product and no interpreter named this run's marker"},
+		// The concatenation differential is a PAIR and one arm of it is not a differential.
+		{Kind: nosqlOracleCount, Ready: nosqlAllDelivered(ev, "NSQ-J5", "NSQ-J6"),
+			Reads: []triage.ProbeID{"NSQ-J5", "NSQ-J6"},
+			Claim: "the concatenated true and false arms produced the same result set"},
+	}, "the $where probes ran, reached the wire and came back")
 }
 
 // nosqlArmTypeVerdict is type confusion, the arm with no dollar in it anywhere.
@@ -1873,17 +2122,40 @@ func nosqlArmTypeVerdict(ev nosqlEvidenceSet) triage.ClassVerdict {
 	c2 := nosqlCompareCards(ev.baseCard, nosqlCards(t2.obs))
 	switch {
 	case c1 == nosqlCardsUnavailable || c2 == nosqlCardsUnavailable:
-		return nosqlCD(v, "cardinality_unavailable: the array pair ran and the response carries no "+
-			"JSON array to count. This arm is entirely a row-count oracle, so there is no fallback")
+		// THE SENTENCE USED TO PREDICT THE FUTURE AND QUOTE ANOTHER RUN'S TOTALS. It said the
+		// precondition is "UNMEETABLE ON THIS ENDPOINT SHAPE", that "no amount of further probing
+		// by this class will meet it", that this is "a permanent property of the pairing", and
+		// then gave 69 of 80 query slots from the canary exam. What this witness measured is
+		// narrower than any of that: TWO responses on THIS slot carried no countable JSON array.
+		// An endpoint that returns an array only when a query matches rows answers exactly like
+		// this and is not permanently uncountable, and a count from a different corpus is not
+		// evidence about this slot at all.
+		return nosqlCD(v, "cardinality_unavailable: the array pair ran, reached the wire and came "+
+			"back, and NEITHER of the two responses carries a JSON array to count. THIS ARM IS A "+
+			"ROW COUNT AND NOTHING ELSE - the $in rewrite it looks for is invisible except as extra "+
+			"rows - so unlike every other arm in this class it has no named-string half to fall "+
+			"back on, and with nothing to count on either side the comparison was never made. THIS "+
+			"CLASS DID NOT MEASURE WHETHER THE ENDPOINT CAN EVER RETURN A COUNTABLE ARRAY: it read "+
+			"these two responses and no others, and a route that returns an array only when a "+
+			"query matches rows looks identical from here. The honest answer is this unknown "+
+			"rather than a clean, and what would settle it is a value known to match")
 	case c1 == nosqlCardsSame && c2 == nosqlCardsWider:
 		v.State = triage.StateFinding
 		v.Grade = triage.GradeHigh
 		v.Oracle = "widening"
+		// "VERIFIED as the Mongoose signature" READ AS A CLAIM ABOUT THE TARGET'S STACK, and this
+		// witness measured two row counts. Mongoose's array-to-$in rewrite is documented and is
+		// what this row points a tool at; it is not the only thing that can turn an array into a
+		// set-membership test, and nothing here identified the ORM. The behaviour is named, the
+		// product is offered as the likeliest source, and the label already carries the pointer.
 		v.Reason = "array_rewritten_to_in: the one-element array holding the served value reproduced " +
-			"the baseline exactly and the two-element array returned MORE rows. VERIFIED as the " +
-			"Mongoose signature: it silently rewrites an array value into $in and casts the elements " +
-			"to the schema type. There is no dollar anywhere in this request, so no validator, no WAF " +
-			"and no $-stripping sanitiser can account for it"
+			"the baseline exactly and the two-element array returned MORE rows, so the array was not " +
+			"matched as a value, it was expanded into a SET MEMBERSHIP TEST and this parameter chooses " +
+			"which rows come back. THE PAYLOADS THIS ARM SENDS CONTAIN NO DOLLAR ANYWHERE, so no " +
+			"validator, no WAF and no $-stripping sanitiser accounts for the extra rows: none of them " +
+			"can ADD rows. WHAT IS NOT IDENTIFIED HERE: the stack. Mongoose is the documented source of " +
+			"this exact shape, silently rewriting an array value into $in and casting the elements to " +
+			"the schema type, and it is what the label points at, but two row counts do not name an ORM"
 		v.Label = nosqlLabel("mongoose", nosqlArmType)
 		return v
 	case c1 == nosqlCardsNarrower && c2 == nosqlCardsNarrower:
@@ -1897,8 +2169,12 @@ func nosqlArmTypeVerdict(ev nosqlEvidenceSet) triage.ClassVerdict {
 		v.Label = nosqlLabel("mongodb", nosqlArmType)
 		return v
 	}
-	return nosqlClean(ev, v, "the array pair and the benign-type controls ran, reached the wire and "+
-		"came back, no ODM cast error named this probe, and no array in the response grew")
+	return nosqlCleanOn(ev, v, []nosqlCleanClaim{
+		// NSQ-T1 and NSQ-T2 were both proven usable above, and the cardinality switch above this
+		// line already refused every unavailable reading, so the pair was compared.
+		{Kind: nosqlOracleCount, Ready: true, Claim: "no array in the response grew"},
+	}, "the array pair and the benign-type controls ran, reached the wire and came back, and no ODM "+
+		"cast error named this probe")
 }
 
 // nosqlArmCouchVerdict is Mango.
@@ -1954,8 +2230,12 @@ func nosqlArmCouchVerdict(ev nosqlEvidenceSet) triage.ClassVerdict {
 		return nosqlNA(v, "object_not_parsed: the parse control did not reproduce the baseline, so "+
 			"no object reached any query engine here and a silent Mango arm means nothing")
 	}
-	return nosqlClean(ev, v, "the Mango probes ran, reached the wire and came back, no CouchDB error "+
-		"named this run's marker, and the erlang_binary transform found nothing")
+	return nosqlCleanOn(ev, v, []nosqlCleanClaim{
+		// NSQ-C2 was proven usable above; NSQ-C4 carries the erlang_binary half and is optional,
+		// so the phrase search alone makes this oracle answerable.
+		{Kind: nosqlOracleNamed, Ready: true,
+			Claim: "no CouchDB error named this run's marker and the erlang_binary transform found nothing"},
+	}, "the Mango probes ran, reached the wire and came back")
 }
 
 // nosqlArmESVerdict is Lucene and the Elasticsearch DSL.
@@ -2045,9 +2325,17 @@ func nosqlArmESVerdict(ev nosqlEvidenceSet) triage.ClassVerdict {
 			"control did not, so there is nothing to show that a silent NSQ-E2 means the quote was "+
 			"handled rather than that the whole value was discarded")
 	}
-	return nosqlClean(ev, v, "the Lucene break, its repair control and the DSL clause probe ran, "+
-		"reached the wire and came back, and no Elasticsearch error phrase appeared that was absent "+
-		"from the baseline")
+	return nosqlCleanOn(ev, v, []nosqlCleanClaim{
+		// NSQ-E2 was proven usable above and NSQ-E3, its repair control, was checked before this
+		// line, so the phrase search ran with its detector verified.
+		{Kind: nosqlOracleNamed, Ready: true,
+			Claim: "no Elasticsearch error phrase appeared that was absent from the baseline"},
+		// The boolean widening is NSQ-E1 and nothing else.
+		{Kind: nosqlOracleCount, Ready: nosqlAnyDelivered(ev, "NSQ-E1"),
+			Reads: []triage.ProbeID{"NSQ-E1"},
+			Claim: "the boolean-widening probe did not widen the result set"},
+	}, "the Lucene break, its repair control and the DSL clause probe ran, reached the wire and "+
+		"came back")
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -2074,43 +2362,280 @@ func nosqlCD(v triage.ClassVerdict, reason string) triage.ClassVerdict {
 	return v
 }
 
-// nosqlClean is the ONLY way this class emits clean, and it re-checks the preconditions rather
-// than trusting the caller to have done it.
+// nosqlOracleKind names what an arm's clean actually rests on, because the preconditions are
+// different and the shipped gate applied one set to both.
+type nosqlOracleKind string
+
+const (
+	// nosqlOracleNamed is a search for a STRING: an engine phrase absent from the baseline, or
+	// this run's marker, or this run's marker glued to a product the server computed.
+	nosqlOracleNamed nosqlOracleKind = "named_string"
+	// nosqlOracleCount is a ROW COUNT: nosqlCards over a JSON array in the response.
+	nosqlOracleCount nosqlOracleKind = "row_count"
+)
+
+// nosqlCleanClaim is one thing an arm's clean asserts, paired with the kind of oracle that
+// asserts it, so the reason can report exactly the half that was judged.
 //
-// A clean here means: my own probes were planned, they reached the wire, they came back, the
-// controls held and my own oracle stayed silent. Anything less is an unknown with a reason. Every
-// precondition below has its own reason string, because "not clean" is useless to an operator who
-// cannot see which of six things went wrong.
-func nosqlClean(ev nosqlEvidenceSet, v triage.ClassVerdict, why string) triage.ClassVerdict {
-	switch {
-	case len(v.Ordinals) == 0:
-		return nosqlCD(v, "no_probe_ordinals: this arm reached its clean branch with no probe to "+
-			"point at, which would be a clean asserting a measurement that never happened")
-	case !ev.haveBase:
-		return nosqlCD(v, "route_control_unresolved: every negative in this class rests on comparing "+
-			"with an unperturbed response, and there is none")
-	case ev.degraded:
-		return nosqlCD(v, "baseline_degraded: the comparison model is degraded or the endpoint failed "+
-			"the stability gate, so a quiet oracle here cannot be distinguished from an endpoint that "+
-			"is quiet about everything")
-	case ev.junkSensitive:
-		return nosqlCD(v, "junk_sensitive: NSQ-NC1 sent a harmless string and the response moved, so "+
-			"this endpoint answers differently for any unmatched value and its silence on my probes "+
-			"carries no information")
+// Ready IS NOT OPTIONAL AND IT DEFAULTS TO FALSE ON PURPOSE. An oracle's blindness is not only a
+// property of the endpoint; it is also a property of whether the probes that oracle reads ACTUALLY
+// CAME BACK. N-JS's row-count claim reads NSQ-J5 against NSQ-J6, N-ES's reads NSQ-E1, N-OP's reads
+// NSQ-OP2 and NSQ-OP3, and every one of those branches is entered only when the probes are in
+// hand. Without this field a clean would carry the sentence "the concatenated true and false arms
+// produced the same result set" on a slot where neither arm came back, which is a measurement
+// asserted out of two missing responses. A zero value that reads "not ready" means a claim added
+// later and left unwired is reported as blind rather than silently believed.
+type nosqlCleanClaim struct {
+	Kind  nosqlOracleKind
+	Claim string
+	// Ready is whether the probes THIS claim reads were delivered. The arm knows; nosqlCleanOn
+	// does not.
+	Ready bool
+	// Reads names those probes, so a NOT-ready row can say which response was missing and what
+	// this class saw of it instead of naming a component it never measured.
+	//
+	// IT IS OPTIONAL AND ITS ABSENCE IS REPORTED. Three of the declared claims are Ready:true by
+	// construction, on probes the arm already proved usable, and they never reach the row that
+	// reads this. A claim that is not ready and names nothing says exactly that.
+	Reads []triage.ProbeID
+}
+
+// nosqlCleanOn is the ONLY way this class emits clean. An arm declares the oracles its clean
+// actually rests on and this decides, per oracle, whether that oracle was in a position to see
+// anything. A clean then says which oracles were watched staying silent and which were not.
+//
+// WHY IT IS PER ORACLE, AND WHY THIS CLASS COULD NEVER SAY CLEAN WITHOUT IT. The shipped gate had
+// one precondition set and applied it to every arm, so a blind ROW COUNTER took the whole arm down
+// with it. MEASURED, canary oracle, the 80-route exam, per arm over 80 query slots:
+//
+//	N-TYPE   79 cannot_determine   69 of them cardinality_unavailable
+//	N-ES     78 cannot_determine   38 junk_sensitive, 30 value_insensitive
+//	N-JS     78 cannot_determine   38 junk_sensitive, 30 value_insensitive
+//	N-COUCH  39 cannot_determine    5 junk_sensitive, 30 value_insensitive
+//	N-OP     39 cannot_determine   35 cardinality_unavailable
+//
+// ZERO cleans in the whole class, on any arm, on any of 80 routes. Two of those three reasons are
+// facts about ROW COUNTING and were being charged to arms that do not count rows: N-COUCH cleans
+// on a CouchDB phrase and this class's own erlang_binary marker transform, N-ES on an
+// Elasticsearch parse error absent from the baseline, and N-JS's tier-1 oracle on this run's
+// marker glued to a product the server computed. A harmless control moving the response cannot
+// put any of those strings into it.
+//
+// THE TWO KINDS HAVE OPPOSITE PRECONDITIONS AND THAT IS THE WHOLE POINT. A row-count differential
+// needs an endpoint that is STABLE against junk and varies with semantics. A named-string oracle
+// needs an endpoint that can SHOW SOMETHING about the slot at all, and an endpoint that moves for
+// junk has just proved it can. Treating "the response moved" as a defeat for both was backwards
+// for one of them.
+//
+// value_insensitive is the one blindness that IS shared, and it stays a hard stop below.
+func nosqlCleanOn(ev nosqlEvidenceSet, v triage.ClassVerdict, claims []nosqlCleanClaim, why string) triage.ClassVerdict {
+	if bad := nosqlCleanHardPreconditions(ev, v); bad != nil {
+		return *bad
 	}
-	if n, moved := nosqlDifferentialSurface(ev); !moved && n >= nosqlMinDifferentialProbes {
-		return nosqlCD(v, "value_insensitive: all "+strconv.Itoa(n)+" of this class's own delivered "+
-			"probes came back indistinguishable from the unperturbed route control, and those probes "+
-			"differ from each other by an operator object, a $where string, a Mango selector and a "+
-			"Lucene break. An endpoint that answers identically to all of them is not answering about "+
-			"this slot at all, so no differential was available, and every oracle in this class is a "+
-			"differential. A silent oracle here means the endpoint showed me nothing, not that the "+
-			"operator was rejected: an injection reaching a query whose result is never rendered "+
-			"produces exactly this shape")
+	if len(claims) == 0 {
+		return nosqlCD(v, "no_oracle_declared: this arm reached its clean branch without naming a "+
+			"single oracle its clean rests on, so there is nothing to have watched staying silent")
+	}
+	var judged []string
+	var blind []string
+	for _, c := range claims {
+		if !c.Ready {
+			blind = append(blind, string(c.Kind)+" ["+nosqlClaimNotReady(ev, c)+"]")
+			continue
+		}
+		if bw := nosqlOracleBlind(ev, c.Kind); bw != "" {
+			blind = append(blind, string(c.Kind)+" ["+bw+"]")
+			continue
+		}
+		judged = append(judged, c.Claim)
+	}
+	if len(judged) == 0 {
+		return nosqlCD(v, "no_oracle_was_judgeable: every oracle this arm's clean rests on was blind "+
+			"on this endpoint - "+strings.Join(blind, "; ")+" - so the arm ran and measured nothing. "+
+			"A silent oracle that could not have spoken is not a negative")
 	}
 	v.State, v.Grade, v.Oracle = triage.StateClean, triage.GradeUnrated, "silent"
-	v.Reason = nosqlArmOf(v) + ": clean. " + why
+	v.Reason = nosqlArmOf(v) + ": clean. " + why + ", and " + strings.Join(judged, ", ")
+	if len(blind) > 0 {
+		if v.Annotations == nil {
+			v.Annotations = map[string]any{}
+		}
+		v.Annotations["oracles_not_judged"] = blind
+		v.Reason += ". NARROWER THAN IT LOOKS: this clean covers the oracles just named and NOT " +
+			strings.Join(blind, "; ") + ", which could not be judged on this endpoint, so it is a " +
+			"clean about the oracles that ran and not about this arm as a whole"
+	}
 	return v
+}
+
+// nosqlAnyDelivered and nosqlAllDelivered are how an arm states, from its own responses, whether
+// the probes one of its oracles reads actually came back. Any is for an oracle that reads each
+// probe independently; All is for a PAIR, where one arm without the other is not a differential.
+func nosqlAnyDelivered(ev nosqlEvidenceSet, ids ...triage.ProbeID) bool {
+	for _, id := range ids {
+		if s, ok := ev.seen[id]; ok && s.obs.Delivered() {
+			return true
+		}
+	}
+	return false
+}
+
+// nosqlAnyWidening mirrors nosqlWideningVerdict's OWN filter exactly, survival check included. A
+// probe the widening oracle skips is a probe that oracle did not read, and Ready has to be the
+// same predicate the oracle uses or the clean claims a comparison the oracle declined to make.
+func nosqlAnyWidening(ev nosqlEvidenceSet, ids ...triage.ProbeID) bool {
+	for _, id := range ids {
+		if s, ok := ev.seen[id]; ok && s.obs.Delivered() && s.obs.Payload.Survived.Proven() {
+			return true
+		}
+	}
+	return false
+}
+
+func nosqlAllDelivered(ev nosqlEvidenceSet, ids ...triage.ProbeID) bool {
+	for _, id := range ids {
+		s, ok := ev.seen[id]
+		if !ok || !s.obs.Delivered() {
+			return false
+		}
+	}
+	return len(ids) > 0
+}
+
+// nosqlClaimNotReady says why an oracle was not in a position to answer, from what this class
+// can actually see about the probes that oracle reads.
+//
+// THE SENTENCE IT REPLACES NAMED A COMPONENT IT HAD NOT MEASURED. It read "the probes this oracle
+// reads did not all come back on this slot, so it was never in a position to answer and its
+// silence is the runner's and not the endpoint's". Ready goes false for three different reasons
+// and only one of them is the runner's:
+//
+//	no observation      nothing came back for the probe at all. This class cannot see from here
+//	                    whether it was never issued, cut by a per-slot cap, or lost.
+//	transport refused   the request went out and the socket said no. That is the network or the
+//	                    TARGET, and sending an operator to look at the tool when the target reset
+//	                    the connection is a guessed cause with a confident voice.
+//	survival unproven   the widening oracle's Ready also asks that the payload be PROVEN on the
+//	                    wire, which is the encoder's record and not a delivery failure.
+//
+// The verdict is an unknown in all three cases. The sentence is not, and this one reports the
+// per-probe state it measured instead of choosing a culprit.
+func nosqlClaimNotReady(ev nosqlEvidenceSet, c nosqlCleanClaim) string {
+	const head = "probes_not_delivered: "
+	if len(c.Reads) == 0 {
+		return head + "this arm declared the oracle not ready and named no probe for it, so this class " +
+			"cannot say which response was missing. The oracle was never in a position to answer and its " +
+			"silence is the ABSENCE of a measurement rather than the result of one"
+	}
+	var missing, refused, unproven, held []string
+	for _, id := range c.Reads {
+		s, ok := ev.seen[id]
+		switch {
+		case !ok:
+			missing = append(missing, string(id))
+		case !s.obs.Delivered():
+			refused = append(refused, string(id)+" ("+string(s.obs.TransportErr)+")")
+		case !s.obs.Payload.Survived.Proven():
+			unproven = append(unproven, string(id)+" (survival "+string(s.obs.Payload.Survived)+")")
+		default:
+			held = append(held, string(id))
+		}
+	}
+	out := head
+	if len(missing) > 0 {
+		out += "no observation reached this class for " + strings.Join(missing, ", ") +
+			", and it cannot see from here whether the request was never issued, cut by a per-slot cap, " +
+			"or lost. "
+	}
+	if len(refused) > 0 {
+		out += "the TRANSPORT refused " + strings.Join(refused, ", ") +
+			", which is the network or the target and not the tool. "
+	}
+	if len(unproven) > 0 {
+		out += strings.Join(unproven, ", ") + " came back without this class's bytes proven on the wire, " +
+			"so what the endpoint answered is an answer to something else. "
+	}
+	if len(held) > 0 {
+		out += strings.Join(held, ", ") + " DID come back, and this oracle needs all of the probes it " +
+			"reads. "
+	}
+	return out + "The oracle was never in a position to answer, so its silence is the ABSENCE of a " +
+		"measurement rather than the result of one"
+}
+
+// nosqlOracleBlind answers, for ONE kind of oracle, whether it was in a position to see anything
+// here, and says why not when it was not. "" means it was, so its silence is a measurement.
+func nosqlOracleBlind(ev nosqlEvidenceSet, k nosqlOracleKind) string {
+	switch k {
+	case nosqlOracleNamed:
+		// The shared blindness is already a hard stop above, and nothing else stops a string
+		// search: it subtracts the baseline, so a phrase the page always carries cannot produce
+		// it, and it requires this run's marker beside the phrase, so another request's error
+		// cannot either.
+		return ""
+	case nosqlOracleCount:
+		// BOTH reasons are reported when both hold, because fixing one of them would still leave
+		// this oracle blind and a row naming only the first sends the operator back twice.
+		var why []string
+		if !nosqlHaveCards(ev) {
+			why = append(why, "cardinality_unavailable: the unperturbed response carries no JSON "+
+				"array, and this oracle counts rows and never body length, so there was nothing to count")
+		}
+		if ev.junkSensitive {
+			why = append(why, "junk_sensitive: NSQ-NC1 sent a harmless string and the response "+
+				"moved, so this endpoint answers differently for any unmatched value and a bare "+
+				"row-count differential here cannot be attributed to my payload rather than to the "+
+				"value simply being different")
+		}
+		return strings.Join(why, " AND ")
+	}
+	return "unknown_oracle_kind (" + string(k) + "): a kind with no blindness rule is a kind nobody " +
+		"has decided the preconditions for, and defaulting it to judged would be the silent zero"
+}
+
+// nosqlCleanHardPreconditions are the four that are true of EVERY oracle in this class, whatever
+// it reads. nil means all four hold.
+func nosqlCleanHardPreconditions(ev nosqlEvidenceSet, v triage.ClassVerdict) *triage.ClassVerdict {
+	var out triage.ClassVerdict
+	switch {
+	case len(v.Ordinals) == 0:
+		out = nosqlCD(v, "no_probe_ordinals: this arm reached its clean branch with no probe to "+
+			"point at, which would be a clean asserting a measurement that never happened")
+	case !ev.haveBase:
+		out = nosqlCD(v, "route_control_unresolved: every negative in this class rests on comparing "+
+			"with an unperturbed response, and there is none")
+	case ev.degraded:
+		out = nosqlCD(v, "baseline_degraded: the comparison model is degraded or the endpoint failed "+
+			"the stability gate, so a quiet oracle here cannot be distinguished from an endpoint that "+
+			"is quiet about everything")
+	default:
+		if n, moved := nosqlDifferentialSurface(ev); !moved && n >= nosqlMinDifferentialProbes {
+			// "INDISTINGUISHABLE" WAS BIGGER THAN THE WITNESS. nosqlReproducesBaseline reads the
+			// STATUS and the normalised body hash, falling back to the array cardinality, and
+			// nothing else. A response that carries the value in Location or Set-Cookie is
+			// distinguishable and this witness cannot see it, which is the measured fault deser.go
+			// records for the identical word in pxRouteSensitivity's refusal. The rule is right on
+			// the channel this class's oracles read; the word named every channel there is.
+			out = nosqlCD(v, "value_insensitive: all "+strconv.Itoa(n)+" of this class's own "+
+				"delivered probes came back with THE SAME STATUS AND THE SAME NORMALISED BODY as the "+
+				"unperturbed route control (or, where no normalised body was built, the same array "+
+				"cardinality), which is the channel every oracle in this class reads and is not every "+
+				"channel there is, "+
+				"and those probes differ from each other by an operator object, a $where string, a "+
+				"Mango selector and a Lucene break. An endpoint that answers identically to all of "+
+				"them is not answering about this slot at all. THIS IS THE ONE BLINDNESS THAT TAKES "+
+				"BOTH KINDS OF ORACLE IN THIS CLASS, and the reason is not that they are all "+
+				"differentials - three arms clean on a string search - but that a named engine "+
+				"phrase, or this run's marker, appearing in a probe response and absent from the "+
+				"baseline would BY DEFINITION make that probe distinguishable from the control. "+
+				"Where nothing is distinguishable no named string appeared, and that silence is "+
+				"vacuous rather than negative. An injection reaching a query whose result is never "+
+				"rendered produces exactly this shape")
+		} else {
+			return nil
+		}
+	}
+	return &out
 }
 
 // nosqlMinDifferentialProbes is the floor for calling an endpoint value-insensitive. Two identical
@@ -2507,3 +3032,18 @@ func (nosqlClassifier) OracleCases() []nosqlOracleCase {
 		},
 	}
 }
+
+// RunnerPlacesMarkers opts this class in to runner-placed markers.
+//
+// NOSQL declares MarkerPos 34 times and spells a marker token only 4 times: its payloads are JSON
+// operator documents whose grammar a spelled token would disturb, so it relies on the runner
+// attaching the marker. Without the opt-in the class is blind, which is how it produced 816
+// probe_not_observed verdicts on the operator's live run.
+//
+// The runner reverts the marker where appending it would break a JSON node payload, because
+// {"$expr":...}<marker> is not a JSON value, and records MarkerPos "" when it does so. That
+// interaction is the reason this is opt-in rather than automatic: injecting a marker into a
+// payload that did not ask for one broke LFI-L7, whose oracle depends on the plaintext marker
+// being ABSENT from the request, and SSTI's polyglot, which measures whether its own bytes come
+// back unrewritten. See triageRunnerPlacesMarkersClass in triageRun.go.
+func (nosqlClassifier) RunnerPlacesMarkers() bool { return true }

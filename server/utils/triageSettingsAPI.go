@@ -1,15 +1,20 @@
 package utils
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
+	"ars0n-framework-v2-server/utils/internal/triagecap"
 	"ars0n-framework-v2-server/utils/triage"
 
 	"github.com/gorilla/mux"
@@ -135,6 +140,40 @@ type TriageCustomPayload struct {
 	Notes     string          `json:"notes"`
 }
 
+// TriageSessionRenewal is the operator's choice to keep the authenticated session alive for the
+// length of a run, and it is the one setting in this document that the operator is NOT always
+// allowed to make.
+//
+// THE MEASUREMENT. On the estate this layer was built against the bearer is a fifteen minute JWT
+// and a full run takes twenty nine minutes, so more than half of every authenticated run was sent
+// with a credential that had already died. Round 10 made the runner substitute the freshest
+// captured credential at send time; that is the mechanism. This is the part the operator sees.
+//
+// THE RULE. Enabled may only be true once the framework has PERFORMED a refresh and watched a
+// different working credential come back. Not a refresh_token field in a body, not a recorded
+// auth flow, not a mint endpoint in the corpus: those are RefreshAvailable and they are exactly
+// the "vulnerable IF" with the IF unproven that this codebase refuses everywhere else. The gate
+// is EvaluateTriageRenewalGate and the refusal is in ValidateTriageSettingsWithRenewal.
+//
+// IntervalSeconds is zero by default and MEANS "derive it from the measured lifetime", which is
+// TriageRenewalIntervalFor. It is not a hidden default of some number: zero with no measured TTL
+// is refused, because a renewal schedule invented here would under-run or over-run silently and
+// the operator would have no way to tell which.
+type TriageSessionRenewal struct {
+	Enabled bool `json:"enabled"`
+	// TokenID is the credential to renew. Empty with Enabled true is refused rather than resolved
+	// to "the active one": a target routinely holds several credentials and renewing the wrong one
+	// leaves the scan authenticated as nobody while the screen says renewal is on.
+	TokenID string `json:"token_id"`
+	// IntervalSeconds of zero means derive from the measured TTL. A non-zero value is the
+	// OPERATOR'S figure and is recorded and rendered as such, never as a measurement.
+	IntervalSeconds int `json:"interval_seconds"`
+	// ProvenAt is the refresh proof this setting was armed against, copied from the gate at save
+	// time. It is stored so a later read can say "armed against a proof taken at T" rather than
+	// implying the proof is current; whether it IS current is decided by the gate on every read.
+	ProvenAt time.Time `json:"proven_at"`
+}
+
 // TriageInvestigateSettings is the whole document stored under TriageSettingsTool.
 type TriageInvestigateSettings struct {
 	Tier           string                        `json:"tier"`
@@ -142,6 +181,7 @@ type TriageInvestigateSettings struct {
 	Pacing         TriagePacing                  `json:"pacing"`
 	OOB            TriageOOB                     `json:"oob"`
 	CustomPayloads []TriageCustomPayload         `json:"custom_payloads"`
+	SessionRenewal TriageSessionRenewal          `json:"session_renewal"`
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -242,8 +282,12 @@ func TriageSettingsVocabulary() map[string]any {
 		"encoders":   triageSettableEncoders(),
 		"oob_modes":  []string{string(triage.OOBNone), string(triage.OOBWildcardDNS), string(triage.OOBHTTPPath)},
 		"encodings":  []string{"utf8", "base64"},
+		// TriageMarkerPosNone is offered alongside the three placements because a payload whose
+		// grammar cannot carry 16 extra bytes has to be authorable. Without it the modal can only
+		// produce payloads the encoder refuses; see triageValidateMarkerPos.
 		"marker_positions": []string{
 			string(triage.MarkerPrefix), string(triage.MarkerSuffix), string(triage.MarkerInline),
+			TriageMarkerPosNone,
 		},
 		"detection_modes":  triageDetectionModes(),
 		"delivery_reasons": DeliveryReasons(),
@@ -457,11 +501,20 @@ type TriageFieldProblem struct {
 
 // TriagePayloadDelivery is what the real encoder did with one payload at one insertion point.
 type TriagePayloadDelivery struct {
-	Point     string `json:"point"`
-	Media     string `json:"media,omitempty"`
-	Encoder   string `json:"encoder"`
-	Delivered bool   `json:"delivered"`
-	Survived  string `json:"survived"`
+	Point   string `json:"point"`
+	Media   string `json:"media,omitempty"`
+	Encoder string `json:"encoder"`
+	// WireLen is the length of the bytes handed to the encoder for this row: the logical payload
+	// after the class token grammar and the marker, which is what the runner sends.
+	WireLen int `json:"wire_len"`
+	// MarkerOnWire says whether these bytes actually carry the run marker. It is not the same
+	// question as MarkerPos: the renderer DROPS the marker rather than corrupt a payload the
+	// node-replace encoder would then refuse, so a payload can be saved with a marker position
+	// and go out without one. A probe with no marker on the wire cannot be attributed, and an
+	// oracle that looks for a reflection of it can only ever be silent.
+	MarkerOnWire bool   `json:"marker_on_wire"`
+	Delivered    bool   `json:"delivered"`
+	Survived     string `json:"survived"`
 	// Proven is the predicate a clean verdict is allowed to rest on: intact or encoded, nothing
 	// else. Delivered and not proven is the cookie semicolon case, which is the one that looks
 	// fine and is not.
@@ -472,14 +525,19 @@ type TriagePayloadDelivery struct {
 
 // TriagePayloadCheck is one custom payload's whole verdict.
 type TriagePayloadCheck struct {
-	Index      int                     `json:"index"`
-	ID         string                  `json:"id"`
-	Class      string                  `json:"class"`
-	OK         bool                    `json:"ok"`
-	ProbeID    string                  `json:"probe_id"`
-	LogicalLen int                     `json:"logical_len"`
-	Delivery   []TriagePayloadDelivery `json:"delivery"`
-	Problems   []TriageFieldProblem    `json:"problems"`
+	Index      int    `json:"index"`
+	ID         string `json:"id"`
+	Class      string `json:"class"`
+	OK         bool   `json:"ok"`
+	ProbeID    string `json:"probe_id"`
+	LogicalLen int    `json:"logical_len"`
+	// WireLen is the length of the bytes that will ACTUALLY be sent: the logical payload with the
+	// class's token grammar applied and the run marker placed per MarkerPos. It is a separate
+	// number from LogicalLen because they differ by at least triage.MarkerLen on every payload
+	// that carries a marker, and the operator reads this one to decide whether a payload fits.
+	WireLen  int                     `json:"wire_len"`
+	Delivery []TriagePayloadDelivery `json:"delivery"`
+	Problems []TriageFieldProblem    `json:"problems"`
 }
 
 // TriageSettingsValidation is the whole result. It is returned on GET as well as on PUT, because a
@@ -502,9 +560,18 @@ type TriageSettingsValidation struct {
 	IsolationChecksNotRun []string `json:"isolation_checks_not_run"`
 }
 
-// ValidateTriageSettings is the whole validation pass. It is pure: no database, no network, so the
-// same function backs the handler and the test.
+// ValidateTriageSettings is the whole validation pass with NO renewal gate supplied.
+//
+// It is pure: no database, no network, so the same function backs the handler and the test. An
+// absent gate is not an open door: the zero TriageRenewalGate has Evaluated false, and an enabled
+// renewal against an unevaluated gate is an ERROR. A caller that cannot evaluate the gate is a
+// caller that cannot show a refresh was ever performed, and not knowing is not clean.
 func ValidateTriageSettings(s TriageInvestigateSettings) TriageSettingsValidation {
+	return ValidateTriageSettingsWithRenewal(s, TriageRenewalGate{})
+}
+
+// ValidateTriageSettingsWithRenewal is the same pass with the renewal gate the handler evaluated.
+func ValidateTriageSettingsWithRenewal(s TriageInvestigateSettings, gate TriageRenewalGate) TriageSettingsValidation {
 	v := TriageSettingsValidation{
 		Errors:   []TriageFieldProblem{},
 		Warnings: []TriageFieldProblem{},
@@ -520,9 +587,121 @@ func ValidateTriageSettings(s TriageInvestigateSettings) TriageSettingsValidatio
 	triageValidateOOB(&v, s.OOB)
 	triageValidateClasses(&v, s.Classes, vocab)
 	triageValidatePayloads(&v, s.CustomPayloads, vocab)
+	triageValidateSessionRenewal(&v, s.SessionRenewal, gate)
 
 	v.OK = len(v.Errors) == 0
 	return v
+}
+
+// triageValidateSessionRenewal is the refusal that makes the hard rule real.
+//
+// The switch may be stored as true ONLY while the gate says a refresh was performed and a
+// different working credential came back. Every refusal here carries the gate's own sentence,
+// which names what would lift it, so the operator is told what to do rather than that they may
+// not.
+//
+// IT RUNS ON EVERY READ AS WELL AS EVERY WRITE. That is what makes a stale proof revoke the
+// setting instead of the setting outliving the proof: a document saved yesterday against a proof
+// that has since broken fails validation the next time the screen is opened, and
+// TriageRenewalEffective refuses the same way at run time without the document being edited.
+func triageValidateSessionRenewal(v *TriageSettingsValidation, r TriageSessionRenewal, gate TriageRenewalGate) {
+	if r.IntervalSeconds < 0 {
+		v.err("session_renewal.interval_seconds", "renewal_interval_negative",
+			"A renewal interval cannot be negative. Leave it at zero to derive it from the measured lifetime.")
+	}
+	if !r.Enabled {
+		return
+	}
+
+	if !gate.Evaluated {
+		v.err("session_renewal.enabled", "renewal_"+TriageRenewalGateNotEvaluated,
+			"Automatic renewal is switched on but the refresh gate was not evaluated, so nothing here shows the session can actually be refreshed. An unevaluated gate has proven nothing, and this is refused rather than believed.")
+		return
+	}
+	if strings.TrimSpace(r.TokenID) == "" {
+		v.err("session_renewal.token_id", "renewal_no_credential_named",
+			"Automatic renewal is switched on but names no credential. A target usually holds several, and renewing the wrong one leaves the scan authenticated as nobody while the screen says renewal is on.")
+		return
+	}
+	option, found := gate.Option(r.TokenID)
+	if !found {
+		v.err("session_renewal.token_id", "renewal_credential_unknown",
+			fmt.Sprintf("Automatic renewal names a credential (%s) this target does not have. It was probably deleted; pick one of the %d that are there.", r.TokenID, len(gate.Options)))
+		return
+	}
+	if !option.Usable {
+		v.err("session_renewal.enabled", "renewal_"+option.Code,
+			"Automatic renewal cannot be switched on for "+triageOrDefault(option.Name, "this credential")+". "+option.Reason)
+		return
+	}
+
+	// The proof stands. Now the schedule, which is a separate question and has its own refusals.
+	switch {
+	case r.IntervalSeconds == 0 && !option.IntervalKnown:
+		v.err("session_renewal.interval_seconds", "renewal_interval_not_derivable",
+			"No renewal interval can be derived, because "+option.IntervalBasis+". Type one and it will be recorded as your figure rather than as a measurement.")
+	case r.IntervalSeconds == 0:
+		// Derived. The basis is surfaced as a warning only when the measurement it rests on is
+		// itself qualified, so the common case is silent rather than noisy.
+		if option.TTLIsUpperBound {
+			v.warn("session_renewal.interval_seconds", "renewal_interval_from_upper_bound",
+				"The interval is derived from a lifetime that is an UPPER BOUND ("+option.TTLEvidence+"), so the real lifetime may be shorter and renewal may fire after the credential is already dead.")
+		}
+		if !option.TTLKnown {
+			v.warn("session_renewal.interval_seconds", "renewal_interval_from_floor",
+				"The interval is derived from a LOWER BOUND rather than a measured lifetime: "+option.IntervalBasis+". The basis names which kind of bound it was.")
+		}
+		// THE DERIVED FIGURE IS HELD TO THE FLOOR, AND THE SAVE SAYS SO, because that is what the
+		// run does with it. See triageRenewalClampWhy.
+		if option.IntervalKnown && time.Duration(option.IntervalSeconds)*time.Second < triageRenewalMinInterval {
+			v.warn("session_renewal.interval_seconds", "renewal_interval_clamped_to_floor",
+				fmt.Sprintf("The interval derived from this credential's lifetime is %ds. %s%s Type an interval of your own if you want a different schedule.",
+					option.IntervalSeconds,
+					triageRenewalClampWhy(time.Duration(option.IntervalSeconds)*time.Second, triageRenewalMinInterval),
+					triageRenewalClampGap(triageRenewalMinInterval, option, true)))
+		}
+	case option.TTLKnown && int64(r.IntervalSeconds) >= option.TTLSeconds:
+		// THIS IS TESTED BEFORE THE FLOOR, AND THE ORDER IS THE WHOLE POINT OF IT.
+		//
+		// TriageRenewalEffective REFUSES an operator-set interval that is not shorter than the
+		// measured lifetime, and it tests the figure that was SET rather than the one the driver
+		// will clamp it to. Both conditions are satisfiable at once on a fast-rotating
+		// application: a 45s credential with a typed 50s interval is below the 60s floor AND no
+		// shorter than the lifetime. With the floor tested first, the save would have answered
+		// "clamped, this is fine" about a document the run refuses outright, which is the same
+		// contradiction as the one this round is closing, pointing the other way.
+		v.err("session_renewal.interval_seconds", "renewal_interval_exceeds_lifetime",
+			fmt.Sprintf("An interval of %ds is not shorter than the credential's measured lifetime of %ds, so the first renewal would fire after it had already expired. The derived interval is %ds.",
+				r.IntervalSeconds, option.TTLSeconds, option.IntervalSeconds))
+	case time.Duration(r.IntervalSeconds)*time.Second < triageRenewalMinInterval:
+		// THE SAME FLOOR, AGAINST THE OPERATOR'S OWN FIGURE, AND THE SAME ANSWER.
+		//
+		// IT USED TO BE AN ERROR AND THAT WAS THE CONTRADICTION. The driver clamps, so a document
+		// this refused was a document the run would have happily executed, and the refusal meant
+		// renewal could not be switched on at all on a fast-rotating application. The floor exists
+		// to stop a pathological schedule, not to deny the feature to the one target that cannot
+		// finish a run without it. What the refusal was right about is that a run must not report
+		// it renews while running a schedule the operator did not choose, and that is paid for by
+		// saying which schedule will run, in the same words the run will use.
+		v.warn("session_renewal.interval_seconds", "renewal_interval_clamped_to_floor",
+			fmt.Sprintf("An interval of %ds was asked for. %s%s",
+				r.IntervalSeconds,
+				triageRenewalClampWhy(time.Duration(r.IntervalSeconds)*time.Second, triageRenewalMinInterval),
+				triageRenewalClampGap(triageRenewalMinInterval, option, true)))
+	case option.IntervalKnown && r.IntervalSeconds > option.IntervalSeconds:
+		v.warn("session_renewal.interval_seconds", "renewal_interval_leaves_no_retry",
+			fmt.Sprintf("An interval of %ds is longer than the derived %ds, which was half the lifetime so that a failed renewal still had a full window to retry in. Yours leaves less than that.",
+				r.IntervalSeconds, option.IntervalSeconds))
+	}
+
+	// The measurement the whole feature exists for, said at the point of configuration.
+	if option.SurvivesKnown && option.SurvivesRun {
+		v.warn("session_renewal.enabled", "renewal_not_required_for_this_run",
+			"This credential would survive the estimated run without renewal ("+option.SurvivesWhy+"), so renewal here is insurance rather than a requirement.")
+	}
+	for _, w := range option.Warnings {
+		v.warn("session_renewal.enabled", "renewal_credential_note", w)
+	}
 }
 
 func triageValidateTier(v *TriageSettingsValidation, field, tier string) {
@@ -760,6 +939,14 @@ func triageValidatePayloads(v *TriageSettingsValidation, payloads []TriageCustom
 			check.Problems = append(check.Problems, pr)
 			v.Errors = append(v.Errors, pr)
 		}
+		// A warning does NOT mark the payload failed and does not block the save. It is for a
+		// fact the operator has to know that is not a reason to throw the payload away, which is
+		// one insertion point's second medium refusing while the first carries it: the run
+		// records a named not_reachable on those slots, never a clean, and refusing the save
+		// would have cost the coverage the first medium was going to give.
+		warn := func(f, code, msg string) {
+			v.Warnings = append(v.Warnings, TriageFieldProblem{Field: field + f, Code: code, Message: msg})
+		}
 
 		if strings.TrimSpace(p.ID) == "" {
 			add(".id", "id_required", "Every payload needs an id so its results can be traced back to it.")
@@ -791,7 +978,7 @@ func triageValidatePayloads(v *TriageSettingsValidation, payloads []TriageCustom
 		check.LogicalLen = len(logical)
 
 		triageValidateDetection(add, p.Detection)
-		triageValidateMarkerPos(add, p.MarkerPos)
+		triageValidateMarkerPos(add, p)
 		if p.Tier != "" {
 			switch triage.ProbeTier(p.Tier) {
 			case triage.TierReduced, triage.TierFull, triage.TierOptIn:
@@ -837,21 +1024,27 @@ func triageValidatePayloads(v *TriageSettingsValidation, payloads []TriageCustom
 		}
 		byProbeID[probeID] = i
 
-		// Delivery, through the real encoder. This is the refusal the operator would otherwise
-		// discover as a silent clean hours later.
+		// Delivery, through the real renderer and the real encoder. This is the refusal the
+		// operator would otherwise discover as a silent clean hours later.
+		//
+		// THE SPEC IS triageCustomProbeSpec'S AND NOT A SECOND COPY OF IT. That function is what
+		// the runner builds the wire from, and its own comment says the two must not disagree:
+		// "a payload is checked as one thing and sent as another, which is the failure this
+		// function exists to make impossible". It was a copy here, with the same four defaults
+		// written out twice, which is exactly the shape that drifts.
 		if len(logical) > 0 && classifier != nil {
-			check.Delivery = triageCheckDelivery(add, p, logical, points)
-			custom[classID] = append(custom[classID], triage.ProbeSpec{
-				ID:        probeID,
-				Class:     classID,
-				Logical:   logical,
-				Encoders:  triageEncodersOf(p.Encoder),
-				Points:    points,
-				MarkerPos: triage.MarkerPos(triageOrDefault(p.MarkerPos, string(triage.MarkerPrefix))),
-				Tier:      triage.ProbeTier(triageOrDefault(p.Tier, string(triage.TierOptIn))),
-				Risk:      triage.RiskTier(triageOrDefault(p.Risk, string(triage.RiskR1))),
-				Notes:     p.Label,
-			})
+			spec, err := triageCustomProbeSpec(classID, p)
+			switch {
+			case err != nil:
+				add(".payload", "payload_not_decodable", err.Error())
+			default:
+				// The VALIDATED points, not the raw strings: a point the class does not reach has
+				// already been refused above and must not be probed here as though it were live.
+				spec.Points = points
+				check.WireLen, check.Delivery = triageCheckDelivery(add, warn, p, spec, points)
+				triageCheckReflectHasAMarker(add, p, check.Delivery)
+				custom[classID] = append(custom[classID], spec)
+			}
 		}
 
 		check.OK = len(check.Problems) == 0
@@ -950,11 +1143,47 @@ func triageValidateDetection(add func(f, code, msg string), d TriageDetection) {
 	}
 }
 
-func triageValidateMarkerPos(add func(f, code, msg string), pos string) {
-	switch triage.MarkerPos(pos) {
+// TriageMarkerPosNone is the spelling of "this payload must stay bare" in the settings document.
+// The runner reads it through triageCustomMarkerOmitted, which also accepts "omitted", and turns
+// it into Variant["marker_placement"]="omitted", the same opt-out a shipped probe uses.
+//
+// WHY IT HAD TO EXIST. A marker is 16 bytes of [0-9a-z] and the runner places it per MarkerPos,
+// defaulting to prefix. Prefixed onto {"$eq":"alice"} that makes zqj...{"$eq":"alice"}, which is
+// not a JSON value, so the json_node_replace encoder refuses it and NOTHING IS SENT. Measured on
+// run a218419a: 384 of class NOSQL's fidelity rows are json_node_payload_is_not_valid_json for
+// exactly this reason, including both arms of its tier-1 arithmetic oracle. An operator writing
+// the same payload by hand had no way to spell the opt-out, so every such payload was unsendable
+// and the save-time check said yes to all of them.
+const TriageMarkerPosNone = "none"
+
+// triageMarkerOmitted reports whether this payload goes out bare. It is deliberately the same
+// question triageCustomMarkerOmitted asks on the send path, in the same two spellings, because a
+// payload validated as marked and sent bare (or the reverse) is the drift this whole pass exists
+// to remove.
+func triageMarkerOmitted(pos string) bool {
+	switch strings.ToLower(strings.TrimSpace(pos)) {
+	case TriageMarkerPosNone, "omitted":
+		return true
+	}
+	return false
+}
+
+func triageValidateMarkerPos(add func(f, code, msg string), p TriageCustomPayload) {
+	if triageMarkerOmitted(p.MarkerPos) {
+		// A bare payload cannot be attributed by reflection: there is no token to look for. Every
+		// other oracle still works, so this refuses the one combination that could not be judged
+		// rather than refusing the position.
+		if p.Detection.Mode == TriageDetectReflect {
+			add(".detection.mode", "reflect_needs_a_marker",
+				"This payload goes out bare, so there is no marker to come back. Reflection cannot "+
+					"judge it: choose another oracle, or give the payload a marker position.")
+		}
+		return
+	}
+	switch triage.MarkerPos(p.MarkerPos) {
 	case "", triage.MarkerPrefix, triage.MarkerSuffix, triage.MarkerInline:
 	default:
-		add(".marker_pos", "unknown_marker_position", fmt.Sprintf("%q is not a marker position.", pos))
+		add(".marker_pos", "unknown_marker_position", fmt.Sprintf("%q is not a marker position.", p.MarkerPos))
 	}
 }
 
@@ -989,53 +1218,226 @@ func triageValidatePoints(add func(f, code, msg string), points []string, info T
 	return out
 }
 
-// triageCheckDelivery renders the payload into every declared insertion point with the real
-// encoder and reports what came out.
+// triageCheckDelivery renders the payload into every declared insertion point THE WAY THE RUNNER
+// WILL, and reports the wire length plus one row per point and medium.
 //
 // A payload is refused, not warned about, when it cannot arrive faithfully. Delivered is not
 // enough: a cookie value carrying a semicolon IS delivered and is then split by any RFC 6265
 // parser, so the application reads a shorter string than the one sent. WireSurvival.Proven is the
 // predicate a clean verdict is allowed to rest on, so it is the predicate here too.
 //
-// The synthetic request below has no per-slot impossible-byte table, because that table is
-// measured against the live target at run time. This check is therefore a floor: it catches what
-// is impossible everywhere, not what is impossible on one endpoint.
-func triageCheckDelivery(add func(f, code, msg string), p TriageCustomPayload, logical []byte, points []triage.SlotKind) []TriagePayloadDelivery {
+// D2f, AND IT IS WHY THIS FUNCTION CHANGED. It used to hand EncodeSlotInto the LOGICAL payload:
+// the bytes the operator typed. Those bytes are not what goes out. triageRenderPayload applies
+// the owning class token grammar, substitutes every spelling of the marker, refuses a payload
+// still carrying an unfillable token, and then places a triage.MarkerLen-byte marker per
+// MarkerPos, which defaults to prefix. So the check answered a question about a string nobody
+// sends, and a payload that fits without the marker and not with it passed here and failed live,
+// which is precisely the silent clean this check exists to prevent.
+//
+// IT IS NOT A HYPOTHETICAL. On run a218419a, 384 of class NOSQL 965 fidelity rows came back
+// json_node_payload_is_not_valid_json: {"$eq":"0"} is a JSON value, zqjfkqv0001dxm52{"$eq":"0"}
+// is not, and json_node_replace refused every one. Four shipped probes, two of them the arms of
+// that class tier-1 arithmetic oracle, never left the process. An operator payload of the same
+// shape got no save-time warning at all.
+//
+// The synthetic request below has no per-slot impossible-byte table and no measured field limit,
+// because both are measured against the live target at run time. This check is therefore a floor:
+// it catches what is impossible everywhere, not what is impossible on one endpoint.
+func triageCheckDelivery(add, warn func(f, code, msg string), p TriageCustomPayload,
+	spec triage.ProbeSpec, points []triage.SlotKind) (int, []TriagePayloadDelivery) {
+
 	out := []TriagePayloadDelivery{}
+	marker, err := triageRepresentativeMarker(spec.Class)
+	if err != nil {
+		// Fail closed and say so. A check that cannot mint a marker cannot render the wire form,
+		// and reporting the logical form instead would be the substitution this pass removed.
+		add(".payload", "delivery_not_checked", fmt.Sprintf(
+			"The wire form could not be rendered (%v), so this payload deliverability was NOT "+
+				"checked. That is a gap, not a pass.", err))
+		return 0, out
+	}
+
+	// The encoder the run will use for an operator payload is the declared one, verbatim: the
+	// custom send path in triageRun.go passes it straight to EncodeSlotInto with no fallback to
+	// the slot kind's default, unlike a shipped probe. This check matches that rather than being
+	// kinder than the runner, because a check that is kinder than the runner is how a payload
+	// passes here and is refused there.
+	mode := triage.EncoderMode(strings.TrimSpace(p.Encoder))
+
+	wireLen := 0
 	for _, k := range points {
-		for _, probe := range triageDeliveryProbes(k) {
-			enc := EncodeSlotInto(probe.tmpl, probe.slot, triage.EncoderMode(p.Encoder), logical, triage.SlotOverrides{})
-			row := TriagePayloadDelivery{
-				Point:     string(k),
-				Media:     probe.media,
-				Encoder:   encoderChainName(enc),
-				Delivered: enc.Delivered,
-				Survived:  string(enc.Wire.Survived),
-				Proven:    enc.Delivered && enc.Wire.Survived.Proven(),
-				Reason:    string(enc.Reason),
-				Detail:    enc.Detail,
+		probes := triageDeliveryProbes(k)
+		rows := make([]TriagePayloadDelivery, 0, len(probes))
+		proven := 0
+
+		for _, probe := range probes {
+			// The same ProbeRequest shape the runner builds for an operator payload, through the
+			// same renderer, so marker_placement "omitted" and the class token grammar are honoured
+			// here once rather than re-implemented.
+			req := triage.ProbeRequest{
+				Spec: spec.ID, Slot: probe.slot.Key, Marker: marker,
+				Variant: triageCustomVariant(p),
 			}
-			out = append(out, row)
+			// triageRenderPayloadInto, WITH THE MODE, and not the two-value wrapper. The
+			// renderer's own marker rule depends on the encoder: it drops the marker rather than
+			// turn a JSON value into something json_node_replace would refuse. Calling the
+			// wrapper here would pass EncodeNone, place a marker the run will not place, and
+			// refuse a payload that is perfectly deliverable, which is the same drift as D2f in
+			// the other direction.
+			wire, unresolved, pos := triageRenderPayloadInto(spec, req, probe.slot, marker, mode)
+			if unresolved != "" {
+				// The runner refuses this probe outright and records custom_payload_unrendered.
+				// Nothing about the target is measured, so the refusal belongs at save time.
+				add(".payload", "payload_token_unresolved", fmt.Sprintf(
+					"On class %s this payload is rendered through that class own token grammar, and %s "+
+						"An operator payload carries no per-probe values, so the run would send nothing.",
+					p.Class, unresolved))
+				return wireLen, out
+			}
+			if len(wire) > wireLen {
+				// The longest rendered form across the declared points. They differ only where the
+				// class grammar splices the observed value in, and the longest is the one that has
+				// to fit.
+				wireLen = len(wire)
+			}
+
+			enc := EncodeSlotInto(probe.tmpl, probe.slot, mode, wire, triage.SlotOverrides{})
+			row := TriagePayloadDelivery{
+				Point:        string(k),
+				Media:        probe.media,
+				Encoder:      encoderChainName(enc),
+				WireLen:      len(wire),
+				MarkerOnWire: pos != "",
+				Delivered:    enc.Delivered,
+				Survived:     string(enc.Wire.Survived),
+				Proven:       enc.Delivered && enc.Wire.Survived.Proven(),
+				Reason:       string(enc.Reason),
+				Detail:       enc.Detail,
+			}
+			if row.Proven && !row.MarkerOnWire && !triageMarkerOmitted(p.MarkerPos) {
+				// THE MARKER WAS ASKED FOR AND WILL NOT BE THERE. The renderer dropped it to keep
+				// the payload deliverable, which is the right trade and is invisible from the
+				// modal. Say it out loud: a probe with no marker on the wire cannot be attributed,
+				// so nothing it provokes can be tied back to it.
+				warn(".marker_pos", "marker_dropped_on_the_wire", fmt.Sprintf(
+					"At %s the %d-byte marker is left off, because adding it would stop these bytes "+
+						"being a JSON value and the %s encoder would refuse the whole probe. The "+
+						"payload is sent as you wrote it and nothing it provokes can be attributed "+
+						"to it by marker.", triageDeliveryWhere(k, probe.media), triage.MarkerLen, mode))
+			}
+			if row.Encoder == "" {
+				// A refused encode has no chain, and a blank column reads as "no encoder was
+				// involved" rather than "this one refused".
+				row.Encoder = p.Encoder
+			}
+			if row.Proven {
+				proven++
+			}
+			rows = append(rows, row)
+		}
+
+		out = append(out, rows...)
+		for _, row := range rows {
 			if row.Proven {
 				continue
 			}
-			where := string(k)
-			if probe.media != "" {
-				where += " (" + probe.media + ")"
-			}
-			detail := enc.Detail
+			where := triageDeliveryWhere(k, row.Media)
+			detail := row.Detail
 			if detail == "" {
-				detail = string(enc.Reason)
+				detail = row.Reason
+			}
+			detail += triageMarkerBlame(p)
+
+			// ONE MEDIUM REFUSING IS NOT AN UNDELIVERABLE PAYLOAD. json_node_replace reaches a JSON
+			// body and cannot reach a form body; refusing the SAVE throws the JSON coverage away
+			// too, while the form slots record a named not_reachable that no report may read as
+			// clean. Coverage is the expensive side, so this is a warning when another medium at
+			// the same point carries the payload, and an error when none does.
+			if proven > 0 {
+				warn(".payload", "not_deliverable_at_one_medium", fmt.Sprintf(
+					"Will not be sent into %s: %s. The other medium at this insertion point carries it, "+
+						"and those slots record a named refusal rather than a clean.", where, detail))
+				continue
 			}
 			code, msg := "not_deliverable", fmt.Sprintf("Cannot be delivered into %s: %s", where, detail)
-			if enc.Delivered {
+			if row.Delivered {
 				code = "not_intact_on_the_wire"
 				msg = fmt.Sprintf("Reaches %s but the application does not read it back: %s", where, detail)
 			}
 			add(".payload", code, msg)
 		}
 	}
-	return out
+	return wireLen, out
+}
+
+// triageCheckReflectHasAMarker refuses the one combination that could only ever read as a clean:
+// an oracle that judges a hit by finding the marker in the response, on a payload the renderer
+// will send with no marker in it.
+//
+// THIS IS THE SILENT-CLEAN SHAPE, NOT A TIDINESS RULE. triageCustomVerdict records StateClean
+// with "went out as asked and its own declared oracle stayed silent" when a reflect-mode payload
+// finds nothing. An unmarked probe finds nothing on every target there has ever been, so the
+// verdict is clean on every slot, forever, and the operator reads coverage that does not exist.
+// The bare marker position is refused with reflect for the same reason, in triageValidateMarkerPos.
+func triageCheckReflectHasAMarker(add func(f, code, msg string), p TriageCustomPayload, rows []TriagePayloadDelivery) {
+	if p.Detection.Mode != TriageDetectReflect {
+		return
+	}
+	for _, row := range rows {
+		if !row.Proven || row.MarkerOnWire {
+			continue
+		}
+		add(".detection.mode", "reflect_marker_dropped_on_the_wire", fmt.Sprintf(
+			"At %s this payload is sent WITHOUT the marker, because adding it would stop these "+
+				"bytes being a JSON value and the %s encoder would refuse the probe. Reflection "+
+				"looks for a marker that will not be in the request, so it can only ever be silent, "+
+				"and a silent oracle is recorded as a clean. Choose another oracle for this payload.",
+			triageDeliveryWhere(triage.SlotKind(row.Point), row.Media), row.Encoder))
+		return
+	}
+}
+
+// triageDeliveryWhere is the one spelling of an insertion point plus its medium, so the refusal
+// and the warning about the same row name the same place.
+func triageDeliveryWhere(k triage.SlotKind, media string) string {
+	if media == "" {
+		return string(k)
+	}
+	return string(k) + " (" + media + ")"
+}
+
+// triageMarkerBlame names the marker when the marker is part of what failed, because "not a JSON
+// value" said about bytes the operator can see ARE a JSON value is the kind of message that gets
+// reported as a bug in the checker.
+func triageMarkerBlame(p TriageCustomPayload) string {
+	if triageMarkerOmitted(p.MarkerPos) {
+		return ""
+	}
+	return fmt.Sprintf(
+		". This is the payload WITH the %d-byte run marker the runner places at the %s, which is what "+
+			"goes on the wire. Set the marker position to %q if this payload grammar cannot carry it; "+
+			"it can then no longer be judged by reflection.",
+		triage.MarkerLen, triageOrDefault(p.MarkerPos, string(triage.MarkerPrefix)), TriageMarkerPosNone)
+}
+
+// triageCheckRunID is the run id the representative marker carries. Four bytes of [0-9a-z], which
+// is what triage.WellFormedRunID requires, and a constant because this marker never leaves the
+// process.
+const triageCheckRunID = "0000"
+
+// triageRepresentativeMarker mints a real, well-formed marker in this class own stripe, so the
+// save-time check renders the payload the way a run will.
+//
+// IT IS REPRESENTATIVE, NOT THE RUN MARKER. The run id and the ordinal are not known until a run
+// starts. That costs this check nothing: every marker is exactly triage.MarkerLen bytes drawn
+// from [0-9a-z], anchor included, so any two are interchangeable for every question asked here,
+// which is length, impossible bytes, JSON validity and cookie-octet survival. What they are not
+// interchangeable for is attribution, and nothing here attributes anything.
+func triageRepresentativeMarker(class triage.ClassID) (triage.Marker, error) {
+	// The first ordinal in a class stripe is the class id itself, which is what MarkerMinter
+	// allocates first, so the representative marker carries the same stripe arithmetic as a real
+	// one rather than a shape that could never be minted.
+	return triage.MintMarkerAt(triagecap.Grant(), triageCheckRunID, class, uint64(class))
 }
 
 func encoderChainName(e Encoded) string {
@@ -1117,6 +1519,861 @@ func triageEncodersOf(mode string) []triage.EncoderMode {
 }
 
 // ---------------------------------------------------------------------------------------------
+// 5b. AUTOMATIC SESSION RENEWAL, AND THE GATE THAT DECIDES WHETHER IT MAY BE OFFERED AT ALL
+// ---------------------------------------------------------------------------------------------
+//
+// WHY THERE IS A GATE AND NOT JUST A SWITCH.
+//
+// A renewal switch is a promise that the scan will still be authenticated at minute twenty nine.
+// The framework can only make that promise about a session it has actually renewed. Everything
+// short of that is an assumption wearing a measurement's clothes:
+//
+//	a refresh_token field in a captured body   -> the grant exists. Nobody has spent it.
+//	an auth flow recorded against the token    -> the steps exist. Nobody has replayed them.
+//	a /token or /silent-renew in the corpus    -> the endpoint exists. Nobody has called it.
+//
+// Those are RefreshAvailable in SessionTokenProfile, and RefreshProven is reserved for the case
+// where a refresh was performed and a DIFFERENT credential came back. RecordRefreshProof refuses
+// to write proven without two fingerprints that differ. This gate refuses to offer the control
+// without that status. It is the same discipline as validated-requires-a-proof-of-concept, and
+// the cost of getting it wrong is the same shape: a scan the operator believes covered something.
+//
+// A STALE PROOF IS NOT A PROOF, AND HERE IS HOW THIS ONE EXPIRES.
+//
+// Three independent tests, all of which must hold. Each one is a fact in the database, not a
+// timer somebody picked:
+//
+//  1. STATUS. There is a refresh event with status success, which is the only thing
+//     RecordRefreshProof writes and the only thing DetectRefreshCapability will call proven.
+//
+//  2. NOT BROKEN SINCE. No LATER refresh event failed. This is the case the brief names and it is
+//     a real hole in the layer below: DetectRefreshCapability selects the most recent SUCCESS and
+//     never looks at what happened after it, so a token proven on Monday and failing every day
+//     since still reads as proven. The gate reads the most recent refresh event of ANY status and
+//     compares. Statuses the framework writes are success (the proof), refreshed (a real refresh
+//     that did not record a proof), and no_flow, replay_failed and no_token_found (failures); an
+//     UNRECOGNISED status counts as a failure and is quoted verbatim, because a status nobody
+//     here has seen is not evidence that a refresh worked.
+//
+//  3. NOT OLDER THAN ITS OWN CLOCK. A proof is the statement "at time T this mechanism minted a
+//     working credential". The credential it minted is dead by T plus the measured lifetime, and
+//     after that nothing about the mechanism has been observed in the present tense. So the proof
+//     window IS the measured lifetime: the TTL where the TTL was measured, the observed floor
+//     where only a floor was (the floor is a lower bound, so holding the proof to it errs towards
+//     re-proving), and where NEITHER was measured there is no lifetime clock at all and the
+//     window falls back to the estimated length of the run the proof is being asked to cover,
+//     derived from this document's own pacing. Every option carries the basis sentence, so the
+//     operator can see which of the three it got and why.
+//
+// Test 3 looks aggressive on a fifteen minute token and it is meant to: prove the refresh, then
+// start the run. It is also self-sustaining, because each renewal performed during a run records
+// a fresh proof, so the proof follows the credential forward for as long as renewal is working
+// and goes stale the moment it stops.
+//
+// WHAT IS A WARNING AND NOT A REFUSAL. A proof taken against a credential that has since been
+// replaced by hand is reported and does not block: the proof is about the MECHANISM, and pasting
+// a new value does not unprove that the mint works. An unmeasured lifetime does not block either;
+// it removes the derived interval and makes the operator type one, which is then labelled as
+// their figure. Refusing there would be refusing on a missing measurement rather than on a
+// missing proof, and the missing proof is the thing this gate is for.
+
+// Refusal and status codes. They are constants because the client renders a sentence per code and
+// a code invented at a call site is a sentence nobody wrote.
+const (
+	// The gate as a whole.
+	TriageRenewalGateNotEvaluated = "gate_not_evaluated"
+	TriageRenewalNoCredential     = "no_credential"
+	TriageRenewalNoneProven       = "no_credential_proven"
+	TriageRenewalOfferable        = "offerable"
+
+	// Per credential.
+	TriageRenewalProven         = "proven"
+	TriageRenewalNeverProven    = "never_proven"
+	TriageRenewalProofBroken    = "proof_broken"
+	TriageRenewalProofStale     = "proof_stale"
+	TriageRenewalMintOutOfScope = "mint_out_of_scope"
+	TriageRenewalNoMechanism    = "no_mechanism_found"
+	TriageRenewalNotNeeded      = "non_expiring"
+	TriageRenewalNoValue        = "no_credential_value"
+	// TriageRenewalNotProfiled is NOT a weaker no_mechanism_found. It is the state before the
+	// search: nothing has characterised this credential, so nothing has read its flow, its corpus
+	// or its own claims, and no_mechanism_found would be a report of a search that never ran.
+	TriageRenewalNotProfiled = "refresh_not_checked"
+)
+
+// triageRefreshEventIsFailure classifies one session_token_events row of kind refresh.
+//
+// The two statuses that are not failures are named explicitly and everything else is one. That is
+// deliberate: a new status added elsewhere in the codebase must arrive here as "a refresh event
+// this gate does not recognise" and take the control away, rather than being waved through by a
+// default that assumed the best.
+func triageRefreshEventIsFailure(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "success", "refreshed":
+		return false
+	}
+	return true
+}
+
+// TriageRenewalCredential is everything the gate needs about one credential. It holds NO secret:
+// the closest it comes is the profile's eight hex digit fingerprint.
+type TriageRenewalCredential struct {
+	TokenID  string
+	Name     string
+	IsActive bool
+	Profile  SessionTokenProfile
+	// ProfileIsStale is true when the stored characterisation described a DIFFERENT value than the
+	// one held now, so the lifetime here was recomputed from the credential rather than read back.
+	ProfileIsStale bool
+
+	// LastRefresh is the most recent refresh event of ANY status, which is what test 2 above
+	// needs and what DetectRefreshCapability does not look at.
+	LastRefreshAt     time.Time
+	LastRefreshStatus string
+	LastRefreshDetail string
+
+	// ProvenAt and ProofAfterFingerprint come from the most recent refresh event with status
+	// success, which is the only thing RecordRefreshProof writes.
+	ProvenAt              time.Time
+	ProofDetail           string
+	ProofAfterFingerprint string
+}
+
+// TriageRenewalOption is one credential as the configuration screen sees it.
+type TriageRenewalOption struct {
+	TokenID     string `json:"token_id"`
+	Name        string `json:"name"`
+	Carrier     string `json:"carrier"`
+	Kind        string `json:"kind"`
+	Fingerprint string `json:"fingerprint"`
+	IsActive    bool   `json:"is_active"`
+
+	// Usable is whether renewal may be turned on FOR THIS CREDENTIAL, and Reason is the sentence
+	// the operator can act on either way. Code is the machine-readable form of the same answer.
+	Usable bool   `json:"usable"`
+	Code   string `json:"code"`
+	Reason string `json:"reason"`
+
+	// The measured lifetime, carried with its provenance because a number without one is exactly
+	// the defect this codebase keeps rediscovering.
+	TTLKnown      bool   `json:"ttl_known"`
+	TTLSeconds    int64  `json:"ttl_seconds"`
+	TTLDisplay    string `json:"ttl_display"`
+	TTLProvenance string `json:"ttl_provenance"`
+	TTLEvidence   string `json:"ttl_evidence"`
+	// TTLIsUpperBound is set when the profiler said so in its own evidence, which today means a
+	// lifetime derived from exp minus nbf. It matters here and nowhere else: an interval derived
+	// from an upper bound can be too long, so the renewal can fire after the credential is dead.
+	TTLIsUpperBound bool   `json:"ttl_is_upper_bound"`
+	ExpiryDisplay   string `json:"expiry_display"`
+	ExpiryStyle     string `json:"expiry_style"`
+
+	// SurvivesRun is Survives() asked about the estimated run length: three states, and known
+	// false is not a yes.
+	SurvivesRun   bool   `json:"survives_run"`
+	SurvivesKnown bool   `json:"survives_known"`
+	SurvivesWhy   string `json:"survives_why"`
+
+	// The derived schedule. IntervalKnown false means nothing measured can produce one and the
+	// operator has to supply it.
+	IntervalSeconds int    `json:"interval_seconds"`
+	IntervalKnown   bool   `json:"interval_known"`
+	IntervalBasis   string `json:"interval_basis"`
+
+	// The proof, and the window it is being held to.
+	RefreshStatus      string    `json:"refresh_status"`
+	RefreshMechanism   string    `json:"refresh_mechanism"`
+	MintHost           string    `json:"mint_host"`
+	MintInScope        bool      `json:"mint_in_scope"`
+	ProvenAt           time.Time `json:"proven_at"`
+	ProofAgeSeconds    int64     `json:"proof_age_seconds"`
+	ProofWindowSeconds int64     `json:"proof_window_seconds"`
+	ProofWindowBasis   string    `json:"proof_window_basis"`
+	RefreshEvidence    []string  `json:"refresh_evidence"`
+
+	// Warnings are things the operator must see that do not take the control away.
+	Warnings []string `json:"warnings"`
+}
+
+// TriageRenewalGate is the whole answer for one target.
+type TriageRenewalGate struct {
+	// Evaluated is false on the zero value, and a zero gate REFUSES an enabled renewal rather
+	// than allowing it. A gate that was never computed has not proven anything.
+	Evaluated bool `json:"evaluated"`
+	// Offerable is whether the control may be shown as usable at all: true when at least one
+	// credential is usable.
+	Offerable bool                  `json:"offerable"`
+	Code      string                `json:"code"`
+	Reason    string                `json:"reason"`
+	Options   []TriageRenewalOption `json:"options"`
+	// The run length the proof window falls back to, and where it came from, carried so the
+	// screen can show the arithmetic rather than a bare number.
+	RunEstimateSeconds int64     `json:"run_estimate_seconds"`
+	RunEstimateBasis   string    `json:"run_estimate_basis"`
+	EvaluatedAt        time.Time `json:"evaluated_at"`
+}
+
+// Option returns the option for one token id.
+func (g TriageRenewalGate) Option(tokenID string) (TriageRenewalOption, bool) {
+	for _, o := range g.Options {
+		if o.TokenID == tokenID {
+			return o, true
+		}
+	}
+	return TriageRenewalOption{}, false
+}
+
+// TriageEstimatedRunDuration is how long the configured run is expected to take, and the sentence
+// that says how that was worked out.
+//
+// It is per_run_probes divided by requests_per_second: the run's own budget at the run's own rate.
+// It is an ESTIMATE and is labelled as one everywhere it is shown. It is used for two things, both
+// of which want an order of magnitude rather than a stopwatch: asking Survives() whether the
+// credential would last the run, and bounding a refresh proof when nothing about the credential's
+// lifetime was ever measured.
+func TriageEstimatedRunDuration(p TriagePacing) (time.Duration, string) {
+	if p.RequestsPerSecond <= 0 || p.PerRunProbes <= 0 {
+		return 0, "the run length cannot be estimated: the pacing has no positive rate or no positive per-run budget"
+	}
+	secs := float64(p.PerRunProbes) / p.RequestsPerSecond
+	d := time.Duration(secs * float64(time.Second))
+	return d, fmt.Sprintf("an estimated %s: %d probes at %.2f per second", humaniseTTL(d), p.PerRunProbes, p.RequestsPerSecond)
+}
+
+// TriageRenewalIntervalFor derives the renewal interval FROM THE MEASURED LIFETIME.
+//
+// Half of it. Not two thirds, not ninety percent, and not a constant: at half the lifetime a
+// renewal that fails still leaves a whole second half in which to retry before the credential
+// dies, and one full retry window is the least that makes the schedule recoverable. Renewing at
+// ninety percent leaves a tenth of a lifetime for a retry that has to traverse a login flow.
+//
+// The bool is the usual three-state honesty. Where no lifetime was measured there is nothing to
+// halve, and this returns false rather than a number, because a schedule built on a guess
+// under-runs or over-runs silently and the operator cannot tell which from the outside.
+func TriageRenewalIntervalFor(p SessionTokenProfile) (time.Duration, bool, string) {
+	if measured, how := triageNonExpiringIsMeasured(p); measured {
+		return 0, false, "the credential was measured as non-expiring (" + how + "), so there is nothing to renew"
+	}
+	if p.TTLKnown && p.TTL > 0 {
+		half := p.TTL / 2
+		basis := fmt.Sprintf("half of the measured %s lifetime (%s: %s), which leaves one full retry window before it expires",
+			humaniseTTL(p.TTL), p.TTLProvenance, p.TTLEvidence)
+		if triageTTLIsUpperBound(p) {
+			basis += ". That lifetime is an UPPER BOUND, so the real one may be shorter and this schedule may fire late"
+		}
+		return half, true, basis
+	}
+	if p.TTLFloorKnown && p.TTLFloor > 0 {
+		// A floor is a lower bound on the lifetime, so half of it is safely early rather than
+		// late. It is still not a TTL and it is not allowed to pretend to be one. AND IT IS ONLY
+		// EARLY WHILE IT IS ONE CREDENTIAL'S OWN SPAN: see triageFloorBelongsToOneCredential.
+		if ok, why := triageFloorBelongsToOneCredential(p); !ok {
+			return 0, false, "the lifetime was never measured, and the lower bound on record cannot be used to derive one: " + why
+		}
+		half := p.TTLFloor / 2
+		// The LABEL comes from the provenance, because the two kinds of floor are different facts
+		// and one sentence may not use the same word for both. floorPhrase is the profile's own
+		// wording for each, so a reader is not told twice in two vocabularies.
+		return half, true, fmt.Sprintf(
+			"half of the %s: %s (%s). The lifetime itself was never measured, so this is a floor and not a TTL: it renews early rather than late",
+			triageFloorBoundLabel(p), floorPhrase(p.floorProvenance(), p.TTLFloor), p.FloorEvidence())
+	}
+	return 0, false, "neither a lifetime nor a lower bound has ever been measured for this credential, so no interval can be derived from a measurement"
+}
+
+// triageFloorBelongsToOneCredential answers whether the lower bound on record is a span of ONE
+// credential's life. It is the only kind a schedule may be built on.
+//
+// THE MEASUREMENT THAT MADE THIS A FUNCTION. A value stored one hour ago carried a probed floor of
+// 5h59m and a sentence saying it "was alive across 5h59m of its own life". Halving it scheduled the
+// first renewal 2h59m out, on a credential whose real life was fifteen minutes. Renewing LATE is
+// the one direction this feature may never run, so this is a refusal and not a warning.
+//
+// IT ASKS THE PROFILE RATHER THAN DECIDING AGAIN, AND THAT IS THE WHOLE POINT OF THE FUNCTION.
+//
+// This file used to answer the question itself, by switching on TTLFloorProvenance. That made two
+// predicates on one question, and they disagreed: SessionTokenProfile.FloorBelongsToOneCredential
+// returned true for a probed floor while this returned false for the same profile, so the same
+// number was one credential's life to the thing that measured it and nobody's to the thing that
+// read it. Only the producer knows how a floor was got, so only the producer may answer, and a
+// second opinion here is a second thing to be wrong.
+//
+// WHAT THE PRODUCER ANSWERS TODAY, READ IN applyProbeHistory RATHER THAN ASSUMED HERE. A probed
+// span is taken only across validation events attributeProbe could tie to the value stored now,
+// by the fingerprint stamped on the event or by the anchor credentialHeldSince returns, and where
+// it can tie none there is no floor at all. That attribution is what makes a probed floor usable,
+// and it is also why the refusal above no longer applies to one.
+//
+// A FLOOR WITH NOTHING RECORDED IS STILL REFUSED, by the producer and for the same reason: nothing
+// says which path produced it, so nothing can say whether it spans a rotation.
+func triageFloorBelongsToOneCredential(p SessionTokenProfile) (bool, string) {
+	return p.FloorBelongsToOneCredential()
+}
+
+// triageFloorBoundLabel names WHICH KIND of lower bound a sentence is about.
+//
+// Every sentence in this file used to say "OBSERVED LOWER BOUND" whatever the provenance was. That
+// was harmless only while probed floors were refused outright; the moment one is allowed through,
+// a span of the framework's own requests gets described to the operator as captured traffic, which
+// is the defect this whole round is about arriving in a new place.
+//
+// The word comes from floorProvenance(), which returns unknown for an empty column rather than
+// defaulting it to observed. The unlabelled case is the honest one for that: "LOWER BOUND" claims
+// nothing about where the number came from. It is currently unreachable from the two callers,
+// because both of them ask triageFloorBelongsToOneCredential first and an unknown provenance is
+// refused there, and it is kept because a caller that stops asking must not start lying.
+func triageFloorBoundLabel(p SessionTokenProfile) string {
+	switch p.floorProvenance() {
+	case ProvObserved:
+		return "OBSERVED LOWER BOUND"
+	case ProvProbed:
+		return "PROBED LOWER BOUND"
+	}
+	return "LOWER BOUND"
+}
+
+// triageNonExpiringIsMeasured answers whether a non_expiring style is a MEASUREMENT or a claim.
+//
+// WHY THE STYLE ALONE IS NOT ENOUGH, AND WHY THIS FILE HAD THE HOLE TWICE.
+//
+// SessionTokenProfile.Survives already refuses to grant an unconditional yes on the style alone,
+// and says why in its own comment: nothing in that package can currently produce non_expiring, so
+// the only way a profile carries it is a row somebody wrote by hand or a future writer that
+// guessed. This file then read the same style in two places and called it "measured" both times,
+// which is the same defect the Survives guard exists to close and a worse one in its consequences.
+// Survives failing open would withhold a yes; this failing open ASSURES the operator that a run of
+// any length outlives a credential that may die at minute ten, and takes the renewal control away
+// on the strength of it.
+//
+// The test is the same one Survives applies: the provenance has to name a method that could have
+// established the claim. ProvUnknown cannot, and neither can an empty column.
+func triageNonExpiringIsMeasured(p SessionTokenProfile) (bool, string) {
+	if p.ExpiryStyle != ExpiryStyleNonExpiring {
+		return false, ""
+	}
+	switch p.ExpiryProvenance {
+	case ProvParsed, ProvProbed, ProvDeclared:
+		return true, string(p.ExpiryProvenance)
+	}
+	return false, ""
+}
+
+// triageNonExpiringClaimIsUnbacked is the other half: the row says non-expiring and nothing says
+// how that was established. It is a WARNING rather than a refusal, because the credential is then
+// judged on its measured lifetime like any other and the claim is simply not used.
+func triageNonExpiringClaimIsUnbacked(p SessionTokenProfile) bool {
+	if p.ExpiryStyle != ExpiryStyleNonExpiring {
+		return false
+	}
+	measured, _ := triageNonExpiringIsMeasured(p)
+	return !measured
+}
+
+// triageTTLIsUpperBound reads the profiler's OWN wording. The exp-minus-nbf rung says so in its
+// evidence because nbf may be backdated for clock skew, and a lifetime that may be longer than the
+// truth is the one direction that makes a renewal schedule fire too late.
+//
+// It is a substring test on a sentence the profiler writes, which is weaker than a field, and the
+// failure mode is chosen on purpose: if that wording ever changes, what is lost is a WARNING, and
+// the evidence string itself is rendered verbatim beside the interval either way, so the operator
+// still reads the same fact in the same place.
+func triageTTLIsUpperBound(p SessionTokenProfile) bool {
+	return strings.Contains(strings.ToLower(p.TTLEvidence), "upper bound")
+}
+
+// triageProofWindowFor is test 3: how long a refresh proof stays current for this credential, and
+// the sentence saying which of the three clocks it got.
+func triageProofWindowFor(p SessionTokenProfile, runEstimate time.Duration) (time.Duration, string) {
+	if p.TTLKnown && p.TTL > 0 {
+		return p.TTL, fmt.Sprintf("the measured %s lifetime (%s): the credential that refresh minted is dead after that, so nothing about the mint has been observed in the present since",
+			humaniseTTL(p.TTL), p.TTLProvenance)
+	}
+	// THE SAME REFUSAL THE INTERVAL MAKES, AND FOR THE SAME REASON. A window taken from a floor
+	// that spans a rotation holds a proof current for many times the life of the credential it
+	// minted, which is the stale proof this gate exists to refuse, arriving through the clock.
+	floorRefusal := ""
+	if p.TTLFloorKnown && p.TTLFloor > 0 {
+		ok, why := triageFloorBelongsToOneCredential(p)
+		if ok {
+			return p.TTLFloor, fmt.Sprintf("the %s of %s. The lifetime was never measured, so the proof is held to the only span that was, which errs towards re-proving",
+				strings.ToLower(triageFloorBoundLabel(p)), humaniseTTL(p.TTLFloor))
+		}
+		floorRefusal = " The lower bound on record was not used: " + why
+	}
+	if runEstimate > 0 {
+		return runEstimate, fmt.Sprintf("the estimated %s length of this run. Nothing this proof could be held to has been measured on the credential itself, so there is no clock of its own, and the proof is instead required to be no older than the run it is authorising.%s",
+			humaniseTTL(runEstimate), floorRefusal)
+	}
+	return 0, "no window could be established: neither the credential's lifetime nor the run's length can be estimated." + floorRefusal
+}
+
+// EvaluateTriageRenewalGate is the whole gate, and it is PURE: the same function backs the handler
+// and the tests, and it never reaches a database or a network.
+func EvaluateTriageRenewalGate(creds []TriageRenewalCredential, pacing TriagePacing, now time.Time) TriageRenewalGate {
+	runEstimate, runBasis := TriageEstimatedRunDuration(pacing)
+	g := TriageRenewalGate{
+		Evaluated:          true,
+		Options:            []TriageRenewalOption{},
+		RunEstimateSeconds: int64(runEstimate / time.Second),
+		RunEstimateBasis:   runBasis,
+		EvaluatedAt:        now.UTC(),
+	}
+	for _, c := range creds {
+		g.Options = append(g.Options, triageRenewalOptionFor(c, runEstimate, now))
+	}
+	usable := 0
+	for _, o := range g.Options {
+		if o.Usable {
+			usable++
+		}
+	}
+	switch {
+	case len(g.Options) == 0:
+		g.Code = TriageRenewalNoCredential
+		g.Reason = "This target has no session credential recorded, so there is no session to renew. Add one in the Session Manager."
+	case usable > 0:
+		g.Offerable = true
+		g.Code = TriageRenewalOfferable
+		g.Reason = fmt.Sprintf("%d of %d credential(s) have a refresh the framework has performed and watched return a different working credential.", usable, len(g.Options))
+	default:
+		g.Code = TriageRenewalNoneProven
+		g.Reason = triageRenewalRefusalReason(g.Options)
+	}
+	return g
+}
+
+// triageRenewalRefusalReason is the target-level sentence when nothing is offerable.
+//
+// IT MAY NOT STATE A FACT IT DID NOT READ. The sentence this replaced was a hardcoded string:
+// "the framework has never performed a refresh of any credential on this target and watched a new
+// working credential come back". On proof_stale and on proof_broken that is FALSE, and it was
+// falsified two sentences later in its own message by the per-credential advice, which says "One
+// credential WAS proven". That whole paragraph reaches the operator verbatim on the configuration
+// screen. Five shipped strings in this codebase have already been proven false by measurement and
+// this was the sixth.
+//
+// So the claim is derived from the options rather than assumed: a proof is on record when an
+// option carries a non-zero ProvenAt, which is read from session_token_events and is the same fact
+// the per-credential branches used to contradict it with.
+func triageRenewalRefusalReason(options []TriageRenewalOption) string {
+	everProven, notNeeded, noValue := false, 0, 0
+	for _, o := range options {
+		if !o.ProvenAt.IsZero() {
+			everProven = true
+		}
+		switch o.Code {
+		case TriageRenewalNotNeeded:
+			notNeeded++
+		case TriageRenewalNoValue:
+			noValue++
+		}
+	}
+	whatToDo := triageRenewalWhatToDo(options)
+
+	switch {
+	case notNeeded == len(options) && len(options) > 0:
+		// Nothing is refused here and saying "cannot be turned on" would read as a fault.
+		return fmt.Sprintf("Automatic renewal is not offered: all %d credential(s) on this target were measured as non-expiring, so a run of any length outlives them and renewing would change nothing.", len(options))
+	case noValue == len(options) && len(options) > 0:
+		return fmt.Sprintf("Automatic renewal cannot be turned on: all %d credential(s) on this target have no value stored, so there is nothing to renew and nothing that could have been proven. %s", len(options), whatToDo)
+	case everProven:
+		return "Automatic renewal cannot be turned on. A refresh HAS been performed on this target and recorded, but that proof no longer describes what happens now, so it cannot support a promise that the scan will still be authenticated at the end of the run. " + whatToDo
+	}
+	return "Automatic renewal cannot be turned on: the framework has never performed a refresh of any credential on this target and watched a new working credential come back. Until it has, renewal would be a promise nothing measured supports. " + whatToDo
+}
+
+// triageRenewalWhatToDo turns the per-credential codes into one next action, because a refusal
+// that does not say what would lift it is a refusal the operator argues with instead of acting on.
+func triageRenewalWhatToDo(options []TriageRenewalOption) string {
+	seen := map[string]bool{}
+	for _, o := range options {
+		seen[o.Code] = true
+	}
+	// THE ADVICE NAMES THE CONTROL THAT ACTUALLY RECORDS A PROOF, which is the proof button on
+	// this screen: it saves with a prove_refresh sidecar, which is what reaches
+	// ProveSessionRefreshForTarget and RecordRefreshProof. Three of these sentences used to say
+	// "refresh once from the Session Manager". MEASURED end to end in round 12: that button
+	// replays the flow, stores whatever comes back and records kind=refresh status=refreshed,
+	// while the proof is read from kind=refresh status=SUCCESS, so following the instruction could
+	// not lift the refusal on any application. An instruction that cannot work is worse than no
+	// instruction: the operator does the thing, watches nothing change, and distrusts the screen.
+	switch {
+	case seen[TriageRenewalProofBroken]:
+		return "One credential WAS proven and a refresh has failed since, so the proof no longer describes what happens now: fix the flow, then take a new proof with the proof button on this screen."
+	case seen[TriageRenewalProofStale]:
+		return "One credential was proven, but the proof is older than the credential it minted could live, so it says nothing about now: take a current proof with the proof button on this screen."
+	case seen[TriageRenewalMintOutOfScope]:
+		return "A refresh mechanism was found but it mints outside this engagement's scope, so the framework must not exercise it: re-authenticate by hand and paste a fresh value before a long run."
+	case seen[TriageRenewalNeverProven]:
+		return "A refresh mechanism was found but has never been exercised: take the proof with the proof button on this screen, which replays the recorded login once and records the proof only if a different working credential comes back."
+	case seen[TriageRenewalNotProfiled]:
+		return "No credential here has been characterised yet, so nothing has looked for a refresh mechanism: open the Session Manager for this target, which characterises every credential it lists."
+	case seen[TriageRenewalNotNeeded]:
+		return "The credential here was measured as non-expiring, so a long run does not need renewal."
+	}
+	return "No refresh mechanism was found for any credential on this target: no auth flow with executable steps, no mint endpoint in the captured corpus and no refresh grant in any captured response."
+}
+
+// triageRenewalOptionFor decides ONE credential. Every branch writes a Reason the operator can
+// act on, and no branch leaves Usable true on an absent measurement.
+func triageRenewalOptionFor(c TriageRenewalCredential, runEstimate time.Duration, now time.Time) TriageRenewalOption {
+	p := c.Profile
+	o := TriageRenewalOption{
+		TokenID:          c.TokenID,
+		Name:             c.Name,
+		Carrier:          p.Carrier.Describe(),
+		Kind:             string(p.Kind),
+		Fingerprint:      p.Fingerprint,
+		IsActive:         c.IsActive,
+		TTLKnown:         p.TTLKnown,
+		TTLSeconds:       int64(p.TTL / time.Second),
+		TTLDisplay:       p.TTLDisplay(),
+		TTLProvenance:    string(p.TTLProvenance),
+		TTLEvidence:      p.TTLEvidence,
+		TTLIsUpperBound:  triageTTLIsUpperBound(p),
+		ExpiryDisplay:    p.ExpiryDisplay(),
+		ExpiryStyle:      string(p.ExpiryStyle),
+		RefreshStatus:    string(p.Refresh.Status),
+		RefreshMechanism: string(p.Refresh.Mechanism),
+		MintHost:         p.Refresh.MintHost,
+		MintInScope:      p.Refresh.MintInScope,
+		RefreshEvidence:  append([]string{}, p.Refresh.Evidence...),
+		Warnings:         []string{},
+	}
+	o.SurvivesRun, o.SurvivesKnown, o.SurvivesWhy = p.Survives(runEstimate, now)
+	if interval, known, basis := TriageRenewalIntervalFor(p); known {
+		o.IntervalSeconds, o.IntervalKnown, o.IntervalBasis = int(interval/time.Second), true, basis
+	} else {
+		o.IntervalBasis = basis
+	}
+	if c.ProfileIsStale {
+		o.Warnings = append(o.Warnings, "The stored characterisation described a different value than the one held now, so the lifetime shown here was recomputed from the credential itself and the corpus was not re-read.")
+	}
+	if p.TTLKnown && p.TTLProvenance != ProvDeclared && p.TTLProvenance != ProvParsed {
+		o.Warnings = append(o.Warnings, fmt.Sprintf("This lifetime was %s rather than read from the credential or stated by the server, so the renewal schedule rests on an inference.", p.TTLProvenance))
+	}
+	if o.TTLIsUpperBound {
+		o.Warnings = append(o.Warnings, "The measured lifetime is an UPPER BOUND, so the real one may be shorter and a schedule derived from it may fire after the credential is already dead.")
+	}
+	if !p.TTLKnown {
+		o.Warnings = append(o.Warnings, "The lifetime of this credential has never been measured, so no interval can be derived from one; any interval used is a figure you supplied.")
+	}
+	if triageNonExpiringClaimIsUnbacked(p) {
+		o.Warnings = append(o.Warnings, "This credential is recorded as non-expiring but nothing says how that was established, so it is an unmeasured claim and not a measurement. It is being judged on its measured lifetime instead, and the claim is not used.")
+	}
+
+	// The proof, in the order of the three tests. Each refusal names the test it failed.
+	proofWindow, windowBasis := triageProofWindowFor(p, runEstimate)
+	o.ProofWindowSeconds, o.ProofWindowBasis = int64(proofWindow/time.Second), windowBasis
+
+	if p.Fingerprint == "" {
+		o.Code, o.Reason = TriageRenewalNoValue, "This credential has no value stored, so there is nothing to renew and nothing that could have been proven."
+		return o
+	}
+	if measured, how := triageNonExpiringIsMeasured(p); measured {
+		o.Code, o.Reason = TriageRenewalNotNeeded, fmt.Sprintf(
+			"This credential was measured as non-expiring (%s), so a run of any length outlives it and renewal would change nothing.", how)
+		return o
+	}
+
+	// TEST 1: was it ever proven at all?
+	if p.Refresh.Status != RefreshProven || c.ProvenAt.IsZero() {
+		switch {
+		case p.Refresh.Status == RefreshProven && c.ProvenAt.IsZero():
+			// The column says proven and there is no event behind it. Trusting the column here
+			// would let a hand-edited row arm a renewal nothing ever performed.
+			o.Code = TriageRenewalNeverProven
+			o.Reason = "This credential is recorded as proven but there is no successful refresh event behind that record, so there is no proof to read. Take one with the proof button on this screen."
+		case p.Refresh.Status == RefreshMintOutOfScope:
+			o.Code = TriageRenewalMintOutOfScope
+			o.Reason = fmt.Sprintf("A refresh mechanism was found (%s at %s) but that host is outside this engagement's scope, so the framework must not mint from it. Re-authenticate by hand and paste a fresh value before a long run.",
+				triageOrDefault(string(p.Refresh.Mechanism), "an unnamed mechanism"), triageOrDefault(p.Refresh.MintHost, "an unnamed host"))
+		case p.Refresh.Status == RefreshAvailable:
+			o.Code = TriageRenewalNeverProven
+			o.Reason = fmt.Sprintf("A refresh mechanism exists (%s%s) but it has NEVER been exercised, so nothing here shows it yields a working credential. Take the proof with the proof button on this screen, which replays the recorded login once and records the proof only if a DIFFERENT credential comes back and the target honours it. The Session Manager's Refresh button is not that control: it replaces the stored value and records no proof. Over the API it is POST /session-tokens/{id}/prove-refresh, or a prove_refresh sidecar on this screen's save.",
+				triageOrDefault(string(p.Refresh.Mechanism), "an unnamed mechanism"),
+				triageRenewalMintSuffix(p))
+		case p.Refresh.Status == "" || p.Refresh.Status == RefreshNotCharacterised:
+			// NOT no_mechanism_found. Nothing has characterised this credential, so nothing has
+			// read its flow, its corpus or its own claims: reporting a search here would be
+			// reporting one that never ran. LoadTriageRenewalCredentials reaches this branch by
+			// CLEARING the refresh half on its fallback path, which is a line in that function and
+			// not a property of ProfileCredential: profileCredentialBytes returns not_observed,
+			// and for two rounds that carried every uncharacterised credential into the default
+			// branch below instead.
+			//
+			// RefreshNotCharacterised is accepted here as well as the zero value, so that when the
+			// patch to profileCredentialBytes lands and it names the state instead of clearing it,
+			// this branch keeps answering the same way rather than falling through again.
+			o.Code = TriageRenewalNotProfiled
+			o.Reason = "Nothing has characterised this credential yet, so no search for a refresh mechanism has been run for it. That is not the same as having looked and found none. Open the Session Manager for this target, which characterises every credential it lists and looks for the mechanism, then come back."
+		default:
+			o.Code = TriageRenewalNoMechanism
+			o.Reason = "No refresh mechanism was found for this credential: no auth flow with executable steps, no mint endpoint in the captured corpus and no refresh grant in any captured response. Renewal cannot be offered for a session nothing knows how to renew."
+		}
+		return o
+	}
+
+	o.ProvenAt = c.ProvenAt.UTC()
+	age := now.Sub(c.ProvenAt)
+	if age < 0 {
+		age = 0
+	}
+	o.ProofAgeSeconds = int64(age / time.Second)
+
+	// TEST 2: has a refresh FAILED since the proof?
+	if !c.LastRefreshAt.IsZero() && c.LastRefreshAt.After(c.ProvenAt) && triageRefreshEventIsFailure(c.LastRefreshStatus) {
+		o.Code = TriageRenewalProofBroken
+		o.Reason = fmt.Sprintf("A refresh WAS proven %s ago, and a refresh has FAILED since (%s, %s ago%s). The proof describes what used to happen, so renewal is not offered until a refresh succeeds again.",
+			humaniseTTL(age), triageOrDefault(c.LastRefreshStatus, "an event with no status"),
+			humaniseTTL(now.Sub(c.LastRefreshAt)), triageRenewalDetailSuffix(c.LastRefreshDetail))
+		return o
+	}
+
+	// TEST 3: is the proof older than its own clock?
+	if proofWindow <= 0 {
+		o.Code = TriageRenewalProofStale
+		o.Reason = "A refresh was proven, but " + windowBasis + ", so there is no way to say whether that proof is still current."
+		return o
+	}
+	if age > proofWindow {
+		o.Code = TriageRenewalProofStale
+		o.Reason = fmt.Sprintf("The refresh was proven %s ago, which is older than %s. Nothing since then shows the mint still works, so the proof says nothing about now. Take a current one with the proof button on this screen.",
+			humaniseTTL(age), windowBasis)
+		return o
+	}
+
+	// The proof stands. Everything that is a warning rather than a refusal is added here.
+	if c.ProofAfterFingerprint == "" {
+		o.Warnings = append(o.Warnings, "That proof predates the recording of the credential it produced, so it could not be checked against the value held now.")
+	} else if c.ProofAfterFingerprint != p.Fingerprint {
+		o.Warnings = append(o.Warnings, fmt.Sprintf("The credential held now (%s) is not the one that refresh produced (%s), so the proof covers the mechanism rather than this value.",
+			p.Fingerprint, c.ProofAfterFingerprint))
+	}
+	if !o.SurvivesKnown {
+		o.Warnings = append(o.Warnings, "Whether this credential would have survived the run unrenewed is unknown: "+o.SurvivesWhy+".")
+	} else if o.SurvivesRun {
+		o.Warnings = append(o.Warnings, "This credential would survive the estimated run without renewal ("+o.SurvivesWhy+"), so renewal is insurance rather than a requirement here.")
+	}
+	o.Usable = true
+	o.Code = TriageRenewalProven
+	o.Reason = fmt.Sprintf("A refresh was performed %s ago and a DIFFERENT working credential came back%s. The proof is held to %s.",
+		humaniseTTL(age), triageRenewalDetailSuffix(c.ProofDetail), windowBasis)
+	return o
+}
+
+func triageRenewalMintSuffix(p SessionTokenProfile) string {
+	if p.Refresh.MintHost == "" {
+		return ""
+	}
+	return " at " + p.Refresh.MintHost
+}
+
+func triageRenewalDetailSuffix(detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return ""
+	}
+	return ": " + detail
+}
+
+// ---------------------------------------------------------------------------------------------
+// What the runner is allowed to do with a stored renewal setting
+// ---------------------------------------------------------------------------------------------
+
+// TriageRenewalEffective is the ONE function a runner may ask "should I renew, and how often".
+//
+// IT IS FAIL CLOSED, and that is the whole point of it. A stored document that says enabled true
+// is not permission: the gate is re-evaluated on every read, and a proof that has since broken or
+// aged out takes the renewal away without anybody editing the document. The alternative is a
+// setting that was true once and stays true forever, which is precisely the stale proof this
+// section exists to refuse.
+//
+// The third return is always a sentence, on every path, because a runner that decided not to renew
+// and cannot say why produces a scan whose authentication silently died.
+func TriageRenewalEffective(s TriageInvestigateSettings, gate TriageRenewalGate, now time.Time) (bool, time.Duration, string) {
+	r := s.SessionRenewal
+	if !r.Enabled {
+		return false, 0, "automatic session renewal is switched off for this target"
+	}
+	if !gate.Evaluated {
+		return false, 0, "automatic session renewal is switched on, but the refresh gate was not evaluated for this run, and an unevaluated gate has proven nothing"
+	}
+	if strings.TrimSpace(r.TokenID) == "" {
+		return false, 0, "automatic session renewal is switched on but names no credential, and renewing the wrong one leaves the scan authenticated as nobody"
+	}
+	o, found := gate.Option(r.TokenID)
+	if !found {
+		return false, 0, fmt.Sprintf("automatic session renewal names credential %s, which this target no longer has", r.TokenID)
+	}
+	if !o.Usable {
+		return false, 0, "automatic session renewal is switched on but is no longer permitted: " + o.Reason
+	}
+	if r.IntervalSeconds > 0 {
+		interval := time.Duration(r.IntervalSeconds) * time.Second
+		// The same refusal the save endpoint makes, repeated here rather than assumed. The
+		// validation pass is what a document written through the API is held to; this is what a
+		// document is held to at the moment it is USED, and the two are different moments. An
+		// interval no shorter than the lifetime schedules its first renewal for after the
+		// credential is already dead, which is a run that renews nothing while reporting that it
+		// renews.
+		if o.TTLKnown && interval >= time.Duration(o.TTLSeconds)*time.Second {
+			return false, 0, fmt.Sprintf("automatic session renewal is switched on with an interval of %s, which is not shorter than the credential's measured lifetime of %s, so the first renewal would fire after it had already expired",
+				humaniseTTL(interval), humaniseTTL(time.Duration(o.TTLSeconds)*time.Second))
+		}
+		return true, interval, fmt.Sprintf("renewing %s every %s, the interval you set", o.Name, humaniseTTL(interval))
+	}
+	if !o.IntervalKnown {
+		return false, 0, "automatic session renewal is switched on with no interval, and none can be derived: " + o.IntervalBasis
+	}
+	interval := time.Duration(o.IntervalSeconds) * time.Second
+	return true, interval, fmt.Sprintf("renewing %s every %s, %s", o.Name, humaniseTTL(interval), o.IntervalBasis)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reading the gate's inputs out of the database. Read only.
+// ---------------------------------------------------------------------------------------------
+
+// LoadTriageRenewalCredentials reads what the gate needs for one target. It WRITES NOTHING.
+//
+// It does not call AttachSessionTokenProfiles, which profiles on read and stores the result: a
+// settings screen is not the place to take a measurement and a write, and the corpus group-by plus
+// scope load that profiling costs would be paid on every GET of this form. Where a stored profile
+// exists and describes the value held, it is used; where it does not, the lifetime half is
+// recomputed with the PURE ProfileCredential and the option says the characterisation was stale.
+//
+// The refresh half is read from session_token_events directly rather than from the stored
+// refresh_status column, because the column cannot express "proven and broken since": it is
+// written by DetectRefreshCapability, which selects the most recent SUCCESS and never looks at
+// what happened after it.
+func LoadTriageRenewalCredentials(ctx context.Context, scopeTargetID string) ([]TriageRenewalCredential, error) {
+	if dbPool == nil {
+		return nil, fmt.Errorf("no database connection, so no credential could be read and no refresh proof could be checked")
+	}
+	rows, err := dbPool.Query(ctx,
+		`SELECT `+sessionTokenCols+sessionTokenFrom+
+			`WHERE t.scope_target_id = $1 ORDER BY t.is_active DESC, t.created_at ASC`, scopeTargetID)
+	if err != nil {
+		return nil, err
+	}
+	tokens := []SessionToken{}
+	for rows.Next() {
+		t, scanErr := scanSessionToken(rows)
+		if scanErr != nil {
+			continue
+		}
+		tokens = append(tokens, t)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	out := make([]TriageRenewalCredential, 0, len(tokens))
+	for _, tok := range tokens {
+		cred := NewCredential(tok.TokenValue)
+		c := TriageRenewalCredential{TokenID: tok.ID, Name: tok.Name, IsActive: tok.IsActive}
+
+		stored, loadErr := LoadSessionTokenProfile(ctx, tok.ID)
+		if loadErr == nil && !stored.ProfiledAt.IsZero() && stored.Fingerprint == cred.Fingerprint() {
+			c.Profile = stored
+		} else {
+			// The pure profiler: the credential's own claims and the carrier, no corpus and no
+			// network. It cannot see a refresh mechanism, which is why the refresh half below is
+			// read separately and why a stale profile does not silently lose the proof.
+			p := ProfileCredential(cred, CarrierForSessionToken(tok), now)
+			p.TokenID, p.ScopeTargetID = tok.ID, tok.ScopeTargetID
+
+			// AND THE REFRESH HALF IT RETURNS IS CLEARED, WHICH IS THE POINT OF THIS LINE.
+			//
+			// profileCredentialBytes fills Refresh with RefreshCapability{Status:
+			// RefreshNotObserved}, and not_observed is the answer of a search: DetectRefreshCapability
+			// writes it after reading the auth flows, the captured corpus and the token's own
+			// grants. NOTHING ABOVE READ ANY OF THOSE. Left as it comes back, the gate's default
+			// branch tells the operator "no auth flow with executable steps, no mint endpoint in
+			// the captured corpus and no refresh grant in any captured response" about a credential
+			// nobody has opened, and refresh_not_checked becomes unreachable on every real target.
+			// Measured by driving this loader against a real database, after a pure test that built
+			// the zero shape by hand had reported the same defect fixed twice.
+			//
+			// The zero capability is the state BEFORE the search, and that is the state here.
+			p.Refresh = RefreshCapability{}
+
+			if loadErr == nil && !stored.ProfiledAt.IsZero() {
+				// A stored profile DID run the search, so its answer is kept even when the value
+				// it described has been replaced. Losing it here would turn a real finding into
+				// not-checked, which is the same defect pointing the other way.
+				p.Refresh = stored.Refresh
+				c.ProfileIsStale = true
+			}
+			c.Profile = p
+		}
+		c.Profile.Name = tok.Name
+
+		// The proof and the most recent attempt, from the events table.
+		var (
+			provenAt     *time.Time
+			provenDetail string
+			provenAfter  string
+		)
+		_ = dbPool.QueryRow(ctx, `
+			SELECT created_at, COALESCE(detail,''), COALESCE(evidence->>'after_fingerprint','')
+			FROM session_token_events
+			WHERE session_token_id = $1 AND kind = 'refresh' AND status = 'success'
+			ORDER BY created_at DESC LIMIT 1`, tok.ID).Scan(&provenAt, &provenDetail, &provenAfter)
+		if provenAt != nil {
+			c.ProvenAt = provenAt.UTC()
+			c.ProofDetail = provenDetail
+			c.ProofAfterFingerprint = provenAfter
+			// The stored profile can be older than the proof, and the pure profiler above cannot
+			// see events at all. The event IS the proof, so it is what the profile says.
+			c.Profile.Refresh.Status = RefreshProven
+			c.Profile.Refresh.ProvenAt = c.ProvenAt
+		}
+		var (
+			lastAt     *time.Time
+			lastStatus string
+			lastDetail string
+		)
+		_ = dbPool.QueryRow(ctx, `
+			SELECT created_at, COALESCE(status,''), COALESCE(detail,'')
+			FROM session_token_events
+			WHERE session_token_id = $1 AND kind = 'refresh'
+			ORDER BY created_at DESC LIMIT 1`, tok.ID).Scan(&lastAt, &lastStatus, &lastDetail)
+		if lastAt != nil {
+			c.LastRefreshAt = lastAt.UTC()
+			c.LastRefreshStatus = lastStatus
+			c.LastRefreshDetail = lastDetail
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// TriageRenewalGateFor loads the inputs and evaluates the gate. A database that cannot be read
+// produces an EVALUATED gate that offers nothing and says why, rather than a zero gate: the two
+// are the same refusal, but only one of them tells the operator what happened.
+func TriageRenewalGateFor(ctx context.Context, scopeTargetID string, pacing TriagePacing) TriageRenewalGate {
+	now := time.Now().UTC()
+	creds, err := LoadTriageRenewalCredentials(ctx, scopeTargetID)
+	if err != nil {
+		runEstimate, runBasis := TriageEstimatedRunDuration(pacing)
+		return TriageRenewalGate{
+			Evaluated:          true,
+			Offerable:          false,
+			Code:               TriageRenewalNoCredential,
+			Reason:             "The session credentials for this target could not be read, so no refresh proof could be checked and renewal cannot be offered: " + err.Error(),
+			Options:            []TriageRenewalOption{},
+			RunEstimateSeconds: int64(runEstimate / time.Second),
+			RunEstimateBasis:   runBasis,
+			EvaluatedAt:        now,
+		}
+	}
+	return EvaluateTriageRenewalGate(creds, pacing, now)
+}
+
+// ---------------------------------------------------------------------------------------------
 // 6. THE HANDLERS
 // ---------------------------------------------------------------------------------------------
 
@@ -1142,8 +2399,14 @@ func GetTriageSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settings, retired := LoadTriageSettings(context.Background(), scopeTargetID)
-	validation := ValidateTriageSettings(settings)
+	ctx := context.Background()
+	settings, retired := LoadTriageSettings(ctx, scopeTargetID)
+	// The gate is RE-EVALUATED on every read, against the pacing this document actually carries.
+	// That is what makes a proof that has since broken or aged out take the control away by
+	// itself: the stored enabled:true then fails validation here, on the screen, rather than at
+	// minute fifteen of a run that nobody is watching.
+	gate := TriageRenewalGateFor(ctx, scopeTargetID, settings.Pacing)
+	validation := ValidateTriageSettingsWithRenewal(settings, gate)
 
 	json.NewEncoder(w).Encode(map[string]any{
 		"scope_target_id": scopeTargetID,
@@ -1153,7 +2416,145 @@ func GetTriageSettings(w http.ResponseWriter, r *http.Request) {
 		"vocabulary":      TriageSettingsVocabulary(),
 		"validation":      validation,
 		"retired_classes": retired,
+		"renewal_gate":    gate,
 	})
+}
+
+// triageSettingsBodyLimit bounds the read. The largest settings document this form can produce is
+// the class table plus the operator's custom payloads, which is kilobytes; a megabyte is four
+// orders of margin and still refuses a body nothing here could have meant.
+const triageSettingsBodyLimit = 1 << 20
+
+// DecodeTriageSettingsBody turns a PUT body into the settings document it names, or refuses it.
+//
+// =================================================================================================
+// WHY IT IS A FUNCTION AND NOT A json.Decoder CALL IN THE HANDLER
+// =================================================================================================
+//
+// The handler decoded into struct{ Settings TriageInvestigateSettings `json:"settings"` } and used
+// the result unconditionally. MEASURED against the live endpoint, twice, same target, same minute:
+//
+//	PUT {"per_run_probes": 25000, ...}          -> 200 {"saved": true}, stored per_run_probes 4000
+//	PUT {"settings": {"per_run_probes": 25000}} -> 200 {"saved": true}, stored per_run_probes 25000
+//
+// A body that IS the settings object carries no "settings" key, so the struct stayed entirely at
+// its zero value. NormaliseTriageSettings does its job and fills a zero document with defaults,
+// the defaults validate clean, and the INSERT ... ON CONFLICT DO UPDATE then replaced the
+// operator's stored document with them. The caller was told it had saved what it sent.
+//
+// That is silent data loss on a write endpoint. It is reachable by anything driving this API
+// directly rather than through the form, the MCP layer included, and the loss is invisible at the
+// call site because the response carries saved:true and a settings object that looks plausible.
+//
+// THE RULE THIS FUNCTION ENFORCES: a body must NAME at least one field of the document it claims
+// to be writing. Two shapes name one, the wrapper the form sends and the bare object a direct
+// caller sends, and both are accepted because both are unambiguous. Everything else is refused,
+// including the empty object: "the caller sent nothing" and "the caller sent exactly the defaults"
+// are different requests and this endpoint may not answer them the same way.
+//
+// THE FIELD NAMES ARE READ OFF THE STRUCT and not typed out here, so a field added to
+// TriageInvestigateSettings is recognised the day it is added rather than the day somebody
+// remembers this list.
+func DecodeTriageSettingsBody(body []byte) (TriageInvestigateSettings, error) {
+	var zero TriageInvestigateSettings
+	if len(bytes.TrimSpace(body)) == 0 {
+		return zero, fmt.Errorf("the request body is empty, and an empty body is not a settings document: send either {\"settings\": {...}} or the settings object itself")
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return zero, fmt.Errorf("the request body is not a JSON object, so it cannot be a settings document: %w", err)
+	}
+
+	known := triageSettingsFieldNames()
+	named := make([]string, 0, len(known))
+	for _, f := range known {
+		if _, ok := top[f]; ok {
+			named = append(named, f)
+		}
+	}
+	wrapper, wrapped := top["settings"]
+
+	switch {
+	case wrapped && len(named) > 0:
+		return zero, fmt.Errorf("the request body carries a \"settings\" wrapper AND the top-level settings field(s) %s, and there is no correct way to choose between them: send one shape or the other",
+			strings.Join(named, ", "))
+	case wrapped:
+		var out TriageInvestigateSettings
+		if err := json.Unmarshal(wrapper, &out); err != nil {
+			return zero, fmt.Errorf("the \"settings\" value is not a settings document: %w", err)
+		}
+		return out, nil
+	case len(named) > 0:
+		var out TriageInvestigateSettings
+		if err := json.Unmarshal(body, &out); err != nil {
+			return zero, fmt.Errorf("the request body names settings fields but does not decode as a settings document: %w", err)
+		}
+		return out, nil
+	}
+
+	return zero, fmt.Errorf("the request body names no settings field at all (it carries %s), so nothing in it says what to store. Send {\"settings\": {...}} or a bare settings object naming at least one of: %s. It is refused rather than written, because a body that decodes to an empty document would overwrite the stored settings with the defaults and report success",
+		triageSettingsKeyList(top), strings.Join(known, ", "))
+}
+
+// triageSettingsFieldNames is every json tag on TriageInvestigateSettings, in declaration order.
+func triageSettingsFieldNames() []string {
+	t := reflect.TypeOf(TriageInvestigateSettings{})
+	out := make([]string, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		tag := strings.Split(t.Field(i).Tag.Get("json"), ",")[0]
+		if tag == "" || tag == "-" {
+			continue
+		}
+		out = append(out, tag)
+	}
+	return out
+}
+
+// triageSettingsKeyList names what the body DID carry, so the refusal is actionable rather than a
+// restatement of the rule. A typo in one key is the common case and seeing it echoed is the fix.
+func triageSettingsKeyList(top map[string]json.RawMessage) string {
+	if len(top) == 0 {
+		return "no keys at all"
+	}
+	keys := make([]string, 0, len(top))
+	for k := range top {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return "the key(s) " + strings.Join(keys, ", ")
+}
+
+// DecodeTriageProveRefresh reads the OPTIONAL prove_refresh sidecar off a settings body.
+//
+// WHY THE SETTINGS PUT CARRIES IT. The renewal gate refuses until a refresh has been performed and
+// observed, and the operator meets that refusal on this screen, on this credential, in this
+// request. Making them leave, find the Session Manager, work out which credential the gate meant
+// and press a different button is how a one-action refusal becomes an unreachable one. A press of
+// "prove it now" is part of the same operator intent as turning the switch on, so it travels with
+// the document: the proof is taken first, the gate is then evaluated against it, and one round
+// trip either arms the control or says exactly why it could not be armed.
+//
+// IT IS STRICTLY OPT-IN. An absent field, a null, an empty object and an empty token id all mean
+// "send nothing", because a settings save that quietly replayed a login flow would be a side
+// effect nobody asked for. A malformed value is refused rather than ignored: a typo that silently
+// does nothing is the same class of defect as a typo that silently overwrites a document, which is
+// what DecodeTriageSettingsBody exists to refuse.
+func DecodeTriageProveRefresh(body []byte) (string, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return "", nil // the settings decoder reports this properly; do not report it twice
+	}
+	raw, present := top["prove_refresh"]
+	if !present || len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return "", nil
+	}
+	var req struct {
+		TokenID string `json:"token_id"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return "", fmt.Errorf("the \"prove_refresh\" value is not an object naming a credential: %w", err)
+	}
+	return strings.TrimSpace(req.TokenID), nil
 }
 
 // SaveTriageSettings answers PUT /triage/{scope_target_id}/settings.
@@ -1173,23 +2574,59 @@ func SaveTriageSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Settings TriageInvestigateSettings `json:"settings"`
+	body, err := io.ReadAll(io.LimitReader(r.Body, triageSettingsBodyLimit))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	incoming, err := DecodeTriageSettingsBody(body)
+	if err != nil {
+		// NOT A 200 WITH saved:true. See DecodeTriageSettingsBody: a body this endpoint cannot
+		// recognise used to decode to the zero struct, pick up every default, validate clean and
+		// be written over whatever the operator had stored.
 		writeJSONError(w, http.StatusBadRequest, "invalid_body", err.Error())
 		return
 	}
 
-	settings, retired := NormaliseTriageSettings(req.Settings)
-	validation := ValidateTriageSettings(settings)
+	settings, retired := NormaliseTriageSettings(incoming)
+
+	// THE PROOF, IF ONE WAS ASKED FOR, BEFORE THE GATE READS THE PROOFS. This is the only thing in
+	// this handler that sends a request, and it sends nothing unless the body named a credential.
+	// It is also the only production caller of RecordRefreshProof, which is what makes the renewal
+	// control reachable at all: the gate demands a state that nothing else in the tree can enter.
+	proveCtx := context.Background()
+	var refreshProof *SessionRefreshProofResult
+	proveTokenID, proveErr := DecodeTriageProveRefresh(body)
+	if proveErr != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_body", proveErr.Error())
+		return
+	}
+	if proveTokenID != "" {
+		p := ProveSessionRefreshForTarget(proveCtx, scopeTargetID, proveTokenID)
+		refreshProof = &p
+	}
+
+	gate := TriageRenewalGateFor(proveCtx, scopeTargetID, settings.Pacing)
+	// The proof this switch is being armed against is stamped onto the document, so a later read
+	// can say what it was armed against. It is NEVER what the later read trusts: the gate is
+	// evaluated again every time, and this field is a record rather than a permission.
+	if settings.SessionRenewal.Enabled {
+		if o, ok := gate.Option(settings.SessionRenewal.TokenID); ok {
+			settings.SessionRenewal.ProvenAt = o.ProvenAt
+		}
+	} else {
+		settings.SessionRenewal.ProvenAt = time.Time{}
+	}
+	validation := ValidateTriageSettingsWithRenewal(settings, gate)
 	if !validation.OK {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]any{
-			"error":      "invalid_settings",
-			"saved":      false,
-			"validation": validation,
-			"settings":   settings,
+			"error":         "invalid_settings",
+			"saved":         false,
+			"validation":    validation,
+			"settings":      settings,
+			"renewal_gate":  gate,
+			"refresh_proof": refreshProof,
 		})
 		return
 	}
@@ -1215,6 +2652,8 @@ func SaveTriageSettings(w http.ResponseWriter, r *http.Request) {
 		"settings":        settings,
 		"validation":      validation,
 		"retired_classes": retired,
+		"renewal_gate":    gate,
+		"refresh_proof":   refreshProof,
 	})
 }
 

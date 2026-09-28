@@ -195,16 +195,70 @@ func TestVerdictValidationRejectsACleanWithNoProbeRecord(t *testing.T) {
 		})
 	}
 
-	ok := ClassVerdict{Class: ClassSQL, SlotKey: "query:sort", State: StateClean, Ordinals: []uint64{68}}
+	// A CLEAN NOW NEEDS BOTH: the ordinals that say a measurement happened, AND the reason that
+	// says what was measured and what the silence covers. It used to need only the ordinals,
+	// because StateClean carried RequiresReason: false.
+	ok := ClassVerdict{Class: ClassSQL, SlotKey: "query:sort", State: StateClean, Ordinals: []uint64{68},
+		Reason: "clean (parser_error): this class's own break probes ran and its own catalogue stayed silent"}
 	if err := ok.Validate(); err != nil {
-		t.Errorf("a clean carrying its probe ordinals was rejected: %v", err)
+		t.Errorf("a clean carrying its probe ordinals and its reason was rejected: %v", err)
+	}
+	if err := (ClassVerdict{Class: ClassSQL, SlotKey: "query:sort", State: StateClean, Ordinals: []uint64{68}}).Validate(); err == nil {
+		t.Error("a clean with probe ordinals and NO REASON validated. That row says an operator need not " +
+			"look here and gives no ground for it, and it is invisible to every audit of this layer, all " +
+			"of which are greps over reason strings")
+	}
+	if err := (ClassVerdict{Class: ClassSQL, SlotKey: "query:sort", State: StateFinding, Ordinals: []uint64{68}}).Validate(); err == nil {
+		t.Error("a finding with probe ordinals and NO REASON validated. That row spends an operator's " +
+			"afternoon on an expensive scanner and names no ground for it")
+	}
+}
+
+// THE REASON FLOOR IS IN THE VOCABULARY, WHICH IS THE ONLY PLACE IT CAN HOLD FOR A CLASS NOBODY
+// HAS WRITTEN YET.
+//
+// MEASURED before this test existed: StateFinding, StateSuspicious and StateClean carried
+// RequiresReason: false, and sqlDecide shipped five rungs through them with Reason "" (the
+// parser-error finding, the boolean-differential finding, the LIKE suspicion and BOTH cleans).
+// Twelve of the seventeen classes written so far pin no reason floor of their own, so a floor
+// written into any one class's test protects that class and nothing else.
+//
+// WHY EVERY ROW AND NOT ONLY SOME. A reason is not a justification of the strength of the
+// verdict, which is what Grade and Oracle are for. It is the record of WHAT WAS READ, and every
+// state has that: not_planned legitimately has little to say, and "no probe was derived for this
+// slot" is the whole of that little, but a row with nothing at all in the field cannot be told
+// from a row nobody finished writing. What this test does NOT require is a LENGTH, because a
+// vocabulary-wide minimum would push the terse unknowns into padding, and padding is where a
+// reason string starts guessing at a cause.
+func TestEveryStateInTheVocabularyRequiresAReason(t *testing.T) {
+	rules := StateRules()
+	if len(rules) != 13 {
+		t.Fatalf("the vocabulary has %d rows and this test was written against 13. A new state needs a "+
+			"decision recorded here, not a default", len(rules))
+	}
+	for _, r := range rules {
+		if !r.RequiresReason {
+			t.Errorf("state %q carries RequiresReason: false, so a verdict in it validates with an EMPTY "+
+				"reason. If that is genuinely right for %q, the argument belongs in this test and in the "+
+				"rule row's comment, not in a bare false in a struct literal", r.State, r.State)
+		}
+		v := ClassVerdict{Class: ClassSQL, SlotKey: "query:sort", State: r.State}
+		if r.RequiresOrdinals {
+			v.Ordinals = []uint64{68}
+		}
+		if err := v.Validate(); err == nil {
+			t.Errorf("state %q validated with no reason at all", r.State)
+		} else if !strings.Contains(err.Error(), "no reason") {
+			t.Errorf("state %q was refused for something other than its missing reason: %v", r.State, err)
+		}
 	}
 }
 
 // A vector half tested and half unmeasured is partially tested, with the untested half named. It
 // is never a green tick. CATALOGUE 4.5 rule 1.
 func TestOneUnknownSlotStopsTheWholeVectorReadingAsClean(t *testing.T) {
-	clean := ClassVerdict{Class: ClassSQL, SlotKey: "query:a", State: StateClean, Ordinals: []uint64{68}}
+	clean := ClassVerdict{Class: ClassSQL, SlotKey: "query:a", State: StateClean, Ordinals: []uint64{68},
+		Reason: "clean (parser_error): this class's own probes ran and its own oracle stayed silent"}
 	unknown := ClassVerdict{Class: ClassSQL, SlotKey: "path:2:*", State: StateCannotDetermine, Reason: "canary_resource"}
 
 	all := SummariseVerdicts([]ClassVerdict{clean, clean, clean, unknown})

@@ -287,6 +287,83 @@ class TestVerdict(unittest.TestCase):
         self.assertEqual(v["posture"], "INCONCLUSIVE",
                          "a target that blocks benign traffic must not report a WAF verdict")
 
+    def test_bot_management_challenge_is_named_and_gets_its_own_posture(self):
+        # A Cloudflare managed challenge: control arm blocked, responses classed as challenge, and
+        # the fingerprint saw a bot-manager cookie. This must NOT flatten into the generic block: it
+        # gets its own posture and a finding that names the vendor and says a UA will not help.
+        ctx = self._Ctx({
+            "waf_control_arm": {"verdict": "blocks_benign_traffic", "block_ratio": 1.0, "note": "x"},
+            "waf_class_matrix": {"verdict": "inconclusive_control_blocked"},
+            "waf_vendor_fingerprint": {
+                "cdn": {"vendors": ["Cloudflare"]},
+                "waf_vendor": {"vendors": []},
+                "bot_manager": {"present": True, "markers": ["cookie:__cf_bm"]},
+            },
+        })
+        ctx.rec.log = [{"n": 1, "class": "challenge", "status": 403},
+                       {"n": 2, "class": "challenge", "status": 403}]
+        findings = verdict.build_findings(ctx)
+        ids = [f["id"] for f in findings]
+        self.assertIn("bot_challenge_wall", ids)
+        self.assertNotIn("blanket_block", ids,
+                         "a challenge wall must not be flattened into a generic block")
+        wall = next(f for f in findings if f["id"] == "bot_challenge_wall")
+        self.assertIn("Cloudflare", wall["title"], "the finding must name who is blocking")
+        self.assertIn("User-Agent", wall["detail"],
+                      "the finding must articulate that a UA alone will not pass")
+        self.assertTrue(wall["falsifier"])
+        v = verdict.build_verdict(ctx, findings, verdict.derive_rate(ctx))
+        self.assertEqual(v["posture"], "CHALLENGE_WALL")
+        self.assertEqual(v["edge"]["bot_manager"], "Cloudflare Bot Management")
+        self.assertIn("Cloudflare", v["headline"])
+
+    def test_challenge_wall_detected_from_markers_alone_without_a_challenge_body(self):
+        # Some bot managers 403 without a recognisable interstitial body; the cookie marker is then
+        # the only signal, and it must still be enough to name the wall rather than a blanket block.
+        ctx = self._Ctx({
+            "waf_control_arm": {"verdict": "blocks_benign_traffic", "block_ratio": 0.9},
+            "waf_vendor_fingerprint": {
+                "cdn": {"vendors": []}, "waf_vendor": {"vendors": []},
+                "bot_manager": {"present": True, "markers": ["datadome"]},
+            },
+        })
+        ctx.rec.log = [{"class": "blocked", "status": 403}]
+        findings = verdict.build_findings(ctx)
+        ids = [f["id"] for f in findings]
+        self.assertIn("bot_challenge_wall", ids)
+        wall = next(f for f in findings if f["id"] == "bot_challenge_wall")
+        self.assertIn("DataDome", wall["title"])
+
+    def test_challenge_wall_suppresses_the_set_a_ua_advice(self):
+        ctx = self._Ctx({
+            "waf_control_arm": {"verdict": "blocks_benign_traffic", "block_ratio": 1.0},
+            "waf_vendor_fingerprint": {"cdn": {"vendors": ["Cloudflare"]}, "waf_vendor": {"vendors": []},
+                                       "bot_manager": {"present": True, "markers": ["cf-mitigated"]}},
+            "waf_bot_persona": {"recommended_user_agent": "Mozilla/5.0"},
+        })
+        ctx.rec.log = [{"class": "challenge"}]
+        recs = verdict.build_recommendations(ctx, verdict.derive_rate(ctx))
+        ua_rows = [row for row in recs["by_tool"].get("ffuf", []) if row["field"] == "headers"]
+        self.assertEqual(ua_rows, [],
+                         "must not advise a UA that cannot beat a fingerprint + JS challenge")
+        self.assertTrue(any("fingerprint" in s.get("reason", "").lower() for s in recs["suppressed"]),
+                        "and the suppression, with its reason, must be reported rather than silent")
+
+    def test_hard_block_without_a_challenge_stays_a_blanket_block(self):
+        # A plain 403 wall with no challenge markers and no bot-manager is still the generic case,
+        # and must keep the old posture so a genuine hard block is not mislabelled a challenge.
+        ctx = self._Ctx({
+            "waf_control_arm": {"verdict": "blocks_benign_traffic", "block_ratio": 1.0, "note": "x"},
+        })
+        ctx.rec.log = [{"class": "blocked", "status": 403}]
+        findings = verdict.build_findings(ctx)
+        ids = [f["id"] for f in findings]
+        self.assertIn("blanket_block", ids)
+        self.assertNotIn("bot_challenge_wall", ids)
+        v = verdict.build_verdict(ctx, findings, verdict.derive_rate(ctx))
+        self.assertEqual(v["posture"], "INCONCLUSIVE")
+        self.assertIsNone(v["edge"], "no vendor was identified, so edge must be null")
+
     def test_no_enforcement_is_reported_as_open_not_as_absent_waf(self):
         ctx = self._Ctx({
             "waf_control_arm": {"verdict": "clean", "block_ratio": 0.0},

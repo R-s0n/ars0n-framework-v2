@@ -107,6 +107,8 @@ func newMux() *http.ServeMux {
 	registerELIControls(mux, marked)
 	registerNoSQLControls(mux, marked)
 	registerCSTIControls(mux, marked)
+	registerEnvelopeControls(mux, marked)
+	registerRound4Controls(mux, marked)
 
 	return mux
 }
@@ -194,6 +196,35 @@ response header, not by anything in the body.</p>
 <li><a href="/csti/corpus-blocked?q=hello">/csti/corpus-blocked?q=</a> the only script 403s: undetermined, which is not the same as absent</li>
 <li><a href="/csti/angular-attr?q=hello">/csti/angular-attr?q=</a> braces stripped from text, attribute values unfiltered</li>
 <li><a href="/csti/angular-hash?q=hello">/csti/angular-hash?q=</a> the fragment rendered client-side, which no HTTP request can carry</li>
+</ul>
+<h2>Envelope controls: header injection, open redirect and deserialization</h2>
+<p>These read something OUTSIDE the response body, so each positive is paired with a place that
+looks identical to a detector that greps the body. The negatives are the half that tests anything.</p>
+<p>The header name below is written out in full on purpose and this page is ALSO a control because
+of it. The triage layer squeezes delimiters out of a response before looking for its markers, so
+&quot;X-Zqj-Crlf unconditionally&quot; squeezes into a sixteen-byte run that begins with that
+layer&#39;s marker anchor and belongs to no run at all. This index ignores its query string
+entirely, so a detector that reports a reflection here is reading somebody else&#39;s token as its
+own. One did, on 2026-09-19.</p>
+<ul>
+<li><a href="/crlf/header?q=hello">/crlf/header?q=</a> the value concatenated into a response header, line breaks unfiltered</li>
+<li><a href="/crlf/lfonly?q=hello">/crlf/lfonly?q=</a> the CR LF pair stripped and a lone LF passed straight through</li>
+<li><a href="/crlf/doubledecode?q=hello">/crlf/doubledecode?q=</a> control bytes stripped, then percent-decoded a second time</li>
+<li><a href="/crlf/edgereject?q=hello">/crlf/edgereject?q=</a> 400 to any line break and 200 to everything else: a named defence, not a clean</li>
+<li><a href="/crlf/preset?q=hello">/crlf/preset?q=</a> emits X-Zqj-Crlf unconditionally, so the detector is disabled by its own baseline</li>
+<li><a href="/crlf/setcookie?q=hello">/crlf/setcookie?q=</a> an injected line break produces a real Set-Cookie, and only that</li>
+<li><a href="/deser/php?q=hello">/deser/php?q=</a> emulated unserialize(): the length it reports is counted from what arrived</li>
+<li><a href="/deser/phpwrapped?q=hello">/deser/phpwrapped?q=</a> the same behind an eleven-byte wrapper, so the rule must be the difference and not the number</li>
+<li><a href="/deser/phpstatic?q=hello">/deser/phpstatic?q=</a> the same sentence with the same number on every response</li>
+<li><a href="/deser/java?q=rO0SNHQAAmhp">/deser/java?q=</a> emulated readStreamHeader: the first four bytes hex-formatted back</li>
+<li><a href="/deser/pickle?q=gASVGwAAAAAAAABdlCiMCHpxZGVzZXJ5lIwIMXBpY2tsM3qUZS4=">/deser/pickle?q=</a> eight pickle opcodes interpreted, rendered as CPython's repr</li>
+<li><a href="/deser/preset?q=hello">/deser/preset?q=</a> __PHP_Incomplete_Class in the prose of every response</li>
+<li><a href="/redirect/local?next=/a">/redirect/local?next=</a> relative references honoured, every scheme and authority refused</li>
+<li><a href="/redirect/fixed?next=/a">/redirect/fixed?next=</a> always 302 to one hardcoded path, parameter ignored</li>
+<li><a href="/redirect/loginwrap?next=/a">/redirect/loginwrap?next=</a> 302 to /login?next=&lt;value&gt;: the marker is in the Location and the browser stays home</li>
+<li><a href="/redirect/strictvalidator?next=/a">/redirect/strictvalidator?next=</a> RFC 3986 resolution accepted, the value then emitted verbatim</li>
+<li><a href="/redirect/alwaysoffsite?next=/a">/redirect/alwaysoffsite?next=</a> the baseline itself redirects to another host</li>
+<li><a href="/redirect/meta?next=/a">/redirect/meta?next=</a> a meta refresh in the body, which is a document and not a protocol effect</li>
 </ul>`)
 }
 
@@ -3417,4 +3448,616 @@ func cstiAngularAttrHandler(w http.ResponseWriter, r *http.Request) {
 func cstiAngularHashHandler(w http.ResponseWriter, r *http.Request) {
 	cstiAngularShell(w, `<div id="view">Fragment: <span id="frag"></span></div>`,
 		`<script>document.getElementById("frag").textContent = location.hash.replace(/^#/, "");</script>`)
+}
+
+// =================================================================================================
+// THE ENVELOPE CONTROLS: CRLF (19), REDIRECT (18) and DESER (24)
+// =================================================================================================
+//
+// Three classes shipped on 2026-09-19 and between them they owe this container eighteen routes.
+// The negatives are the ones that matter, and they are why this block is as long as it is: each
+// of the three classes reads something OUTSIDE the response body (a header list, a Location, a
+// number the application computed), and the cheapest way to build a detector for any of those is
+// one that fires on a body merely containing the string. Every one of those cheap detectors
+// passes a positive route. So the routes below are paired: for each mechanism there is a place it
+// must fire and a place that looks exactly like it to a body-grepping detector and where the
+// answer is nothing.
+//
+// EMULATED, LIKE EVERY OTHER POSITIVE HERE. There is no PHP, no JVM and no CPython in this image
+// and there will not be one: the deserialization routes rewrite strings over a closed grammar, in
+// the same spirit as cmdiHandler's two-integer arithmetic. What they emulate was MEASURED on the
+// real runtimes first (php:8.3-cli-alpine, JDK 25.0.2, CPython 3.13.12) and those measurements
+// are quoted in server/triageclasses/deser.go, so the strings here reproduce an observed output
+// rather than guessing at one. The pickle route is a real, tiny interpreter over eight opcodes
+// rather than a canned answer, because a canned answer cannot be told apart from a reflection by
+// the detector it is supposed to be testing.
+//
+// THE HEADER ROUTES CANNOT BE WRITTEN THE OBVIOUS WAY. Go's net/http refuses to put a CR or an LF
+// into a response header: Header.writeSubset runs every value through a replacer that turns both
+// into a space, so w.Header().Set("X-Echo", valueWithCRLF) produces one folded header and no
+// injection at all. A Go server is structurally incapable of the bug these routes stand in for,
+// which is a good property for a server and a useless one for a control. So the routes SPLIT the
+// value themselves and emit the headers the line breaks asked for, which is what a vulnerable
+// header writer in another language does by accident.
+// -------------------------------------------------------------------------------------------
+
+func registerEnvelopeControls(mux *http.ServeMux, marked func(string, http.HandlerFunc) http.HandlerFunc) {
+	for path, handler := range map[string]http.HandlerFunc{
+		"/crlf/header":              crlfHeaderHandler,
+		"/crlf/lfonly":              crlfLFOnlyHandler,
+		"/crlf/doubledecode":        crlfDoubleDecodeHandler,
+		"/crlf/edgereject":          crlfEdgeRejectHandler,
+		"/crlf/preset":              crlfPresetHandler,
+		"/crlf/setcookie":           crlfSetCookieHandler,
+		"/deser/php":                deserPHPHandler(""),
+		"/deser/phpwrapped":         deserPHPHandler(deserWrapper),
+		"/deser/phpstatic":          deserPHPStaticHandler,
+		"/deser/java":               deserJavaHandler,
+		"/deser/pickle":             deserPickleHandler,
+		"/deser/preset":             deserPresetHandler,
+		"/redirect/local":           redirectLocalHandler,
+		"/redirect/fixed":           redirectFixedHandler,
+		"/redirect/loginwrap":       redirectLoginwrapHandler,
+		"/redirect/strictvalidator": redirectStrictValidatorHandler,
+		"/redirect/alwaysoffsite":   redirectAlwaysOffsiteHandler,
+		"/redirect/meta":            redirectMetaHandler,
+	} {
+		mux.HandleFunc(path, marked(strings.TrimPrefix(path, "/"), handler))
+	}
+}
+
+// envelopeNames are the parameter names these routes answer to. A triage vector names one
+// parameter and the three classes involved do not care which, so the list is generous and the
+// fallback is the first pair in the query: a route answering only to "q" would report "nothing
+// was sent" for a vector built on "next", and a route that silently sees nothing is the exact
+// failure this whole container exists to make impossible.
+var envelopeNames = []string{"q", "next", "url", "value", "redirect", "id", "file", "page"}
+
+func envelopeValue(r *http.Request) string {
+	if v := queryParam(r, envelopeNames...); v != "" {
+		return v
+	}
+	raw := envelopeFirstRaw(r)
+	if raw == "" {
+		return readRequestBody(r)
+	}
+	decoded, err := url.QueryUnescape(raw)
+	if err != nil {
+		return strings.ReplaceAll(raw, "+", " ")
+	}
+	return decoded
+}
+
+func envelopeFirstRaw(r *http.Request) string {
+	for _, pair := range strings.Split(r.URL.RawQuery, "&") {
+		_, value, found := strings.Cut(pair, "=")
+		if !found || value == "" {
+			continue
+		}
+		return value
+	}
+	return ""
+}
+
+// -------------------------------------------------------------------------------------------
+// CRLF
+// -------------------------------------------------------------------------------------------
+
+// crlfLines splits a value the way an unfiltered header writer does: on CR LF, on a bare LF and
+// on a bare CR. Element 0 is what stays in the header the application was building and every
+// element after it is a header the value asked for.
+func crlfLines(value string) []string {
+	normalised := strings.ReplaceAll(value, "\r\n", "\n")
+	normalised = strings.ReplaceAll(normalised, "\r", "\n")
+	return strings.Split(normalised, "\n")
+}
+
+// crlfIsTokenName is RFC 9110's field-name grammar. A line whose name is not a token is dropped
+// rather than emitted, because Go would drop it anyway and a route that pretended otherwise would
+// be describing a response it did not send.
+func crlfIsTokenName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("!#$%&*+-.^_|~", c), c == '\'', c == '`':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// crlfSafeCookieValue keeps a cookie value to characters a client will actually parse. It matters
+// only for the application's OWN cookie: the injected one carries the probe's marker, which is
+// sixteen alphanumeric bytes and survives this untouched.
+func crlfSafeCookieValue(v string) string {
+	var b strings.Builder
+	for _, c := range v {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			b.WriteRune(c)
+		case strings.ContainsRune("-._~", c):
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}
+
+// crlfEmit writes every header the line breaks started. cookiesOnly restricts it to Set-Cookie,
+// which is what isolates /crlf/setcookie.
+func crlfEmit(w http.ResponseWriter, lines []string, cookiesOnly bool) int {
+	injected := 0
+	for _, line := range lines[1:] {
+		name, value, ok := strings.Cut(line, ":")
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if !ok || !crlfIsTokenName(name) {
+			continue
+		}
+		if strings.EqualFold(name, "Set-Cookie") {
+			w.Header().Add("Set-Cookie", value)
+			injected++
+			continue
+		}
+		if cookiesOnly {
+			continue
+		}
+		w.Header().Set(name, value)
+		injected++
+	}
+	return injected
+}
+
+func crlfPage(w http.ResponseWriter, body string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, "<!doctype html><title>Preferences</title>\n<h1>Preferences saved</h1>\n<p>%s</p>\n", body)
+}
+
+// THE HEADER INJECTION POSITIVE. The value is concatenated into a response header and the line
+// breaks in it terminate that header, which is the bug in its textbook form.
+//
+// THE BODY SAYS NOTHING ABOUT THE VALUE, deliberately, and that is the pairing with /clean/echo:
+// there, every one of this class's payloads comes back in the body verbatim, header name and all,
+// and the answer must be that nothing was found. A class that reads the body cannot tell these
+// two routes apart and is then worth nothing at all.
+func crlfHeaderHandler(w http.ResponseWriter, r *http.Request) {
+	lines := crlfLines(envelopeValue(r))
+	w.Header().Set("X-Canary-Tracking", "tracking-"+canaryMarker)
+	n := crlfEmit(w, lines, false)
+	crlfPage(w, fmt.Sprintf("%d additional response headers were written.", n))
+}
+
+// THE FILTER THAT STRIPS THE SEQUENCE AND NOT THE BYTE. It removes every CR LF pair and passes a
+// lone LF straight through, which is how a great many hand-written CRLF defences are built. It is
+// the route that makes CRLF-Q3 a separate probe rather than a second spelling of CRLF-Q1: a class
+// shipping only Q1 reports this endpoint clean and the bug is there.
+func crlfLFOnlyHandler(w http.ResponseWriter, r *http.Request) {
+	filtered := strings.ReplaceAll(envelopeValue(r), "\r\n", "")
+	lines := strings.Split(filtered, "\n")
+	w.Header().Set("X-Canary-Tracking", "tracking-"+canaryMarker)
+	n := crlfEmit(w, lines, false)
+	crlfPage(w, fmt.Sprintf("%d additional response headers were written. A carriage return "+
+		"followed by a line feed is removed here; a line feed on its own is not.", n))
+}
+
+// THE PROXY-THEN-APPLICATION SHAPE. Something in front strips the control bytes out of the
+// once-decoded value, and the application then percent-decodes what is left a SECOND time. A
+// payload carrying real CR LF bytes is neutralised by the strip; a payload carrying the TEXT
+// %0d%0a walks past it, because at that point it is six printable characters, and becomes a line
+// break on the second decode.
+//
+// WHAT THIS ROUTE MEASURED, AND IT IS A FINDING ABOUT THE CLASS AND NOT ABOUT THIS FILE. For that
+// story to be true of CRLF-Q1 and CRLF-Q4 the two have to differ ON THE WIRE, and they do not.
+// Q1's logical bytes are CR LF and the query encoder escapes them to %0D%0A; Q4's logical bytes
+// are the text %0d%0a and EncodeLiteralPct passes the percent through raw, so Q4 is also %0d%0a on
+// the wire. The two requests differ in the case of two hex digits and in nothing else, so every
+// route in the world answers them identically and this one cannot discriminate them either. The
+// route is built to its specification anyway, because the specification is right and the encoder
+// choice is what is wrong: Q4 wants the ORDINARY query encoder over its percent TEXT, which is
+// what puts %250d%250a on the wire. Measured and reported rather than papered over.
+func crlfDoubleDecodeHandler(w http.ResponseWriter, r *http.Request) {
+	once := envelopeValue(r)
+	stripped := strings.Map(func(c rune) rune {
+		if c == '\r' || c == '\n' {
+			return -1
+		}
+		return c
+	}, once)
+	twice, err := url.QueryUnescape(stripped)
+	if err != nil {
+		twice = stripped
+	}
+	lines := crlfLines(twice)
+	w.Header().Set("X-Canary-Tracking", "tracking-"+canaryMarker)
+	n := crlfEmit(w, lines, false)
+	crlfPage(w, fmt.Sprintf("%d additional response headers were written. The value is "+
+		"percent-decoded once more here, after the line breaks have been removed.", n))
+}
+
+// THE EDGE THAT REFUSES THE BYTE. 400 to any value carrying a CR or an LF, 200 to everything
+// else, and the two answers are otherwise the same page.
+//
+// The verdict here must be not_exploitable and NOT clean, and the difference is the whole point:
+// something is refusing the byte, and nothing here shows what the application behind it would do
+// with one that got through. /clean/validate is the paired control, because it rejects EVERY
+// value with the same 400 and there the answer must be an ordinary clean.
+func crlfEdgeRejectHandler(w http.ResponseWriter, r *http.Request) {
+	if strings.ContainsAny(envelopeValue(r), "\r\n") {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, "<!doctype html><title>Invalid input</title>\n"+
+			"<h1>That value could not be accepted</h1>\n<p>Line breaks are not permitted in this field.</p>\n")
+		return
+	}
+	crlfPage(w, "Your preference was recorded.")
+}
+
+// THE SIGNATURE ALREADY IN THE BASELINE. This route emits a header called X-Zqj-Crlf on every
+// response including the unperturbed one, as an intermediary echoing request headers back would.
+// Every probe in the class would otherwise fire, and the required verdict is cannot_determine,
+// neither a finding nor a clean. It is the tier-4 baseline-differencing rule applied to a tier-5
+// oracle, and it is the one route that proves the rule is implemented rather than intended.
+func crlfPresetHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Zqj-Crlf", "emitted-unconditionally-by-this-route")
+	crlfPage(w, "This route emits X-Zqj-Crlf on every response, payload or not.")
+}
+
+// THE SET-COOKIE ARM. The value is concatenated into a Set-Cookie the application writes, so an
+// injected line break naming another Set-Cookie produces a real one.
+//
+// ONLY Set-Cookie LINES ARE HONOURED HERE, which is a deliberate narrowing and not laziness. If
+// this route also emitted an arbitrary injected header it would be a second /crlf/header, CRLF-Q1
+// would win the verdict ahead of CRLF-Q6, and the Set-Cookie oracle this route exists for would
+// never be the thing that fired. The generic header arm has its own route.
+func crlfSetCookieHandler(w http.ResponseWriter, r *http.Request) {
+	lines := crlfLines(envelopeValue(r))
+	w.Header().Add("Set-Cookie", "pref="+crlfSafeCookieValue(lines[0])+"; Path=/")
+	n := crlfEmit(w, lines, true)
+	crlfPage(w, fmt.Sprintf("%d additional cookies were set.", n))
+}
+
+// -------------------------------------------------------------------------------------------
+// DESER
+// -------------------------------------------------------------------------------------------
+
+// deserWrapper is what /deser/phpwrapped concatenates in front of the value before deserializing
+// it. Eleven bytes, so every length that route reports is eleven more than the payload's own, and
+// a class comparing against the literal 39 reads that as a miss.
+const deserWrapper = "zqwrapper::"
+
+// reDeserPHPObject is PHP's serialized-object grammar for the one shape this class sends: a class
+// name and zero properties.
+var reDeserPHPObject = regexp.MustCompile(`^O:(\d+):"([^"]*)":(\d+):\{\}$`)
+
+// deserPHPHandler EMULATES unserialize(). It does two things and nothing else: it counts the
+// bytes it was handed, and it recognises a serialized object naming a class it does not have.
+// There is no deserializer here and nothing in a payload is ever executed.
+//
+// THE NUMBER IS THE ORACLE AND IT IS COMPUTED. Three payloads of three different lengths each get
+// their own length back, which is a value this route calculated from the bytes that arrived and
+// which no static page can produce. /deser/phpstatic is the paired negative and prints the same
+// sentence with the same number whatever it is sent.
+func deserPHPHandler(wrapper string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		full := wrapper + envelopeValue(r)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if m := reDeserPHPObject.FindStringSubmatch(full); m != nil {
+			declared, _ := strconv.Atoi(m[1])
+			name := m[2]
+			if declared == len(name) {
+				// MEASURED on php:8.3-cli-alpine. An unknown class produces an object of type
+				// __PHP_Incomplete_Class carrying the name in a property, and no magic method
+				// runs: there is no class to construct and __wakeup does not fire on an
+				// incomplete one.
+				fmt.Fprintf(w, "<!doctype html><title>profile</title><!-- %s -->\n"+
+					"<h1>Stored profile</h1>\n<pre>object(__PHP_Incomplete_Class)#1 (1) {\n"+
+					"  [\"__PHP_Incomplete_Class_Name\"]=&gt;\n  string(%d) \"%s\"\n}</pre>\n",
+					canaryMarker, len(name), deserEscape(name))
+				return
+			}
+		}
+		// MEASURED on php:8.3-cli-alpine: every non-serialized string produces this, the number
+		// being the length of what unserialize() was handed.
+		fmt.Fprintf(w, "<!doctype html><title>profile</title><!-- %s -->\n<h1>Stored profile</h1>\n"+
+			"<pre>PHP Warning:  unserialize(): Error at offset 0 of %d bytes in /app/profile.php on line 12</pre>\n",
+			canaryMarker, len(full))
+	}
+}
+
+// THE STATIC ERROR PAGE, AND IT IS THE ROUTE THAT JUSTIFIES SHIPPING TWO LENGTH PROBES INSTEAD OF
+// ONE. The sentence is here on every response with the number 39 in it, whatever was sent and
+// whether anything was sent at all: a cached error, a documentation page, a security-training
+// page. One length probe reads 39 and calls it arithmetic. The pair reads 39 twice, sees that the
+// number did not move when the payload's length did, and cannot claim a computation.
+func deserPHPStaticHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, "<!doctype html><title>Known errors</title>\n<h1>Troubleshooting: stored profiles</h1>\n"+
+		"<p>If the profile cache is stale you will see this in the log:</p>\n"+
+		"<pre>PHP Warning:  unserialize(): Error at offset 0 of 39 bytes in /app/profile.php on line 12</pre>\n"+
+		"<p>Clear the cache and retry. This page is documentation and deserializes nothing.</p>\n")
+}
+
+// deserJavaHandler EMULATES ObjectInputStream's readStreamHeader, which is the first four bytes
+// and nothing else. It base64-decodes the value, formats the first four bytes as eight uppercase
+// hex characters, and reports them the way the JVM does.
+//
+// MEASURED on JDK 25.0.2. The echo is a computation: the eight characters ACED1234 appear in
+// neither the raw payload nor its base64 text, so no reflection can produce them, and DES-J2
+// sends two different bytes and must get its own eight back. Nothing is deserialized here and
+// there is no class resolution to reach: a real JVM throws in readStreamHeader before the first
+// class name is read, which is exactly why this is the safe way to prove an ObjectInputStream is
+// on the other end of a slot.
+func deserJavaHandler(w http.ResponseWriter, r *http.Request) {
+	value := strings.TrimSpace(envelopeValue(r))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	raw, err := base64.StdEncoding.DecodeString(value)
+	if err != nil || len(raw) < 4 {
+		fmt.Fprint(w, "<!doctype html><title>session</title>\n<h1>Session restore</h1>\n"+
+			"<pre>java.lang.IllegalArgumentException: the session blob is not base64</pre>\n")
+		return
+	}
+	header := strings.ToUpper(hex.EncodeToString(raw[:4]))
+	if header == "ACED0005" {
+		fmt.Fprintf(w, "<!doctype html><title>session</title><!-- %s -->\n<h1>Session restore</h1>\n"+
+			"<pre>java.io.InvalidClassException: no local class descriptor</pre>\n", canaryMarker)
+		return
+	}
+	w.WriteHeader(http.StatusInternalServerError)
+	fmt.Fprintf(w, "<!doctype html><title>session</title><!-- %s -->\n<h1>Session restore failed</h1>\n"+
+		"<pre>java.io.StreamCorruptedException: invalid stream header: %s\n"+
+		"\tat java.base/java.io.ObjectInputStream.readStreamHeader(ObjectInputStream.java:989)</pre>\n",
+		canaryMarker, header)
+}
+
+// deserPickleHandler runs a REAL interpreter over eight pickle opcodes and renders the object the
+// way CPython's repr does. It is not a canned string, and that is the point: a canned string is
+// indistinguishable from a reflection to the detector this route exists to test, and the joined
+// repr ['zqdesery', '1pickl3z'] is absent from both forms of the request precisely because the
+// two halves are separated by opcodes in the pickle and the brackets and quotes are Python's.
+//
+// EIGHT OPCODES, NO GLOBAL AND NO REDUCE. PROTO, FRAME, EMPTY_LIST, MARK, SHORT_BINUNICODE,
+// MEMOIZE, APPENDS and STOP build a list of strings and can do nothing else. There is no import,
+// no call and no attribute lookup anywhere in this function, so the dangerous half of pickle is
+// not emulated rather than being emulated carefully.
+func deserPickleHandler(w http.ResponseWriter, r *http.Request) {
+	value := strings.TrimSpace(envelopeValue(r))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	raw, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		fmt.Fprint(w, "<!doctype html><title>cart</title>\n<h1>Saved cart</h1>\n"+
+			"<pre>binascii.Error: Invalid base64-encoded string</pre>\n")
+		return
+	}
+	repr, loadErr := deserPickleLoads(raw)
+	if loadErr != "" {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "<!doctype html><title>cart</title><!-- %s -->\n<h1>Saved cart</h1>\n"+
+			"<pre>_pickle.UnpicklingError: %s</pre>\n", canaryMarker, deserEscape(loadErr))
+		return
+	}
+	fmt.Fprintf(w, "<!doctype html><title>cart</title><!-- %s -->\n<h1>Saved cart</h1>\n"+
+		"<pre>restored: %s</pre>\n", canaryMarker, deserEscape(repr))
+}
+
+// deserPickleLoads returns CPython's repr of the object, or the exact message CPython produces
+// for an opcode it does not know. MEASURED on CPython 3.13.12 for both arms.
+func deserPickleLoads(b []byte) (repr string, loadErr string) {
+	var items []string
+	list := false
+	for i := 0; i < len(b); {
+		op := b[i]
+		i++
+		switch op {
+		case 0x80: // PROTO
+			if i >= len(b) {
+				return "", "truncated protocol opcode"
+			}
+			i++
+		case 0x95: // FRAME
+			if i+8 > len(b) {
+				return "", "truncated frame opcode"
+			}
+			i += 8
+		case 0x5d: // EMPTY_LIST
+			list = true
+		case 0x28: // MARK
+		case 0x94: // MEMOIZE
+		case 0x8c: // SHORT_BINUNICODE
+			if i >= len(b) {
+				return "", "truncated string opcode"
+			}
+			n := int(b[i])
+			i++
+			if i+n > len(b) {
+				return "", "truncated string"
+			}
+			items = append(items, string(b[i:i+n]))
+			i += n
+		case 0x65: // APPENDS
+		case 0x2e: // STOP
+			if !list {
+				if len(items) == 1 {
+					return "'" + items[0] + "'", ""
+				}
+				return "", "the stack is empty"
+			}
+			quoted := make([]string, 0, len(items))
+			for _, s := range items {
+				quoted = append(quoted, "'"+s+"'")
+			}
+			return "[" + strings.Join(quoted, ", ") + "]", ""
+		default:
+			return "", "invalid load key, " + deserPyChar(op) + "."
+		}
+	}
+	return "", "pickle data was truncated"
+}
+
+// deserEscape escapes the four markup characters and DELIBERATELY LEAVES THE SINGLE QUOTE ALONE.
+//
+// THIS WAS A LIVE DEFECT AND THE CURL RUN CAUGHT IT. These handlers first used html.EscapeString,
+// which turns an apostrophe into &#39;, so the body carried [&#39;zqdesery&#39;, &#39;1pickl3z&#39;]
+// and not the exact 24 bytes ['zqdesery', '1pickl3z'] that DESER's tier-1 pickle oracle matches
+// with bytes.Contains. The same escape broke the load-key echo, which is also quoted. The route
+// looked right in a browser and could not have fired the detector it exists to test: a positive
+// control that cannot go positive, which is the one failure this container must never have.
+//
+// Dropping the apostrophe is safe here and only here. Everything these handlers print sits inside
+// a <pre> element, never inside an attribute, so an apostrophe cannot terminate anything; the
+// angle brackets, the ampersand and the double quote are still escaped, so a payload carrying
+// markup cannot turn a deserialization route into an accidental cross-site scripting positive.
+var deserEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;")
+
+func deserEscape(s string) string { return deserEscaper.Replace(s) }
+
+// deserPyChar renders a byte the way Python renders it inside single quotes in that message.
+func deserPyChar(c byte) string {
+	if c >= 0x20 && c < 0x7f && c != '\'' && c != '\\' {
+		return "'" + string(rune(c)) + "'"
+	}
+	return fmt.Sprintf("'\\x%02x'", c)
+}
+
+// THE DESERIALIZATION SIGNATURE ALREADY IN THE BASELINE. A framework upgrade note carrying
+// __PHP_Incomplete_Class in prose. Every probe in the class would otherwise fire on it and the
+// required verdict is cannot_determine.
+func deserPresetHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, "<!doctype html><title>Upgrade notes</title>\n<h1>Upgrade notes: session objects</h1>\n"+
+		"<p>After the upgrade, a session written by the old release loads as an object of type\n"+
+		"__PHP_Incomplete_Class, because the class it names has been renamed. The loader rewrites it\n"+
+		"on first read. This page deserializes nothing and is here to be read.</p>\n")
+}
+
+// -------------------------------------------------------------------------------------------
+// REDIRECT
+// -------------------------------------------------------------------------------------------
+
+// redirectBody writes the one body every redirect route in this block returns.
+//
+// IT CONTAINS NO PART OF THE VALUE, AND THAT IS THE WHOLE REASON THE FUNCTION EXISTS. These
+// handlers first echoed the target into the body the way the shipped /redirect does, and the
+// full-registry run then reported XSS-R finding (element_created) on /redirect/local and
+// /redirect/strictvalidator: Go sniffs a body with no declared type, a reflected payload beginning
+// with a marker-named tag is read as HTML, and two routes written to test open redirect had become
+// accidental cross-site scripting positives. /clean/echo already documents the same trap from the
+// other direction ("a verbatim reflection served as text/html IS cross-site scripting, and this
+// route would become a positive control by accident").
+//
+// A route in this container must test ONE mechanism. The redirect class reads the Location and
+// never the body, so the body here is a constant, the type is declared, and nosniff is set. The
+// shipped /redirect is deliberately left as it is: it is an older positive control with its own
+// callers, and changing what it reflects would change what other tools measure.
+func redirectBody(w http.ResponseWriter, status int) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	fmt.Fprintln(w, "redirecting")
+}
+
+// reRedirectScheme is RFC 3986's scheme grammar, anchored.
+var reRedirectScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.\-]*:`)
+
+// redirectOriginRelative reports whether a value is a relative reference with no scheme and no
+// authority, which is what a redirector meaning to stay on its own origin accepts.
+func redirectOriginRelative(v string) bool {
+	if v == "" || strings.ContainsAny(v, "\r\n") {
+		return false
+	}
+	// Backslashes are normalised first, because a browser maps every backslash in a special URL
+	// to a slash and a filter that does not is the bug this validator is built NOT to have.
+	normalised := strings.ReplaceAll(v, "\\", "/")
+	if strings.HasPrefix(normalised, "//") {
+		return false
+	}
+	return !reRedirectScheme.MatchString(v)
+}
+
+// THE FILTERED REDIRECTOR. It honours a relative reference and refuses anything carrying a scheme
+// or an authority, falling back to the site root.
+//
+// THIS IS THE ROUTE THAT SEPARATES A FILTER FROM AN UNCONNECTED SLOT and it is the reason the
+// class spends a request on an inert control. The inert value reaches the Location here, so the
+// slot demonstrably steers the redirect and every off-origin form was neutralised: that is a
+// named defence, which is a different and more useful answer than clean. /redirect/fixed is the
+// paired route where the slot reaches nothing and clean is correct, and without the control those
+// two produce the same pixel.
+func redirectLocalHandler(w http.ResponseWriter, r *http.Request) {
+	target := "/"
+	if v := envelopeValue(r); redirectOriginRelative(v) {
+		target = v
+	}
+	w.Header().Set("Location", target)
+	w.Header().Set("X-Canary", canaryMarker)
+	redirectBody(w, http.StatusFound)
+}
+
+// THE FIXED DESTINATION. A 302 to a hardcoded path, every parameter ignored, so a detector built
+// on "the response is a 302" or "the response became a redirect" fires on every request here and
+// must not.
+func redirectFixedHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Location", "/account/home")
+	redirectBody(w, http.StatusFound)
+}
+
+// THE SINGLE MOST IMPORTANT NEGATIVE IN THE REDIRECT CLASS. The value is urlencoded into the
+// query of an on-origin Location, which is what every "come back here afterwards" login flow in
+// the world does. The marker IS in the Location. The Location DID change. The browser stays home.
+// Every naive open-redirect scanner reports this, and the operator stops reading the class after
+// the third one.
+func redirectLoginwrapHandler(w http.ResponseWriter, r *http.Request) {
+	value := envelopeValue(r)
+	w.Header().Set("Location", "/login?next="+url.QueryEscape(value))
+	redirectBody(w, http.StatusFound)
+}
+
+// THE VALIDATOR THAT RESOLVES THE STRICT WAY AND EMITS THE VALUE VERBATIM. It resolves the value
+// as RFC 3986 says to, keeps it if the resulting authority is this origin, and falls back to the
+// root otherwise. Under that reading ////host/ and \/\/host/ and /\/host/ are all on-origin
+// paths, so they pass the check and go into the Location unchanged, and a browser then reads them
+// the WHATWG way and leaves.
+//
+// The verdict here must be SUSPICIOUS and never a finding. The effect is real and no browser was
+// in the loop: the loose reading is three named normalisations in Go, and modelled is not
+// measured. A class grading this high would be asserting a browser behaviour nothing here tested
+// against a browser.
+func redirectStrictValidatorHandler(w http.ResponseWriter, r *http.Request) {
+	value := envelopeValue(r)
+	target := "/"
+	base := &url.URL{Scheme: "http", Host: r.Host, Path: r.URL.Path}
+	if ref, err := url.Parse(value); err == nil {
+		if resolved := base.ResolveReference(ref); resolved.Host != "" && strings.EqualFold(resolved.Host, r.Host) {
+			target = value
+		}
+	}
+	w.Header().Set("Location", target)
+	redirectBody(w, http.StatusFound)
+}
+
+// THE SITE-WIDE OFF-ORIGIN REDIRECT. The BASELINE already 302s to another host, as a canonical
+// host redirect or a tenant redirect does. "The Location points somewhere else" is this
+// endpoint's normal behaviour, so a class that scored it would flag every such site, and the
+// required verdict is clean with the route control's own behaviour recorded on the row.
+func redirectAlwaysOffsiteHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Location", "https://cdn.canary-oracle.invalid/")
+	redirectBody(w, http.StatusFound)
+}
+
+// THE DOCUMENT REDIRECT. A 200 whose body carries a meta refresh naming the value. It is a real
+// redirect mechanism and a WEAKER oracle than a Location: a document a client may or may not
+// interpret, rather than a header the protocol acts on. Suspicious at grade low is the ceiling
+// and a finding is wrong here.
+//
+// Every markup character is escaped, so this route cannot double as a cross-site scripting
+// positive by accident. The redirect payloads contain none, so the escaping changes nothing about
+// what that class sees.
+func redirectMetaHandler(w http.ResponseWriter, r *http.Request) {
+	value := html.EscapeString(envelopeValue(r))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, "<!doctype html><html><head><title>Redirecting</title>\n"+
+		"<meta http-equiv=\"refresh\" content=\"0;url=%s\"></head>\n"+
+		"<body><p>If you are not redirected, follow the link on this page.</p></body></html>\n", value)
 }

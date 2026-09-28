@@ -2,9 +2,11 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Active session tokens as a credential source for every scan.
@@ -66,12 +68,38 @@ func (c *ScopedAuthContext) ApplySessionTokens(scopeTargetID string) {
 
 	applied := 0
 	skipped := map[string]string{}
+	// Credentials refused because THE VALUE ITSELF said it was dead, which is a different count
+	// from the expires_at one above and is reported separately for that reason.
+	deadByValue := map[string]string{}
+	now := time.Now().UTC()
 
 	for rows.Next() {
 		var kind, headerName, cookieName, paramName, prefix, value, cookieDomain, tokenName string
 		var domains []string
 		if rows.Scan(&kind, &headerName, &cookieName, &paramName, &prefix, &value,
 			&domains, &cookieDomain, &tokenName) != nil {
+			continue
+		}
+
+		// THE VALUE GETS THE LAST WORD ON ITS OWN EXPIRY.
+		//
+		// The SQL above filters on expires_at, which is a COLUMN, and a column is a claim about
+		// the credential rather than the credential. Three ways a dead token got past it:
+		//
+		//   1. expires_at is NULL, because the row predates DeriveSessionTokenExpiry or because
+		//      nobody typed one. NULL means "the operator did not say", and that was correctly
+		//      treated as "not known to be expired" and then incorrectly sent.
+		//   2. the credential is a PASETO, a SAML assertion or a JWE, whose expiry
+		//      DeriveSessionTokenExpiry cannot read at all, so the column stays NULL forever.
+		//   3. the operator typed an expires_at. DeriveSessionTokenExpiry returns the explicit
+		//      value unread whenever there is one, so a declared expiry of next year overrides
+		//      an exp claim that passed twenty minutes ago, and the dead token goes on the wire.
+		//
+		// The credential's own exp is not a claim, it is the thing the server will check. It wins.
+		// Only a PARSED expiry is allowed to refuse a token here: an observed floor is a lower
+		// bound and refusing a live credential on one would be worse than the bug being fixed.
+		if dead, why := credentialSaysItIsDead(value, prefix, kind, cookieName, headerName, paramName, now); dead {
+			deadByValue[tokenName] = why
 			continue
 		}
 
@@ -161,6 +189,49 @@ func (c *ScopedAuthContext) ApplySessionTokens(scopeTargetID string) {
 			"refresh them or the scan measures an anonymous session",
 			expiredCount, scopeTargetID)
 	}
+	// Said separately from the expires_at count, because the operator's next action is different:
+	// the column being wrong is a data problem, the credential being dead is a session problem.
+	for name, why := range deadByValue {
+		log.Printf("[SESSION] token %q was NOT attached for %s: %s", name, scopeTargetID, why)
+	}
+}
+
+// credentialSaysItIsDead reads the expiry out of the credential ITSELF and reports whether that
+// moment has passed.
+//
+// It uses only ProvParsed expiries. A declared column is what this check exists to overrule, and
+// an observed floor is a lower bound on a lifetime rather than a statement that one has ended, so
+// neither may refuse a token. A credential whose expiry cannot be read is NOT dead: refusing every
+// opaque session id and every API key because we could not parse one would be a far larger outage
+// than the bug this closes.
+//
+// The reason string carries a fingerprint and an expiry and never the value.
+func credentialSaysItIsDead(value, prefix, kind, cookieName, headerName, paramName string, now time.Time) (bool, string) {
+	carrier := CredentialCarrier{Kind: kind, Prefix: prefix, Name: headerName}
+	switch kind {
+	case tokenTypeCookie:
+		carrier.Name = cookieName
+	case tokenTypeQuery:
+		carrier.Name = paramName
+	case tokenTypeBearer:
+		carrier.Kind = "header"
+		if carrier.Name == "" {
+			carrier.Name = "Authorization"
+		}
+		if carrier.Prefix == "" {
+			carrier.Prefix = "Bearer "
+		}
+	}
+	p := ProfileCredential(NewCredential(value), carrier, now)
+	if !p.ExpiryKnown || p.ExpiryProvenance != ProvParsed {
+		return false, ""
+	}
+	if p.ExpiresAt.After(now) {
+		return false, ""
+	}
+	return true, fmt.Sprintf(
+		"the %s credential %s carries its own expiry of %s, which passed %s ago, so it was not sent whatever expires_at says (%s)",
+		p.Kind, p.Fingerprint, p.ExpiresAt.Format(time.RFC3339), humaniseTTL(now.Sub(p.ExpiresAt)), p.ExpiryEvidence)
 }
 
 // addDomainHeader files an operator-declared header against a registrable domain, where For() can

@@ -113,6 +113,9 @@ function buildContext(sendMessageImpl, initialStorage) {
     setInterval: () => 0,
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearInterval: () => {},
+    clearTimeout: (id) => clearTimeout(id),
+    // popup.js's fetchWithTimeout wraps every framework fetch in an AbortController + timeout.
+    AbortController,
     fetch: async () => ({ ok: false, status: 0, json: async () => ({}) }),
     URL,
     JSON,
@@ -420,6 +423,160 @@ section('a settings toggle mid-recording cannot narrow the live capture scope');
     Object.prototype.hasOwnProperty.call(update.settings, 'extraHosts'),
     false,
   );
+}
+
+/* ------------------------------------------------ pasting a block of scope rules */
+
+// One line, one rule, or a whole pasted block all take the same add path. The splitter is where the
+// delimiters live, and the one trap is a regex rule whose {m,n} quantifier contains a comma.
+
+section('a pasted block splits on newlines and commas');
+{
+  const context = buildContext(async () => ({ success: true }));
+  const split = context.splitScopeRuleBlock;
+
+  check('one rule per line', split('=console.nebius.com\napi.nebius.cloud\n!dev.api.nebius.cloud'),
+    ['=console.nebius.com', 'api.nebius.cloud', '!dev.api.nebius.cloud']);
+  check('comma separated on one line', split('a.example.com, b.example.com,c.example.com'),
+    ['a.example.com', 'b.example.com', 'c.example.com']);
+  check('newlines and commas mixed', split('a.example.com, b.example.com\nc.example.com'),
+    ['a.example.com', 'b.example.com', 'c.example.com']);
+  check('blanks and stray separators are dropped',
+    split('  \n a.example.com \n\n , ,  \n b.example.com \n'),
+    ['a.example.com', 'b.example.com']);
+  check('CRLF is handled', split('a.example.com\r\nb.example.com'),
+    ['a.example.com', 'b.example.com']);
+  check('exact duplicates collapse, first-seen order kept',
+    split('a.example.com\nB.EXAMPLE.com\na.example.com'),
+    ['a.example.com', 'B.EXAMPLE.com']);
+  check('empty input is no rules', split(''), []);
+  check('null input is no rules', split(null), []);
+}
+
+section('a regex rule keeps its commas; only non-regex lines comma-split');
+{
+  const context = buildContext(async () => ({ success: true }));
+  const split = context.splitScopeRuleBlock;
+
+  check('a re: line with {m,n} is one rule', split('re:prod-[0-9]{1,3}\\.acme\\.io'),
+    ['re:prod-[0-9]{1,3}\\.acme\\.io']);
+  check('a denied regex is one rule too', split('!re:prod-[0-9]{2,4}\\.acme\\.io'),
+    ['!re:prod-[0-9]{2,4}\\.acme\\.io']);
+  check('a regex line among host lines stays intact',
+    split('example.com\nre:web-[0-9]{1,2}\\.acme\\.io\napi.example.com'),
+    ['example.com', 're:web-[0-9]{1,2}\\.acme\\.io', 'api.example.com']);
+  check('a plain line still comma-splits next to a regex line',
+    split('a.example.com, b.example.com\nre:x-[0-9]{1,4}\\.io'),
+    ['a.example.com', 'b.example.com', 're:x-[0-9]{1,4}\\.io']);
+}
+
+section('adding a pasted block posts each rule and clears the box');
+{
+  const posted = [];
+  const worker = [];
+  const context = buildContext(async (msg) => {
+    worker.push(msg.action);
+    if (msg.action === 'getSessionState') return { success: true, state: { active: false } };
+    return { success: true };
+  });
+  context.fetch = async (url, options) => {
+    const method = (options && options.method) || 'GET';
+    if (method === 'POST' && /\/api\/scope-rules$/.test(url)) {
+      posted.push(JSON.parse(options.body).typed);
+      return { ok: true, status: 201, text: async () => '', json: async () => ({}) };
+    }
+    if (/\/api\/scope-rules\//.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ rules: [], rules_active: false }) };
+    }
+    return { ok: false, status: 404, text: async () => 'no', json: async () => ({}) };
+  };
+
+  context.document.getElementById('targetSelect').value = 'target-x';
+  const input = context.document.getElementById('scopeRuleInput');
+  input.value = '=console.nebius.com\napi.nebius.cloud, !dev.api.nebius.cloud';
+
+  await context.addScopeRule();
+
+  check('each rule was posted once', posted,
+    ['=console.nebius.com', 'api.nebius.cloud', '!dev.api.nebius.cloud']);
+  check('the box is cleared when all applied', input.value, '');
+  check('the worker was told the boundary moved', worker.includes('refreshScopeRules'), true);
+  check('the summary counts the additions', context.elements.get('scopeRulePreview').textContent, '3 added');
+}
+
+section('a bad line in a block is kept for fixing while the good ones apply');
+{
+  const posted = [];
+  const context = buildContext(async () => ({ success: true }));
+  context.fetch = async (url, options) => {
+    const method = (options && options.method) || 'GET';
+    if (method === 'POST' && /\/api\/scope-rules$/.test(url)) {
+      const typed = JSON.parse(options.body).typed;
+      posted.push(typed);
+      if (typed === 'not a host!!') {
+        return { ok: false, status: 400, text: async () => '"not a host!!" is not a valid host', json: async () => ({}) };
+      }
+      return { ok: true, status: 201, text: async () => '', json: async () => ({}) };
+    }
+    if (/\/api\/scope-rules\//.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ rules: [], rules_active: false }) };
+    }
+    return { ok: false, status: 404, text: async () => 'no', json: async () => ({}) };
+  };
+
+  context.document.getElementById('targetSelect').value = 'target-x';
+  const input = context.document.getElementById('scopeRuleInput');
+  input.value = 'good.example.com\nnot a host!!\napi.example.com';
+
+  await context.addScopeRule();
+
+  check('all three were attempted', posted.length, 3);
+  check('only the bad line is kept in the box', input.value, 'not a host!!');
+  const preview = context.elements.get('scopeRulePreview');
+  check('summary counts both outcomes', preview.textContent, '2 added  ·  1 not added');
+  check('the failing rule and its reason are shown', preview.children[0].textContent,
+    'not a host!!: "not a host!!" is not a valid host');
+}
+
+section('a wide rule in a block is confirmed once, then stored');
+{
+  const posted = [];
+  let confirmShown = '';
+  const context = buildContext(async () => ({ success: true }));
+  context.confirm = (message) => { confirmShown = message; return true; };
+  context.fetch = async (url, options) => {
+    const method = (options && options.method) || 'GET';
+    if (method === 'POST' && /\/api\/scope-rules$/.test(url)) {
+      const body = JSON.parse(options.body);
+      posted.push({ typed: body.typed, confirm_wide: body.confirm_wide });
+      // The wide rule is refused until its canonical text comes back as confirm_wide.
+      if (body.typed === '~jivo' && body.confirm_wide !== '~jivo') {
+        return {
+          ok: false,
+          status: 428,
+          text: async () => 'the rule can admit hosts nobody has seen yet. confirm by sending confirm_wide exactly as "~jivo", or bound it.',
+          json: async () => ({}),
+        };
+      }
+      return { ok: true, status: 201, text: async () => '', json: async () => ({}) };
+    }
+    if (/\/api\/scope-rules\//.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ rules: [], rules_active: false }) };
+    }
+    return { ok: false, status: 404, text: async () => 'no', json: async () => ({}) };
+  };
+
+  context.document.getElementById('targetSelect').value = 'target-x';
+  const input = context.document.getElementById('scopeRuleInput');
+  input.value = 'example.com\n~jivo';
+
+  await context.addScopeRule();
+
+  check('the wide rule was first tried without confirmation', posted[1], { typed: '~jivo', confirm_wide: '' });
+  check('then re-sent with its canonical text', posted[2], { typed: '~jivo', confirm_wide: '~jivo' });
+  check('the operator was prompted once', confirmShown.includes('~jivo'), true);
+  check('everything applied, so the box is cleared', input.value, '');
+  check('summary counts all as added', context.elements.get('scopeRulePreview').textContent, '2 added');
 }
 
 /* ------------------------------------------------------------------ */

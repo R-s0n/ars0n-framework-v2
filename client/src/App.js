@@ -220,7 +220,6 @@ import PointersModal from './modals/PointersModal';
 // spellings of "not knowing is not clean" is two answers to the same question.
 import TriageRunModal, { normalizeTriageStatus, triageCardLine } from './modals/TriageRunModal';
 import FlowConfigureModal from './modals/FlowConfigureModal';
-import DetectFlowsModal from './modals/DetectFlowsModal';
 import RequestFlowBuilderModal from './modals/RequestFlowBuilderModal';
 import ReplayRequestsModal from './modals/ReplayRequestsModal';
 import RequestFlowsModal from './modals/RequestFlowsModal';
@@ -238,6 +237,7 @@ import RecordAuthFlowsModal from './modals/RecordAuthFlowsModal';
 import ManualAuthFlowModal from './modals/ManualAuthFlowModal';
 import ManageSessionsModal from './modals/ManageSessionsModal';
 import RefreshSessionModal from './modals/RefreshSessionModal';
+import SessionInvestigateModal, { summariseSessionTtl } from './modals/SessionInvestigateModal';
 import ClientIdentityPatternsModal from './modals/ClientIdentityPatternsModal';
 import PolicyAccessModal from './modals/PolicyAccessModal';
 import RoleAccessModal from './modals/RoleAccessModal';
@@ -1382,7 +1382,12 @@ function App() {
   const [showManualAuthFlowModal, setShowManualAuthFlowModal] = useState(false);
   const [showManageSessionsModal, setShowManageSessionsModal] = useState(false);
   const [showRefreshSessionModal, setShowRefreshSessionModal] = useState(false);
-  
+  const [showSessionInvestigateModal, setShowSessionInvestigateModal] = useState(false);
+  // How long this application's session lasts, as measured by the token characterisation engine.
+  // It starts as the word UNKNOWN rather than as a blank or a zero, because a tile reading "0" or
+  // "-" is read as "no expiry", which is the opposite of an unmeasured lifetime.
+  const [sessionTtl, setSessionTtl] = useState(() => summariseSessionTtl(null));
+
   const handleCloseSubdomainsModal = () => setShowSubdomainsModal(false);
   const handleCloseCloudDomainsModal = () => setShowCloudDomainsModal(false);
   const handleCloseUniqueSubdomainsModal = () => setShowUniqueSubdomainsModal(false);
@@ -6223,7 +6228,6 @@ function App() {
   // separate modals, which is what lets the flow view hand a request to the repeater: a tab cannot
   // open another tab and leave the first one's state alone.
   const [showFlowConfigureModal, setShowFlowConfigureModal] = useState(false);
-  const [showDetectFlowsModal, setShowDetectFlowsModal] = useState(false);
   const [showRequestFlowBuilderModal, setShowRequestFlowBuilderModal] = useState(false);
   const [showReplayRequestsModal, setShowReplayRequestsModal] = useState(false);
   const [showRequestFlowsModal, setShowRequestFlowsModal] = useState(false);
@@ -6263,11 +6267,211 @@ function App() {
   // built flows, the repeater saves versions, and the flow view is where a flow gets promoted into
   // the builder. One effect keyed on "none of them is open" does all of it - opening a modal changes
   // the flag to true and fetches nothing, closing it changes back and refreshes.
-  const flowModalsOpen = showFlowConfigureModal || showDetectFlowsModal
+  const flowModalsOpen = showFlowConfigureModal
     || showRequestFlowBuilderModal || showReplayRequestsModal || showRequestFlowsModal;
   useEffect(() => {
     if (!flowModalsOpen) loadFlowCardMetrics();
   }, [flowModalsOpen, loadFlowCardMetrics]);
+
+  // ACTIVE FLOW DETECTION now runs from the Request Flow Replay card, not a modal. The Detect Flows
+  // button starts a run with the config saved in the Configure modal (empty body -> saved config) and
+  // the card shows its progress. detectRun is the latest /status object, or a small locally-made
+  // {status:'starting'|'error', ...} while a start is in flight or has failed; null means nothing has
+  // been shown for this target yet.
+  const [detectRun, setDetectRun] = useState(null);
+  const [detectStarting, setDetectStarting] = useState(false);
+  const detectPollRef = useRef(null);
+
+  const stopDetectPolling = useCallback(() => {
+    if (detectPollRef.current) {
+      clearInterval(detectPollRef.current);
+      detectPollRef.current = null;
+    }
+  }, []);
+
+  const DETECT_TERMINAL = useMemo(
+    () => new Set(['completed', 'aborted', 'cancelled', 'error', 'idle']),
+    []
+  );
+
+  const pollDetectStatus = useCallback(async (targetId) => {
+    try {
+      const res = await fetch(`/api/flow-detection/${targetId}/status`);
+      if (!res.ok) return;
+      const s = await res.json();
+      setDetectRun(s);
+      if (DETECT_TERMINAL.has(s.status)) {
+        stopDetectPolling();
+        setDetectStarting(false);
+        // The run wrote captures and flows, so the card's four numbers are stale until re-read.
+        loadFlowCardMetrics();
+      }
+    } catch {
+      // Transient network error; the interval keeps trying rather than tearing the run's UI down.
+    }
+  }, [DETECT_TERMINAL, stopDetectPolling, loadFlowCardMetrics]);
+
+  const handleRunDetectFlows = useCallback(async () => {
+    if (!activeTarget || detectStarting) return;
+    const targetId = activeTarget.id;
+    setDetectStarting(true);
+    setDetectRun({ status: 'starting' });
+    try {
+      // EMPTY BODY. The server reads that as "use the saved config", which is what the Configure
+      // modal wrote. Sending a config inline here would be a second source of truth for the run.
+      const res = await fetch(`/api/flow-detection/${targetId}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '',
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        // 409 already-running is not an error to show: another run (or this one, double-clicked) is
+        // live, so fall through to polling and let the card display the run in progress.
+        if (res.status === 409) {
+          setDetectRun({ status: 'running' });
+        } else {
+          const msg = (data && (data.message || data.error)) || `Could not start the run (${res.status}).`;
+          setDetectRun({ status: 'error', last_error: msg });
+          setDetectStarting(false);
+          return;
+        }
+      } else {
+        setDetectRun({
+          status: 'running',
+          planned: (data && data.planned) || 0,
+          sent: 0,
+          rps: data && data.rps,
+        });
+      }
+      stopDetectPolling();
+      detectPollRef.current = setInterval(() => pollDetectStatus(targetId), 1500);
+      pollDetectStatus(targetId);
+    } catch (err) {
+      setDetectRun({ status: 'error', last_error: `Could not reach the framework: ${err.message}` });
+      setDetectStarting(false);
+    }
+  }, [activeTarget, detectStarting, stopDetectPolling, pollDetectStatus]);
+
+  const handleCancelDetectFlows = useCallback(async () => {
+    if (!activeTarget) return;
+    try {
+      await fetch(`/api/flow-detection/${activeTarget.id}/cancel`, { method: 'POST' });
+    } catch {
+      // Ignore: the poll picks up the cancelling -> cancelled transition either way.
+    }
+  }, [activeTarget]);
+
+  // On target change: drop any run UI from the previous target, then ask once whether THIS target has
+  // a run in progress (e.g. after a page refresh) and resume polling if so. A terminal or idle run is
+  // not surfaced on arrival - a stale "completed" banner on every page load is noise.
+  useEffect(() => {
+    stopDetectPolling();
+    setDetectRun(null);
+    setDetectStarting(false);
+    if (!activeTarget) return undefined;
+    const targetId = activeTarget.id;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/flow-detection/${targetId}/status`);
+        if (!res.ok || cancelled) return;
+        const s = await res.json();
+        if (cancelled) return;
+        if (['running', 'pending', 'cancelling'].includes(s.status)) {
+          setDetectRun(s);
+          detectPollRef.current = setInterval(() => pollDetectStatus(targetId), 1500);
+        }
+      } catch {
+        // No run info is a normal state; the card just shows the buttons.
+      }
+    })();
+    return () => { cancelled = true; stopDetectPolling(); };
+  }, [activeTarget, stopDetectPolling, pollDetectStatus]);
+
+  const detectRunLive = Boolean(detectRun
+    && ['starting', 'running', 'pending', 'cancelling'].includes(detectRun.status));
+
+  // The run panel under the card's buttons. Live runs get a progress bar; finished ones get a one-line
+  // summary the operator can dismiss. Nothing here sends a request - it reads /status.
+  const renderDetectRunStatus = () => {
+    const s = detectRun || {};
+    const planned = Number(s.planned || 0);
+    const sent = Number(s.sent || 0);
+    const pct = planned > 0 ? Math.min(100, Math.round((sent / planned) * 100)) : 0;
+    const dismiss = () => { stopDetectPolling(); setDetectRun(null); };
+
+    // Running or starting: one compact centered line with a slim progress bar, the same shape the
+    // Consolidate Attack Vectors card uses for its probe, and a link-style cancel rather than a button.
+    if (s.status === 'starting' || detectRunLive) {
+      const cancelling = s.status === 'cancelling';
+      return (
+        <div className="small text-center mt-3">
+          <div className="text-white-50 mb-1">
+            <Spinner animation="border" size="sm" className="me-2" />
+            {s.status === 'starting'
+              ? 'starting active flow detection'
+              : cancelling
+                ? 'cancelling'
+                : `detecting flows ${sent.toLocaleString()}${planned ? ` of ${planned.toLocaleString()}` : ''}`}
+            {s.status !== 'starting' && !cancelling && s.redirects
+              ? `, ${Number(s.redirects).toLocaleString()} redirects` : ''}
+            {s.status !== 'starting' && !cancelling && (
+              <Button
+                variant="link"
+                className="p-0 ms-2 text-danger small align-baseline"
+                onClick={handleCancelDetectFlows}
+              >
+                cancel
+              </Button>
+            )}
+          </div>
+          <ProgressBar
+            now={planned > 0 ? pct : 100}
+            striped
+            animated
+            variant={cancelling ? 'warning' : 'danger'}
+            style={{ height: '6px' }}
+          />
+        </div>
+      );
+    }
+
+    // Terminal: one coloured line with a dismiss link, not a full alert box.
+    let color = 'rgba(255,255,255,0.55)';
+    let text = '';
+    if (s.status === 'completed') {
+      color = '#20c997';
+      text = `detection complete: ${sent.toLocaleString()} request${sent === 1 ? '' : 's'} sent`
+        + (s.redirects ? `, ${Number(s.redirects).toLocaleString()} redirect${s.redirects === 1 ? '' : 's'}` : '')
+        + (s.errors ? `, ${Number(s.errors).toLocaleString()} error${s.errors === 1 ? '' : 's'}` : '');
+    } else if (s.status === 'aborted') {
+      color = '#fd7e14';
+      text = `detection aborted after ${sent.toLocaleString()} request${sent === 1 ? '' : 's'}`
+        + (s.abort_reason ? `: ${s.abort_reason}` : '');
+    } else if (s.status === 'cancelled') {
+      text = `detection cancelled after ${sent.toLocaleString()} request${sent === 1 ? '' : 's'}`;
+    } else if (s.status === 'error') {
+      color = '#dc3545';
+      text = s.last_error || 'the detection run failed';
+    } else {
+      // idle after a run we were showing - nothing to say.
+      return null;
+    }
+
+    return (
+      <div className="small text-center mt-3" style={{ color }}>
+        {text}
+        <Button
+          variant="link"
+          className="p-0 ms-2 text-white-50 small align-baseline"
+          onClick={dismiss}
+        >
+          dismiss
+        </Button>
+      </div>
+    );
+  };
 
   // XSS. One status object per tool, keyed by tool key, holding both the eligibility figures (which
   // exist before any scan has run, so the card can say 27/71 up front) and the latest run.
@@ -6621,7 +6825,6 @@ function App() {
   const handleOpenAttackVectorConfigureModal = () => setShowAttackVectorConfigureModal(true);
   const handleOpenPointersModal = () => setShowPointersModal(true);
   const handleOpenFlowConfigureModal = () => setShowFlowConfigureModal(true);
-  const handleOpenDetectFlowsModal = () => setShowDetectFlowsModal(true);
   // Same rule as the repeater below: opened from its own button there is no handover, so the id left
   // behind by the last "Edit as flow" is cleared first rather than silently reopening that flow.
   const handleOpenRequestFlowBuilderModal = () => {
@@ -6734,6 +6937,13 @@ function App() {
   const handleCloseRefreshSessionModal = () => {
     setShowRefreshSessionModal(false); fetchSessionTokenCounts();
   };
+  // Investigate sits between Manage Sessions and Refresh Session because that is the order the
+  // work happens in: define the credential, find out what it is and how long it lives, then renew
+  // it when it dies. Closing it re-reads the card, since a re-measure changes the TTL tile.
+  const handleOpenSessionInvestigateModal = () => setShowSessionInvestigateModal(true);
+  const handleCloseSessionInvestigateModal = () => {
+    setShowSessionInvestigateModal(false); fetchSessionTokenCounts();
+  };
   const handleOpenClientIdentityModal = () => setShowClientIdentityModal(true);
   const handleCloseClientIdentityModal = () => { setShowClientIdentityModal(false); fetchAuthzCounts(); };
   // Possible IDOR Targets = saved client identifiers; Possible ACV Targets is a placeholder until the
@@ -6801,15 +7011,37 @@ function App() {
 
   const fetchSessionTokenCounts = async (targetId) => {
     const id = targetId || (activeTarget && activeTarget.id);
-    if (!id) { setSessionTokenCounts({ total: 0, active: 0 }); return; }
+    if (!id) {
+      setSessionTokenCounts({ total: 0, active: 0 });
+      setSessionTtl(summariseSessionTtl(null));
+      return;
+    }
+    // ONE CALL, TO THE CHARACTERISATION ENDPOINT, AND NOT TO THE TOKEN LIST. Both the counts and
+    // the Session TTL tile come out of the same payload, which is a projection with no field for a
+    // credential value at all. The card used to fetch the token list as well, purely for a length
+    // and a filter, and that list carried every credential on this target into the page and into
+    // any HAR the operator saved. counts.total and counts.active are the same two numbers.
+    //
+    // A FAILURE IS NOT A ZERO. It leaves the counts and the tile alone at whatever the last read
+    // said and the tile reading UNKNOWN, because "0 session tokens" is a statement of fact and a
+    // failed fetch is not in a position to make one.
     try {
-      const res = await fetch(`/api/session-tokens/target/${id}`);
+      const res = await fetch(`/api/session-tokens/target/${id}/investigate`);
       if (res.ok) {
-        const data = await res.json();
-        const list = Array.isArray(data) ? data : (data?.tokens || []);
-        setSessionTokenCounts({ total: list.length, active: list.filter((t) => t.is_active).length });
+        const report = await res.json();
+        const counts = (report && report.counts) || {};
+        setSessionTokenCounts({
+          total: Number.isFinite(counts.total) ? counts.total : 0,
+          active: Number.isFinite(counts.active) ? counts.active : 0,
+        });
+        setSessionTtl(summariseSessionTtl(report));
+      } else {
+        setSessionTtl(summariseSessionTtl(null));
       }
-    } catch (error) { console.error('Error fetching session token counts:', error); }
+    } catch (error) {
+      console.error('Error characterising session credentials:', error);
+      setSessionTtl(summariseSessionTtl(null));
+    }
   };
   // Count how many threat-model items have actually been filled out for the active target, so the
   // STRIDE card can surface real progress instead of a static legend.
@@ -10415,11 +10647,12 @@ function App() {
                             Consolidate Attack Vectors card uses, so the label row sits the same
                             distance above the buttons here as it does on every other card. */}
                         <div className="mt-auto">
-                          {/* Four numbers, one per piece of work the five buttons below do, so the
-                              card says WHERE the work is instead of making the operator open five
-                              modals to find out. Read left to right they follow the buttons:
-                              Configure governs ENDPOINTS, Detect Flows produces FLOWS, the builder
-                              holds BUILT FLOWS, the repeater holds VERSIONS.
+                          {/* Four numbers, one per piece of work the buttons below do, so the card
+                              says WHERE the work is instead of making the operator open five modals
+                              to find out. The metrics keep the order the work happens in - Configure
+                              governs ENDPOINTS, Detect Flows produces FLOWS, the builder holds BUILT
+                              FLOWS, the repeater holds VERSIONS - even though Replay Requests now
+                              leads the button row as the workbench they all feed.
 
                               A count that could not be read shows n/a, not 0. See FlowCardMetric. */}
                           <Row className="text-center align-items-start mb-3">
@@ -10472,21 +10705,35 @@ function App() {
                             />
                             <FlowCardMetric
                               metric={flowCardMetrics?.versions}
-                              label="Versions"
-                              title="Saved request versions in the repeater."
-                              // Opening a capture in the repeater materialises its unmodified
-                              // original, so the headline counts rows the operator never typed. The
-                              // edit count is the one that reflects work done.
+                              label="Edits"
+                              title="Saved edits of recorded requests in the repeater. The recordings themselves are variants, opened from the sitemap."
+                              // The headline is edits the operator made, not the materialised
+                              // originals that opening a request creates on its own. The saved total
+                              // (edits plus those originals) is the second line.
                               sub={flowCardMetrics?.versions?.parts
-                                ? `${(flowCardMetrics.versions.parts.edited || 0).toLocaleString()} edited`
+                                ? `of ${(flowCardMetrics.versions.parts.total || 0).toLocaleString()} saved`
                                 : null}
                             />
                           </Row>
                           <Row className="g-2">
-                            {/* First, and to the left of Detect Flows, because it is the screen that
-                                decides what Detect Flows may touch and what every request it sends
-                                carries. Reading the row left to right is the order the work happens
-                                in. Nothing behind this button sends a request. */}
+                            {/* Replay Requests sits first: it is the workbench the rest of the card
+                                feeds into. Every other button exists to put a request in front of it -
+                                Configure decides what may be sent, Detect Flows and the builder
+                                assemble flows, Request Flows is where a flow hands one over - so the
+                                repeater leads and the tools that feed it follow. */}
+                            <Col>
+                              <Button
+                                variant="outline-danger"
+                                className="w-100"
+                                onClick={handleOpenReplayRequestsModal}
+                                disabled={!activeTarget}
+                              >
+                                Replay Requests
+                              </Button>
+                            </Col>
+                            {/* Configure is the screen that decides what Detect Flows may touch and
+                                what every request it sends carries. Nothing behind this button sends
+                                a request. */}
                             <Col>
                               <Button
                                 variant="outline-danger"
@@ -10497,14 +10744,21 @@ function App() {
                                 Configure
                               </Button>
                             </Col>
+                            {/* Detect Flows no longer opens a modal: it RUNS, on the config saved in
+                                Configure, and the progress bar below the buttons reports it. Disabled
+                                while a run is live so it cannot be double-started; the server also
+                                refuses a second concurrent run. */}
                             <Col>
                               <Button
                                 variant="outline-danger"
                                 className="w-100"
-                                onClick={handleOpenDetectFlowsModal}
-                                disabled={!activeTarget}
+                                onClick={handleRunDetectFlows}
+                                disabled={!activeTarget || detectRunLive}
+                                title="Send for the routing the crawl never walked, using the verbs and guards saved in Configure. Configure it first if you have not."
                               >
-                                Detect Flows
+                                {detectRunLive
+                                  ? <><Spinner as="span" animation="border" size="sm" className="me-2" />Detecting</>
+                                  : 'Detect Flows'}
                               </Button>
                             </Col>
                             <Col>
@@ -10521,16 +10775,6 @@ function App() {
                               <Button
                                 variant="outline-danger"
                                 className="w-100"
-                                onClick={handleOpenReplayRequestsModal}
-                                disabled={!activeTarget}
-                              >
-                                Replay Requests
-                              </Button>
-                            </Col>
-                            <Col>
-                              <Button
-                                variant="outline-danger"
-                                className="w-100"
                                 onClick={handleOpenRequestFlowsModal}
                                 disabled={!activeTarget}
                               >
@@ -10538,6 +10782,7 @@ function App() {
                               </Button>
                             </Col>
                           </Row>
+                          {detectRun && renderDetectRunStatus()}
                         </div>
                       </Card.Body>
                     </Card>
@@ -10557,19 +10802,19 @@ function App() {
                           Record a real authentication against the target with the browser extension, or write the requests out by hand, then keep the session tokens those flows produce. Every token is tied to the flow that can mint another one, so when a session dies the framework can go and get a new one instead of quietly testing a login wall.
                         </Card.Text>
                         <Row className="g-3 justify-content-center mt-1 mb-2">
-                          <Col xs={6} md={3}>
+                          <Col xs={6} md={2}>
                             <div className="fs-3 fw-bold text-danger">{authFlowCounts.total ?? 0}</div>
                             <div className="text-white small pb-4">Auth Flows</div>
                           </Col>
-                          <Col xs={6} md={3}>
+                          <Col xs={6} md={2}>
                             <div className="fs-3 fw-bold text-danger">{authFlowCounts.recorded ?? 0}</div>
                             <div className="text-white small pb-4">Recorded</div>
                           </Col>
-                          <Col xs={6} md={3}>
+                          <Col xs={6} md={2}>
                             <div className="fs-3 fw-bold text-danger">{sessionTokenCounts.total ?? 0}</div>
                             <div className="text-white small pb-4">Session Tokens</div>
                           </Col>
-                          <Col xs={6} md={3}>
+                          <Col xs={6} md={2}>
                             {/* Active is the number that matters: it is what the other tools will
                                 actually send. Zero active tokens with a full list is the state that
                                 makes every scan report a login wall. */}
@@ -10577,6 +10822,27 @@ function App() {
                               {sessionTokenCounts.active ?? 0}
                             </div>
                             <div className="text-white small pb-4">Active</div>
+                          </Col>
+                          <Col xs={12} md={3}>
+                            {/* HOW LONG THE SESSION LASTS, which is the number that decides whether
+                                a scan finishes authenticated. A measured lifetime is large and in the
+                                card's accent colour like every other metric here; an unmeasured one is
+                                smaller, grey and spelled UNKNOWN, because a dash, a blank or a zero in
+                                this position reads as "no expiry" and that is the opposite of the
+                                truth. Where several credentials disagree the tile shows the one that
+                                governs the scan and the line beneath says so. */}
+                            <div
+                              className={sessionTtl.known
+                                ? 'fs-3 fw-bold text-danger'
+                                : 'fs-5 fw-bold text-secondary'}
+                              title={sessionTtl.explain || ''}
+                            >
+                              {sessionTtl.value}
+                            </div>
+                            <div className="text-white small">Session TTL</div>
+                            <div className="text-white-50 pb-4" style={{ fontSize: '0.7rem' }}>
+                              {sessionTtl.detail || ''}
+                            </div>
                           </Col>
                         </Row>
                         <div className="mt-auto">
@@ -10597,6 +10863,15 @@ function App() {
                               <Button variant="outline-danger" className="w-100"
                                       onClick={handleOpenManageSessionsModal} disabled={!activeTarget}>
                                 Manage Sessions
+                              </Button>
+                            </Col>
+                            <Col>
+                              {/* Between Manage Sessions and Refresh Session because that is the
+                                  order the work happens in: define the credential, find out what it
+                                  is and how long it lives, then renew it when it dies. */}
+                              <Button variant="outline-danger" className="w-100"
+                                      onClick={handleOpenSessionInvestigateModal} disabled={!activeTarget}>
+                                Investigate
                               </Button>
                             </Col>
                             <Col>
@@ -11417,7 +11692,7 @@ function App() {
                                 onClick={handleProbeReflection}
                                 disabled={!activeTarget || isProbingReflection
                                   || isConsolidatingAttackVectors}
-                                title="Two passes. First it reads the requests and responses the crawl already stored and records every input whose value comes back, sending nothing. Then it sends one canary per input and records what survived. Nothing that changes data is sent at any setting: POST, PATCH, PUT and DELETE are never put on the wire.">
+                                title="Three passes. Passive reads the requests and responses the crawl already stored and records every input whose value comes back, sending nothing. Active sends one canary per input and records what survived. The classifier pass then probes each input for the attack classes enabled on the Configure tab. IT REPLAYS THE VERB IT CAPTURED, so POST, PATCH, PUT and DELETE do go out and do change data on the accounts you have authorised. Use the Configure tab to narrow which endpoints are in scope.">
                                 <div className="btn-content">
                                   {isProbingReflection
                                     ? <Spinner animation="border" size="sm" />
@@ -12721,6 +12996,13 @@ function App() {
         scopeTargetUrl={activeTarget?.scope_target}
       />
 
+      <SessionInvestigateModal
+        show={showSessionInvestigateModal}
+        handleClose={handleCloseSessionInvestigateModal}
+        scopeTargetId={activeTarget?.id}
+        scopeTargetUrl={activeTarget?.scope_target}
+      />
+
       <RefreshSessionModal
         show={showRefreshSessionModal}
         handleClose={handleCloseRefreshSessionModal}
@@ -12829,18 +13111,13 @@ function App() {
         activeTarget={activeTarget}
       />
 
-      {/* The five Request Flow Replay modals. One tabbed modal until now; separate modals because
-          the flow view has to be able to hand a request to the repeater, and a tab cannot open
-          another tab without taking the first one's state down with it. */}
+      {/* The Request Flow Replay modals. One tabbed modal until now; separate modals because the flow
+          view has to be able to hand a request to the repeater, and a tab cannot open another tab
+          without taking the first one's state down with it. Detect Flows is no longer among them: its
+          configuration moved into Configure and it now runs straight from the card. */}
       <FlowConfigureModal
         show={showFlowConfigureModal}
         handleClose={() => setShowFlowConfigureModal(false)}
-        activeTarget={activeTarget}
-      />
-
-      <DetectFlowsModal
-        show={showDetectFlowsModal}
-        handleClose={() => setShowDetectFlowsModal(false)}
         activeTarget={activeTarget}
       />
 

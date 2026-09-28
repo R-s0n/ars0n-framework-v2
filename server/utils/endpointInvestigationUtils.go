@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -56,6 +57,17 @@ type EndpointInvestigationResult struct {
 	// results are ambiguous: an empty page could be a real empty page or an unauthenticated one.
 	Authenticated bool   `json:"authenticated"`
 	AuthSource    string `json:"auth_source,omitempty"`
+	// Set when the response this row was built from is a REDIRECT HOP rather than a page.
+	//
+	// A redirect-following client that returns a 3xx at all did not walk the chain to a page.
+	// Three ways that happens: DoFollowing recovering the hop whose Location no URL parser
+	// accepts, a chain longer than the client's hop limit, and a 3xx with no Location to follow.
+	// All three mean the same thing to a reader of this row, and without this field none of them
+	// can be told from a page that really did answer 302 with an empty body. RedirectChainNote
+	// says which, and never quotes the Location, which is attacker-influenced text on its way
+	// into a log line and a stored scan result.
+	RedirectChainBroke bool   `json:"redirect_chain_broke,omitempty"`
+	RedirectChainNote  string `json:"redirect_chain_note,omitempty"`
 	// Set when the row recorded a write verb. That verb is characterised with GET, never sent, so
 	// the result must not read as though the write surface was exercised.
 	VerbNotReplayed string `json:"verb_not_replayed,omitempty"`
@@ -349,6 +361,74 @@ func ExecuteEndpointInvestigation(scanID, scopeTargetID string) {
 	log.Printf("[INFO] Endpoint investigation completed for scope target %s", scopeTargetID)
 }
 
+// ---------------------------------------------------------------------------------------------
+// A REDIRECT HOP IS NOT A PAGE, AND A ROW THAT CANNOT TELL THE TWO APART IS WORSE THAN NO ROW
+// ---------------------------------------------------------------------------------------------
+//
+// DoFollowing recovers the hop that broke a redirect chain so a caller gets SOMETHING rather than
+// nothing. That is the right trade for the transport and the wrong one for the record: what comes
+// back is a 3xx with an empty body, and every page-derived field computed from it is a
+// measurement of nothing. MEASURED on a three-hop chain ending in an unparseable Location, before
+// this function existed:
+//
+//	CHAIN BROKE : status=302 size=0 title="" forms=0 apis=0 secrets=0 misconfigs=2
+//	PAGE FETCHED: status=200 size=120 title="Admin Console" forms=1
+//
+// The first row is indistinguishable from a page that really answered 302 with an empty body, and
+// the two "misconfigurations" are Missing clickjacking protection and Missing charset in
+// Content-Type: both TRUE OF A REDIRECT HOP and neither a fact about the endpoint, because a 302
+// has no page to frame and no charset to declare. Four security headers were additionally
+// reported MISSING from a document nobody read, which is the same fabrication pointing the other
+// way.
+//
+// WHY THIS IS ASKED OF THE RESPONSE rather than returned as a flag by DoFollowing: the recovery
+// is not the only way this shape arrives. A redirect-FOLLOWING client that hands back a 3xx at
+// all did not walk the chain to a page, and there are three ways that happens: an unparseable
+// Location (the recovery), a chain past the client's hop limit (CheckRedirect returning
+// ErrUseLastResponse), and a 3xx carrying no Location to follow. All three mean the same thing to
+// a reader of the row and all three are named separately here so the row says which. Asking the
+// response also means this needs no change to httpNoFollow.go, whose DoFollowing serves callers
+// that do not follow at all.
+//
+// resp.Location() IS THE PREDICATE AND NOT A HAND-ROLLED url.Parse, because it is the same call
+// net/http's own redirect loop makes before it gives up (client.go builds "failed to parse
+// Location header %q" from exactly this error), so this agrees with the transport by
+// construction rather than by resemblance.
+//
+// THE LOCATION VALUE NEVER ENTERS THE NOTE. It is attacker-influenced, it can carry userinfo, and
+// this string goes into a log line and into a stored scan result.
+func redirectChainBreak(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
+	// THE STATUS SET IS net/http's OWN, not the whole 3xx range, and the difference matters in
+	// the direction that would suppress a real page. client.go's redirectBehavior follows
+	// exactly 301, 302, 303, 307 and 308; it hands 300, 304, 305 and 306 straight back to the
+	// caller because it never intended to walk them. A 300 Multiple Choices can carry a real
+	// body listing the alternatives, and treating it as a hop would throw that page away and
+	// call the row a broken chain, which is this defect inverted.
+	switch resp.StatusCode {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+	default:
+		return ""
+	}
+	_, err := resp.Location()
+	switch {
+	case errors.Is(err, http.ErrNoLocation):
+		return fmt.Sprintf("the target answered %d with no Location header, so there was nowhere to "+
+			"walk to and no page was fetched; this row describes the hop", resp.StatusCode)
+	case err != nil:
+		return fmt.Sprintf("the redirect chain died on a %d whose Location header no URL parser "+
+			"accepts, so net/http abandoned the walk; this row is the hop that broke it and not the "+
+			"page it pointed at", resp.StatusCode)
+	default:
+		return fmt.Sprintf("a redirect-following client handed back a %d rather than a page, so the "+
+			"chain was not walked to the end (the hop limit, or the client declining to follow); this "+
+			"row describes the hop", resp.StatusCode)
+	}
+}
+
 // investigateEndpoint catalogues one endpoint. canonicalURL identifies it and is what the result
 // reports; probeURL is what actually gets requested, and differs when observed parameters were
 // supplied. Everything on the wire uses probeURL, including the scope check: the canonical URL is a
@@ -441,7 +521,10 @@ func investigateEndpoint(endpointID, canonicalURL, probeURL, method string, auth
 		result.Authenticated = false
 	}
 
-	resp, err := client.Do(req)
+	// DoFollowing, not client.Do. This client DOES walk the chain, and net/http abandons the whole
+	// walk when any hop carries a Location it cannot parse: no response, no page, no analysis. The
+	// retry re-sends once without following so at least the hop that broke the chain is recorded.
+	resp, err := DoFollowing(client, req)
 	if err != nil {
 		log.Printf("[ERROR] Failed to request %s: %v", urlStr, err)
 		return result
@@ -461,6 +544,30 @@ func investigateEndpoint(endpointID, canonicalURL, probeURL, method string, auth
 
 	result.ResponseSize = len(body)
 	bodyStr := string(body)
+
+	// THE CHAIN IS ASKED ABOUT BEFORE ANYTHING IS DERIVED FROM THE BODY. Everything below this
+	// point describes A PAGE, and on a broken chain there is no page: the body is a redirect
+	// hop's, which is empty, and every analyser run over it returns a finding about nothing or an
+	// absence claim about a document that was never read. The transport facts above are real and
+	// are kept, the hop's own cookies and Location are recorded, and the row says plainly that it
+	// is a hop so that nothing downstream reads it as an endpoint investigated and found bare.
+	if note := redirectChainBreak(resp); note != "" {
+		result.RedirectChainBroke = true
+		result.RedirectChainNote = note
+		result.Cookies = analyzeCookies(resp.Cookies())
+		if loc := resp.Header.Get("Location"); loc != "" {
+			// THE BREAKING HOP IS RECORDED AS THE SERVER SENT IT. This hop's Location was never
+			// stored before, because net/http discarded the whole response; recording it is most
+			// of why the recovery is worth having, since an unparseable Location IS the finding.
+			// It goes in byte for byte: userinfo, credentials and all, because a Location of
+			// https://user:password@host/ is evidence, and a rewritten one proves nothing.
+			result.Redirects = append(result.Redirects, RedirectInfo{
+				Location: loc, StatusCode: resp.StatusCode,
+			})
+		}
+		log.Printf("[INFO] %s: no page was fetched. %s", urlStr, note)
+		return result
+	}
 
 	result.SecurityHeaders = analyzeSecurityHeaders(resp.Header)
 	result.Cookies = analyzeCookies(resp.Cookies())
@@ -556,8 +663,11 @@ func analyzeCookies(cookies []*http.Cookie) []CookieInfo {
 		}
 
 		result = append(result, CookieInfo{
-			Name:     cookie.Name,
-			Value:    maskSensitiveValue(cookie.Value),
+			Name: cookie.Name,
+			// THE VALUE GOES IN AS THE TARGET SET IT. A session cookie in an investigation row
+			// is the evidence: a truncated one cannot be replayed, cannot be decoded and
+			// cannot prove an exposure.
+			Value:    cookie.Value,
 			Secure:   cookie.Secure,
 			HttpOnly: cookie.HttpOnly,
 			SameSite: sameSite,
@@ -566,13 +676,6 @@ func analyzeCookies(cookies []*http.Cookie) []CookieInfo {
 		})
 	}
 	return result
-}
-
-func maskSensitiveValue(value string) string {
-	if len(value) > 8 {
-		return value[:4] + "..." + value[len(value)-4:]
-	}
-	return "***"
 }
 
 func extractForms(body string) []FormInfo {
@@ -964,13 +1067,23 @@ func runInvestigationTier1(scopeTargetID string, endpoints []struct {
 		if verdict == "not_validated" {
 			verdict = validationStatusValid // never validated is not evidence against it
 		}
+		// A ROW WHOSE CHAIN BROKE STAYS ELIGIBLE AND STEERS NOTHING. Tier 1 issues its own
+		// requests, so dropping the endpoint here would turn "we never saw the page" into "we
+		// looked and found nothing", which is the defect this field exists to stop. What must
+		// not happen is the opposite: Content-Type is the hop's, not the page's, and Tier 1
+		// chooses probes by it. An unknown content type is the honest input, and the signals and
+		// score are already empty because nothing was derived from a hop's body.
+		contentType := res.ContentType
+		if res.RedirectChainBroke {
+			contentType = ""
+		}
 		targets = append(targets, Tier1Target{
 			EndpointID:    ep.ID,
 			URL:           ep.URL,
 			Method:        ep.Method,
 			Score:         res.InterestScore,
 			Status:        verdict,
-			ContentType:   res.ContentType,
+			ContentType:   contentType,
 			Signals:       res.Signals,
 			Authenticated: res.Authenticated,
 		})

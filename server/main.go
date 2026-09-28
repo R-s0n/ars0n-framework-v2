@@ -247,6 +247,12 @@ func main() {
 	r.HandleFunc("/triage/{scope_target_id}/run/cancel", utils.CancelTriageRunHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/triage/{scope_target_id}/run/status", utils.GetTriageRunStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/triage/{scope_target_id}/run/verdicts", utils.GetTriageRunVerdicts).Methods("GET", "OPTIONS")
+	// The response a verdict points into, and the span it cites resolved against those bytes. Both
+	// are ordered before /run so the literal segments win, same rule as the settings routes above.
+	// Without these two lines the bodies are stored and unreachable, which is the shape this whole
+	// piece of work exists to end: evidence at an offset into something nobody can read.
+	r.HandleFunc("/triage/{scope_target_id}/run/response", utils.GetTriageRunResponse).Methods("GET", "OPTIONS")
+	r.HandleFunc("/triage/{scope_target_id}/run/evidence", utils.GetTriageRunEvidence).Methods("GET", "OPTIONS")
 	r.HandleFunc("/triage/{scope_target_id}/run", utils.StartTriageRunHandler).Methods("POST", "OPTIONS")
 
 	// The vector-testing sections: XSS, SQL injection, and the ten to come. One handler set,
@@ -637,9 +643,23 @@ func main() {
 	r.HandleFunc("/session-tokens/target/{scope_target_id}", utils.GetSessionTokens).Methods("GET", "OPTIONS")
 	r.HandleFunc("/session-tokens/target/{scope_target_id}", utils.CreateSessionToken).Methods("POST", "OPTIONS")
 	r.HandleFunc("/session-tokens/target/{scope_target_id}/parse", utils.ParseSessionTokens).Methods("POST", "OPTIONS")
+	// The characterisation of every credential this target has: kind, lifetime, the PROVENANCE of
+	// that lifetime, expiry and whether refresh is proven. GET reads the stored measurement and
+	// measures anything never measured; POST re-measures everything. Deliberately not a field on
+	// the token list: the list serialises token_value and this endpoint has no field for a
+	// credential value at all.
+	r.HandleFunc("/session-tokens/target/{scope_target_id}/investigate", utils.InvestigateSessionTokens).Methods("GET", "POST", "OPTIONS")
 	r.HandleFunc("/session-tokens/{id}/activate", utils.ActivateSessionToken).Methods("POST", "OPTIONS")
 	r.HandleFunc("/session-tokens/{id}/validate", utils.ValidateSessionToken).Methods("POST", "OPTIONS")
 	r.HandleFunc("/session-tokens/{id}/refresh", utils.RefreshSessionToken).Methods("POST", "OPTIONS")
+	// PROVE the refresh, which is a different act from performing one. /refresh replays whatever
+	// flow is linked, with no scope check, and stores whatever comes back without asking the
+	// target about it; its event is kind=refresh status=refreshed, which is not a proof and never
+	// arms automatic renewal. This one refuses an out-of-scope mint before sending, validates the
+	// minted credential before storing it, and writes the kind=refresh status=success row the
+	// renewal gate reads. It was unroutable until now, so the only way to reach it was the
+	// prove_refresh sidecar on the Investigate settings save.
+	r.HandleFunc("/session-tokens/{id}/prove-refresh", utils.ProveSessionRefreshHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/session-tokens/{id}/events", utils.GetSessionTokenEvents).Methods("GET", "OPTIONS")
 	r.HandleFunc("/session-tokens/{id}", utils.UpdateSessionToken).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/session-tokens/{id}", utils.DeleteSessionToken).Methods("DELETE", "OPTIONS")
@@ -776,6 +796,11 @@ func main() {
 	r.HandleFunc("/replay-request/{scope_target_id}/flows", utils.GetReplayRequestFlows).Methods("GET", "OPTIONS")
 	r.HandleFunc("/replay-request/{scope_target_id}/versions", utils.ListReplayRequestVersions).Methods("GET", "OPTIONS")
 	r.HandleFunc("/replay-request/{scope_target_id}/versions", utils.CreateReplayRequestVersion).Methods("POST", "OPTIONS")
+	// Variant overlay: a name and the one primary per endpoint. variant-meta is the sparse store the UI
+	// reads and writes; variants is the grouped read the MCP uses so it need not regroup captures.
+	r.HandleFunc("/replay-request/{scope_target_id}/variant-meta", utils.GetReplayVariantMeta).Methods("GET", "OPTIONS")
+	r.HandleFunc("/replay-request/{scope_target_id}/variant-meta", utils.UpsertReplayVariantMeta).Methods("POST", "OPTIONS")
+	r.HandleFunc("/replay-request/{scope_target_id}/variants", utils.GetReplayVariants).Methods("GET", "OPTIONS")
 
 	// Active flow detection: the scanner that SENDS requests to find routing the operator never
 	// clicked, and the exclusion list without which it must not exist.
@@ -819,6 +844,9 @@ func main() {
 	r.HandleFunc("/flow-config/{scope_target_id}/engagement", utils.GetEngagementConfig).Methods("GET", "OPTIONS")
 	r.HandleFunc("/flow-config/{scope_target_id}/engagement", utils.PutEngagementConfig).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/flow-config/{scope_target_id}/engagement/{field}", utils.DeleteEngagementConfigField).Methods("DELETE", "OPTIONS")
+	// The saved Detect Flows run config, so the Configure modal owns it and the card's button just runs.
+	r.HandleFunc("/flow-config/{scope_target_id}/detection", utils.GetFlowDetectionConfigHandler).Methods("GET", "OPTIONS")
+	r.HandleFunc("/flow-config/{scope_target_id}/detection", utils.PutFlowDetectionConfigHandler).Methods("PUT", "OPTIONS")
 
 	// The four numbers above the Request Flow Replay card's buttons. Read-only, four concurrent
 	// counts, sends nothing. Unregistered until now, which the client rendered as four permanent

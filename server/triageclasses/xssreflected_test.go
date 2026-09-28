@@ -1746,3 +1746,96 @@ func TestTheSevenTruePositivesStillFireAfterTheMediaGate(t *testing.T) {
 		t.Log("the js-lexer fixture produced no hit; the rule's own table covers it and this is only a smoke check")
 	}
 }
+
+// ---------------------------------------------------------------------------------------------
+// value_ignored HAS TO LOOK AT THE ENVELOPE BEFORE IT SAYS NOTHING DEPENDS ON THE VALUE
+// ---------------------------------------------------------------------------------------------
+
+// THE FALSE STATEMENT THIS TEST EXISTS FOR. Every comparison in xssrDeliveryEvidence goes through
+// xssrBodyKey, which is status plus body length plus body. A marker returned in a response header
+// leaves all three untouched, so an application that echoes the value into a Content-Disposition
+// filename produced a verdict reading "nothing observable depends on this slot's value" about a
+// value the class had just watched come back. That is not a cautious verdict, it is a wrong fact
+// in the field the operator reads.
+func TestAMarkerReturnedInAResponseHeaderIsNotValueIgnoredForXSSR(t *testing.T) {
+	route := triage.Observation{Status: 200, Body: []byte("<p>the usual page</p>")}
+	route.BodyLen = len(route.Body)
+	m := string(xssrMarkOne)
+
+	// The body is byte-identical to the control on BOTH the census and the decode probe, which is
+	// the exact precondition of the value_ignored branch. The only difference anywhere in the
+	// response is a header carrying this run's own marker.
+	census := xssrShotWithHeaders(xssrP0r, xssrMarkOne, "text/html", string(route.Body),
+		[2]string{"Content-Disposition", `attachment; filename="` + m + `-report.csv"`})
+	census.Obs.Status = route.Status
+	dec := xssrShot(xssrPDec, xssrMarkThree, "text/html", string(route.Body))
+	dec.Obs.Status = route.Status
+
+	d := xssrDeliveryEvidence(route, true, xssrQuerySlot(), xssrRunOf(census, dec))
+	if d.Delivered {
+		t.Errorf("got Delivered=true (%+v): a header reflection is not a decode-depth measurement and must not "+
+			"be promoted into one", d)
+	}
+	if strings.Contains(d.Why, "value_ignored") {
+		t.Fatalf("the verdict still says value_ignored while this run's own marker %q sits in a "+
+			"Content-Disposition header: %q", m, d.Why)
+	}
+	if !strings.Contains(d.Why, "value_reaches_the_envelope") {
+		t.Errorf("the reason %q does not name the envelope reflection, so the operator is told the slot is "+
+			"undecidable without being told the one thing that was measured about it", d.Why)
+	}
+	if !strings.Contains(d.Why, "Content-Disposition") {
+		t.Errorf("the reason %q does not name the header the marker came back in, and a header sink nobody "+
+			"can name is a lead nobody can follow", d.Why)
+	}
+}
+
+// And the elimination survives when the envelope really is silent. This is the half that stops
+// the check above from being a silencer: a slot that is genuinely discarded must still reach
+// value_ignored, and it must still be an UNKNOWN rather than a clean.
+func TestATrulyDiscardedSlotStillReachesValueIgnoredAndIsStillNotClean(t *testing.T) {
+	route := triage.Observation{Status: 200, Body: []byte("<p>the usual page</p>")}
+	route.BodyLen = len(route.Body)
+	same := func(p triage.ProbeID, m triage.Marker) xssrProbeObs {
+		it := xssrShotWithHeaders(p, m, "text/html", string(route.Body),
+			[2]string{"X-Request-Id", "5f2c1ab7-not-a-marker"},
+			[2]string{"Cache-Control", "no-store"})
+		it.Obs.Status = route.Status
+		return it
+	}
+	d := xssrDeliveryEvidence(route, true, xssrQuerySlot(), xssrRunOf(same(xssrP0r, xssrMarkOne), same(xssrPDec, xssrMarkThree)))
+	if d.Delivered {
+		t.Errorf("got Delivered=true (%+v) on a slot nothing in the response depends on", d)
+	}
+	if !strings.Contains(d.Why, "value_ignored") {
+		t.Fatalf("a slot whose census, decode probe and every response header are free of this run's marker no "+
+			"longer reaches value_ignored: %q", d.Why)
+	}
+	// THE DECISION, ASSERTED. The brief asked whether this branch should become a clean. It must
+	// not, and the reason has to be ON the verdict rather than only in a comment, because the
+	// operator reading the row is the person who decides whether to spend a tool run here.
+	if !strings.Contains(d.Why, "cache") {
+		t.Errorf("the reason %q does not say why byte-identity is not an assurance. Identical bytes cannot "+
+			"tell an application that read the value and dropped it from a cache or a static handler that "+
+			"answered before the origin saw the request, and only the first of those is safe", d.Why)
+	}
+}
+
+// The envelope search is case-insensitive in the value and searches every header including
+// duplicates, for the same reasons the body search does.
+func TestTheEnvelopeMarkerSearchCoversDuplicateHeadersAndCaseFolding(t *testing.T) {
+	m := string(xssrMarkOne)
+	o := triage.Observation{RespHeaders: [][2]string{
+		{"Set-Cookie", "a=1; Path=/"},
+		{"Set-Cookie", "last=" + strings.ToUpper(m) + "; Path=/"},
+	}}
+	got, name := xssrMarkerInEnvelope(o, xssrMarkOne)
+	if name != "Set-Cookie" || !strings.Contains(strings.ToLower(got), m) {
+		t.Errorf("xssrMarkerInEnvelope = (%q, %q); the marker came back upper-cased in the SECOND Set-Cookie "+
+			"line, and an application that upper-cases a value has still reflected it", got, name)
+	}
+	if _, none := xssrMarkerInEnvelope(triage.Observation{RespHeaders: o.RespHeaders}, ""); none != "" {
+		t.Error("a marker-less observation matched a header, so the search is finding something other than " +
+			"this run's own marker")
+	}
+}

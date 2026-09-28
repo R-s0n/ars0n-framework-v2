@@ -79,8 +79,7 @@ import "context"
 // http_status defaults to -1, because there is no HTTP status 0 and a probe that never got a
 // response must not be storable as though it got one. survived defaults to the empty string, which
 // is WireSurvivalUnknown and for which WireSurvival.Proven() is false, so a mangled probe cannot
-// read as a defended application. value_redacted separates "we blanked a credential" from "the
-// capture carried an empty value".
+// read as a defended application.
 //
 // Idempotent, so it is safe to run on every boot. Applied from createTables in database.go beside
 // the vector tables, which is where vector_scans and vector_findings are created.
@@ -150,10 +149,17 @@ var TriageSchema = []string{
 	// that disappears when the run is unusual is worthless, because unusual runs are the ones being
 	// diagnosed. Cleanup comes from triage_runs ON DELETE CASCADE instead.
 	//
-	// observed_value is BLANKED, with value_redacted set, whenever is_credential is true. Measured:
-	// 1555 of the 1655 cookie slots in the corpus are credential or analytics cookies, which is why
-	// the effective cookie surface is around 100 and not 1655. Those are never probed, so their
-	// values buy nothing, and a session token in a results table is a liability.
+	// observed_value CARRIES WHAT THE CAPTURE HELD, for every slot including the credential ones.
+	// Measured: 1555 of the 1655 cookie slots in the corpus are credential or analytics cookies,
+	// which is why the effective cookie surface is around 100 and not 1655. is_credential says a
+	// class must not PROBE the slot, because injecting into a session cookie produces a 401 that is
+	// a perfect differential and invalidates the session the rest of the run depends on. It says
+	// nothing about recording: the session token this crawl was carrying is exactly the value an
+	// operator needs in front of them.
+	//
+	// There used to be a value_redacted column here and a blanking rule in RecordTriageSlots. Both
+	// are gone. An existing database keeps the column, defaulting FALSE and written by nobody; the
+	// insert no longer names it, so nothing depends on it either way.
 	`CREATE TABLE IF NOT EXISTS triage_slots (
 	    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	    run_id UUID NOT NULL REFERENCES triage_runs(id) ON DELETE CASCADE,
@@ -165,7 +171,6 @@ var TriageSchema = []string{
 	    field_path TEXT NOT NULL DEFAULT '',
 	    segment_index INT NOT NULL DEFAULT -1,
 	    observed_value TEXT NOT NULL DEFAULT '',
-	    value_redacted BOOLEAN NOT NULL DEFAULT FALSE,
 	    value_origin TEXT NOT NULL DEFAULT '',
 	    value_kind TEXT NOT NULL DEFAULT '',
 	    wrapper TEXT NOT NULL DEFAULT '',
@@ -401,6 +406,129 @@ var TriageSchema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_triage_fidelity_not_proven
 	    ON triage_fidelity(run_id, class_id)
 	    WHERE survived NOT IN ('intact', 'encoded');`,
+
+	// THE RESPONSES THEMSELVES, ONE COPY PER DISTINCT BODY.
+	//
+	// =================================================================================================
+	// WHY THIS TABLE EXISTS
+	// =================================================================================================
+	//
+	// triage_verdicts records evidence_offset, evidence_length and evidence_matched. Until this
+	// table existed those were a span into a body that had been garbage collected before the run
+	// finished, so a verdict could say "arithmetic evaluated, 5 bytes at offset 412" and the
+	// operator had no way to see the response it appeared in. An offset cannot be pasted into a bug
+	// report. The whole layer exists to decide whether a target is worth twenty-eight minutes of
+	// sqlmap, and that judgement is made by a human READING the response.
+	//
+	// =================================================================================================
+	// CONTENT ADDRESSED, WHICH IS THE ONLY REASON THIS IS AFFORDABLE
+	// =================================================================================================
+	//
+	// A run sends thousands of probes: run 2n6f sent 5312. Measured on the operator's own corpus,
+	// the responses those probes were sent against average 12.7 KiB, so storing every response
+	// whole would have cost 64 MB for that one run. Measured on the same corpus, the responses a
+	// repeated request to one endpoint gets back are mostly the same bytes: over the 8411 manual
+	// crawl captures there are 1420 distinct bodies, and on the endpoints this run actually probed
+	// the repeat ratio runs from 12x to 109x. One paper-account positions endpoint was captured 218
+	// times and holds TWO distinct bodies.
+	//
+	// So the key is the body's own SHA-256 and the row is the body. N identical responses cost one
+	// copy. The hash is not a new measurement: it is sha256 of exactly the bytes in the body column,
+	// computed by the writer over what it is about to store, so the key can never address bytes
+	// other than the ones present.
+	//
+	// KEYED PER RUN AND NOT PER TARGET, deliberately. A global store would dedupe across runs and
+	// would then need a reference count to know when a body may be deleted, which is a second
+	// counter over the same population maintained by hand, which is the bug family this schema's
+	// other comments keep recording. Per run, ON DELETE CASCADE is the whole lifetime rule: delete
+	// the run, the bodies go with it, and no count has to be right for that to work.
+	//
+	// THE LENGTH IS CHECKED AGAINST THE BYTES rather than trusted, because body_len is exactly the
+	// shape of a count that is not a count: it would be read as "how big the response was" and a
+	// writer that set it from the uncapped response while storing the capped bytes would make every
+	// offset arithmetic downstream wrong by an unknown amount. truncated is the field that says the
+	// response was larger than triageMaxBodyBytes, and it is separate for that reason.
+	`CREATE TABLE IF NOT EXISTS triage_bodies (
+	    run_id UUID NOT NULL REFERENCES triage_runs(id) ON DELETE CASCADE,
+	    body_sha256 BYTEA NOT NULL,
+	    body BYTEA NOT NULL,
+	    body_len INT NOT NULL,
+	    truncated BOOLEAN NOT NULL DEFAULT FALSE,
+	    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	    PRIMARY KEY (run_id, body_sha256),
+	    CONSTRAINT triage_bodies_len_is_the_stored_length
+	        CHECK (body_len = octet_length(body)),
+	    CONSTRAINT triage_bodies_key_is_a_sha256
+	        CHECK (octet_length(body_sha256) = 32)
+	);`,
+
+	// THE LINK FROM A PROBE TO ITS RESPONSE, ADDED TO triage_fidelity RATHER THAN TO A NEW TABLE.
+	//
+	// ADD COLUMN IF NOT EXISTS, never a rewrite: the operator has a live database with real
+	// engagement data in it and nothing here may drop or rewrite a column that holds captured
+	// bytes. Every existing row keeps everything it had and gains body_state = the empty string,
+	// which is the UNRECORDED sentinel and is distinguishable from every measured answer, so a run
+	// that predates this feature reads as "nobody recorded a body here" and never as "the response
+	// was empty".
+	//
+	// body_state IS THE FIELD THAT STOPS AN ABSENCE READING AS A MEASUREMENT, and it is the reason
+	// there is a text column here at all rather than just a hash. Its values, defined in Go beside
+	// the writer (TriageBodyStored and the rest), are:
+	//
+	//	(empty)                nobody recorded anything. A pre-feature row.
+	//	stored                 the bytes are in triage_bodies under body_sha256.
+	//	no_response            the probe got no response at all, so there was no body to keep.
+	//	not_attached           a response arrived and the runner did not hand its body over. A
+	//	                       runner defect, named rather than rendered as an empty response.
+	//	dropped:<reason>       a response arrived, its body was NOT kept, and the reason says why.
+	//	unstorable:<reason>    the database refused the body.
+	//
+	// A reader that wants the response asks for stored and gets the bytes; anything else is a
+	// sentence explaining what is missing. There is no value that means empty: an empty response
+	// body is stored with body_len 0, because zero bytes IS a measurement.
+	//
+	// body_len DEFAULTS TO -1, for the reason http_status does. Zero is a real body length and the
+	// commonest one on a 204, so a 0 default would make "nobody measured this" indistinguishable
+	// from "the target sent nothing". It is the length of the bytes that were OFFERED for storage,
+	// so it still says how big the response was on a row whose body was dropped.
+	//
+	// resp_headers IS STORED PER ROW AND NOT CONTENT ADDRESSED. Two responses with identical bodies
+	// almost never have identical headers, because Date changes every second, so hashing them would
+	// dedupe nothing and cost a second key. Measured on the operator's corpus they are 489 bytes
+	// each on average, which is 2.6 MB for a 5312 probe run. They are kept because several classes
+	// put their evidence in a header and not in the body at all (the SSTI hit record carries a
+	// Where field that is either the body or a response header name), and because a reflection with
+	// no Content-Type is not a finding anybody can write up.
+	`ALTER TABLE triage_fidelity ADD COLUMN IF NOT EXISTS body_sha256 BYTEA NOT NULL DEFAULT ''::BYTEA;`,
+	`ALTER TABLE triage_fidelity ADD COLUMN IF NOT EXISTS body_state TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE triage_fidelity ADD COLUMN IF NOT EXISTS body_len INT NOT NULL DEFAULT -1;`,
+	`ALTER TABLE triage_fidelity ADD COLUMN IF NOT EXISTS resp_content_type TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE triage_fidelity ADD COLUMN IF NOT EXISTS resp_headers JSONB NOT NULL DEFAULT '[]';`,
+
+	// A ROW THAT CLAIMS THE BYTES ARE THERE HAS TO SAY WHERE.
+	//
+	// This is the second CHECK in this schema and it earns its place on the same ground the clean
+	// one does: stored is the only body_state that asserts an operator can go and read something,
+	// and a row asserting it with no key is a row that sends a reader to an empty result and lets
+	// them read the emptiness as the response. Every other value is a sentence about what is
+	// missing and needs no enforcement.
+	//
+	// Added through a guarded DO block rather than a bare ADD CONSTRAINT because ADD CONSTRAINT has
+	// no IF NOT EXISTS and this DDL runs on every boot. It is satisfied by every pre-existing row
+	// by construction: they all carry the unrecorded body_state.
+	`DO $$
+	BEGIN
+	    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'triage_fidelity_stored_body_names_its_key') THEN
+	        ALTER TABLE triage_fidelity ADD CONSTRAINT triage_fidelity_stored_body_names_its_key
+	            CHECK (body_state <> 'stored' OR octet_length(body_sha256) = 32);
+	    END IF;
+	END $$;`,
+
+	// "Which probes got this exact response" is the question an operator asks after seeing one
+	// interesting body, and it is the reverse of the link the row carries.
+	`CREATE INDEX IF NOT EXISTS idx_triage_fidelity_body
+	    ON triage_fidelity(run_id, body_sha256)
+	    WHERE body_state = 'stored';`,
 }
 
 // EnsureTriageSchema applies the DDL. Idempotent, so it is safe to call on every boot.

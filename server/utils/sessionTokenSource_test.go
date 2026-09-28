@@ -1,6 +1,11 @@
 package utils
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+)
 
 // Which map a session cookie lands in decides whether any scan ever sends it.
 //
@@ -105,6 +110,143 @@ func TestScopeRoutingMatchesRegistrableDomain(t *testing.T) {
 		if got != wantDomain {
 			t.Errorf("%s: routed as domain=%v, want %v (registrable=%q)",
 				scope, got, wantDomain, RegistrableDomain(scope))
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// The value gets the last word on its own expiry
+// ---------------------------------------------------------------------------------------------
+//
+// Raised in round 10: nothing ran a session token's VALUE through an expiry read before overlaying
+// it. ApplySessionTokens filtered on expires_at, which is a COLUMN, and there are three ways a
+// dead credential walked past that filter. The tests below pin all three, and the third is the one
+// no amount of care with the column can fix, because DeriveSessionTokenExpiry returns an explicit
+// expires_at UNREAD whenever the operator supplied one.
+
+func sessionSourceTestTarget(t *testing.T, ctx context.Context) string {
+	t.Helper()
+	return triageTestTarget(t, ctx)
+}
+
+func sessionSourceInsertToken(t *testing.T, ctx context.Context, target, name, value string, expiresAt *time.Time) string {
+	t.Helper()
+	var id string
+	if err := dbPool.QueryRow(ctx, `
+		INSERT INTO session_tokens
+		  (scope_target_id, name, token_type, header_name, value_prefix, token_value, is_active, expires_at)
+		VALUES ($1,$2,'bearer','Authorization','Bearer ',$3,TRUE,$4) RETURNING id::text`,
+		target, name, value, expiresAt).Scan(&id); err != nil {
+		t.Fatalf("insert session token: %v", err)
+	}
+	return id
+}
+
+// attachedCount is how many host or domain buckets ended up with any material at all.
+func attachedCount(c *ScopedAuthContext) int {
+	n := 0
+	for _, m := range c.byHost {
+		if m != nil && (m.Cookies != "" || len(m.Headers) > 0 || len(m.QueryParams) > 0) {
+			n++
+		}
+	}
+	for _, m := range c.byDomain {
+		if m != nil && (m.Cookies != "" || len(m.Headers) > 0 || len(m.QueryParams) > 0) {
+			n++
+		}
+	}
+	return n
+}
+
+// FAIL FIRST: before credentialSaysItIsDead existed this test attached the dead bearer, because
+// the operator's declared expires_at is a year away and the SQL filter believes the column.
+//
+// The measurement behind it: on the live target the bearer is a 15 minute token, six distinct
+// values arrived in ten minutes of browsing, and a full triage run takes 29 minutes. The token
+// frozen in a row goes stale during the run it was configured for, and a scan carrying it reports
+// a login wall on every endpoint rather than reporting that it lost its session.
+func TestADeadCredentialIsNotSentWhateverTheColumnSays(t *testing.T) {
+	ctx := triageTestDB(t)
+	target := sessionSourceTestTarget(t, ctx)
+
+	issued := time.Now().UTC().Add(-30 * time.Minute)
+	dead := makeJWT(t, map[string]interface{}{"alg": "ES256"},
+		map[string]interface{}{"nbf": issued.Unix(), "exp": issued.Add(15 * time.Minute).Unix()})
+	declared := time.Now().UTC().Add(365 * 24 * time.Hour)
+	sessionSourceInsertToken(t, ctx, target, "bearer with a declared expiry a year out", dead, &declared)
+
+	c := newTestAuthContext()
+	c.ApplySessionTokens(target)
+	if n := attachedCount(c); n != 0 {
+		t.Fatalf("a bearer whose own exp passed %s ago was attached to %d scope(s); "+
+			"the declared expires_at column overruled the credential itself",
+			humaniseTTL(time.Since(issued.Add(15*time.Minute))), n)
+	}
+}
+
+// The same gate must not refuse a LIVE credential, or the fix is worse than the bug.
+func TestALiveCredentialIsStillSent(t *testing.T) {
+	ctx := triageTestDB(t)
+	target := sessionSourceTestTarget(t, ctx)
+
+	issued := time.Now().UTC()
+	live := makeJWT(t, map[string]interface{}{"alg": "ES256"},
+		map[string]interface{}{"nbf": issued.Unix(), "exp": issued.Add(2 * time.Hour).Unix()})
+	sessionSourceInsertToken(t, ctx, target, "live bearer", live, nil)
+
+	c := newTestAuthContext()
+	c.ApplySessionTokens(target)
+	if attachedCount(c) == 0 {
+		t.Fatalf("a bearer with two hours of life left was not attached to anything")
+	}
+}
+
+// A credential whose expiry CANNOT be read is not dead. Refusing every opaque session id and every
+// API key because nothing could be parsed would be a far larger outage than the bug being closed.
+func TestAnUnreadableExpiryIsNotTreatedAsExpired(t *testing.T) {
+	ctx := triageTestDB(t)
+	target := sessionSourceTestTarget(t, ctx)
+	sessionSourceInsertToken(t, ctx, target, "opaque api key", "an-invented-opaque-api-key-value", nil)
+
+	c := newTestAuthContext()
+	c.ApplySessionTokens(target)
+	if attachedCount(c) == 0 {
+		t.Fatalf("an opaque credential with no readable expiry was refused as though it were expired")
+	}
+}
+
+// The unit behind the gate, without a database, so every branch is pinned cheaply.
+func TestCredentialSaysItIsDead(t *testing.T) {
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	past := makeJWT(t, map[string]interface{}{"alg": "HS256"},
+		map[string]interface{}{"iat": now.Add(-time.Hour).Unix(), "exp": now.Add(-time.Minute).Unix()})
+	future := makeJWT(t, map[string]interface{}{"alg": "HS256"},
+		map[string]interface{}{"iat": now.Unix(), "exp": now.Add(time.Hour).Unix()})
+
+	cases := []struct {
+		name     string
+		value    string
+		kind     string
+		wantDead bool
+	}{
+		{"an expired bearer", past, tokenTypeBearer, true},
+		{"a live bearer", future, tokenTypeBearer, false},
+		{"an opaque cookie", "an-invented-opaque-session-value", tokenTypeCookie, false},
+		{"an empty value", "", tokenTypeBearer, false},
+		{"a PASETO with no exp", "v4.local." + b64url([]byte("ciphertext")), tokenTypeBearer, false},
+	}
+	for _, tc := range cases {
+		dead, why := credentialSaysItIsDead(tc.value, "Bearer ", tc.kind, "sid", "Authorization", "", now)
+		if dead != tc.wantDead {
+			t.Errorf("%s: dead=%v want %v (%s)", tc.name, dead, tc.wantDead, why)
+		}
+		if dead {
+			if strings.Contains(why, tc.value) {
+				t.Errorf("%s: the reason string contains the credential: %q", tc.name, why)
+			}
+			if !strings.Contains(why, "whatever expires_at says") {
+				t.Errorf("%s: the reason does not say the column was overruled: %q", tc.name, why)
+			}
 		}
 	}
 }

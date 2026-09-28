@@ -2,11 +2,15 @@ package utils
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -61,6 +65,29 @@ type ManualCrawlCapture struct {
 	DurationMs            int           `json:"duration_ms"`
 	RequestBodyTruncated  bool          `json:"request_body_truncated"`
 	ResponseBodyTruncated bool          `json:"response_body_truncated"`
+
+	// Content-addressed response body. A rendered-media response (image, video, audio, font) has
+	// no text form, so its bytes live in manual_crawl_body_blobs keyed by this digest and the row
+	// points at them. Hundreds of navigations pulling the same sprite cost one copy.
+	//
+	// ResponseBodySHA256 is the digest of the bytes actually stored, recomputed by the framework
+	// from what arrived, so it is always checkable. ResponseBodyBytes is the size ON THE WIRE:
+	// when ResponseBodyCapped is set, the stored bytes are only the leading part of an object that
+	// big, and the digest names the prefix, not the whole object.
+	ResponseBodySHA256      string `json:"response_body_sha256,omitempty"`
+	ResponseBodyBytes       int64  `json:"response_body_bytes,omitempty"`
+	ResponseBodyCapped      bool   `json:"response_body_capped,omitempty"`
+	ResponseBodyBlobMissing bool   `json:"response_body_blob_missing,omitempty"`
+
+	// What storing this row changed about the bytes the target sent. sanitizeForPostgres has to
+	// strip NUL bytes and invalid UTF-8 because a Postgres text column cannot hold them, but a
+	// reader looking at a replacement character could not tell whether the target sent it or
+	// whether we put it there. StorageOriginals maps an altered field to the digest of its
+	// pre-sanitiser bytes, which are kept in manual_crawl_body_blobs.
+	StorageAltered       bool              `json:"storage_altered,omitempty"`
+	StorageAlteredFields []string          `json:"storage_altered_fields,omitempty"`
+	StorageAlteredBytes  int64             `json:"storage_altered_bytes,omitempty"`
+	StorageOriginals     map[string]string `json:"storage_originals,omitempty"`
 }
 
 type ManualCrawlSession struct {
@@ -78,7 +105,12 @@ type ManualCrawlSession struct {
 }
 
 type CaptureRequest struct {
-	SessionID       string                 `json:"sessionId"`
+	SessionID string `json:"sessionId"`
+	// A stable per-capture identity minted by the extension at enqueue time and persisted with the
+	// queue entry, so a batch that is re-sent (a lost/timed-out 200 after the rows already committed,
+	// or a worker restart mid-flush) is deduped by the primary key instead of inserting duplicate
+	// rows. Empty from an older extension build; the server then falls back to a fresh uuid.
+	CaptureUID      string                 `json:"captureUid,omitempty"`
 	URL             string                 `json:"url"`
 	Endpoint        string                 `json:"endpoint"`
 	Method          string                 `json:"method"`
@@ -103,6 +135,34 @@ type CaptureRequest struct {
 	DurationMs            int           `json:"durationMs,omitempty"`
 	RequestBodyTruncated  bool          `json:"requestBodyTruncated,omitempty"`
 	ResponseBodyTruncated bool          `json:"responseBodyTruncated,omitempty"`
+
+	// A response body with no text form. The extension sends the bytes base64 encoded the first
+	// time it sees a given digest in a session and sends the reference alone afterwards, because a
+	// page load pulls the same logo, sprite and font on every navigation.
+	ResponseBodyBlob *CaptureBodyBlob `json:"responseBodyBlob,omitempty"`
+}
+
+// CaptureBodyBlob is a response body carried out of band from the row. Base64 may be empty, which
+// means the extension believes the framework already holds these bytes under this digest; the row
+// still records the reference, and the framework flags it if the bytes turn out not to be here.
+type CaptureBodyBlob struct {
+	SHA256   string `json:"sha256"`
+	Bytes    int64  `json:"bytes,omitempty"`
+	Capped   bool   `json:"capped,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
+	Base64   string `json:"base64,omitempty"`
+}
+
+// storedBlob is one row of manual_crawl_body_blobs. SHA256 is the digest of Content, so it is
+// recomputable from what is stored. ByteSize is the size on the wire, which is larger than
+// StoredBytes exactly when Capped is set.
+type storedBlob struct {
+	SHA256      string
+	ByteSize    int64
+	StoredBytes int64
+	Capped      bool
+	MimeType    string
+	Content     []byte
 }
 
 type BatchCaptureRequest struct {
@@ -264,7 +324,7 @@ func CaptureManualCrawlRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stored, err := insertManualCrawlCaptures(req.SessionID, scopeTargetID, []CaptureRequest{req})
+	stored, _, missingBlobs, err := insertManualCrawlCaptures(req.SessionID, scopeTargetID, []CaptureRequest{req})
 	if err != nil {
 		log.Printf("[MANUAL-CRAWL] Error storing capture: %v", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal_error", "Failed to store capture")
@@ -281,6 +341,9 @@ func CaptureManualCrawlRequest(w http.ResponseWriter, r *http.Request) {
 		"stored":        stored,
 		"requestCount":  requestCount,
 		"endpointCount": endpointCount,
+		// Digests the capture referenced but the framework does not hold, so the extension can stop
+		// assuming those bytes are already here and send them again next time it sees them.
+		"missingBlobs": missingBlobs,
 	})
 }
 
@@ -307,7 +370,7 @@ func CaptureManualCrawlBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stored, err := insertManualCrawlCaptures(req.SessionID, scopeTargetID, req.Captures)
+	stored, dropped, missingBlobs, err := insertManualCrawlCaptures(req.SessionID, scopeTargetID, req.Captures)
 	if err != nil {
 		log.Printf("[MANUAL-CRAWL] Error storing capture batch: %v", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal_error", "Failed to store captures")
@@ -319,18 +382,31 @@ func CaptureManualCrawlBatch(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[MANUAL-CRAWL] Error refreshing session counts: %v", err)
 	}
 
-	if stored < len(req.Captures) {
-		log.Printf("[MANUAL-CRAWL] Stored %d/%d captures for session %s (%d unstorable)",
-			stored, len(req.Captures), req.SessionID, len(req.Captures)-stored)
+	// received - stored - dropped is the deduplicated remainder: rows that were already committed
+	// (an idempotent re-POST after a lost 200 / a resumed queue), NOT failures. Only `dropped` rows
+	// genuinely could not be stored, so `rejected` reports only those — otherwise a clean re-flush
+	// would light up the operator's failure counter and a false "could not be stored" banner.
+	deduplicated := len(req.Captures) - stored - dropped
+	if deduplicated < 0 {
+		deduplicated = 0
+	}
+	if dropped > 0 {
+		log.Printf("[MANUAL-CRAWL] Stored %d/%d captures for session %s (%d unstorable, %d already stored)",
+			stored, len(req.Captures), req.SessionID, dropped, deduplicated)
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":       true,
 		"stored":        stored,
 		"received":      len(req.Captures),
-		"rejected":      len(req.Captures) - stored,
+		"rejected":      dropped,
+		"deduplicated":  deduplicated,
 		"requestCount":  requestCount,
 		"endpointCount": endpointCount,
+		// Digests these captures referenced without sending the bytes, which the framework turns
+		// out not to hold. The extension drops them from its "already uploaded" set so the next
+		// response carrying those bytes ships them rather than assuming they are here.
+		"missingBlobs": missingBlobs,
 	})
 }
 
@@ -339,48 +415,80 @@ func CaptureManualCrawlBatch(w http.ResponseWriter, r *http.Request) {
 // null). A single such byte used to fail the whole multi-row INSERT, silently destroying every
 // other capture batched with it. Strip them, and drop anything else that is not valid UTF-8.
 func sanitizeForPostgres(s string) string {
+	cleaned, _ := sanitizeForPostgresChecked(s)
+	return cleaned
+}
+
+// sanitizeForPostgresChecked is the same transformation, reporting how many WIRE BYTES it changed.
+// A stored body is not the body the target sent whenever that count is non-zero, and an operator
+// looking at a replacement character has no other way to tell whether the target sent it or
+// whether we put it there. On a binary payload behind a texty content-type that is the difference
+// between a finding and a rendering artefact.
+//
+// A replacement character that really was on the wire decodes as a 3-byte rune and is left alone
+// and NOT counted; only a byte that is not valid UTF-8 on its own decodes as a 1-byte RuneError
+// and gets replaced.
+func sanitizeForPostgresChecked(s string) (string, int) {
 	if s == "" {
-		return s
+		return s, 0
 	}
 	if !strings.ContainsRune(s, 0) && utf8.ValidString(s) {
-		return s
+		return s, 0
 	}
 
 	var b strings.Builder
 	b.Grow(len(s))
-	for _, r := range s {
+	altered := 0
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
 		switch {
 		case r == 0:
 			// dropped: not representable in a Postgres text column
-		case r == utf8.RuneError:
+			altered++
+		case r == utf8.RuneError && size == 1:
 			b.WriteRune('�')
+			altered++
 		default:
-			b.WriteRune(r)
+			b.WriteString(s[i : i+size])
 		}
+		i += size
 	}
-	return b.String()
+	return b.String(), altered
 }
 
 // sanitizeJSONValue walks a decoded JSON value and cleans every string it contains, so header maps
 // and parameter maps are safe to store as jsonb.
 func sanitizeJSONValue(v interface{}) interface{} {
+	cleaned, _ := sanitizeJSONValueChecked(v)
+	return cleaned
+}
+
+func sanitizeJSONValueChecked(v interface{}) (interface{}, int) {
 	switch typed := v.(type) {
 	case string:
-		return sanitizeForPostgres(typed)
+		cleaned, altered := sanitizeForPostgresChecked(typed)
+		return cleaned, altered
 	case map[string]interface{}:
 		out := make(map[string]interface{}, len(typed))
+		altered := 0
 		for key, value := range typed {
-			out[sanitizeForPostgres(key)] = sanitizeJSONValue(value)
+			cleanKey, keyAltered := sanitizeForPostgresChecked(key)
+			cleanValue, valueAltered := sanitizeJSONValueChecked(value)
+			out[cleanKey] = cleanValue
+			altered += keyAltered + valueAltered
 		}
-		return out
+		return out, altered
 	case []interface{}:
 		out := make([]interface{}, len(typed))
+		altered := 0
 		for i, value := range typed {
-			out[i] = sanitizeJSONValue(value)
+			cleanValue, valueAltered := sanitizeJSONValueChecked(value)
+			out[i] = cleanValue
+			altered += valueAltered
 		}
-		return out
+		return out, altered
 	default:
-		return v
+		return v, 0
 	}
 }
 
@@ -392,42 +500,401 @@ func sanitizeJSONMap(m map[string]interface{}) map[string]interface{} {
 	return cleaned
 }
 
+// captureAlterations records, per capture row, exactly what storing it changed. Every field goes
+// through it, so the row can say which fields were altered, by how many bytes, and where the
+// pre-sanitiser bytes are.
+type captureAlterations struct {
+	fields    []string
+	bytes     int
+	originals map[string]string
+	blobs     map[string]storedBlob
+}
+
+// text sanitises one text column and records the alteration if there was one, keeping the original
+// bytes. Rows where the sanitiser actually changed something are the rows where the operator most
+// needs the wire truth, and they are rare enough that keeping the original is cheap.
+func (a *captureAlterations) text(field, value string) string {
+	cleaned, altered := sanitizeForPostgresChecked(value)
+	if altered == 0 {
+		return cleaned
+	}
+	a.note(field, altered, []byte(value))
+	return cleaned
+}
+
+// jsonMap sanitises one jsonb column. No original is kept: encoding/json rewrites invalid UTF-8 on
+// the way out, so there is no lossless byte form of the original map to point at. The fact and the
+// count are recorded; claiming an original we cannot reproduce would be worse than claiming none.
+func (a *captureAlterations) jsonMap(field string, m map[string]interface{}) []byte {
+	cleanedValue, altered := sanitizeJSONValueChecked(orEmptyMap(m))
+	cleaned, _ := cleanedValue.(map[string]interface{})
+	if cleaned == nil {
+		cleaned = map[string]interface{}{}
+	}
+	out, _ := json.Marshal(cleaned)
+	if altered > 0 {
+		a.note(field, altered, nil)
+	}
+	return out
+}
+
+func (a *captureAlterations) jsonValue(field string, v interface{}) []byte {
+	cleaned, altered := sanitizeJSONValueChecked(v)
+	out, _ := json.Marshal(cleaned)
+	if altered > 0 {
+		a.note(field, altered, nil)
+	}
+	return out
+}
+
+func (a *captureAlterations) note(field string, bytes int, original []byte) {
+	a.fields = append(a.fields, field)
+	a.bytes += bytes
+	if original == nil {
+		return
+	}
+	digest := digestOf(original)
+	if a.originals == nil {
+		a.originals = map[string]string{}
+	}
+	a.originals[field] = digest
+	if a.blobs == nil {
+		a.blobs = map[string]storedBlob{}
+	}
+	a.blobs[digest] = storedBlob{
+		SHA256:      digest,
+		ByteSize:    int64(len(original)),
+		StoredBytes: int64(len(original)),
+		MimeType:    "application/octet-stream",
+		Content:     original,
+	}
+}
+
+func (a *captureAlterations) altered() bool { return len(a.fields) > 0 }
+
+func digestOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// decodeCaptureBlob turns what the extension sent into a row of manual_crawl_body_blobs. The digest
+// is RECOMPUTED from the bytes that arrived rather than taken on trust, so a stored blob always
+// hashes to the name it is filed under; a declared digest that disagrees means the payload was
+// corrupted in transit and is refused.
+func decodeCaptureBlob(blob *CaptureBodyBlob) (storedBlob, error) {
+	if blob == nil {
+		return storedBlob{}, fmt.Errorf("no blob")
+	}
+
+	declared := strings.ToLower(strings.TrimSpace(blob.SHA256))
+
+	// A reference with no bytes: the extension has shipped these bytes earlier in the session and
+	// believes the framework still holds them. The row records the reference either way.
+	if blob.Base64 == "" {
+		if declared == "" {
+			return storedBlob{}, fmt.Errorf("blob reference has neither bytes nor a digest")
+		}
+		return storedBlob{
+			SHA256:   declared,
+			ByteSize: blob.Bytes,
+			Capped:   blob.Capped,
+			MimeType: strings.TrimSpace(blob.MimeType),
+		}, nil
+	}
+
+	content, err := base64.StdEncoding.DecodeString(blob.Base64)
+	if err != nil {
+		return storedBlob{}, fmt.Errorf("blob is not valid base64: %w", err)
+	}
+
+	digest := digestOf(content)
+	if declared != "" && declared != digest {
+		return storedBlob{}, fmt.Errorf("blob digest mismatch: declared %s, bytes hash to %s", declared, digest)
+	}
+
+	wireSize := blob.Bytes
+	if wireSize < int64(len(content)) {
+		wireSize = int64(len(content))
+	}
+
+	return storedBlob{
+		SHA256:      digest,
+		ByteSize:    wireSize,
+		StoredBytes: int64(len(content)),
+		Capped:      blob.Capped,
+		MimeType:    strings.TrimSpace(blob.MimeType),
+		Content:     content,
+	}, nil
+}
+
+// storeCaptureBlobs writes bodies content addressed, so the sprite pulled on every navigation of a
+// session costs one copy however many rows point at it. A digest already present is left alone:
+// the bytes under a given digest are by definition the same bytes.
+func storeCaptureBlobs(blobs map[string]storedBlob) error {
+	if len(blobs) == 0 {
+		return nil
+	}
+
+	digests := make([]string, 0, len(blobs))
+	for digest := range blobs {
+		digests = append(digests, digest)
+	}
+	sort.Strings(digests)
+
+	valueGroups := make([]string, 0, len(digests))
+	args := make([]interface{}, 0, len(digests)*6)
+	for _, digest := range digests {
+		blob := blobs[digest]
+		if blob.Content == nil {
+			continue
+		}
+		base := len(args)
+		valueGroups = append(valueGroups, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d)",
+			base+1, base+2, base+3, base+4, base+5, base+6))
+		args = append(args, blob.SHA256, blob.ByteSize, blob.StoredBytes, blob.Capped,
+			sanitizeForPostgres(blob.MimeType), blob.Content)
+	}
+	if len(valueGroups) == 0 {
+		return nil
+	}
+
+	_, err := dbPool.Exec(context.Background(), `
+		INSERT INTO manual_crawl_body_blobs (sha256, byte_size, stored_bytes, capped, mime_type, content)
+		VALUES `+strings.Join(valueGroups, ", ")+`
+		ON CONFLICT (sha256) DO NOTHING`, args...)
+	return err
+}
+
+func isHexDigest(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// mediaContentTypes are the ones a stored blob may be served back under. Anything else is served as
+// octet-stream: the bytes are handed over in full either way, but a captured text/html body must
+// not be rendered as a page by the framework's own origin.
+func servableBlobContentType(mimeType string) string {
+	mime := strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	for _, prefix := range []string{"image/", "video/", "audio/", "font/"} {
+		if strings.HasPrefix(mime, prefix) {
+			return mime
+		}
+	}
+	return "application/octet-stream"
+}
+
+// serveCaptureBlob hands over the bytes of one stored body. The digest has to be referenced by a
+// capture in the named session or target, so the URL means something and a blob cannot be fetched
+// from a context that never saw it.
+func serveCaptureBlob(w http.ResponseWriter, scopeColumn, scopeValue, digest string) {
+	digest = strings.ToLower(strings.TrimSpace(digest))
+	if !isHexDigest(digest) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_digest", "blob must be a 64 character hex sha256")
+		return
+	}
+
+	var referenced bool
+	err := dbPool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+			SELECT 1 FROM manual_crawl_captures c
+			WHERE c.`+scopeColumn+` = $1
+			  AND (c.response_body_sha256 = $2
+			       OR EXISTS (
+			            SELECT 1 FROM jsonb_each_text(COALESCE(c.storage_originals, '{}'::jsonb)) o
+			            WHERE o.value = $2))
+		)`, scopeValue, digest).Scan(&referenced)
+	if err != nil {
+		log.Printf("[MANUAL-CRAWL] Error checking blob reference: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error", "Failed to look up body")
+		return
+	}
+	if !referenced {
+		writeJSONError(w, http.StatusNotFound, "blob_not_referenced",
+			"No capture here references that body digest")
+		return
+	}
+
+	var content []byte
+	var mimeType string
+	var capped bool
+	var byteSize, storedBytes int64
+	err = dbPool.QueryRow(context.Background(), `
+		SELECT content, COALESCE(mime_type, ''), COALESCE(capped, false), byte_size, stored_bytes
+		FROM manual_crawl_body_blobs WHERE sha256 = $1`, digest).
+		Scan(&content, &mimeType, &capped, &byteSize, &storedBytes)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "blob_missing",
+			"The capture references this body but the framework does not hold the bytes")
+		return
+	}
+
+	w.Header().Set("Content-Type", servableBlobContentType(mimeType))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+	w.Header().Set("Content-Disposition", "inline")
+	// Everything a reader needs to judge what they are looking at, without a second request.
+	w.Header().Set("X-Capture-Body-Sha256", digest)
+	w.Header().Set("X-Capture-Body-Wire-Bytes", fmt.Sprintf("%d", byteSize))
+	w.Header().Set("X-Capture-Body-Stored-Bytes", fmt.Sprintf("%d", storedBytes))
+	if capped {
+		w.Header().Set("X-Capture-Body-Capped", "true")
+	}
+	w.Write(content)
+}
+
+// includeMediaBodies says whether a listing should carry blob-backed bodies inline. Off by default
+// because a target's whole capture set would otherwise grow by every image on every page it serves;
+// the bytes are one request away at ?blob=<digest>, and the digest, both sizes and the capped flag
+// are on the row either way, so nothing is hidden by the default.
+func includeMediaBodies(r *http.Request) bool {
+	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("include_media")))
+	return value == "1" || value == "true" || value == "yes"
+}
+
+// attachBlobBodies fills in response_body from the blob store for rows whose body has no text form.
+// Off unless asked for: the digest, the size and the capped flag are always on the row, and the
+// bytes are one request away at ?blob=<digest>, which is also the form that lets an operator LOOK
+// at the photo instead of reading base64.
+func attachBlobBodies(captures []ManualCrawlCapture, include bool) {
+	if !include {
+		return
+	}
+	digests := map[string]bool{}
+	for i := range captures {
+		if captures[i].ResponseBodySHA256 != "" && captures[i].ResponseBody == "" {
+			digests[captures[i].ResponseBodySHA256] = true
+		}
+	}
+	if len(digests) == 0 {
+		return
+	}
+
+	rows, err := dbPool.Query(context.Background(),
+		`SELECT sha256, content FROM manual_crawl_body_blobs WHERE sha256 = ANY($1)`, sortedDigests(digests))
+	if err != nil {
+		log.Printf("[MANUAL-CRAWL] Error loading body blobs: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	bodies := map[string]string{}
+	for rows.Next() {
+		var digest string
+		var content []byte
+		if err := rows.Scan(&digest, &content); err == nil {
+			// Same spelling the extension uses for a body that is bytes rather than text, so a
+			// reader never has to know which source produced a given capture.
+			bodies[digest] = "base64," + base64.StdEncoding.EncodeToString(content)
+		}
+	}
+
+	for i := range captures {
+		if body, ok := bodies[captures[i].ResponseBodySHA256]; ok && captures[i].ResponseBody == "" {
+			captures[i].ResponseBody = body
+		}
+	}
+}
+
+// knownBlobDigests reports which of these digests the framework actually holds. A capture that
+// references bytes nobody has is recorded as such rather than silently pointing at nothing.
+func knownBlobDigests(digests []string) (map[string]bool, error) {
+	known := map[string]bool{}
+	if len(digests) == 0 {
+		return known, nil
+	}
+	rows, err := dbPool.Query(context.Background(),
+		`SELECT sha256 FROM manual_crawl_body_blobs WHERE sha256 = ANY($1)`, digests)
+	if err != nil {
+		return known, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var digest string
+		if err := rows.Scan(&digest); err == nil {
+			known[digest] = true
+		}
+	}
+	return known, nil
+}
+
 // insertManualCrawlCaptures writes captures with a single multi-row INSERT, falling back to
 // one-row-at-a-time on failure so a single unstorable capture costs one record instead of the
 // whole batch.
-func insertManualCrawlCaptures(sessionID, scopeTargetID string, captures []CaptureRequest) (int, error) {
+// Returns (stored, dropped, missing, err): stored is rows newly written (ON CONFLICT skips are NOT
+// counted, so an idempotent re-POST reports stored=0); dropped is rows that genuinely could not be
+// stored even on the individual retry. received - stored - dropped is the deduplicated remainder,
+// which the caller must NOT report as a failure.
+func insertManualCrawlCaptures(sessionID, scopeTargetID string, captures []CaptureRequest) (int, int, []string, error) {
 	targetDomain := extractDomainFromScopeTarget(scopeTargetID)
 
-	stored, err := insertCaptureBatch(sessionID, scopeTargetID, targetDomain, captures)
+	stored, missing, err := insertCaptureBatch(sessionID, scopeTargetID, targetDomain, captures)
 	if err == nil {
-		return stored, nil
+		// Whole batch went in as one statement; anything not stored was an ON CONFLICT dedup, not a
+		// failure, so nothing is "dropped".
+		return stored, 0, missing, nil
 	}
 
 	log.Printf("[MANUAL-CRAWL] Batch insert failed (%v); retrying %d captures individually", err, len(captures))
 
 	inserted := 0
+	dropped := 0
+	allMissing := map[string]bool{}
 	var lastErr error
 	for _, capture := range captures {
-		one, oneErr := insertCaptureBatch(sessionID, scopeTargetID, targetDomain, []CaptureRequest{capture})
+		one, oneMissing, oneErr := insertCaptureBatch(sessionID, scopeTargetID, targetDomain, []CaptureRequest{capture})
 		if oneErr != nil {
 			lastErr = oneErr
+			dropped++
 			log.Printf("[MANUAL-CRAWL] Dropping unstorable capture %s %s: %v", capture.Method, capture.URL, oneErr)
 			continue
 		}
+		// one == 0 here means the row was an ON CONFLICT dedup, not stored and not dropped.
 		inserted += one
+		for _, digest := range oneMissing {
+			allMissing[digest] = true
+		}
 	}
 
+	// Nothing got in and we hit an error: surface it as a 5xx so the client keeps the batch and
+	// retries (the error may be a transient DB hiccup affecting the whole batch, not per-row).
 	if inserted == 0 && lastErr != nil {
-		return 0, lastErr
+		return 0, 0, nil, lastErr
 	}
-	return inserted, nil
+	return inserted, dropped, sortedDigests(allMissing), nil
 }
 
-func insertCaptureBatch(sessionID, scopeTargetID, targetDomain string, captures []CaptureRequest) (int, error) {
-	const columnCount = 27
+func sortedDigests(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for key := range set {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
 
-	valueGroups := make([]string, 0, len(captures))
-	args := make([]interface{}, 0, len(captures)*columnCount)
+// captureRow is one prepared row. Built in a first pass so the blobs a batch references can be
+// stored and checked for presence BEFORE the rows that point at them are written: a row must never
+// claim bytes the framework does not hold.
+type captureRow struct {
+	args       []interface{}
+	blobDigest string
+	blobBytes  int64
+	blobCapped bool
+}
+
+func insertCaptureBatch(sessionID, scopeTargetID, targetDomain string, captures []CaptureRequest) (int, []string, error) {
+	const columnCount = 35
+
+	rows := make([]captureRow, 0, len(captures))
+	blobs := map[string]storedBlob{}
 
 	for _, capture := range captures {
 		if strings.TrimSpace(capture.URL) == "" {
@@ -460,62 +927,166 @@ func insertCaptureBatch(sessionID, scopeTargetID, targetDomain string, captures 
 			isDirect = strings.EqualFold(parsed.Hostname(), targetDomain)
 		}
 
-		headersJSON, _ := json.Marshal(sanitizeJSONMap(capture.Headers))
-		responseHeadersJSON, _ := json.Marshal(sanitizeJSONMap(capture.ResponseHeaders))
-		getParamsJSON, _ := json.Marshal(sanitizeJSONMap(capture.GetParams))
-		postParamsJSON, _ := json.Marshal(sanitizeJSONMap(capture.PostParams))
+		// Every field goes through the tracker, so the row can say exactly what storing it changed.
+		var alt captureAlterations
+
+		urlValue := alt.text("url", capture.URL)
+		endpointValue := alt.text("endpoint", endpoint)
+		postData := alt.text("post_data", capture.PostData)
+		responseBody := alt.text("response_body", capture.ResponseBody)
+		bodyType := alt.text("body_type", capture.BodyType)
+		mimeType := alt.text("mime_type", capture.MimeType)
+		graphqlOperation := alt.text("graphql_operation", capture.GraphQLOperation)
+		resourceType := alt.text("resource_type", capture.ResourceType)
+		initiator := alt.text("initiator", capture.Initiator)
+		captureError := alt.text("error", capture.Error)
+
+		headersJSON := alt.jsonMap("headers", capture.Headers)
+		responseHeadersJSON := alt.jsonMap("response_headers", capture.ResponseHeaders)
+		getParamsJSON := alt.jsonMap("get_params", capture.GetParams)
+		postParamsJSON := alt.jsonMap("post_params", capture.PostParams)
 
 		redirectChain := capture.RedirectChain
 		if redirectChain == nil {
 			redirectChain = []interface{}{}
 		}
-		redirectChainJSON, _ := json.Marshal(sanitizeJSONValue(redirectChain))
+		redirectChainJSON := alt.jsonValue("redirect_chain", redirectChain)
 
 		sources := capture.Sources
 		if sources == nil {
 			sources = []string{}
 		}
 
+		// A body with no text form. The bytes are content addressed, so hundreds of navigations
+		// pulling the same sprite cost one copy while every row still points at them.
+		blobDigest := ""
+		var blobBytes int64
+		blobCapped := false
+		if capture.ResponseBodyBlob != nil {
+			blob, blobErr := decodeCaptureBlob(capture.ResponseBodyBlob)
+			if blobErr != nil {
+				// The reference is still recorded so the row is honest about what it was carrying;
+				// it will be flagged as pointing at bytes we do not hold.
+				blobDigest = strings.ToLower(strings.TrimSpace(capture.ResponseBodyBlob.SHA256))
+				blobBytes = capture.ResponseBodyBlob.Bytes
+				blobCapped = capture.ResponseBodyBlob.Capped
+				log.Printf("[MANUAL-CRAWL] Rejecting body blob for %s %s: %v", method, capture.URL, blobErr)
+			} else {
+				if blob.MimeType == "" {
+					blob.MimeType = mimeType
+				}
+				blobDigest = blob.SHA256
+				blobBytes = blob.ByteSize
+				blobCapped = blob.Capped
+				if blob.Content != nil {
+					blobs[blob.SHA256] = blob
+				}
+			}
+		}
+
+		for digest, blob := range alt.blobs {
+			blobs[digest] = blob
+		}
+
+		originalsJSON, _ := json.Marshal(orEmptyStringMap(alt.originals))
+		alteredFields := alt.fields
+		if alteredFields == nil {
+			alteredFields = []string{}
+		}
+
+		// Prefer the client-supplied stable id (so a re-POST deduplicates on the primary key); fall
+		// back to a fresh uuid for an older build that sends none or a malformed value.
+		rowID := uuid.New().String()
+		if trimmed := strings.TrimSpace(capture.CaptureUID); trimmed != "" {
+			if parsed, err := uuid.Parse(trimmed); err == nil {
+				rowID = parsed.String()
+			}
+		}
+
+		rows = append(rows, captureRow{
+			blobDigest: blobDigest,
+			blobBytes:  blobBytes,
+			blobCapped: blobCapped,
+			args: []interface{}{
+				rowID,
+				sessionID,
+				scopeTargetID,
+				urlValue,
+				endpointValue,
+				method,
+				capture.StatusCode,
+				headersJSON,
+				responseHeadersJSON,
+				postData,
+				responseBody,
+				getParamsJSON,
+				postParamsJSON,
+				bodyType,
+				capture.TabID,
+				timestamp,
+				mimeType,
+				sources,
+				graphqlOperation,
+				resourceType,
+				initiator,
+				redirectChainJSON,
+				captureError,
+				capture.DurationMs,
+				capture.RequestBodyTruncated,
+				capture.ResponseBodyTruncated,
+				isDirect,
+				blobDigest,
+				blobBytes,
+				blobCapped,
+				false, // response_body_blob_missing, resolved below
+				alt.altered(),
+				alteredFields,
+				int64(alt.bytes),
+				originalsJSON,
+			},
+		})
+	}
+
+	if len(rows) == 0 {
+		return 0, nil, nil
+	}
+
+	if err := storeCaptureBlobs(blobs); err != nil {
+		// Losing the bytes must not lose the rows. The captures are still stored and the ones that
+		// referenced those bytes are flagged, which is visible rather than silent.
+		log.Printf("[MANUAL-CRAWL] Failed to store %d body blob(s): %v", len(blobs), err)
+	}
+
+	referenced := map[string]bool{}
+	for _, row := range rows {
+		if row.blobDigest != "" {
+			referenced[row.blobDigest] = true
+		}
+	}
+	known, err := knownBlobDigests(sortedDigests(referenced))
+	if err != nil {
+		log.Printf("[MANUAL-CRAWL] Could not check body blob presence: %v", err)
+		// Unknown is not the same as missing; do not flag rows on a failed check.
+		for digest := range referenced {
+			known[digest] = true
+		}
+	}
+
+	missing := map[string]bool{}
+	valueGroups := make([]string, 0, len(rows))
+	args := make([]interface{}, 0, len(rows)*columnCount)
+	for _, row := range rows {
+		if row.blobDigest != "" && !known[row.blobDigest] {
+			row.args[30] = true
+			missing[row.blobDigest] = true
+		}
 		base := len(args)
 		placeholders := make([]string, columnCount)
 		for i := 0; i < columnCount; i++ {
 			placeholders[i] = fmt.Sprintf("$%d", base+i+1)
 		}
 		valueGroups = append(valueGroups, "("+strings.Join(placeholders, ", ")+")")
-
-		args = append(args,
-			uuid.New().String(),
-			sessionID,
-			scopeTargetID,
-			sanitizeForPostgres(capture.URL),
-			sanitizeForPostgres(endpoint),
-			method,
-			capture.StatusCode,
-			headersJSON,
-			responseHeadersJSON,
-			sanitizeForPostgres(capture.PostData),
-			sanitizeForPostgres(capture.ResponseBody),
-			getParamsJSON,
-			postParamsJSON,
-			sanitizeForPostgres(capture.BodyType),
-			capture.TabID,
-			timestamp,
-			sanitizeForPostgres(capture.MimeType),
-			sources,
-			sanitizeForPostgres(capture.GraphQLOperation),
-			sanitizeForPostgres(capture.ResourceType),
-			sanitizeForPostgres(capture.Initiator),
-			redirectChainJSON,
-			sanitizeForPostgres(capture.Error),
-			capture.DurationMs,
-			capture.RequestBodyTruncated,
-			capture.ResponseBodyTruncated,
-			isDirect,
-		)
-	}
-
-	if len(valueGroups) == 0 {
-		return 0, nil
+		args = append(args, row.args...)
 	}
 
 	query := `
@@ -523,14 +1094,31 @@ func insertCaptureBatch(sessionID, scopeTargetID, targetDomain string, captures 
 		(id, session_id, scope_target_id, url, endpoint, method, status_code, headers, response_headers,
 		 post_data, response_body, get_params, post_params, body_type, tab_id, timestamp, mime_type,
 		 sources, graphql_operation, resource_type, initiator, redirect_chain, error, duration_ms,
-		 request_body_truncated, response_body_truncated, is_direct)
-		VALUES ` + strings.Join(valueGroups, ", ")
+		 request_body_truncated, response_body_truncated, is_direct,
+		 response_body_sha256, response_body_bytes, response_body_capped, response_body_blob_missing,
+		 storage_altered, storage_altered_fields, storage_altered_bytes, storage_originals)
+		VALUES ` + strings.Join(valueGroups, ", ") + `
+		ON CONFLICT (id) DO NOTHING`
 
-	if _, err := dbPool.Exec(context.Background(), query, args...); err != nil {
-		return 0, err
+	tag, err := dbPool.Exec(context.Background(), query, args...)
+	if err != nil {
+		return 0, nil, err
 	}
 
-	return len(valueGroups), nil
+	if len(missing) > 0 {
+		log.Printf("[MANUAL-CRAWL] %d capture body digest(s) reference bytes the framework does not hold", len(missing))
+	}
+
+	// RowsAffected, not len(valueGroups): a re-POSTed batch whose rows already exist is a no-op under
+	// ON CONFLICT DO NOTHING, and counting it as stored would inflate the session's request_count.
+	return int(tag.RowsAffected()), sortedDigests(missing), nil
+}
+
+func orEmptyStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return map[string]string{}
+	}
+	return m
 }
 
 func orEmptyMap(m map[string]interface{}) map[string]interface{} {
@@ -624,8 +1212,12 @@ func StopManualCrawl(w http.ResponseWriter, r *http.Request) {
 	var requestCount, endpointCount int
 	err := dbPool.QueryRow(context.Background(), `
 		UPDATE manual_crawl_sessions s
-		SET status = 'completed',
-		    ended_at = NOW(),
+		-- Only an active session completes. A session already marked 'abandoned' (its worker died and
+		-- cleanup/StartManualCrawl retired it) keeps that terminal status and its original ended_at;
+		-- a late Stop must not relabel a dead session as a clean completion or move its end time. The
+		-- counts are still refreshed and returned so Stop stays idempotent from the client's view.
+		SET status = CASE WHEN s.status = 'active' THEN 'completed' ELSE s.status END,
+		    ended_at = CASE WHEN s.status = 'active' THEN NOW() ELSE s.ended_at END,
 		    request_count = c.request_count,
 		    endpoint_count = c.endpoint_count
 		FROM (
@@ -825,12 +1417,24 @@ func GetManualCrawlCaptures(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ?blob=<sha256> serves the stored bytes themselves. An operator proving an IDOR that returned
+	// another user's photo has to be able to LOOK at the photo; base64 in a JSON field proves the
+	// bytes were kept but shows nobody anything.
+	if digest := r.URL.Query().Get("blob"); digest != "" {
+		serveCaptureBlob(w, "session_id", sessionID, digest)
+		return
+	}
+
 	query := `
 		SELECT id, session_id, scope_target_id, url, endpoint, method, status_code,
 		       headers, response_headers, post_data, response_body, get_params, post_params,
 		       body_type, tab_id, timestamp, mime_type, sources, graphql_operation, resource_type,
 		       initiator, redirect_chain, error, duration_ms, request_body_truncated,
-		       response_body_truncated, COALESCE(is_direct, false)
+		       response_body_truncated, COALESCE(is_direct, false),
+		       COALESCE(response_body_sha256, ''), COALESCE(response_body_bytes, 0),
+		       COALESCE(response_body_capped, false), COALESCE(response_body_blob_missing, false),
+		       COALESCE(storage_altered, false), COALESCE(storage_altered_fields, '{}'),
+		       COALESCE(storage_altered_bytes, 0), COALESCE(storage_originals, '{}'::jsonb)
 		FROM manual_crawl_captures
 		WHERE session_id = $1
 		ORDER BY timestamp ASC
@@ -844,7 +1448,9 @@ func GetManualCrawlCaptures(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	json.NewEncoder(w).Encode(scanManualCrawlCaptures(rows))
+	captures := scanManualCrawlCaptures(rows)
+	attachBlobBodies(captures, includeMediaBodies(r))
+	json.NewEncoder(w).Encode(captures)
 }
 
 // GetManualCrawlCapturesForTarget returns every capture for a scope target in one call. The results
@@ -858,12 +1464,21 @@ func GetManualCrawlCapturesForTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if digest := r.URL.Query().Get("blob"); digest != "" {
+		serveCaptureBlob(w, "scope_target_id", scopeTargetID, digest)
+		return
+	}
+
 	query := `
 		SELECT id, session_id, scope_target_id, url, endpoint, method, status_code,
 		       headers, response_headers, post_data, response_body, get_params, post_params,
 		       body_type, tab_id, timestamp, mime_type, sources, graphql_operation, resource_type,
 		       initiator, redirect_chain, error, duration_ms, request_body_truncated,
-		       response_body_truncated, COALESCE(is_direct, false)
+		       response_body_truncated, COALESCE(is_direct, false),
+		       COALESCE(response_body_sha256, ''), COALESCE(response_body_bytes, 0),
+		       COALESCE(response_body_capped, false), COALESCE(response_body_blob_missing, false),
+		       COALESCE(storage_altered, false), COALESCE(storage_altered_fields, '{}'),
+		       COALESCE(storage_altered_bytes, 0), COALESCE(storage_originals, '{}'::jsonb)
 		FROM manual_crawl_captures
 		WHERE scope_target_id = $1
 		ORDER BY timestamp ASC
@@ -877,7 +1492,9 @@ func GetManualCrawlCapturesForTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	json.NewEncoder(w).Encode(scanManualCrawlCaptures(rows))
+	captures := scanManualCrawlCaptures(rows)
+	attachBlobBodies(captures, includeMediaBodies(r))
+	json.NewEncoder(w).Encode(captures)
 }
 
 func scanManualCrawlCaptures(rows interface {
@@ -892,6 +1509,7 @@ func scanManualCrawlCaptures(rows interface {
 		var graphqlOperation, resourceType, initiator, captureError *string
 		var statusCode, tabID, durationMs *int
 		var requestBodyTruncated, responseBodyTruncated *bool
+		var storageOriginalsJSON []byte
 
 		err := rows.Scan(
 			&capture.ID,
@@ -921,6 +1539,14 @@ func scanManualCrawlCaptures(rows interface {
 			&requestBodyTruncated,
 			&responseBodyTruncated,
 			&capture.IsDirect,
+			&capture.ResponseBodySHA256,
+			&capture.ResponseBodyBytes,
+			&capture.ResponseBodyCapped,
+			&capture.ResponseBodyBlobMissing,
+			&capture.StorageAltered,
+			&capture.StorageAlteredFields,
+			&capture.StorageAlteredBytes,
+			&storageOriginalsJSON,
 		)
 		if err != nil {
 			log.Printf("[MANUAL-CRAWL] Error scanning capture: %v", err)
@@ -978,6 +1604,9 @@ func scanManualCrawlCaptures(rows interface {
 		}
 		if len(postParamsJSON) > 0 {
 			json.Unmarshal(postParamsJSON, &capture.PostParams)
+		}
+		if len(storageOriginalsJSON) > 0 {
+			json.Unmarshal(storageOriginalsJSON, &capture.StorageOriginals)
 		}
 
 		captures = append(captures, capture)

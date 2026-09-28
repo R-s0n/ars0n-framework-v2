@@ -101,22 +101,17 @@ func NormalizeURL(url string) string {
 	return url
 }
 
+// SanitizeResponse prepares a fetched page body for a Postgres text column, and removes nothing a
+// text column can hold.
+//
+// It used to also drop every C0 control character except newline, carriage return and tab.
+// Postgres stores those perfectly well, and dropping them silently rewrote the bytes the target
+// sent: a response carrying an ESC sequence, a form feed, or a payload that is not really text
+// came back shorter than the wire, with no second copy to compare against. Only the NUL byte,
+// which a text column genuinely cannot hold, and invalid UTF-8, which Postgres rejects outright,
+// are touched. That is the same rule sanitizeForPostgres applies to captured bodies.
 func SanitizeResponse(input []byte) string {
-	// Remove null bytes
-	sanitized := bytes.ReplaceAll(input, []byte{0}, []byte{})
-
-	// Convert to string and handle any invalid UTF-8
-	str := string(sanitized)
-
-	// Replace any other problematic characters
-	str = strings.Map(func(r rune) rune {
-		if r < 32 && r != '\n' && r != '\r' && r != '\t' {
-			return -1 // Drop the character
-		}
-		return r
-	}, str)
-
-	return str
+	return sanitizeForPostgres(string(input))
 }
 
 func extractTitle(htmlContent string) string {
@@ -884,6 +879,10 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 	// Track successful/failed requests
 	successfulRequests := 0
 	failedRequests := 0
+	// Its own counter, because a URL that answered a redirect nobody could follow is neither a
+	// fetch that worked nor a fetch that failed, and calling it either loses the one fact that
+	// makes the stored row readable.
+	chainBrokeRequests := 0
 
 	// Create an HTTP client with reasonable timeouts and TLS config
 	client := &http.Client{
@@ -909,12 +908,21 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 
-		resp, err := client.Do(req)
+		// DoFollowing, not client.Do. This client follows redirects, and net/http discards the
+		// whole response when a hop carries a Location it cannot parse. That counted
+		// failedRequests++ and lost the URL's technology fingerprint entirely, for a URL that
+		// answered. A missing fingerprint is not an absent technology, but nothing downstream
+		// can tell the two apart.
+		resp, err := DoFollowing(client, req)
 		if err != nil {
 			failedRequests++
 			log.Printf("[STATUS_CODE] URL: %s | Failed to fetch: %v", urlStr, err)
 			continue
 		}
+		// AND THE RECOVERY IS NOT A PAGE. redirectChainBreak is in
+		// endpointInvestigationUtils.go, where the same defect was measured; see its comment for
+		// the three shapes and why the Location never enters the note.
+		chainBreak := redirectChainBreak(resp)
 
 		// Read response body
 		body, err := io.ReadAll(resp.Body)
@@ -944,7 +952,48 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 			continue
 		}
 
-		// Store response data in database using UPSERT
+		// Store response data in database using UPSERT.
+		//
+		// THE COLUMN LIST IS NARROWER WHEN NO PAGE WAS FETCHED, and that narrowness IS the field
+		// that says so. target_urls has no column for "the chain broke", so the honest record is
+		// the one that writes only what was measured: the hop's status and its real headers.
+		// title, content_length and http_response are LEFT UNWRITTEN, which is NULL on an insert
+		// and unchanged on a conflict, and NULL is the shape every reader in this tree already
+		// models for them (liveWebServers.go scans Title and HTTPResponse as sql.NullString and
+		// content_length through nullIntToInt; consolidateAttackSurface.go holds ContentLength as
+		// *int). '' and 0 mean A PAGE WAS READ AND IT WAS EMPTY. NULL means nobody read one.
+		//
+		// This is the round-10 regression and its correction. Before round 10 a broken chain did
+		// failedRequests++ and left NO ROW; round 10's DoFollowing conversion turned that into a
+		// stored row reading status_code=302, title='', content_length=0, http_response='' for a
+		// URL whose page was never fetched, which is strictly worse than an absent row because an
+		// absent row is honest about its absence. Keeping the status and the headers keeps what
+		// the conversion was actually for, which is that the URL ANSWERED; nothing else about it
+		// was observed and nothing else is claimed.
+		//
+		// A column would be better than an absence and the patch for one is in this round's
+		// report; it needs database.go, which this change does not own.
+		if chainBreak != "" {
+			_, err = dbPool.Exec(context.Background(),
+				`INSERT INTO target_urls (url, scope_target_id, status_code, http_response_headers, created_at)
+				 VALUES ($1, $2, $3, $4::jsonb, NOW())
+				 ON CONFLICT (url, scope_target_id)
+				 DO UPDATE SET
+				     status_code = EXCLUDED.status_code,
+				     http_response_headers = EXCLUDED.http_response_headers,
+				     updated_at = NOW()`,
+				urlStr, scopeTargetID, resp.StatusCode, string(headersJSON))
+			if err != nil {
+				failedRequests++
+				log.Printf("[ERROR] Failed to store metadata for URL %s: %v", urlStr, err)
+				continue
+			}
+			chainBrokeRequests++
+			log.Printf("[STATUS_CODE] URL: %s | Status: %d | NO PAGE FETCHED, no page fields stored. %s",
+				urlStr, resp.StatusCode, chainBreak)
+			continue
+		}
+
 		_, err = dbPool.Exec(context.Background(),
 			`INSERT INTO target_urls (url, scope_target_id, status_code, title, content_length, http_response, http_response_headers, created_at)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NOW())
@@ -972,10 +1021,18 @@ func ExecuteAndParseNucleiTechScan(urls []string, scopeTargetID string) error {
 		log.Printf("[STATUS_CODE] URL: %s | Status: %d | Stored successfully", urlStr, resp.StatusCode)
 	}
 
-	log.Printf("[INFO] Screenshot capture complete - Success: %d | Failed: %d | Total: %d",
-		successfulRequests, failedRequests, len(urls))
+	log.Printf("[INFO] Screenshot capture complete - Success: %d | Failed: %d | No page fetched: %d | Total: %d",
+		successfulRequests, failedRequests, chainBrokeRequests, len(urls))
 	if failedRequests > 0 {
 		log.Printf("[WARN] %d URLs failed to fetch - these will not have metadata", failedRequests)
+	}
+	if chainBrokeRequests > 0 {
+		// NOT counted as a failure and NOT counted as a success. The target answered and no page
+		// was fetched, and folding that into either column is how the row became unreadable in
+		// the first place.
+		log.Printf("[WARN] %d URL(s) answered a redirect whose chain could not be walked to a page: "+
+			"status and headers were stored, no page fields were, and those rows carry NULL rather "+
+			"than an empty title, a zero length and an empty body", chainBrokeRequests)
 	}
 
 	// Create a temporary file for URLs
@@ -1451,24 +1508,6 @@ func GetMetaDataScansForScopeTarget(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(scans)
-}
-
-func GanitizeResponse(input []byte) string {
-	// Remove null bytes
-	sanitized := bytes.ReplaceAll(input, []byte{0}, []byte{})
-
-	// Convert to string and handle any invalid UTF-8
-	str := string(sanitized)
-
-	// Replace any other problematic characters
-	str = strings.Map(func(r rune) rune {
-		if r < 32 && r != '\n' && r != '\r' && r != '\t' {
-			return -1 // Drop the character
-		}
-		return r
-	}, str)
-
-	return str
 }
 
 func ExecuteFfufScan(url string, scopeTargetID string) error {

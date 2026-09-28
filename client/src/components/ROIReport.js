@@ -643,7 +643,10 @@ const TargetSection = memo(({ targetURL, roiScore, breakdown, onDelete, onAddAsS
         }
       }
     } catch {}
-    const truncatedResponse = httpResponse.split('\n').slice(0, 25).join('\n');
+    // The whole body, not the first 25 lines. This is what the target sent back, and the
+    // thing worth finding in it (a stack trace, an internal hostname, a key in a bootstrap
+    // blob) is almost never in the head. The <pre> below scrolls; nothing here decides
+    // what is worth seeing.
 
     let httpHeaders = {};
     try {
@@ -662,10 +665,10 @@ const TargetSection = memo(({ targetURL, roiScore, breakdown, onDelete, onAddAsS
     const katanaCount = parseKatanaURLs(targetURL.katana_results).length;
     const ffufCount = parseFfufEndpoints(targetURL.ffuf_results).length;
 
-    return { truncatedResponse, httpHeaders, title, webServer, technologies, katanaCount, ffufCount };
+    return { httpResponse, httpHeaders, title, webServer, technologies, katanaCount, ffufCount };
   }, [targetURL]);
 
-  const { truncatedResponse, httpHeaders, title, webServer, technologies, katanaCount, ffufCount } = processedData;
+  const { httpResponse, httpHeaders, title, webServer, technologies, katanaCount, ffufCount } = processedData;
 
   const priority = getPriorityLevel(roiScore);
   const screenshotSrc = getScreenshotSrc(targetURL);
@@ -1011,9 +1014,9 @@ const TargetSection = memo(({ targetURL, roiScore, breakdown, onDelete, onAddAsS
         <Col>
           <Card className="bg-dark border-danger">
             <Card.Body className="p-3">
-              <h5 className="text-danger mb-2">Response Preview</h5>
-              <pre className="bg-dark text-white p-2 border border-danger rounded" style={{ maxHeight: '150px', overflowY: 'auto', fontSize: '0.85rem' }}>
-                {truncatedResponse || <span className="text-white-50">No response data - run Technology Detection step to capture response</span>}
+              <h5 className="text-danger mb-2">Response</h5>
+              <pre className="bg-dark text-white p-2 border border-danger rounded" style={{ maxHeight: '320px', overflowY: 'auto', fontSize: '0.85rem', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                {httpResponse || <span className="text-white-50">No response data - run Technology Detection step to capture response</span>}
               </pre>
             </Card.Body>
           </Card>

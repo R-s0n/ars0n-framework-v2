@@ -64,6 +64,14 @@
             </label>
           </div>
 
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="captureMediaBodies" checked>
+            <label class="form-check-label small" for="captureMediaBodies">
+              Capture Media Bodies
+              <span class="text-muted" style="font-size: 10px;">(images, video, audio, fonts)</span>
+            </label>
+          </div>
+
           <div class="form-check form-switch mb-1">
             <input class="form-check-input" type="checkbox" id="deepCapture">
             <label class="form-check-label small" for="deepCapture">
@@ -108,7 +116,9 @@
               <div><code>~jivo within acme.io</code> the same, bounded to one domain</div>
               <div><code>re:prod-[0-9]+\.acme\.io</code> full-match regex</div>
               <div><code>!cdn.example.com</code> <strong>deny</strong> that subtree</div>
+              <div><code>!=cdn.example.com</code> <strong>deny</strong> that exact host</div>
               <div class="mt-1">A deny always wins, whatever else matches.</div>
+              <div>Add many at once: one rule per line, or comma-separated.</div>
             </div>
 
             <div id="scopeRulesActive" class="d-none alert alert-warning py-1 px-2 mb-2"
@@ -122,10 +132,18 @@
 
             <div id="scopeRuleList" class="mb-2"></div>
 
-            <div class="input-group input-group-sm">
-              <input type="text" class="form-control" id="scopeRuleInput"
-                     placeholder="e.g. *.example.com or !cdn.example.com" autocomplete="off">
-              <button class="btn btn-outline-danger" id="scopeRuleAdd" type="button">Add</button>
+            <!-- A textarea, not a single-line input: an operator pastes a whole block of rules at
+                 once (one per line, or comma-separated) instead of adding them one at a time. Enter
+                 inserts a newline so a block can be composed; Ctrl/Cmd+Enter or Add applies. -->
+            <textarea class="form-control form-control-sm" id="scopeRuleInput" rows="3"
+                      placeholder="One rule per line, or comma-separated. Paste a whole block:&#10;=console.nebius.com&#10;api.nebius.cloud&#10;!dev.api.nebius.cloud"
+                      autocomplete="off" spellcheck="false"
+                      style="font-size: 12px; resize: vertical; white-space: pre; overflow-wrap: normal;"></textarea>
+            <div class="d-flex align-items-center justify-content-between mt-1">
+              <span class="text-muted" style="font-size: 10px;">
+                Paste many at once: one per line or comma-separated. <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to add.
+              </span>
+              <button class="btn btn-outline-danger btn-sm flex-shrink-0" id="scopeRuleAdd" type="button">Add</button>
             </div>
             <div id="scopeRulePreview" class="small mt-1" style="font-size: 11px; min-height: 16px;"></div>
           </div>

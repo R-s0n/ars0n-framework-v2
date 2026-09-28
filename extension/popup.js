@@ -41,6 +41,9 @@ let frameworkUrl = DEFAULT_FRAMEWORK_URL;
 let availableTargets = [];
 let isConnected = false;
 let targetsLoaded = false;
+// The 2s poll is async and setInterval does not wait for the previous tick, so a slow tick could
+// stack on the next one. This guard makes it skip rather than overlap.
+let pollInFlight = false;
 // Extra scope hosts, keyed by scope target id. Never a flat list: a host added while testing one
 // target must not still be in scope when the next recording starts against a different one, which
 // is what a single shared array used to do. popup.js keeps its own copy of this shape rather than
@@ -62,17 +65,31 @@ let authSectionAutoOpened = false;
 document.addEventListener('DOMContentLoaded', async () => {
   await loadSettings();
   initializeEventListeners();
+  // Register the retry poll BEFORE the first connection check so that even if that check is slow
+  // (its fetches are time-bounded but not instant), the poll is already installed and can recover.
+  setInterval(pollTick, POLL_INTERVAL_MS);
   await refreshSessionState();
   await refreshAuthState();
   await checkFrameworkConnection();
   await loadScopeRules();
+});
 
-  setInterval(async () => {
+// One poll tick. Non-reentrant, and it retries the TARGET load whenever we are connected but have
+// no targets loaded — not only when disconnected. The old guard was `if (!isConnected)`, which
+// never re-ran the target fetch once /api/health had succeeded, so a single stalled or failed
+// /api/scopetarget/read left the dropdown stuck on "Loading targets…" until the popup was reloaded.
+async function pollTick() {
+  if (pollInFlight) return;
+  pollInFlight = true;
+  try {
     await refreshSessionState();
     await refreshAuthState();
     if (!isConnected) await checkFrameworkConnection();
-  }, POLL_INTERVAL_MS);
-});
+    else if (!targetsLoaded) await loadURLTargets();
+  } finally {
+    pollInFlight = false;
+  }
+}
 
 function initializeEventListeners() {
   document.getElementById('startCaptureBtn').addEventListener('click', startCapture);
@@ -84,6 +101,7 @@ function initializeEventListeners() {
   document.getElementById('includeSubdomains').addEventListener('change', saveSettings);
   document.getElementById('captureStatic').addEventListener('change', saveSettings);
   document.getElementById('captureResponseBodies').addEventListener('change', saveSettings);
+  document.getElementById('captureMediaBodies').addEventListener('change', saveSettings);
   document.getElementById('deepCapture').addEventListener('change', toggleDeepCapture);
   // Scope belongs to a target, so changing the target changes which extra hosts apply. Without
   // this the list keeps showing the previous target's hosts, which is the thing that made the old
@@ -139,6 +157,7 @@ async function loadSettings() {
     'includeSubdomains',
     'captureStatic',
     'captureResponseBodies',
+    'captureMediaBodies',
     'deepCapture',
     'extraHostsByTarget',
     'extraHosts',
@@ -154,6 +173,7 @@ async function loadSettings() {
   // useful responses were being thrown away.
   document.getElementById('captureStatic').checked = result.captureStatic !== false;
   document.getElementById('captureResponseBodies').checked = result.captureResponseBodies !== false;
+  document.getElementById('captureMediaBodies').checked = result.captureMediaBodies !== false;
   document.getElementById('deepCapture').checked = Boolean(result.deepCapture);
 
   const storedMap = result.extraHostsByTarget;
@@ -191,6 +211,7 @@ function currentSettings() {
     includeSubdomains: document.getElementById('includeSubdomains').checked,
     captureStatic: document.getElementById('captureStatic').checked,
     captureResponseBodies: document.getElementById('captureResponseBodies').checked,
+    captureMediaBodies: document.getElementById('captureMediaBodies').checked,
     deepCapture: document.getElementById('deepCapture').checked,
     extraHosts: currentExtraHosts(),
   };
@@ -202,6 +223,7 @@ async function saveSettings() {
     includeSubdomains: settings.includeSubdomains,
     captureStatic: settings.captureStatic,
     captureResponseBodies: settings.captureResponseBodies,
+    captureMediaBodies: settings.captureMediaBodies,
   });
 
   if (sessionState.active) {
@@ -290,6 +312,19 @@ async function removeHost(host) {
 
 function sendToWorker(message) {
   return chrome.runtime.sendMessage(message).catch((error) => ({ success: false, error: error.message }));
+}
+
+// fetch() has no timeout, so a socket the framework accepts but never answers (its backend busy
+// ingesting the recording's capture batches on the same localhost origin, a half-open socket after
+// the machine slept) leaves the await pending forever — neither the success path nor the catch
+// runs. That is the mechanism behind the popup wedging on "Loading targets…" with no recovery until
+// reload. Bounding every framework fetch turns a stall into a reject the caller's catch handles and
+// the poll retries. The default is deliberately generous so a legitimately slow-but-working
+// localhost is not aborted mid-response.
+function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs || 8000);
+  return fetch(url, { ...(options || {}), signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
 /* ------------------------------------------------------------------ scope rendering */
@@ -395,7 +430,7 @@ async function loadScopeRules() {
     return;
   }
   try {
-    const res = await fetch(`${frameworkUrl}/api/scope-rules/${targetId}`);
+    const res = await fetchWithTimeout(`${frameworkUrl}/api/scope-rules/${targetId}`, {}, 8000);
     if (!res.ok) throw new Error(`framework returned ${res.status}`);
     const body = await res.json();
     scopeRules = body.rules || [];
@@ -484,11 +519,11 @@ async function previewScopeRule(typed) {
     return;
   }
   try {
-    const res = await fetch(`${frameworkUrl}/api/scope-rules/preview`, {
+    const res = await fetchWithTimeout(`${frameworkUrl}/api/scope-rules/preview`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ scope_target_id: currentScopeTargetId(), typed }),
-    });
+    }, 8000);
     const body = await res.json();
     if (!body.ok) {
       out.className = 'small mt-1 text-danger';
@@ -508,59 +543,168 @@ async function previewScopeRule(typed) {
   }
 }
 
+// Live preview for the input. A single rule gets the real server preview (the same evaluator that
+// will enforce it). A pasted block of several rules cannot be previewed one-shot server-side, so it
+// just reports how many are ready; each is validated for real when Add runs.
+async function previewScopeInput(typed) {
+  const out = document.getElementById('scopeRulePreview');
+  if (!out) return;
+  const rules = splitScopeRuleBlock(typed);
+  if (rules.length === 0) {
+    out.textContent = '';
+    out.className = 'small mt-1';
+    return;
+  }
+  if (rules.length === 1) {
+    await previewScopeRule(rules[0]);
+    return;
+  }
+  out.className = 'small mt-1 text-muted';
+  out.textContent = `${rules.length} rules ready. Ctrl+Enter or Add to apply.`;
+}
+
+// Splits a pasted block into individual rule strings, so an operator can add many rules at once
+// instead of one line at a time.
+//
+// Newlines are always a boundary: no rule spans two lines. Commas are a boundary too, EXCEPT on a
+// line that is a regex rule, because a regex repetition like {1,3} contains a comma and splitting on
+// it would break the pattern. A line whose body (after an optional leading "!") begins with
+// re:/regex: is therefore kept whole. Blank pieces are dropped and exact duplicates collapse (a
+// pasted block that overlaps an earlier one is common), preserving first-seen order. Pure and free
+// of the DOM so popup.test.mjs can exercise it directly.
+function splitScopeRuleBlock(text) {
+  const out = [];
+  const seen = new Set();
+  const push = (piece) => {
+    const rule = String(piece).trim();
+    if (!rule) return;
+    const key = rule.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(rule);
+  };
+  String(text === null || text === undefined ? '' : text)
+    .split(/\r\n|\r|\n/)
+    .forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      // A regex rule may legitimately contain commas ({m,n}); never comma-split one.
+      if (/^!?\s*(re|regex):/i.test(trimmed)) {
+        push(trimmed);
+        return;
+      }
+      trimmed.split(',').forEach(push);
+    });
+  return out;
+}
+
+// POSTs one typed rule and normalises the outcome. 428 means the rule is "wide" and needs a
+// deliberate second act, whose token is the rule's own canonical text (see CreateScopeRule). The
+// add is idempotent server-side (ON CONFLICT DO UPDATE), so re-sending an existing rule is a 201,
+// not an error, which is why a re-pasted block does not report failures.
+async function postScopeRule(targetId, typed, confirmWide) {
+  try {
+    const res = await fetchWithTimeout(`${frameworkUrl}/api/scope-rules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope_target_id: targetId, typed, confirm_wide: confirmWide || '' }),
+    }, 8000);
+    if (res.status === 428) {
+      const message = await res.text();
+      const canonical = (message.match(/confirm_wide exactly as "([^"]+)"/) || [])[1] || '';
+      return { ok: false, wide: true, canonical, message };
+    }
+    if (!res.ok) {
+      const message = (await res.text()) || `framework returned ${res.status}`;
+      return { ok: false, message };
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, message: error.message };
+  }
+}
+
+// Adds every rule in the input. One line, one rule, or a whole pasted block all take the same path.
+// Wide rules are collected and confirmed ONCE at the end rather than one prompt each, and on any
+// failure the input is rewritten to just the lines that still need attention so nothing an operator
+// typed is lost.
 async function addScopeRule() {
   const input = document.getElementById('scopeRuleInput');
   const out = document.getElementById('scopeRulePreview');
-  const typed = (input.value || '').trim();
   const targetId = currentScopeTargetId();
-  if (!typed) return;
+  const rules = splitScopeRuleBlock(input ? input.value : '');
+  if (!rules.length) return;
   if (!targetId) {
-    out.className = 'small mt-1 text-danger';
-    out.textContent = 'Select a target first.';
+    if (out) {
+      out.className = 'small mt-1 text-danger';
+      out.textContent = 'Select a target first.';
+    }
     return;
   }
 
-  const send = (confirmWide) => fetch(`${frameworkUrl}/api/scope-rules`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ scope_target_id: targetId, typed, confirm_wide: confirmWide || '' }),
-  });
-
-  try {
-    let res = await send('');
-    if (res.status === 428) {
-      // A rule that can admit hosts nobody has seen is stored only on a second, deliberate act.
-      // The confirmation is the rule's own canonical text, so an operator cannot confirm a
-      // different rule from the one they are looking at.
-      const message = await res.text();
-      const canonical = (message.match(/confirm_wide exactly as "([^"]+)"/) || [])[1];
-      if (!canonical || !window.confirm(
-        `${message}\n\nAdd it anyway?`)) {
-        out.className = 'small mt-1 text-warning';
-        out.textContent = 'Not added. Bound it with "within <domain>" to avoid the warning.';
-        return;
-      }
-      res = await send(canonical);
-    }
-    if (!res.ok) {
-      out.className = 'small mt-1 text-danger';
-      out.textContent = (await res.text()) || `framework returned ${res.status}`;
-      return;
-    }
-    input.value = '';
-    out.textContent = '';
-    await loadScopeRules();
-    // The worker holds its own parsed copy, so it has to be told the boundary moved.
-    await sendToWorker({ action: 'refreshScopeRules' });
-  } catch (error) {
-    out.className = 'small mt-1 text-danger';
-    out.textContent = error.message;
+  if (out) {
+    out.className = 'small mt-1 text-muted';
+    out.textContent = `Adding ${rules.length} rule${rules.length === 1 ? '' : 's'}...`;
   }
+
+  const applied = [];
+  const failed = [];   // { typed, message }
+  const needWide = [];  // { typed, canonical }
+
+  for (const typed of rules) {
+    const result = await postScopeRule(targetId, typed, '');
+    if (result.ok) applied.push(typed);
+    else if (result.wide) needWide.push({ typed, canonical: result.canonical });
+    else failed.push({ typed, message: result.message });
+  }
+
+  // The wide rules, confirmed together: one dialog listing them, not N interruptions in a row.
+  if (needWide.length) {
+    const list = needWide.map((w) => '  ' + w.typed).join('\n');
+    const ok = window.confirm(
+      `${needWide.length} rule${needWide.length === 1 ? '' : 's'} can admit hosts nobody has seen `
+      + `yet:\n\n${list}\n\nAdd ${needWide.length === 1 ? 'it' : 'them'} anyway? `
+      + `(Bound with "within <domain>" to avoid this.)`);
+    for (const w of needWide) {
+      if (!ok) { failed.push({ typed: w.typed, message: 'skipped; needs confirmation' }); continue; }
+      if (!w.canonical) { failed.push({ typed: w.typed, message: 'could not confirm' }); continue; }
+      const result = await postScopeRule(targetId, w.typed, w.canonical);
+      if (result.ok) applied.push(w.typed);
+      else failed.push({ typed: w.typed, message: result.message || 'not added' });
+    }
+  }
+
+  // Keep only what still needs attention; everything applied cleanly disappears from the box.
+  if (input) input.value = failed.map((f) => f.typed).join('\n');
+  lastPreviewText = input ? input.value : '';
+
+  await loadScopeRules();
+  // The worker holds its own parsed copy, so it has to be told the boundary moved.
+  await sendToWorker({ action: 'refreshScopeRules' });
+
+  renderScopeAddSummary(out, applied, failed);
+}
+
+// The outcome line under the input. Successes are counted; each failure is named with its own
+// reason, so a single bad line in a large paste is findable rather than swallowed by a count.
+function renderScopeAddSummary(out, applied, failed) {
+  if (!out) return;
+  const parts = [];
+  if (applied.length) parts.push(`${applied.length} added`);
+  if (failed.length) parts.push(`${failed.length} not added`);
+  out.className = 'small mt-1 ' + (failed.length ? 'text-danger' : 'text-muted');
+  out.textContent = parts.join('  ·  ') || 'Nothing to add.';
+  failed.forEach((f) => {
+    const line = document.createElement('div');
+    line.style.fontSize = '10px';
+    line.textContent = `${f.typed}: ${f.message}`;
+    out.appendChild(line);
+  });
 }
 
 async function removeScopeRule(ruleId) {
   try {
-    await fetch(`${frameworkUrl}/api/scope-rules/${ruleId}`, { method: 'DELETE' });
+    await fetchWithTimeout(`${frameworkUrl}/api/scope-rules/${ruleId}`, { method: 'DELETE' }, 8000);
     await loadScopeRules();
     await sendToWorker({ action: 'refreshScopeRules' });
   } catch (error) {
@@ -575,8 +719,10 @@ function wireScopeRules() {
   if (!input || !add) return;
 
   add.addEventListener('click', () => void addScopeRule());
+  // This is a textarea now, so Enter inserts a newline and a block can be composed or pasted.
+  // Ctrl/Cmd+Enter applies, matching the "send" convention of a multi-line field.
   input.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
       void addScopeRule();
     }
@@ -587,7 +733,7 @@ function wireScopeRules() {
     if (typed === lastPreviewText) return;
     lastPreviewText = typed;
     if (previewTimer) clearTimeout(previewTimer);
-    previewTimer = setTimeout(() => void previewScopeRule(typed), 300);
+    previewTimer = setTimeout(() => void previewScopeInput(typed), 300);
   });
   if (help) {
     help.addEventListener('click', (event) => {
@@ -767,7 +913,7 @@ async function checkFrameworkConnection() {
   const indicator = document.getElementById('connectionIndicator');
 
   try {
-    const response = await fetch(`${frameworkUrl}/api/health`, { method: 'GET', mode: 'cors' });
+    const response = await fetchWithTimeout(`${frameworkUrl}/api/health`, { method: 'GET', mode: 'cors' }, 6000);
     if (!response.ok) throw new Error('Framework not responding');
 
     isConnected = true;
@@ -803,7 +949,7 @@ async function loadURLTargets() {
   const targetSelect = document.getElementById('targetSelect');
 
   try {
-    const response = await fetch(`${frameworkUrl}/api/scopetarget/read`);
+    const response = await fetchWithTimeout(`${frameworkUrl}/api/scopetarget/read`, {}, 8000);
     if (!response.ok) throw new Error(`Failed to fetch targets: ${response.status}`);
 
     const allTargets = await response.json();

@@ -447,15 +447,15 @@ func (c rfiClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerdict {
 			return one(triage.StateCannotDetermine,
 				"prelude_failed: the vector needs a token this run could not obtain",
 				"", triage.GradeUnrated, nil)
-		case ctx.Budget.Exhausted():
-			return one(triage.StateNotRun,
-				"probe_budget_exhausted: the cap was reached before this class sent anything",
-				"", triage.GradeUnrated, nil)
-		default:
-			return one(triage.StateNotPlanned,
-				"no remote-include probe was derived for this slot and no reason above applies",
-				"", triage.GradeUnrated, nil)
 		}
+		// THE LAST TWO ARMS LIVE IN pxNothingSentTail AND THE ORDER IS THE WHOLE POINT. See
+		// pxbudgetarm.go. The derivation question is put to rfiPlanLadder itself, with the
+		// budget set aside, so this arm asks the planner rather than guessing for it.
+		state, reason := pxNothingSentTail(ctx, len(rfiPlanLadder(rfiPlanInput{
+			Slot: ctx.Slot, RouteResolved: true, Round: 0, OOB: ctx.OOB,
+		})), "a remote-include probe",
+			"no remote-include probe was derived for this slot and no reason above applies")
+		return one(state, reason, "", triage.GradeUnrated, nil)
 	}
 	for _, o := range own {
 		if o.Err != nil {
@@ -568,21 +568,12 @@ func (c rfiClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerdict {
 	}
 	if len(fetched) > 0 {
 		ann["probes_that_called_back"] = fetched
-		// THE CLEAN. A callback proves the fetch happened; the absence of the served bytes proves
-		// the fetch was not included. Both halves measured, so this is the one state in this class
-		// that asserts something about the application.
-		ann["clean_preconditions"] = []string{
-			"the collaborator can serve content and did serve it at " + rfiServedFile,
-			"a callback arrived for at least one of this class's own probes, so the fetch is proven to have happened",
-			"the unresolvable .invalid control produced neither a callback nor a content hit",
-			"the served thirty-two bytes were absent from the response in every transform form searched",
+		control, haveControl := pxRouteControl(ctx)
+		state, reason, oracle, preconds := rfiAfterTheFetch(honest, control, haveControl)
+		if len(preconds) > 0 {
+			ann["clean_preconditions"] = preconds
 		}
-		v := one(triage.StateClean,
-			"the server fetched the URL this slot named, and the bytes our collaborator served did "+
-				"NOT appear in the response. The fetch is proven and the inclusion is disproven, which "+
-				"is the only shape in which this class can honestly say clean. THE FETCH ITSELF MAY BE "+
-				"SSRF: that is SSRF's class, SSRF's probes and SSRF's verdict, and the label says so",
-			"callback_without_content", triage.GradeUnrated, ords)
+		v := one(state, reason, oracle, triage.GradeUnrated, ords)
 		v[0].Untested = skips
 		return v
 	}
@@ -600,6 +591,113 @@ func (c rfiClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerdict {
 		"", triage.GradeUnrated, ords)
 	v[0].Untested = skips
 	return v
+}
+
+// rfiAfterTheFetch is the decision this class takes once a callback has proven the fetch
+// happened, and it is a plain function because a ClassifyCtx cannot be built outside the triage
+// package: left inside Classify it could only ever be exercised by running the whole runner
+// against a live collaborator, which is exactly the shape a missing guard hides in.
+//
+// A CALLBACK PROVES THE FETCH. IT DOES NOT PROVE THE RESPONSE WAS READABLE. The clean below
+// rests on two halves and only one of them is out of band: the fetch is proven by the callback,
+// and the non-inclusion is proven by SEARCHING A BODY for the thirty-two bytes the collaborator
+// served. The second half is a pxReadsBody negative and it needs pxReadsBody's preconditions.
+func rfiAfterTheFetch(honest []faOwnObs, control triage.Observation, haveControl bool) (
+	triage.TriageState, string, string, []string) {
+
+	// THE PRECONDITION ON THE SECOND HALF, AND IT IS THE LAST GUARD BEFORE THE ONLY CLEAN THIS
+	// CLASS CAN EMIT. The DECISION is the shared one every pxReadsBody class takes, so a later arm
+	// added to the mechanism reaches this class too; the SENTENCE is this class's own, for the
+	// reason written on rfiWhyTheBodyWasUnsearchable.
+	if why, absent := pxNoEvidenceToRead(pxReadsBody, honest, control, haveControl); absent {
+		return triage.StateCannotDetermine,
+			rfiWhyTheBodyWasUnsearchable(honest, control, haveControl, why), "", nil
+	}
+
+	// AND THE 4xx ARM THE SHARED PRECONDITION HAS NOT ABSORBED YET. It matters more here than in
+	// any other adopter: a callback proves the FETCH happened, so the temptation to call the rest
+	// disproven is strongest exactly where the response we searched was a refusal page that every
+	// request gets, ours and the control's alike.
+	if why, refused := pxControlRefusesEveryone(honest, control, haveControl); refused {
+		return triage.StateCannotDetermine,
+			"no_fetch_conclusion (" + rfiServedFile + " was served and a callback proved it was " +
+				"fetched): the inclusion half of this class's clean is a search of the response body, " +
+				"and " + why, "", nil
+	}
+
+	return triage.StateClean,
+		"the server fetched the URL this slot named, and the bytes our collaborator served did " +
+			"NOT appear in the response. The fetch is proven and the inclusion is disproven, which " +
+			"is the only shape in which this class can honestly say clean. THE FETCH ITSELF MAY BE " +
+			"SSRF: that is SSRF's class, SSRF's probes and SSRF's verdict, and the label says so",
+		"callback_without_content",
+		append([]string{rfiSearchablePrecondition(haveControl)},
+			"the collaborator can serve content and did serve it at "+rfiServedFile,
+			"a callback arrived for at least one of this class's own probes, so the fetch is proven to have happened",
+			"the unresolvable .invalid control produced neither a callback nor a content hit",
+			"the served thirty-two bytes were absent from the response in every transform form searched",
+		)
+}
+
+// rfiSearchablePrecondition says only what the guards above actually checked. Without a route
+// control neither control arm ran, and a clean that listed them anyway would be the stale-fact
+// failure: a precondition printed because it is usually true rather than because it was measured.
+func rfiSearchablePrecondition(haveControl bool) string {
+	if !haveControl {
+		return "THE BODY WAS SEARCHABLE: this class's own responses carried a body. NO UNPERTURBED " +
+			"ROUTE CONTROL RESOLVED, so whether this endpoint answers 5xx to everyone, or the same " +
+			"4xx to everyone, was NOT CHECKED on this slot"
+	}
+	return "THE BODY WAS SEARCHABLE: this class's own responses carried a body, the unperturbed " +
+		"route control did not itself answer 5xx, and it was not a 4xx that every probe reproduced, " +
+		"so the absence below is a measurement"
+}
+
+// rfiWhyTheBodyWasUnsearchable says, in THIS class's terms, why the body half of its clean could
+// not be read.
+//
+// IT DOES NOT REUSE pxBodySurfaceUnreadable'S SENTENCE, AND THE REASON IS ONE CLAUSE IN IT.
+// That sentence reads "EVERY ORACLE IN THIS CLASS READS THE RESPONSE BODY", which is true of
+// DESER and of ORM-LEAK and is FALSE HERE: this class's strongest oracle is a DNS or HTTP
+// callback to a collaborator and never touches the response at all. Shipping it would be a reason
+// string asserting something its witness did not measure, which is the fault this round exists to
+// stop, so the rule is taken from the mechanism and the sentence is written here.
+//
+// The last parameter is the mechanism's own wording, used ONLY when the mechanism refused for an
+// arm this function does not recognise: a later arm must not fall through to a clean, and it must
+// not be paraphrased by a function written before it existed either, so it is quoted and
+// attributed rather than restated.
+func rfiWhyTheBodyWasUnsearchable(honest []faOwnObs, control triage.Observation, haveControl bool,
+	mechanism string) string {
+
+	delivered, empty := 0, 0
+	for _, o := range honest {
+		if !o.Obs.Delivered() {
+			continue
+		}
+		delivered++
+		if len(o.Obs.Body) == 0 {
+			empty++
+		}
+	}
+	head := "no_fetch_conclusion (" + rfiServedFile + " was served and a callback proved it was " +
+		"fetched): THE OTHER HALF OF THIS CLASS'S CLEAN IS A SEARCH OF THE RESPONSE BODY for the " +
+		"bytes the collaborator served, and that half had nothing to work on. "
+	switch {
+	case delivered > 0 && empty == delivered:
+		return head + "no_body_to_read: all " + pxCount(delivered, "of this class's delivered probes") +
+			" came back carrying ZERO body bytes. Bytes cannot be present or absent in a response " +
+			"that has no body, so the inclusion was not disproven, it was not looked for. The fetch " +
+			"is still proven and is still worth SSRF's attention"
+	case haveControl && control.Status >= 500:
+		return head + "control_already_failing: the unperturbed route control carries none of our " +
+			"bytes and it answered " + strconv.Itoa(control.Status) + ", so the page this class " +
+			"searched is that failure's and not the application's output. A server that fetched our " +
+			"URL and then failed renders no included content either way, and an error page the benign " +
+			"request gets too cannot tell the two apart"
+	}
+	return head + "the shared body-surface precondition refused, and this class has no sentence of " +
+		"its own for the arm that fired, so the mechanism's own words follow verbatim: " + mechanism
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -654,15 +752,15 @@ func (c rfiClassifier) classifyInBand(ctx triage.ClassifyCtx, key triage.SlotKey
 			return one(triage.StateCannotDetermine,
 				"prelude_failed: the vector needs a token this run could not obtain."+ceiling,
 				"", triage.GradeUnrated, nil)
-		case ctx.Budget.Exhausted():
-			return one(triage.StateNotRun,
-				"probe_budget_exhausted: the cap was reached before this class sent anything."+ceiling,
-				"", triage.GradeUnrated, nil)
-		default:
-			return one(triage.StateNotPlanned,
-				"no in-band probe was derived for this slot and no reason above applies."+ceiling,
-				"", triage.GradeUnrated, nil)
 		}
+		// THE LAST TWO ARMS LIVE IN pxNothingSentTail AND THE ORDER IS THE WHOLE POINT. See
+		// pxbudgetarm.go. The in-band ladder is the same planner as the out-of-band one, asked
+		// with the budget set aside.
+		state, reason := pxNothingSentTail(ctx, len(rfiPlanLadder(rfiPlanInput{
+			Slot: ctx.Slot, RouteResolved: true, Round: 0, OOB: ctx.OOB,
+		})), "an in-band remote-include probe",
+			"no in-band probe was derived for this slot and no reason above applies")
+		return one(state, reason+ceiling, "", triage.GradeUnrated, nil)
 	}
 	for _, o := range own {
 		if o.Err != nil {

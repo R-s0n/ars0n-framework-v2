@@ -3,6 +3,8 @@ package utils
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,13 +44,17 @@ import (
 // swallowed on the way to the last response.
 
 const (
-	// The default page of captures. Deliberately generous: the point of the list is to scan it.
-	replayCaptureDefaultLimit = 500
-	replayCaptureMaxLimit     = 5000
 	// A ceiling on how many rows one search may pull back to build the tree from. The corpus is a
 	// few thousand rows on the largest target seen, so this is a guard against a pathological
 	// future, not a page size.
 	replayCaptureScanCeiling = 50000
+	// The list returns the whole matched set, not a page of it: the client builds the sitemap the
+	// operator navigates from these rows, and a tree that stopped at 500 hid most of a real crawl
+	// behind a limit nobody asked for. So the page limit IS the scan ceiling - everything the tree
+	// was built from comes back - and the only thing that truncates is exceeding that ceiling, which
+	// the query language is then how you narrow back under.
+	replayCaptureDefaultLimit = replayCaptureScanCeiling
+	replayCaptureMaxLimit     = replayCaptureScanCeiling
 	// Paths deeper than this collapse into their last kept ancestor. A sitemap is for orienting,
 	// and no operator navigates twenty levels of tree.
 	replaySitemapMaxDepth = 15
@@ -55,17 +62,69 @@ const (
 
 // ReplayCaptureSummary is one row of the capture list. Bodies are deliberately absent: the list is
 // for choosing, and the chosen capture is fetched whole by the /raw endpoint.
+//
+// RequestSig and ResponseSig are coarse variant fingerprints the client uses to collapse duplicate
+// captures of one endpoint (same method+host+path) into a single sitemap leaf while keeping the
+// genuinely distinct request/response variants as versions. They are grouping keys, never a security
+// boundary: see requestSig / responseSig for exactly what goes into them.
 type ReplayCaptureSummary struct {
-	ID         string    `json:"id"`
-	Method     string    `json:"method"`
-	URL        string    `json:"url"`
-	Path       string    `json:"path"`
-	Host       string    `json:"host"`
-	StatusCode int       `json:"status_code"`
-	MimeType   string    `json:"mime_type"`
-	Size       int       `json:"size"`
-	DurationMs int       `json:"duration_ms"`
-	Timestamp  time.Time `json:"timestamp"`
+	ID          string    `json:"id"`
+	Method      string    `json:"method"`
+	URL         string    `json:"url"`
+	Path        string    `json:"path"`
+	Host        string    `json:"host"`
+	StatusCode  int       `json:"status_code"`
+	MimeType    string    `json:"mime_type"`
+	Size        int       `json:"size"`
+	DurationMs  int       `json:"duration_ms"`
+	Timestamp   time.Time `json:"timestamp"`
+	RequestSig  string    `json:"request_sig"`
+	ResponseSig string    `json:"response_sig"`
+	// Source is a friendly label for HOW this capture was recorded, derived from capture_source and
+	// the sources array. It is what a variant's DEFAULT name is built from - "Active detection",
+	// "Manual crawl" - so the client and the MCP both show the same default before anyone renames it.
+	Source string `json:"source"`
+}
+
+// Volatile REQUEST parameters, masked by NAME, not by value shape. This is the crucial difference
+// from the response-body maskVolatile: that one masks any 10/13-digit run, UUID or ISO date wherever
+// it appears, which for a request would collapse account?id=1000000001 and ...002 into one variant -
+// destroying the exact adjacent-resource pair the repeater exists to surface. Here only the VALUES of
+// known session-noise parameters are masked; every resource identifier is preserved. Covers query
+// strings, x-www-form-urlencoded bodies (unquoted key=value) and JSON bodies (quoted "key":"value").
+var (
+	reReqTokenKV = regexp.MustCompile(`(?i)([?&]|^)(csrf(?:[_-]?token)?|xsrf(?:[_-]?token)?|_token|__requestverificationtoken|authenticity_token|csrfmiddlewaretoken|nonce|session(?:[_-]?id)?|sid|cachebust|cb)=[^&#\s]*`)
+	reReqTokenJS = regexp.MustCompile(`(?i)"(csrf(?:[_-]?token)?|xsrf(?:[_-]?token)?|_token|__requestverificationtoken|authenticity_token|csrfmiddlewaretoken|nonce|session(?:[_-]?id)?|sid)"(\s*:\s*)"[^"]*"`)
+)
+
+func maskRequestVolatile(s string) string {
+	s = reReqTokenKV.ReplaceAllString(s, `${1}${2}=_M_`)
+	s = reReqTokenJS.ReplaceAllString(s, `"${1}"${2}"_M_"`)
+	return s
+}
+
+// requestSig fingerprints what makes one request DIFFERENT from another to the same endpoint: the
+// method, the full URL (so a differing query string is a distinct variant even though the endpoint
+// path is the same), and the request body. Only KNOWN session-noise parameters (CSRF/XSRF tokens,
+// nonces, session ids, cache-bust params) are masked, by name, so the same logical request recorded
+// twice with a fresh token collapses to ONE variant while resource identifiers stay distinct. Headers
+// are deliberately NOT included: cookies and auth headers rotate every capture and are session noise.
+func requestSig(method, rawURL, body string) string {
+	masked := maskRequestVolatile(rawURL + "\x00" + body)
+	sum := sha256.Sum256([]byte(strings.ToUpper(strings.TrimSpace(method)) + "\x00" + masked))
+	return hex.EncodeToString(sum[:8])
+}
+
+// responseSig fingerprints what makes one response distinct: the status, the mime type, the stored
+// body digest (set for media/blob-backed bodies), the redirect Location (the whole signal of a 3xx,
+// which the body does not carry) and the body length. Two captures whose responses differ in any of
+// these are separate variants; identical ones collapse. Body length stands in for a full text-body
+// hash to avoid re-reading every response body during a list, so two different text bodies of exactly
+// equal length can collide - an acceptable coarseness for a UI grouping key.
+func responseSig(status int, mime, sha, location string, size int) string {
+	sum := sha256.Sum256([]byte(strconv.Itoa(status) + "\x00" + mime + "\x00" + sha + "\x00" +
+		strings.TrimSpace(location) + "\x00" + strconv.Itoa(size)))
+	return hex.EncodeToString(sum[:8])
 }
 
 // ReplaySitemapNode groups the matched captures by host and then by path segment. Count includes
@@ -164,7 +223,10 @@ func GetReplayRequestCaptures(w http.ResponseWriter, r *http.Request) {
 		SELECT id, COALESCE(method,''), COALESCE(url,''),
 		       %s AS host, %s AS path,
 		       COALESCE(status_code,0), COALESCE(mime_type,''),
-		       COALESCE(octet_length(response_body),0), COALESCE(duration_ms,0), timestamp
+		       COALESCE(octet_length(response_body),0), COALESCE(duration_ms,0), timestamp,
+		       COALESCE(left(post_data, 65536),''), COALESCE(response_body_sha256,''),
+		       COALESCE(NULLIF(response_headers->>'location',''), NULLIF(response_headers->>'Location',''), ''),
+		       COALESCE(capture_source,''), COALESCE(array_to_string(sources,','),'')
 		FROM manual_crawl_captures
 		WHERE scope_target_id = $1 AND (%s)
 		ORDER BY timestamp ASC
@@ -182,11 +244,16 @@ func GetReplayRequestCaptures(w http.ResponseWriter, r *http.Request) {
 	matches := []ReplayCaptureSummary{}
 	for rows.Next() {
 		var c ReplayCaptureSummary
+		var postData, respSha, respLoc, captureSource, sourcesCSV string
 		if err := rows.Scan(&c.ID, &c.Method, &c.URL, &c.Host, &c.Path, &c.StatusCode,
-			&c.MimeType, &c.Size, &c.DurationMs, &c.Timestamp); err != nil {
+			&c.MimeType, &c.Size, &c.DurationMs, &c.Timestamp, &postData, &respSha, &respLoc,
+			&captureSource, &sourcesCSV); err != nil {
 			log.Printf("[REPLAY-REQUEST] Failed to scan capture row: %v", err)
 			continue
 		}
+		c.RequestSig = requestSig(c.Method, c.URL, postData)
+		c.ResponseSig = responseSig(c.StatusCode, c.MimeType, respSha, respLoc, c.Size)
+		c.Source = replayVariantSourceLabel(captureSource, sourcesCSV)
 		matches = append(matches, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -203,12 +270,16 @@ func GetReplayRequestCaptures(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(replayCapturesResponse{
-		Total:     total,
-		Matched:   len(matches),
-		Returned:  len(page),
-		Limit:     limit,
-		Offset:    offset,
-		Truncated: len(page) < len(matches),
+		Total:    total,
+		Matched:  len(matches),
+		Returned: len(page),
+		Limit:    limit,
+		Offset:   offset,
+		// True only when the scan ceiling itself was hit, so there may be matching rows beyond what
+		// one search can pull back. The page is the whole matched set otherwise, so this is no longer
+		// an arbitrary "first 500" cap: it fires only when the corpus genuinely exceeds the ceiling,
+		// and narrowing the query is how you bring it back under.
+		Truncated: len(matches) >= replayCaptureScanCeiling,
 		Query:     query,
 		Tree:      buildReplaySitemap(matches),
 		Captures:  page,

@@ -3420,6 +3420,83 @@ type xssrDelivery struct {
 //
 // It takes the route control as an Observation and a bool rather than as a triage.Replay so that
 // it can be tested: a resolved Replay can only be built by the runner.
+//
+// ---------------------------------------------------------------------------------------------
+// WHY value_ignored KEEPS ITS cannot_determine, AND WHY NO SECOND ARM WAS BUILT FOR IT
+// ---------------------------------------------------------------------------------------------
+//
+// The other three reflection-gated classes in this pass each got a non-reflective arm, because
+// each of them was refusing before it had tried: SSTI never ran a boolean differential, ELI never
+// ran a parse differential, TRAVERSAL never ran the blind three-way because a false uniform block
+// cut its ladder off after round 0. This class is NOT in that position and inventing an arm for it
+// would be manufacturing confidence, which is the one thing the brief forbids.
+//
+// THE MEASUREMENT. value_ignored is reached only when the census response AND the decode probe are
+// both identical to the route control in status, in length and in every body byte. That is not a
+// silence, it is a positive observation: this response is a constant function of this slot. A
+// reflected-XSS finding requires the value to appear in a document the browser parses, and a
+// response the value cannot move contains no such appearance. So for THIS RESPONSE the elimination
+// is complete and a boolean differential would have nothing left to separate: both members of any
+// pair return the same bytes by construction, which is what the branch already established.
+//
+// WHAT AN ARM WOULD HAVE TO BE, AND WHY EACH CANDIDATE IS REFUSED.
+//
+//	a boolean or length differential  -  there is nothing to difference. The precondition of this
+//	    branch is that every probe already produced the identical response.
+//	an error-signature arm  -  an error signature is a body differential, and the body does not
+//	    move. It would be the same request buying the same nothing.
+//	a timing arm  -  forbidden as a primary oracle, and correctly.
+//	a second-request arm  -  fetching the value back from another route is STORED XSS, class 12's
+//	    subject and not this one's. A class that claimed it here would be reporting another class's
+//	    finding under its own name.
+//
+// SO THE HONEST MOVE WAS TO FIX WHAT THE BRANCH WAS SAYING, NOT TO ADD A REQUEST. Two changes, and
+// they pull in opposite directions on purpose. The envelope is now checked before the sentence is
+// allowed, because the body key ignores headers and the class was capable of asserting "nothing
+// observable depends on this value" about a marker sitting in a Content-Disposition filename. And
+// the verdict stays cannot_determine, because the one thing byte-identity genuinely cannot
+// distinguish is an application that read the value and dropped it from a cache or a static
+// handler that answered before the origin ever saw the request. Those are the same bytes and
+// opposite facts, the second stops being true the moment the cache key changes, and a green tick
+// on the second is a false assurance this class has no way to earn.
+//
+// NAMED GAP: this class's OracleCases declare no route for /clean/inert, the canary oracle's
+// "discards the parameter entirely" control, so the branch below has never been exercised end to
+// end against a real endpoint of that shape. It is measured here only against the static index,
+// which reaches it for the same reason but was not built to.
+// xssrMarkerInEnvelope looks for this run's own census marker in the RESPONSE HEADERS, which is
+// the half of the response xssrBodyKey cannot see.
+//
+// It returns the header VALUE it matched and the header NAME, in that order, or two empty strings.
+// It searches every header, duplicates included, because a value echoed into the second of two
+// Set-Cookie lines is echoed just as much as one in the first, and it searches case-insensitively
+// through xssrFindMarker for the same reason the body search does: an application that upper-cases
+// a filename has still reflected the value.
+//
+// IT DELIBERATELY DOES NOT DECIDE ANYTHING. A marker in a header is not a reflected-XSS finding
+// and this function is not allowed to imply one; its only job is to stop the value_ignored
+// sentence being said about a slot whose value demonstrably came back.
+//
+// IT TAKES THE MARKER RATHER THAN READING Observation.Marker. The class's own run items carry the
+// marker they were minted with, and Observation.Marker is filled by the send path: a fixture, and
+// an observation rebuilt from a store row, can have one and not the other. Reading the field would
+// make this silently return "no reflection" on exactly the paths a test can construct.
+func xssrMarkerInEnvelope(o triage.Observation, marker triage.Marker) (value, name string) {
+	m := string(marker)
+	if m == "" {
+		m = string(o.Marker)
+	}
+	if m == "" {
+		return "", ""
+	}
+	for _, h := range o.RespHeaders {
+		if len(xssrFindMarker([]byte(h[1]), m)) > 0 {
+			return h[1], h[0]
+		}
+	}
+	return "", ""
+}
+
 func xssrDeliveryEvidence(route triage.Observation, routeOK bool, slot triage.Slot, run xssrRun) xssrDelivery {
 	d := xssrDelivery{Depth: -1}
 	dec, hasDec := run.item(xssrPDec)
@@ -3432,9 +3509,30 @@ func xssrDeliveryEvidence(route triage.Observation, routeOK bool, slot triage.Sl
 		sameAsRoute := xssrBodyKey(cen.Obs) == xssrBodyKey(route)
 		decSameAsRoute := hasDec && dec.Obs.Delivered() && xssrBodyKey(dec.Obs) == xssrBodyKey(route)
 		if sameAsRoute && (!hasDec || decSameAsRoute) {
+			// THE ENVELOPE HAS TO BE LOOKED AT BEFORE THIS SENTENCE MAY BE SAID. Every comparison
+			// above is xssrBodyKey, which is status plus body and NOTHING ELSE, so a value that
+			// comes back in a response header leaves the body key untouched and the class used to
+			// announce "nothing observable depends on this slot's value" about a slot it had just
+			// watched reflect. Content-Disposition filenames, Location, Set-Cookie values and
+			// X-Debug-style echoes are all real sinks somebody owns, and none of them is in a
+			// body. Saying nothing depends on the value while the marker sits in a header is not a
+			// weaker verdict, it is a false statement in the one field the operator reads.
+			if hdr, at := xssrMarkerInEnvelope(cen.Obs, cen.Marker); at != "" {
+				return xssrDelivery{Why: "value_reaches_the_envelope: this class's census body is byte-identical to " +
+					"the route control, but this run's own marker came back in the " + at + " header (" + hdr +
+					"). The value is therefore read, and it lands somewhere this class does not model: a reflected " +
+					"XSS verdict needs a rendered document, so this is not clean, and the header sink belongs to " +
+					"the protocol-effect classes (CRLF for a header this value created, REDIRECT for a Location " +
+					"whose authority it reached)"}
+			}
 			return xssrDelivery{Why: "value_ignored: this class's census response is byte-identical to the route " +
-				"control, so nothing observable depends on this slot's value. An absence measured there is a fact " +
-				"about the endpoint and not about the application"}
+				"control in status, length and body, and this run's own marker is absent from every response " +
+				"header too, so nothing observable in this response depends on this slot's value. THAT IS AN " +
+				"ELIMINATION FOR THIS RESPONSE AND IT IS STILL NOT A CLEAN, for a reason this class cannot " +
+				"measure away: identical bytes cannot tell an application that received the value and discarded " +
+				"it from a cache or a static handler that answered before the origin ever saw it, and those two " +
+				"have opposite consequences the moment the cache key changes. See the note on " +
+				"xssrDeliveryEvidence for why no arm was invented here"}
 		}
 		if !sameAsRoute {
 			d.Delivered, d.Depth, d.Evidence = true, 0, "value_influences_response"

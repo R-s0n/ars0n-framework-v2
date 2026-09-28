@@ -515,9 +515,12 @@ func TestTokenNameClassificationCoversTheVariantsAndRejectsTheLookalikes(t *test
 }
 
 func TestDiscoveryFindsTokensInTheQueryTheHeadersTheCookiesAndTheBody(t *testing.T) {
+	// The query state is on an OAuth CALLBACK, which is the one leg where a state is a genuine
+	// hard requirement: `code` alongside it is what says so. A `state` with no OAuth parameter
+	// beside it is ordinary application data and has its own test.
 	r := PreludeRequest{
 		Method: http.MethodPost,
-		URL:    "https://127.0.0.1/callback?state=abc123&page=2",
+		URL:    "https://127.0.0.1/callback?code=auth-code-1&state=abc123&page=2",
 		Header: http.Header{
 			"X-Csrf-Token": {"hdr-token"},
 			"Cookie":       {"sid=1; XSRF-TOKEN=cookie-token"},
@@ -716,5 +719,477 @@ func TestTheBlockedPreludeReasonCodeIsNotDoubled(t *testing.T) {
 		if err := v.Validate(); err != nil {
 			t.Errorf("state %q produced an invalid verdict: %v", c.state, err)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE 821 VERDICTS: A CLIENT-MINTED OAUTH `state` IS NOT A TOKEN THE PRELUDE MUST FETCH
+// ---------------------------------------------------------------------------------------------
+//
+// Measured on live run a218419a against the staging estate. Every prelude refusal in the whole
+// run, 821 verdicts across 4 slot kinds on 5 vectors, was the word `state`, and the estate had no
+// CSRF token anywhere. The two request shapes are reproduced verbatim below, because the point of
+// these tests is that THESE requests must be probed, not that some request like them might be.
+
+// theMeasuredAuthorizationGET is vector 28115525, byte for byte in the parts that matter.
+func theMeasuredAuthorizationGET() PreludeRequest {
+	return PreludeRequest{
+		Method: http.MethodGet,
+		URL: "https://app.example.test/oauth/authorize?response_type=code&client_id=46d7ea1470836cbfa697b987a17249ed" +
+			"&redirect_uri=https%3A%2F%2Fexample.com%2Fbugbounty-test%2Fcallback&scope=account%3Awrite%20trading%20data&state=bbtest123",
+		Header: http.Header{"Authorization": {"Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"}},
+		Media:  triage.BodyNone,
+	}
+}
+
+// theMeasuredOAuthClientPOST is vector 3c46f26d / 12303d54 / 64f1e168, the JSON body verbatim.
+func theMeasuredOAuthClientPOST() PreludeRequest {
+	return PreludeRequest{
+		Method: http.MethodPost,
+		URL:    "https://app.example.test/api/v1/oauth/client",
+		Header: http.Header{
+			"Authorization": {"Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"},
+			"Content-Type":  {"application/json"},
+			"Referer":       {"https://app.example.test/oauth/authorize?response_type=code&client_id=46d7ea1470836cbfa697b987a17249ed"},
+		},
+		Body:  []byte(`{"response_type":"code","client_id":"46d7ea1470836cbfa697b987a17249ed","redirect_uri":"https://example.com/bugbounty-test/callback","scope":"account:write trading data","state":"bbtest123"}`),
+		Media: triage.BodyJSON,
+	}
+}
+
+func TestTheOAuthStateOnAnAuthorizationRequestIsNotAHardTokenRequirement(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  PreludeRequest
+	}{
+		{"the authorization GET", theMeasuredAuthorizationGET()},
+		{"the oauth client POST", theMeasuredOAuthClientPOST()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := AssessPreludeRequirement(tc.req)
+			if q.Role != string(oauthRoleAuthzRequest) {
+				t.Fatalf("role %q, want %q; response_type and client_id are in this request",
+					q.Role, oauthRoleAuthzRequest)
+			}
+			if len(q.Slots) != 1 || q.Slots[0].Name != "state" {
+				t.Fatalf("slots %+v, want exactly the state field", q.Slots)
+			}
+			if !q.Slots[0].Soft {
+				t.Error("the state on an OAuth authorization request was demanded as a hard token. " +
+					"The client mints that value and the server never issues it, so no fetch can ever " +
+					"produce a fresh one and every slot on the vector is thrown away for nothing: " +
+					"821 verdicts on run a218419a")
+			}
+			if q.Hard() {
+				t.Error("the requirement reads as hard, so the runner would still block every probe")
+			}
+			if !preludeBasisHas(q.Basis, PreludeBasisOAuthStateClientMinted) {
+				t.Errorf("the basis does not name the client-minted reason, got %v", q.Basis)
+			}
+			if !preludeBasisHas(q.Basis, PreludeBasisBearerAuthority) {
+				t.Errorf("the basis does not name the bearer authority, got %v", q.Basis)
+			}
+		})
+	}
+}
+
+func preludeBasisHas(basis []string, want string) bool {
+	for _, b := range basis {
+		if b == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTheMeasuredVectorIsProbedRatherThanBlocked is the end to end version: the whole prelude,
+// against a JSON API shaped like the measured one, and the answer must be a MEASURED
+// not-required that lets the probe through with its captured bytes intact.
+func TestTheMeasuredVectorIsProbedRatherThanBlocked(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.Path)
+		// A JSON REST API. A GET of the POST route is a 405, the root is the SPA shell with no
+		// csrf machinery on it at all, and nothing anywhere publishes a "state".
+		switch r.URL.Path {
+		case "/api/v1/oauth/client":
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			fmt.Fprint(w, `{"error":"method not allowed"}`)
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<html><head><title>app</title></head><body><div id="root"></div></body></html>`)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"ok":true,"state":"active"}`)
+		}
+	}))
+	defer srv.Close()
+
+	captured := theMeasuredOAuthClientPOST()
+	captured.URL = srv.URL + "/api/v1/oauth/client"
+	captured.Header.Set("Referer", srv.URL+"/oauth/authorize?response_type=code&client_id=x")
+
+	q := AssessPreludeRequirement(captured)
+	res := FetchPreludeTokens(context.Background(), srv.Client(), PreludeSpec{
+		URL:      captured.URL,
+		Header:   captured.Header,
+		Required: q.Slots,
+		Basis:    q.Basis,
+	})
+
+	if res.State != triage.PreludeTokenNotRequired {
+		t.Fatalf("state %q with reason %q, want token_not_required: the server mints nothing "+
+			"called state, so the captured value is the client's own and replaying it is correct",
+			res.State, res.Reason)
+	}
+	if res.Blocked() {
+		t.Fatal("the prelude blocked the probe, which is how 821 verdicts became cannot_determine")
+	}
+	if len(res.SoftUnserved) != 1 || res.SoftUnserved[0] != "body:state" {
+		t.Errorf("SoftUnserved is %v, want [body:state]; an unserved soft slot must be NAMED, not "+
+			"silently dropped, or the absence is a fact again", res.SoftUnserved)
+	}
+	if !strings.Contains(res.Reason, "measured") {
+		t.Errorf("the reason must say the answer was measured rather than assumed, got %q", res.Reason)
+	}
+	if !preludeBasisHas(res.Basis, PreludeBasisOAuthStateClientMinted) {
+		t.Errorf("the not-required answer arrived without its positive evidence, basis %v", res.Basis)
+	}
+
+	// THE SERVER WAS ACTUALLY ASKED. A not-required that never sent a request would be an
+	// assumption wearing the word "measured".
+	if len(got) == 0 {
+		t.Fatal("no prelude request was sent, so nothing was measured")
+	}
+	if !preludeBasisHas(got, "/api/v1/oauth/client") {
+		t.Errorf("the vector's own url was not tried first, paths=%v", got)
+	}
+
+	// AND THE PROBE GOES OUT WITH THE CAPTURED BYTES UNTOUCHED.
+	req, _ := http.NewRequest(http.MethodPost, captured.URL, nil)
+	out, err := res.ApplyTo(req, q.Slots, captured.Body, triage.BodyJSON)
+	if err != nil {
+		t.Fatalf("ApplyTo refused a probe whose only token was an unserved soft slot: %v", err)
+	}
+	if string(out) != string(captured.Body) {
+		t.Errorf("the body was rewritten:\n got %s\nwant %s", out, captured.Body)
+	}
+}
+
+func TestAnOAuthCallbackStateStaysHardAndFailsHonestly(t *testing.T) {
+	// The leg the original comment was written for, and it is still right there: the
+	// authorization server is RETURNING to the client, so this state is one a strict client
+	// checks and a replayed one tests that check rather than the slot. No GET can mint a fresh
+	// one, so the honest unobtainable is the correct answer and must survive this change.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><body>signed in</body></html>`)
+	}))
+	defer srv.Close()
+
+	callback := PreludeRequest{
+		Method: http.MethodGet,
+		URL:    srv.URL + "/auth/cb?code=abc123&state=nonce-9f2",
+		Header: http.Header{},
+		Media:  triage.BodyNone,
+	}
+	q := AssessPreludeRequirement(callback)
+	if q.Role != string(oauthRoleCallback) {
+		t.Fatalf("role %q, want %q; this request carries code alongside state", q.Role, oauthRoleCallback)
+	}
+	if len(q.Slots) != 1 || q.Slots[0].Soft {
+		t.Fatalf("slots %+v; a callback state must stay a hard requirement", q.Slots)
+	}
+
+	res := FetchPreludeTokens(context.Background(), srv.Client(), PreludeSpec{
+		URL: callback.URL, Required: q.Slots, Basis: q.Basis,
+	})
+	if res.State != triage.PreludeTokenUnobtainable || !res.Blocked() {
+		t.Fatalf("state %q, want token_required_unobtainable: softening this leg would send every "+
+			"probe with a burnt state and record the slot examined", res.State)
+	}
+	if !strings.Contains(res.Reason, "state") {
+		t.Errorf("the reason must name the field, got %q", res.Reason)
+	}
+
+	// AND IT IS NOT SATISFIED BY APPLICATION DATA. Measured against the pre-change code: a
+	// response of {"ok":true,"state":"active"} satisfied this slot, the prelude said
+	// token_obtained, and every probe would have gone out with the state rewritten to "active".
+	// A corrupted request is worse than a blocked one, because the differential believes it.
+	data := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true,"state":"active"}`)
+	}))
+	defer data.Close()
+	hard := []TokenSlot{{Name: "state", Kind: TokenKindOAuthState, Where: triage.KindQuery, Observed: "nonce-9f2"}}
+	res = FetchPreludeTokens(context.Background(), data.Client(), PreludeSpec{
+		URL: data.URL + "/auth/cb?code=abc123&state=nonce-9f2", Required: hard,
+	})
+	if v, ok := res.Tokens["state"]; ok {
+		t.Errorf("the prelude adopted %q out of a JSON response field as a fresh OAuth state", v)
+	}
+	if res.State != triage.PreludeTokenUnobtainable {
+		t.Errorf("state %q reason %q, want token_required_unobtainable", res.State, res.Reason)
+	}
+}
+
+func TestAnOrdinaryStateFieldIsNotATokenAtAll(t *testing.T) {
+	// No OAuth parameter anywhere, so `state` is application data: an order state, a US state, a
+	// feature flag. Demanding a token for it blocks the vector for a field the server does not
+	// even treat as security material.
+	for _, tc := range []struct {
+		name string
+		req  PreludeRequest
+	}{
+		{"a status field", PreludeRequest{
+			Method: http.MethodPatch, URL: "https://api.example.test/v1/orders/9",
+			Header: http.Header{"Content-Type": {"application/json"}},
+			Body:   []byte(`{"state":"shipped","note":"ok"}`), Media: triage.BodyJSON,
+		}},
+		{"a postal address field", PreludeRequest{
+			Method: http.MethodPost, URL: "https://api.example.test/v1/addresses",
+			Header: http.Header{"Content-Type": {"application/x-www-form-urlencoded"}},
+			Body:   []byte(`city=Austin&state=TX&zip=78701`), Media: triage.BodyForm,
+		}},
+		{"a query filter", PreludeRequest{
+			Method: http.MethodGet, URL: "https://api.example.test/v1/tickets?state=open&page=2",
+			Header: http.Header{}, Media: triage.BodyNone,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := AssessPreludeRequirement(tc.req)
+			if q.Role != string(oauthRoleNone) {
+				t.Errorf("role %q, want %q", q.Role, oauthRoleNone)
+			}
+			if q.Hard() {
+				t.Fatalf("an ordinary field called state was demanded as a hard token: %+v", q.Slots)
+			}
+			for _, s := range q.Slots {
+				if !s.Soft {
+					t.Errorf("slot %s:%s is hard", s.Where, s.Name)
+				}
+			}
+		})
+	}
+}
+
+func TestARealCsrfTokenIsStillHardHoweverTheRequestIsShaped(t *testing.T) {
+	// THE GUARD ON THE SOFTENING. csrf, xsrf, authenticity_token, _token and the verification
+	// token name one mechanism each and a server-issued one, so none of them may be softened by
+	// anything about the surrounding request. An OAuth authorization request that ALSO carries a
+	// real csrf field must still block when the token cannot be refreshed.
+	req := PreludeRequest{
+		Method: http.MethodPost,
+		URL:    "https://app.example.test/oauth/authorize",
+		Header: http.Header{
+			"Authorization": {"Bearer x.y.z"},
+			"Content-Type":  {"application/x-www-form-urlencoded"},
+		},
+		Body:  []byte(`response_type=code&client_id=abc&state=nonce&authenticity_token=stale`),
+		Media: triage.BodyForm,
+	}
+	q := AssessPreludeRequirement(req)
+	if !q.Hard() {
+		t.Fatalf("a real authenticity_token was softened by the OAuth context: %+v", q.Slots)
+	}
+	var hard, soft int
+	for _, s := range q.Slots {
+		if s.Soft {
+			soft++
+		} else {
+			hard++
+		}
+	}
+	if hard != 1 || soft != 1 {
+		t.Errorf("got %d hard and %d soft slots, want the authenticity_token hard and the state soft: %+v",
+			hard, soft, q.Slots)
+	}
+
+	// And the whole fetch still refuses when the token cannot be found, bearer header or not.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><body>nothing here</body></html>`)
+	}))
+	defer srv.Close()
+	req.URL = srv.URL + "/oauth/authorize"
+	q = AssessPreludeRequirement(req)
+	res := FetchPreludeTokens(context.Background(), srv.Client(), PreludeSpec{
+		URL: req.URL, Header: req.Header, Required: q.Slots, Basis: q.Basis,
+	})
+	if res.State != triage.PreludeTokenUnobtainable || !res.Blocked() {
+		t.Fatalf("state %q, want token_required_unobtainable; the bearer basis must never override "+
+			"a token the application actually demands", res.State)
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// LOOKING WHERE THE TOKEN ACTUALLY LIVES
+// ---------------------------------------------------------------------------------------------
+
+func TestThePreludeLooksBeyondTheVectorsOwnUrlForTheMint(t *testing.T) {
+	// A JSON API that DOES use a CSRF token. The vector is POST /api/v1/widgets; a GET of that
+	// same url is a 405, which is the only url the prelude used to try, so the token was
+	// unobtainable and the vector was thrown away. The token is published where an API actually
+	// publishes one: a meta tag on the SPA shell.
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/" {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<html><head><meta name="csrf-token" content="shell-minted-7f2"></head></html>`)
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		fmt.Fprint(w, `{"error":"method not allowed"}`)
+	}))
+	defer srv.Close()
+
+	slots := []TokenSlot{{Name: "X-CSRF-Token", Kind: TokenKindSynchronizer, Where: triage.KindHeader, Observed: "stale"}}
+	res := FetchPreludeTokens(context.Background(), srv.Client(), PreludeSpec{
+		URL:      srv.URL + "/api/v1/widgets",
+		Required: slots,
+	})
+
+	if res.State != triage.PreludeTokenObtained {
+		t.Fatalf("state %q reason %q; the token is on the shell at / and a single-url prelude can "+
+			"never reach it, so a real token surface reads as unobtainable forever", res.State, res.Reason)
+	}
+	if res.Tokens["X-CSRF-Token"] != "shell-minted-7f2" {
+		t.Errorf("tokens %v, want the shell-minted value", res.Tokens)
+	}
+	if res.SourceURL != srv.URL+"/" {
+		t.Errorf("SourceURL is %q, want the shell; the result must say where the token came from", res.SourceURL)
+	}
+	if len(paths) < 2 || paths[0] != "/api/v1/widgets" {
+		t.Errorf("paths tried %v; the vector's own url must be tried first and the walk must only "+
+			"run when it fails", paths)
+	}
+}
+
+func TestTheCandidateWalkNeverLeavesTheOrigin(t *testing.T) {
+	spec := PreludeSpec{
+		URL: "https://app.example.test/api/v1/deep/nested/thing",
+		Header: http.Header{
+			// A cross-origin Referer, which is exactly what a capture from an OAuth redirect
+			// carries. Fetching it would send the session cookie to somebody else's host.
+			"Referer": {"https://evil.example.net/attacker-page"},
+		},
+		Fallbacks: []string{"http://app.example.test/insecure", "https://other.example.test/csrf"},
+	}
+	for _, got := range preludeCandidateURLs(spec) {
+		u, err := url.Parse(got)
+		if err != nil {
+			t.Fatalf("candidate %q does not parse: %v", got, err)
+		}
+		if u.Scheme != "https" || u.Host != "app.example.test" {
+			t.Errorf("candidate %q leaves the origin; a prelude that follows a capture's Referer "+
+				"off-origin hands the session cookie to a third party", got)
+		}
+	}
+	if n := len(preludeCandidateURLs(spec)); n > preludeMaxAttempts {
+		t.Errorf("the walk produced %d candidates, cap is %d", n, preludeMaxAttempts)
+	}
+}
+
+func TestASoftSlotTakesAValueOnlyFromAPlaceAServerPublishesTokens(t *testing.T) {
+	// The injection hazard the soft mechanism creates and closes. A REST response routinely
+	// contains {"state":"active"}; that is data the API returned, not a token it published for
+	// the client to hand back. Writing it into the probe would corrupt the request and the
+	// corruption would look like a finding.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":7,"state":"active"}`)
+	}))
+	defer srv.Close()
+
+	soft := []TokenSlot{{Name: "state", Kind: TokenKindOAuthState, Where: triage.KindBody, FieldPath: "/state", Observed: "bbtest123", Soft: true}}
+	res := FetchPreludeTokens(context.Background(), srv.Client(), PreludeSpec{URL: srv.URL + "/v1/x", Required: soft})
+	if v, ok := res.Tokens["state"]; ok {
+		t.Errorf("the prelude adopted %q out of a plain JSON response field as though it were a "+
+			"minted token", v)
+	}
+	if res.State != triage.PreludeTokenNotRequired {
+		t.Errorf("state %q reason %q, want token_not_required", res.State, res.Reason)
+	}
+
+	// But a value the server genuinely publishes IS taken, and is then suppressed like any other
+	// fresh token, because the mechanism has to work where it is real.
+	mint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><input type="hidden" name="state" value="server-minted-441"></html>`)
+	}))
+	defer mint.Close()
+	soft[0].Where = triage.KindBody
+	res = FetchPreludeTokens(context.Background(), mint.Client(), PreludeSpec{URL: mint.URL + "/form", Required: soft})
+	if res.State != triage.PreludeTokenObtained {
+		t.Fatalf("state %q reason %q; a soft slot the server DOES publish must be refreshed",
+			res.State, res.Reason)
+	}
+	if res.Tokens["state"] != "server-minted-441" {
+		t.Errorf("tokens %v, want the hidden input's value", res.Tokens)
+	}
+}
+
+func TestANotRequiredAnswerNamesTheMechanismRatherThanShrugging(t *testing.T) {
+	// A plain bearer-authenticated JSON call with no token-shaped field anywhere. The old answer
+	// was the string "no token-shaped field in the captured request", which is an absence. The
+	// answer has to name why a CSRF token is unnecessary here, or the reader cannot tell a
+	// measured not-required from a discovery pass that simply did not look.
+	req := PreludeRequest{
+		Method: http.MethodDelete,
+		URL:    "https://api.example.test/v1/keys/9",
+		Header: http.Header{
+			"Authorization": {"Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"},
+			"Content-Type":  {"application/json"},
+		},
+		Body:  []byte(`{"confirm":true}`),
+		Media: triage.BodyJSON,
+	}
+	q := AssessPreludeRequirement(req)
+	if len(q.Slots) != 0 {
+		t.Fatalf("slots %+v, want none", q.Slots)
+	}
+	for _, want := range []string{
+		PreludeBasisBearerAuthority,
+		PreludeBasisPreflightedMethod,
+		PreludeBasisPreflightedMedia,
+		PreludeBasisNoTokenField,
+	} {
+		if !preludeBasisHas(q.Basis, want) {
+			t.Errorf("the basis omits %q, got %v", want, q.Basis)
+		}
+	}
+	if q.Basis[0] != PreludeBasisBearerAuthority {
+		t.Errorf("the basis leads with %q; the strongest mechanism must come first", q.Basis[0])
+	}
+
+	res := FetchPreludeTokens(context.Background(), http.DefaultClient, PreludeSpec{
+		URL: req.URL, Required: q.Slots, Basis: q.Basis,
+	})
+	if res.State != triage.PreludeTokenNotRequired {
+		t.Fatalf("state %q, want token_not_required", res.State)
+	}
+	if !strings.Contains(res.Reason, "Authorization header") {
+		t.Errorf("the not-required reason does not name a mechanism, got %q", res.Reason)
+	}
+}
+
+func TestAViewstateIsDecidedWithoutSpendingARequest(t *testing.T) {
+	// A viewstate is a MAC over the whole form and the probe is about to mutate a field it
+	// covers, so no fetch can help. Sending one anyway also meant that a viewstate form whose
+	// fetch happened to fail reported token_required_unobtainable, which is a different answer
+	// to the operator about a different problem.
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	slots := []TokenSlot{{Name: "__VIEWSTATE", Kind: TokenKindViewState, Where: triage.KindBody, Observed: "old"}}
+	res := FetchPreludeTokens(context.Background(), srv.Client(), PreludeSpec{URL: srv.URL + "/page", Required: slots})
+	if res.State != triage.PreludeViewstateBound {
+		t.Fatalf("state %q, want viewstate_bound even though every fetch would have failed", res.State)
+	}
+	if hits != 0 {
+		t.Errorf("the prelude sent %d requests for a token no response can fix", hits)
 	}
 }

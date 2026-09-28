@@ -161,14 +161,31 @@ func TestVaryCookieSuppressesTheCacheFinding(t *testing.T) {
 
 // ---- secrets: both gates have to hold ----------------------------------------------------------
 
-func TestKnownProviderSecretIsFoundAndRedacted(t *testing.T) {
+// A key found leaked on the target IS the finding. Evidence carries it whole: a masked key cannot
+// be checked against the provider, cannot be deduplicated against the same key seen elsewhere, and
+// cannot be pasted into a report as proof that the leak is real.
+func TestKnownProviderSecretIsFoundAndServedWhole(t *testing.T) {
 	in := SignalInput{Body: `const key = "AKIAIOSFODNN7EXAMPLE";`}
 	s, ok := sigKinds(analyzeSecrets(in))["secret_aws_access_key"]
 	if !ok {
 		t.Fatal("an AWS key format must be recognised")
 	}
-	if strings.Contains(s.Evidence, "IOSFODNN7EXAM") {
-		t.Fatalf("the value must be redacted before storage, got %q", s.Evidence)
+	if s.Evidence != "AKIAIOSFODNN7EXAMPLE" {
+		t.Fatalf("the key must be served exactly as it was found, got %q", s.Evidence)
+	}
+}
+
+func TestGenericSecretEvidenceCarriesTheValue(t *testing.T) {
+	in := SignalInput{Body: `{"api_key": "f4Kx9vQ2mZpL7wR3nB8tYcJ6hD1sA5gE"}`}
+	s, ok := sigKinds(analyzeSecrets(in))["secret_generic_assignment"]
+	if !ok {
+		t.Fatal("a random-looking value assigned to api_key is worth reporting")
+	}
+	if !strings.Contains(s.Evidence, "f4Kx9vQ2mZpL7wR3nB8tYcJ6hD1sA5gE") {
+		t.Fatalf("the value is the finding and must appear in full, got %q", s.Evidence)
+	}
+	if !strings.Contains(s.Evidence, "api_key") {
+		t.Fatalf("the name it was assigned to must stay alongside it, got %q", s.Evidence)
 	}
 }
 

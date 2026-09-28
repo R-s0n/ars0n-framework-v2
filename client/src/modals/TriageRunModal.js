@@ -1,31 +1,33 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Modal, Button, Form, Spinner, Alert } from 'react-bootstrap';
 
-// WHAT THE TRIAGE PASS ACTUALLY ANSWERED, AND WHAT IT DID NOT.
+// HOW MUCH OF THE QUESTION GOT ASKED.
 //
-// Pointers shows the POSITIVES. This screen shows the other half, which is larger and matters
-// more. On the measured exam run (ef8c13ab, 32 vectors, 320 pairs, 157 seconds) the classifiers
-// wrote 800 verdict rows: 28 positive, 96 clean, and 676 that are NOT KNOWN. Every one of the 676
-// carries a named reason, and the names are the point: decode_depth_unknown, baseline_unstable,
-// no_oob_endpoint and not_reached are four different jobs for the operator, and "676 unknown" is
-// none of them.
+// WHAT THE FEATURE IS, because the first draft of this screen never said. Triage is the cheap
+// pass that decides where to point the expensive scanners. Every place a payload can go, paired
+// with one attack class, is one question, and a real target has tens of thousands of them. sqlmap
+// answers ONE in about 1,690 requests and 28 minutes, so they cannot be answered that way. Triage
+// answers each with a handful of probes and sorts them: point sqlmap here, point dalfox there,
+// ignore these. Pointers shows the answers. THIS screen shows how much of the question actually
+// got asked.
 //
-// THE RULE THIS SCREEN IS BUILT AROUND: NOT KNOWING IS NOT CLEAN. A clean on a live vulnerability
-// is the worst outcome this system can produce, because the operator then does not point the
-// scanner there and the bug is never found. cannot_determine is always an acceptable answer; a
-// wrong clean never is. So:
+// WHY THE SCREEN EXISTS AT ALL. The unasked majority is the dangerous half. A clean on a live
+// vulnerability is the worst output this system can produce, because the operator then does not
+// point a scanner there and the bug is never found. So NOT KNOWING IS NOT CLEAN, at every layer:
 //
-//   - The banner comes FIRST and states the run's certification, not its findings.
+//   - A pair holding one clean arm beside one arm that could not answer is NOT a clean pair, and
+//     rollUpPairs is the single place that decides it.
 //   - Every class that ran is listed, including the ones that found nothing, because a list of
 //     only the classes that fired reads as "the rest is fine".
-//   - A clean is rendered in the quietest colour on the screen. The unknowns get the accent.
-//   - A pair holding one clean arm and one arm that could not answer is NOT a clean pair, and
-//     rollUpPairs is the single place that decides it.
+//   - renders_as_clean is the server's answer (TriageRunCoverage.RendersAsClean,
+//     server/utils/triageStore.go) and this file never computes a clean the server withheld.
+//     blockingReasons mirrors that predicate clause for clause so the screen can say WHY, and it
+//     can only ever ADD reasons not to trust a run.
 //
-// NOTHING IS RE-DERIVED UPWARDS. renders_as_clean is the server's answer
-// (TriageRunCoverage.RendersAsClean, server/utils/triageStore.go) and this file never computes a
-// clean the server withheld. blockingReasons below mirrors that predicate clause for clause so the
-// screen can say WHY, but it can only ever ADD reasons not to trust a run.
+// WHERE THAT RULE LIVES ON THE SCREEN, and this is the part the first draft got wrong. Beside the
+// number it qualifies, in one line. Not as a preamble, and not as five clauses read before the
+// operator has been told what they are looking at. The operator who commissioned this feature
+// opened it and asked what it does. A rule nobody reads to the end protects nobody.
 
 const ACCENT = '#dc3545';     // something fired, or something is wrong with the run itself
 const UNKNOWN = '#fd7e14';    // not known. The colour the majority of this screen wears.
@@ -146,11 +148,13 @@ export const reasonText = (row) => {
 // when its arms disagree, and NOSQL emits six.
 const OUTCOME_RANK = { fired: 0, not_known: 1, not_applicable: 2, clean: 3 };
 
+// The words the operator reads. "not known" and "clean" are the schema's words; these are the
+// ones that say what to DO with the pair.
 export const OUTCOME_LABEL = {
-  fired: 'fired',
-  not_known: 'not known',
-  not_applicable: 'cannot apply',
-  clean: 'clean',
+  fired: 'worth scanning',
+  not_known: 'no answer',
+  not_applicable: 'cannot apply here',
+  clean: 'ruled out',
 };
 
 export const OUTCOME_TONE = {
@@ -316,47 +320,128 @@ export const blockingReasons = (coverage) => {
   return out;
 };
 
-// certificateLine is the banner, and it is the first thing on the screen on every state.
+// ------------------------------------------------------------------------------------------------
+// THE SCREEN, IN THE OPERATOR'S UNITS
+// ------------------------------------------------------------------------------------------------
+
+// fmt groups thousands by hand rather than through toLocaleString, so 34500 reads as 34,500 in
+// every environment this client runs in. On a screen whose subject is scale, 34500 is a number
+// nobody parses at a glance.
+export const fmt = (n) => String(num(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+const pct = (part, whole) => (num(whole) > 0 ? Math.round((num(part) / num(whole)) * 100) : 0);
+
+// THE LEDE. One line the operator reads once and never needs again, and one line under it that
+// defines the only piece of vocabulary this screen cannot avoid. It is defined HERE and nowhere
+// else: a word that has to re-explain itself in every label is the wrong word for the label.
+export const TRIAGE_LEDE = {
+  what: 'The third phase of Investigate: the cheap pass that decides where to point the '
+    + 'expensive scanners.',
+  how: 'Investigate runs three phases. Passive reads the traffic already captured, active sends '
+    + 'one canary per input, and the classifier pass asks, for every place a payload can go '
+    + 'paired with one attack class, whether it is worth a real scan. sqlmap answers one of those '
+    + 'questions in about 1,690 requests and 28 minutes, so this answers each with a handful of '
+    + 'probes instead. Pointers lists what came back worth scanning. This screen is how much of '
+    + 'the question actually got asked.',
+};
+
+// coverageReadout translates the server's coverage into the things an operator acts on: what is
+// worth scanning, what is ruled out, how much has been asked, and what could not be asked at all.
 //
-// A tired operator glancing at this screen must not come away thinking the unexamined majority is
-// fine, and the banner is the sentence that decides that.
-export const certificateLine = (status) => {
+// IT DERIVES NOTHING UPWARDS. Every field is a server count or the difference of two, and no
+// clean is computed here that the server did not already state.
+//
+// The two units are kept apart and each is named in its own label, because they genuinely differ:
+// a QUESTION is one (vector, slot, class) triple, and an ANSWER is one verdict row, of which a
+// class that tests several arms writes more than one. Silently mixing them is how a screen ends
+// up claiming more coverage than it has.
+export const coverageReadout = (status) => {
+  if (!status || !status.hasRun) return null;
+  const c = status.coverage;
+  if (!c) return null;
+  const questions = num(c.EligiblePairs);
+  const asked = num(c.RanPairs);
+  const worthScanning = num(c.Positive);
+  const ruledOut = num(c.Clean);
+  const probesSent = num(status.probesSent);
+  const probesStuck = num(c.UnprovenProbes);
+  return {
+    questions,
+    asked,
+    notAskedYet: Math.max(0, questions - asked),
+    // What the runner has walked past, which is NOT what it measured. The gap between these two
+    // is where a question the runner reached and could not probe at all shows up.
+    reached: num(status.completed),
+    askedPercent: pct(asked, questions),
+    reachedPercent: pct(status.completed, questions),
+    worthScanning,
+    ruledOut,
+    noAnswer: num(c.Unknown),
+    nothingCameBack: num(c.PairsWithNoVerdict),
+    probesSent,
+    probesStuck,
+    stuckPairs: num(c.UnprovenPairs),
+    stuckPercent: pct(probesStuck, probesSent),
+    concluded: worthScanning + ruledOut,
+    // NOTHING EITHER WAY WHILE THE RUN IS STILL GOING IS THE CLOCK, NOT THE TARGET. A finished
+    // run that concluded nothing is not early: it is a finished run that concluded nothing, and
+    // calling that early would be a false reassurance in the other direction.
+    tooEarly: !!status.running && worthScanning + ruledOut === 0,
+  };
+};
+
+// runHeadline is the line under the lede. It says where the run is and what it has, in that
+// order, and it says clean ONLY where the server's own predicate said so.
+export const runHeadline = (status) => {
   if (!status || !status.hasRun) {
     return {
       kind: 'no_run',
       tone: UNKNOWN,
-      title: 'The triage classifiers have never run on this target.',
-      detail: 'Nothing has been asked of any class here, so nothing is known. That is a gap in '
-        + 'coverage, not a clean result. Investigate runs its two reflection passes and then the '
-        + 'classifiers configured on the Configure tab.',
+      title: 'No triage run on this target yet.',
+      detail: 'Nothing has been asked here, so nothing is known: a gap in coverage, not a clean '
+        + 'result. Investigate runs the two reflection passes and then the classifiers configured '
+        + 'on the Configure tab.',
     };
   }
+  const r = coverageReadout(status);
   if (status.running) {
     return {
       kind: 'running',
       tone: UNKNOWN,
-      title: `A triage run is in progress: ${status.completed} of ${status.planned} pairs, `
-        + `${status.probesSent} probes sent.`,
-      detail: 'Nothing below is final. Every pair the run has not reached yet is recorded as not '
-        + 'measured, and a cancel leaves them that way rather than silently absent.',
+      title: `Running: ${fmt(status.completed)} of ${fmt(status.planned)} questions reached, `
+        + `${fmt(status.probesSent)} probes sent.`,
+      detail: status.cancelling
+        ? 'A cancel was asked for. Every question the run has not reached is written down as not '
+          + 'asked, rather than quietly dropped out of the total.'
+        : '',
     };
   }
   if (status.rendersAsClean) {
     return {
-      kind: 'clean',
+      kind: 'certified',
       tone: MUTED,
-      title: 'Every eligible pair was measured, every probe reached the wire, and every verdict is clean.',
-      detail: 'This is the only shape in which a triage run certifies anything, and it is '
-        + 'deliberately hard to reach. It still says only that THESE classes asked THESE questions '
-        + 'of THESE slots.',
+      title: 'Every question was asked, every probe reached the target, and every answer is clean.',
+      detail: 'The only shape in which a triage run certifies anything, and deliberately hard to '
+        + 'reach. It still says only that THESE classes asked THESE questions of THESE slots.',
     };
   }
+  if (!r) {
+    return {
+      kind: 'finished',
+      tone: UNKNOWN,
+      title: `The run is ${status.status || 'finished'} and its coverage could not be read.`,
+      detail: 'How much of this target was asked about is unknown, which is not the same as clean.',
+    };
+  }
+  const tail = r.notAskedYet > 0
+    ? `${fmt(r.notAskedYet)} of ${fmt(r.questions)} questions never asked`
+    : (r.noAnswer > 0 ? `${fmt(r.noAnswer)} answers that say nothing either way` : 'nothing left open');
   return {
-    kind: 'not_certified',
-    tone: ACCENT,
-    title: 'This run does not certify anything on this target as clean.',
-    detail: 'Not knowing is not clean. The clauses below are the reasons, each one from the run\'s '
-      + 'own record, and the table names every pair that did not conclude and why.',
+    kind: 'finished',
+    tone: r.worthScanning > 0 ? ACCENT : UNKNOWN,
+    title: `Finished: ${fmt(r.worthScanning)} worth scanning, ${fmt(r.ruledOut)} ruled out, ${tail}.`,
+    detail: r.worthScanning > 0
+      ? 'Open Pointers for the evidence and the tool to point at each one.'
+      : '',
   };
 };
 
@@ -386,8 +471,123 @@ export const normalizeTriageStatus = (data) => {
     // alongside the coverage it was computed from: a bare true with no counts beside it is a
     // claim nobody can check, and this screen exists to stop unchecked claims of clean.
     rendersAsClean: !!d.renders_as_clean && !!cov,
+    // WHAT RENEWAL DID, as GetTriageRunStatus serves it. NOT DERIVED HERE and NOT DEFAULTED: a
+    // server that does not serve the field at all is a different fact from a run that did not
+    // renew, and only the server read which one. An absent record arrives as an object carrying
+    // recorded:false and its own sentence; null here means nobody served anything.
+    sessionRenewal: d.session_renewal || null,
     note: d.note ? String(d.note) : '',
   };
+};
+
+// ------------------------------------------------------------------------------------------------
+// WAS MY SCAN AUTHENTICATED THE WHOLE WAY THROUGH?
+//
+// This is the question the session layer exists to answer, and for two rounds the answer existed
+// only in a log line: the renewal driver recorded its decision, every attempt and what the logins
+// cost onto the run row, GetTriageRunStatus served it, and nothing in client/src or mcp-server read
+// it. A run whose session quietly died halfway through and a run that stayed authenticated end to
+// end produced the same screen.
+//
+// THE SENTENCE IS THE SERVER'S. TriageSessionRenewalDriver.Summary composes it next to the fields
+// it reads, so this file renders it rather than composing a second opinion from the same numbers.
+// What this function adds is a CLASSIFICATION, and every branch of it is a field the server serves:
+//
+//   unrecorded  record.recorded !== true          nobody wrote a record, so nothing was measured
+//   off         record.on === false               the driver started no schedule; decision says why
+//   stopped     some attempt has withdrawn true   the gate, the pacing brake or a crash ended it
+//   failing     cost.logins > 0 and none stored   logins went to the target and replaced nothing
+//   idle        on, and cost.logins === 0         a schedule ran and no login was ever replayed
+//   held        on, and at least one stored       a login replaced the stored credential
+//
+// NOTHING HERE CLAIMS THE RUN WAS AUTHENTICATED AT ANY INSTANT, because nothing measured that:
+// no probe in this feature checks that a given request carried a live credential. What it can say
+// is what the driver decided and what its logins did, and it says only that.
+export const renewalReading = (record) => {
+  if (!record || typeof record !== 'object') return null;
+  // WHAT THE RECORD ACTUALLY CARRIES, asked before anything is counted. A row written by an
+  // earlier driver carries a decision and no cost and no attempt list, and num(undefined) is 0:
+  // without this the screen would report "no login was replayed" from a field nobody wrote, which
+  // is the exact defect this whole feature exists to stop. Missing reads as unknown, never as zero.
+  const countsKnown = Array.isArray(record.attempts) && !!record.cost && typeof record.cost === 'object';
+  const attempts = Array.isArray(record.attempts) ? record.attempts : [];
+  const cost = record.cost || {};
+  const logins = num(cost.logins);
+  // COUNTED THE SAME WAY THE SERVER'S SENTENCE COUNTS THEM, from the same list, so the words and
+  // the classification beside them cannot disagree: a withdrawal is not an attempt that failed,
+  // and an attempt that sent nothing is not a login.
+  const withdrawn = attempts.filter((a) => a && a.withdrawn);
+  const stored = attempts.filter((a) => a && !a.withdrawn && a.stored_new_value).length;
+  const refused = attempts.filter((a) => a && !a.withdrawn && !a.attempted).length;
+
+  const base = {
+    summary: String(record.summary || ''),
+    decision: String(record.decision || ''),
+    attempts,
+    logins,
+    stored,
+    refused,
+    clamped: !!record.clamped,
+    intervalSeconds: num(record.interval_seconds),
+    derivedSeconds: num(record.derived_interval_seconds),
+  };
+
+  // THE DECISION, ONLY WHERE THE SUMMARY DOES NOT ALREADY CARRY IT. Summary() appends the driver's
+  // decision verbatim on the "did not renew" and "clamped" branches and not on the others, so on a
+  // plain running schedule the sentence that says WHERE THE INTERVAL CAME FROM ("the interval you
+  // set", or half a measured lifetime) exists only in this field. Printing it unconditionally
+  // would put the same sentence on the screen twice, which this codebase has done before.
+  base.extraDecision = base.decision && !base.summary.includes(base.decision) ? base.decision : '';
+
+  if (record.recorded !== true) {
+    return { ...base, kind: 'unrecorded', tone: UNKNOWN, loud: false,
+      title: 'Session renewal: no record was written for this run' };
+  }
+  if (!record.on) {
+    return { ...base, kind: 'off', tone: UNKNOWN, loud: false,
+      title: 'Session renewal: this run did NOT renew its session' };
+  }
+  if (!countsKnown) {
+    return { ...base, kind: 'incomplete', tone: UNKNOWN, loud: false,
+      title: 'Session renewal: a schedule ran and this record does not say what it did' };
+  }
+  if (withdrawn.length > 0) {
+    return { ...base, kind: 'stopped', tone: ACCENT, loud: true,
+      title: 'Session renewal: the schedule STOPPED before the run finished' };
+  }
+  if (logins > 0 && stored === 0) {
+    return { ...base, kind: 'failing', tone: ACCENT, loud: true,
+      title: `Session renewal: ${plural(logins, 'login replay', 'login replays')} went to the target `
+        + 'and none of them replaced the stored credential' };
+  }
+  // RENEWAL WAS ON AND WAS REFUSED EVERY TIME. This is NOT the quiet case: renewOnce refuses
+  // before sending on an out-of-scope mint and does not stop the schedule, so the run keeps
+  // ticking, keeps renewing nothing, and the credential ages out under it. Kept apart from idle
+  // for the same reason the driver counts them apart: a refusal is not a login that failed and it
+  // is not a login that never came due.
+  if (logins === 0 && refused > 0) {
+    return { ...base, kind: 'refused', tone: ACCENT, loud: true,
+      title: `Session renewal: ${plural(refused, 'renewal was', 'renewals were')} refused before `
+        + 'anything was sent, and no login was replayed' };
+  }
+  if (logins === 0) {
+    return { ...base, kind: 'idle', tone: UNKNOWN, loud: false,
+      title: 'Session renewal: a schedule was set and no login was replayed' };
+  }
+  return { ...base, kind: 'held', tone: MUTED, loud: false,
+    title: `Session renewal: ${plural(stored, 'login replay', 'login replays')} replaced the stored credential` };
+};
+
+// renewalAttemptOutcome is the one-word state of a single attempt, read off the three booleans the
+// driver records. The order matters and mirrors Summary(): a withdrawal is checked first because a
+// withdrawn attempt carries no result at all, and an attempt that never reached the wire is
+// refused rather than failed.
+export const renewalAttemptOutcome = (a) => {
+  if (!a) return 'unknown';
+  if (a.withdrawn) return 'withdrawn';
+  if (!a.attempted) return 'refused';
+  if (a.stored_new_value) return 'stored';
+  return 'failed';
 };
 
 export const triageCardLine = (status) => {
@@ -396,15 +596,16 @@ export const triageCardLine = (status) => {
     return {
       unknown: true,
       running: false,
-      text: 'Triage classifiers have never run on this target: a gap in coverage, not a clean result.',
+      text: 'Investigate has not run its classifier pass on this target yet: a gap in coverage, '
+        + 'not a clean result.',
     };
   }
   if (status.running) {
     return {
       unknown: true,
       running: true,
-      text: `Triage ${status.cancelling ? 'cancelling' : (status.phase || 'running')}: `
-        + `${status.completed} of ${status.planned} pairs, ${status.probesSent} probes sent.`,
+      text: `Investigate, classifier pass ${status.cancelling ? 'cancelling' : (status.phase || 'running')}: `
+        + `${status.completed} of ${status.planned} questions reached, ${status.probesSent} probes sent.`,
     };
   }
   const c = status.coverage;
@@ -412,13 +613,14 @@ export const triageCardLine = (status) => {
     return {
       unknown: true,
       running: false,
-      text: `Triage ${status.status || 'finished'}: the coverage for this run could not be read, `
-        + 'so how much of it was measured is unknown.',
+      text: `Investigate, classifier pass ${status.status || 'finished'}: the coverage could not `
+        + 'be read, so how much of it was asked is unknown.',
     };
   }
   const notKnown = num(c.Unknown);
-  const head = `Triage ${status.status || 'finished'}: ${num(c.EligiblePairs)} pairs, `
-    + `${num(c.Positive)} fired, ${num(c.Clean)} clean, ${notKnown} not known.`;
+  const head = `Investigate, classifier pass ${status.status || 'finished'}: `
+    + `${num(c.Positive)} worth scanning, `
+    + `${num(c.Clean)} ruled out, ${notKnown} with no answer, over ${num(c.EligiblePairs)} questions.`;
   return {
     unknown: notKnown > 0 || !status.rendersAsClean,
     running: false,
@@ -495,10 +697,26 @@ const Chip = ({ text, why, tone }) => (
   </span>
 );
 
-const Count = ({ n, label, tone, why }) => (
-  <div style={{ minWidth: '5.5rem' }} title={why || undefined}>
-    <div className="fw-bold" style={{ fontSize: '1.15rem', color: tone, lineHeight: 1.2 }}>{n}</div>
-    <div style={{ fontSize: '0.66rem', color: MUTED }}>{label}</div>
+// A number with its unit in its own label. data-triage-value carries the raw count so a test
+// reads the number rather than the formatting.
+const Figure = ({ id, n, label, tone, why }) => (
+  <div
+    data-triage-figure={id}
+    data-triage-value={String(num(n))}
+    style={{ minWidth: '6.5rem' }}
+    title={why || undefined}
+  >
+    <div className="fw-bold" style={{ fontSize: '1.35rem', color: tone, lineHeight: 1.15 }}>{fmt(n)}</div>
+    <div style={{ fontSize: '0.68rem', color: MUTED }}>{label}</div>
+  </div>
+);
+
+const GroupLabel = ({ text }) => (
+  <div
+    className="mb-1"
+    style={{ fontSize: '0.64rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: QUIET }}
+  >
+    {text}
   </div>
 );
 
@@ -518,6 +736,10 @@ function TriageRunModal({ show, handleClose, activeTarget }) {
   const [openReason, setOpenReason] = useState('');
   const [outcome, setOutcome] = useState('');
   const [search, setSearch] = useState('');
+  // The clause-by-clause reasoning is one click away rather than gone. Collapsed by default
+  // because it is a conclusion about the run, and a conclusion read before the subject is a
+  // lecture.
+  const [showWhy, setShowWhy] = useState(false);
 
   const targetId = activeTarget && activeTarget.id;
 
@@ -595,14 +817,13 @@ function TriageRunModal({ show, handleClose, activeTarget }) {
     if (!targetId) return;
     setBusy(kind);
     try {
-      const url = kind === 'cancel'
-        ? `/api/triage/${targetId}/run/cancel`
-        : `/api/triage/${targetId}/run`;
-      const res = await fetch(url, { method: 'POST' });
+      // Cancel is the only action this screen takes. Starting is Investigate's job; see the
+      // footer comment for why there is no second entry point.
+      const res = await fetch(`/api/triage/${targetId}/run/cancel`, { method: 'POST' });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         setStatusError(body.message || body.error
-          || `The triage run could not be ${kind === 'cancel' ? 'cancelled' : 'started'} (HTTP ${res.status}).`);
+          || `The classifier pass could not be cancelled (HTTP ${res.status}).`);
       }
       await load();
     } catch (err) {
@@ -627,8 +848,17 @@ function TriageRunModal({ show, handleClose, activeTarget }) {
     return groupByClass(kept, classNames);
   }, [pairs, classNames, outcome, search]);
 
-  const cert = certificateLine(status);
+  const head = runHeadline(status);
   const coverage = (status && status.coverage) || null;
+  const readout = useMemo(() => coverageReadout(status), [status]);
+  const renewal = useMemo(
+    () => renewalReading(status && status.sessionRenewal), [status],
+  );
+  // How far the runner has walked, which is the liveness signal. How much it has ASKED is the
+  // smaller number in the Questions group, and the two are deliberately not merged.
+  const reachedPercent = status && status.planned > 0
+    ? Math.min(100, Math.round((num(status.completed) / num(status.planned)) * 100))
+    : 0;
   const blocking = useMemo(
     () => (status && status.hasRun && !status.rendersAsClean ? blockingReasons(coverage) : []),
     [status, coverage],
@@ -637,93 +867,285 @@ function TriageRunModal({ show, handleClose, activeTarget }) {
   return (
     <Modal show={show} onHide={handleClose} fullscreen data-bs-theme="dark">
       <Modal.Header closeButton>
-        <Modal.Title className="text-danger">Triage coverage</Modal.Title>
+        <Modal.Title className="text-danger">Investigate coverage</Modal.Title>
       </Modal.Header>
       <Modal.Body style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        {/* THE BANNER. First, always, never behind a toggle. It states the run's certification
-            rather than its findings, because the findings are the small half. */}
-        <div
-          className="mb-2 pb-2"
-          style={{ borderBottom: `2px solid ${cert.tone}` }}
-          data-triage-certificate={cert.kind}
-        >
-          <div className="fw-bold" style={{ fontSize: '0.92rem', color: cert.tone }}>{cert.title}</div>
-          <div style={{ fontSize: '0.76rem', color: MUTED }}>{cert.detail}</div>
-          {status && status.hasRun && (
-            <div className="mt-1" style={{ fontSize: '0.7rem', color: MUTED }}>
-              run <code className="text-light">{status.runId}</code>
-              {status.createdAt ? ` started ${status.createdAt}` : ''}
-              {status.phase ? ` · phase ${status.phase}` : ''}
-              {` · ${status.probesSent} probes sent`}
-              {status.error ? ` · the run recorded: ${status.error}` : ''}
+        {/* THE HEAD. Read top to bottom it answers, in this order: what is this, where is the run,
+            what has it found, how much has it asked, and what could it not ask. The rule that
+            unanswered is not clean sits beside the number it qualifies, in one line. */}
+        <div data-triage-head className="mb-2 pb-2" style={{ borderBottom: `2px solid ${head.tone}` }}>
+          {/* WHAT IT IS. First, always, on every state of the run. */}
+          <div
+            data-triage-lede
+            className="pb-2 mb-2"
+            style={{ borderBottom: '1px solid rgba(255,255,255,0.12)' }}
+          >
+            <div className="fw-bold text-light" style={{ fontSize: '0.95rem' }}>{TRIAGE_LEDE.what}</div>
+            <div style={{ fontSize: '0.75rem', color: MUTED }}>{TRIAGE_LEDE.how}</div>
+          </div>
+
+          {/* WHERE THE RUN IS, in the operator's units. */}
+          <div data-triage-status={head.kind} className="mb-2">
+            <div className="fw-bold" style={{ fontSize: '0.9rem', color: head.tone }}>{head.title}</div>
+            {head.detail && (
+              <div style={{ fontSize: '0.75rem', color: MUTED }}>{head.detail}</div>
+            )}
+            {status && status.running && (
+              <div className="d-flex align-items-center gap-2 mt-1">
+                <Spinner animation="border" size="sm" variant="warning" />
+                <div
+                  style={{
+                    height: '5px',
+                    flexGrow: 1,
+                    maxWidth: '22rem',
+                    background: 'rgba(255,255,255,0.10)',
+                    borderRadius: '3px',
+                  }}
+                >
+                  <div
+                    style={{
+                      height: '5px',
+                      width: `${Math.min(100, reachedPercent)}%`,
+                      background: UNKNOWN,
+                      borderRadius: '3px',
+                    }}
+                  />
+                </div>
+                <span style={{ fontSize: '0.72rem', color: MUTED }}>{`${reachedPercent}%`}</span>
+                {status.cancelling ? (
+                  <span style={{ fontSize: '0.72rem', color: MUTED }}>cancelling</span>
+                ) : (
+                  <Button
+                    variant="link"
+                    className="p-0 text-danger small align-baseline"
+                    data-triage-action="cancel"
+                    disabled={busy === 'cancel'}
+                    onClick={() => act('cancel')}
+                  >
+                    cancel
+                  </Button>
+                )}
+              </div>
+            )}
+            {status && status.hasRun && (
+              <div className="mt-1" style={{ fontSize: '0.68rem', color: QUIET }}>
+                {`run ${status.runId}`}
+                {status.createdAt ? `, started ${status.createdAt}` : ''}
+                {status.error ? ` · the run recorded: ${status.error}` : ''}
+              </div>
+            )}
+          </div>
+
+          {/* WAS IT AUTHENTICATED. Above the coverage figures on purpose: a run that lost its
+              session halfway through produces exactly the same coverage numbers as one that did
+              not, and reading those numbers without this line is how a login wall gets reported
+              as a target with nothing on it. The sentence is the server's own; the classification
+              beside it is this file's and every branch of it reads a served field. */}
+          {renewal && (
+            <div
+              data-triage-renewal={renewal.kind}
+              className="mb-2 pb-2"
+              style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}
+            >
+              <div style={{ fontSize: '0.8rem', color: renewal.tone, fontWeight: renewal.loud ? 700 : 600 }}>
+                {renewal.title}
+              </div>
+              <div style={{ fontSize: '0.75rem', color: MUTED }}>{renewal.summary}</div>
+              {renewal.extraDecision && (
+                <div data-triage-renewal-decision style={{ fontSize: '0.72rem', color: MUTED }}>
+                  {`The driver decided: ${renewal.extraDecision}`}
+                </div>
+              )}
+              {/* THE RECORD IS A SNAPSHOT WHILE THE RUN IS ALIVE. The driver writes it when it
+                  starts, when the gate withdraws it and when the run stops, so on a run still in
+                  flight every count above is what renewal had done by the last write. Without this
+                  line "no login was replayed" reads as a verdict on a run that has not finished.
+                  The only fact it uses is status.running, which is the run row's own status. */}
+              {status && status.running && (
+                <div data-triage-renewal-partial style={{ fontSize: '0.72rem', color: UNKNOWN }}>
+                  This run is still going, so the account above is renewal&apos;s record as it stands
+                  and not a final one.
+                </div>
+              )}
+              {renewal.clamped && (
+                <div
+                  data-triage-renewal-clamp
+                  className="mt-1"
+                  style={{ fontSize: '0.72rem', color: UNKNOWN }}
+                >
+                  {`The schedule that actually ran is every ${renewal.intervalSeconds}s, clamped up `
+                    + `from the ${renewal.derivedSeconds}s that was derived or asked for.`}
+                </div>
+              )}
+              {/* EVERY ATTEMPT, including the ones that sent nothing. The driver records a reason
+                  on each, and a run whose renewals were all refused for an out-of-scope mint needs
+                  to show that reason and not a count of zero. */}
+              {renewal.attempts.length > 0 && (
+                <div className="mt-1">
+                  {renewal.attempts.map((a, i) => {
+                    const outcome = renewalAttemptOutcome(a);
+                    return (
+                      <div
+                        key={`${String((a && a.at) || i)}-${i}`}
+                        data-triage-renewal-attempt={outcome}
+                        style={{
+                          fontSize: '0.7rem',
+                          color: outcome === 'withdrawn' || outcome === 'failed' ? ACCENT : QUIET,
+                        }}
+                      >
+                        <span className="font-monospace">{String((a && a.at) || '')}</span>
+                        {` ${outcome} · ${String((a && a.code) || '')}`}
+                        {outcome === 'stored' && a.before_fingerprint && a.after_fingerprint
+                          ? ` · ${a.before_fingerprint} to ${a.after_fingerprint}`
+                          : ''}
+                        {a && a.detail ? `: ${a.detail}` : ''}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* WHAT IT HAS, and how much of the question it has put. Two units, each named in its
+              own label, because one question can produce more than one answer. */}
+          {readout && (
+            <div className="d-flex flex-wrap mb-2" style={{ columnGap: '2.5rem', rowGap: '0.75rem' }}>
+              <div>
+                <GroupLabel text="Answers so far" />
+                <div className="d-flex flex-wrap gap-3">
+                  <Figure
+                    id="worth_scanning"
+                    n={readout.worthScanning}
+                    label="worth scanning"
+                    tone={readout.worthScanning > 0 ? ACCENT : MUTED}
+                    why="Point a real scanner here. Pointers carries the evidence and names the tool for each one."
+                  />
+                  <Figure
+                    id="ruled_out"
+                    n={readout.ruledOut}
+                    label="ruled out"
+                    tone={QUIET}
+                    why="This class put its probes to this slot and nothing came back. Safe to skip, for this class and this slot only."
+                  />
+                  <Figure
+                    id="no_answer"
+                    n={readout.noAnswer}
+                    label="no answer either way"
+                    tone={UNKNOWN}
+                    why="Something stopped the measurement, and each one names its own reason in the breakdown below: a missing collaborator, an unstable baseline and a run that ended early are three different jobs. A question the run has not reached yet writes one of these too, which is why this can be larger than the number asked."
+                  />
+                </div>
+              </div>
+              <div>
+                <GroupLabel text="Questions" />
+                <div className="d-flex flex-wrap gap-3">
+                  <Figure
+                    id="asked"
+                    n={readout.asked}
+                    label={`asked, of ${fmt(readout.questions)}`}
+                    tone="#e9ecef"
+                    why="Questions where the measurement actually happened. The run walking past a question is not the same as asking it."
+                  />
+                  <Figure
+                    id="not_asked_yet"
+                    n={readout.notAskedYet}
+                    label={status && status.running ? 'not asked yet' : 'never asked'}
+                    tone={UNKNOWN}
+                    why="Counted before the first request went out, so these are known to exist and known not to have been answered."
+                  />
+                  {readout.nothingCameBack > 0 && (
+                    <Figure
+                      id="nothing_back"
+                      n={readout.nothingCameBack}
+                      label="asked, nothing came back"
+                      tone={UNKNOWN}
+                      why="These have nothing at all in the breakdown below to represent them. A crash, a cancel or a budget cut leaves the question silent, and silence has been read as clean here before."
+                    />
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* THE RULE, one line, beside the number it qualifies. */}
+          {readout && (
+            <div data-triage-honesty className="mb-2" style={{ fontSize: '0.75rem', color: MUTED }}>
+              {'Only "ruled out" means we looked and found nothing. Not asked is not the same as nothing there.'}
+            </div>
+          )}
+
+          {/* A RUN THAT HAS FOUND NOTHING BECAUSE IT HAS BARELY STARTED SAYS THAT. Two zeroes with
+              no sentence beside them read as a result, and they are not one. */}
+          {readout && readout.tooEarly && (
+            <div data-triage-early className="mb-2" style={{ fontSize: '0.78rem', color: UNKNOWN }}>
+              {readout.askedPercent < 50
+                ? `Too early to mean anything: ${fmt(readout.asked)} of ${fmt(readout.questions)} `
+                  + 'questions have been asked so far, so the two zeroes above are not results.'
+                : `Still running, and nothing has concluded either way yet: ${fmt(readout.asked)} of `
+                  + `${fmt(readout.questions)} questions asked.`}
+            </div>
+          )}
+
+          {/* PROBES THAT NEVER LEFT. Measured at 93% on the operator's live run, every one of them
+              refused by the runner's own encoder guard. This block is the difference between a
+              target that is quiet and a run that asked it nothing, and it disappears at zero. */}
+          {readout && readout.probesStuck > 0 && (
+            <div
+              data-triage-wire
+              className="mb-2 p-2"
+              style={{
+                fontSize: '0.78rem',
+                color: '#e9ecef',
+                border: `1px solid ${UNKNOWN}`,
+                borderRadius: '0.25rem',
+              }}
+            >
+              <span className="fw-bold" style={{ color: UNKNOWN }}>
+                {`${fmt(readout.probesStuck)} of the ${fmt(readout.probesSent)} probes sent `
+                  + `(${readout.stuckPercent}%) never reached the target.`}
+              </span>
+              {` Dropped, altered or refused before they left, so the questions they carried were `
+                + `not asked at all and nothing can be read from them. ${fmt(readout.stuckPairs)} `
+                + 'questions are affected and need re-probing.'}
+            </div>
+          )}
+
+          {/* THE FULL REASONING, one click away. It still mirrors the server clause for clause and
+              it is still the point of the feature. It is simply not what an operator should have
+              to read before they know what they are looking at. */}
+          {blocking.length > 0 && (
+            <div>
+              <Button
+                variant="link"
+                data-triage-why-toggle
+                className="p-0 align-baseline"
+                style={{ color: MUTED, textDecoration: 'none', fontSize: '0.74rem' }}
+                onClick={() => setShowWhy(!showWhy)}
+              >
+                {`${showWhy ? 'Hide' : 'Show'} why none of this is a clean bill of health `
+                  + `(${blocking.length})`}
+              </Button>
+              {showWhy && (
+                <ul data-triage-why className="mb-0 ps-3 mt-1">
+                  {blocking.map((b) => (
+                    <li key={b.key} data-triage-blocking={b.key} style={{ fontSize: '0.75rem', color: '#e9ecef' }}>
+                      {b.text}
+                      <span style={{ color: MUTED }}>{` ${b.why}`}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
         </div>
 
+        {/* NEVER A BLANK SPACE. A status that could not be read and a target with nothing to
+            report look identical on screen unless the failure says so itself. */}
         {statusError && (
           <Alert variant="dark" className="border border-warning text-white-50 py-2 small mb-2">
             {statusError}
           </Alert>
-        )}
-
-        {/* PROGRESS AND CANCEL, in the same place the answer will appear. */}
-        {status && status.running && (
-          <div className="d-flex align-items-center gap-2 mb-2" style={{ fontSize: '0.78rem' }}>
-            <Spinner animation="border" size="sm" variant="danger" />
-            <span className="text-white-50">
-              {status.cancelling ? 'cancelling' : (status.phase || 'running')}
-              {` ${status.completed} of ${status.planned} pairs`}
-            </span>
-            {!status.cancelling && (
-              <Button
-                variant="link"
-                className="p-0 text-danger small align-baseline"
-                data-triage-action="cancel"
-                disabled={busy === 'cancel'}
-                onClick={() => act('cancel')}
-              >
-                cancel
-              </Button>
-            )}
-          </div>
-        )}
-
-        {/* THE NUMBERS. The denominator is beside the numerator on every one of them: "96 clean"
-            on its own is the sentence this whole layer exists to refuse. */}
-        {coverage && (
-          <div className="d-flex flex-wrap gap-3 mb-2 pb-2" style={{ borderBottom: '1px solid rgba(255,255,255,0.12)' }}>
-            <Count n={num(coverage.EligiblePairs)} label="eligible pairs" tone="#e9ecef"
-                   why="The denominator, written before any request went out." />
-            <Count n={num(coverage.RanPairs)} label="measured" tone="#e9ecef"
-                   why="Pairs where the measurement actually happened. Sending a probe is not the same thing." />
-            <Count n={num(coverage.Positive)} label="rows fired" tone={ACCENT}
-                   why="Verdict rows in a positive state. Open Pointers for the evidence." />
-            <Count n={num(coverage.Unknown)} label="rows not known" tone={UNKNOWN}
-                   why="Every one of these names its own reason in the table below. Not knowing is not clean." />
-            <Count n={num(coverage.Clean)} label="rows clean" tone={QUIET}
-                   why="This class's own probes ran and its own oracle stayed silent, for this slot only." />
-            <Count n={num(coverage.UnprovenProbes)} label="unproven probes" tone={UNKNOWN}
-                   why="Probes that cannot be shown to have reached the wire as asked. A clean drawn from one is worth nothing." />
-            <Count n={num(coverage.PairsWithNoVerdict)} label="pairs with no row" tone={UNKNOWN}
-                   why="Eligible pairs that produced no verdict row at all. They have nothing in the table below to represent them." />
-          </div>
-        )}
-
-        {/* WHY IT CERTIFIES NOTHING, clause by clause. */}
-        {blocking.length > 0 && (
-          <div className="mb-2 pb-2" style={{ borderBottom: '1px solid rgba(255,255,255,0.12)' }}>
-            <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: MUTED }}>
-              Why this run certifies nothing as clean
-            </div>
-            <ul className="mb-0 ps-3 mt-1">
-              {blocking.map((b) => (
-                <li key={b.key} data-triage-blocking={b.key} style={{ fontSize: '0.75rem', color: '#e9ecef' }}>
-                  {b.text}
-                  <span style={{ color: MUTED }}>{` ${b.why}`}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
         )}
 
         {verdictError && (
@@ -746,11 +1168,11 @@ function TriageRunModal({ show, handleClose, activeTarget }) {
                 aria-label="Filter pairs by outcome"
                 onChange={(e) => { setOutcome(e.target.value); setOpenReason(''); }}
               >
-                <option value="">Every pair</option>
-                <option value="fired">Fired</option>
-                <option value="not_known">Not known</option>
-                <option value="not_applicable">Cannot apply</option>
-                <option value="clean">Clean</option>
+                <option value="">Every question</option>
+                <option value="fired">Worth scanning</option>
+                <option value="not_known">No answer</option>
+                <option value="not_applicable">Cannot apply here</option>
+                <option value="clean">Ruled out</option>
               </Form.Select>
               <Form.Control
                 size="sm"
@@ -761,7 +1183,7 @@ function TriageRunModal({ show, handleClose, activeTarget }) {
                 onChange={(e) => setSearch(e.target.value)}
               />
               <span style={{ fontSize: '0.72rem', color: MUTED }}>
-                {`${groups.reduce((n, g) => n + g.pairs.length, 0)} of ${pairs.length} pairs shown`}
+                {`${groups.reduce((n, g) => n + g.pairs.length, 0)} of ${pairs.length} questions shown`}
               </span>
             </div>
 
@@ -792,16 +1214,17 @@ function TriageRunModal({ show, handleClose, activeTarget }) {
                         {g.label}
                       </span>
                       <span style={{ fontSize: '0.72rem', color: MUTED }}>
-                        {plural(g.pairs.length, 'pair', 'pairs')}
+                        {plural(g.pairs.length, 'question', 'questions')}
                       </span>
-                      {/* NOT KNOWN IS LISTED BEFORE CLEAN, every time. */}
-                      {g.fired > 0 && <Chip text={`${g.fired} fired`} tone={ACCENT} why="A positive verdict on this class. Open Pointers for the evidence." />}
-                      <Chip text={`${g.not_known} not known`} tone={g.not_known ? UNKNOWN : MUTED}
-                            why="The class could not answer for these pairs. The reason is named inside." />
-                      {g.not_applicable > 0 && <Chip text={`${g.not_applicable} cannot apply`} tone={MUTED}
-                            why="The mechanism cannot exist at this slot. Correctly not run, and still not a clean." />}
-                      <Chip text={`${g.clean} clean`} tone={QUIET}
-                            why="Every arm of the pair ran, every probe is proven on the wire, and nothing fired." />
+                      {/* WHAT COULD NOT BE ANSWERED IS LISTED BEFORE WHAT WAS RULED OUT, every
+                          time. A row that leads with its cleans reads as "the rest is fine". */}
+                      {g.fired > 0 && <Chip text={`${g.fired} worth scanning`} tone={ACCENT} why="This class fired here. Open Pointers for the evidence and the tool to point at it." />}
+                      <Chip text={`${g.not_known} no answer`} tone={g.not_known ? UNKNOWN : MUTED}
+                            why="The class could not answer these. The reason is named inside, and the reasons are different jobs." />
+                      {g.not_applicable > 0 && <Chip text={`${g.not_applicable} cannot apply here`} tone={MUTED}
+                            why="The mechanism cannot exist at this slot. Correctly not asked, and still not a clean." />}
+                      <Chip text={`${g.clean} ruled out`} tone={QUIET}
+                            why="Every arm ran, every probe reached the target, and nothing came back. Safe to skip, for this class and this slot only." />
                     </div>
 
                     {open && g.buckets.map((b) => {
@@ -825,8 +1248,11 @@ function TriageRunModal({ show, handleClose, activeTarget }) {
                             </span>
                           </div>
                           {bOpen && (
-                            <div className="ps-3 pb-2">
-                              {b.rows.slice(0, 200).map((entry, i) => {
+                            <div className="ps-3 pb-2" style={{ maxHeight: '50vh', overflowY: 'auto' }}>
+                              {/* Every row in the bucket. A bucket is already the narrowing, and a
+                                  verdict row that is not drawn is a triage result the operator
+                                  cannot reach from anywhere else. The panel scrolls. */}
+                              {b.rows.map((entry, i) => {
                                 const v = entry.row.Verdict || {};
                                 return (
                                   <div
@@ -872,11 +1298,6 @@ function TriageRunModal({ show, handleClose, activeTarget }) {
                                   </div>
                                 );
                               })}
-                              {b.rows.length > 200 && (
-                                <div style={{ fontSize: '0.7rem', color: UNKNOWN }}>
-                                  {`${b.rows.length - 200} further rows in this bucket are not drawn. The counts above are over all of them.`}
-                                </div>
-                              )}
                             </div>
                           )}
                         </div>
@@ -893,26 +1314,23 @@ function TriageRunModal({ show, handleClose, activeTarget }) {
         {!loading && pairs.length === 0 && !verdictError && (
           <div className="text-white-50 py-3" style={{ fontSize: '0.8rem' }}>
             {status && status.hasRun
-              ? 'This run holds no verdict rows. Nothing was measured, which is not the same as '
-                + 'nothing being there.'
+              ? 'Nothing to break down yet: this run has not written a single answer. Nothing '
+                + 'measured is not the same as nothing there.'
               : (status && status.note)
-                || 'No triage run has ever been started for this target, so no class has asked it '
-                  + 'anything.'}
+                || 'Investigate has never run its classifier pass on this target, so nothing '
+                  + 'has been asked of it.'}
           </div>
         )}
       </Modal.Body>
       <Modal.Footer>
-        {/* THE RE-RUN LIVES HERE, not on the card. The operator who wants it is the one looking at
-            the gaps, and the button row on the card is already six wide at phone width. */}
-        <Button
-          variant="outline-danger"
-          data-triage-action="rerun"
-          disabled={!targetId || running || busy === 'rerun'}
-          title="Runs the classifiers configured on the Configure tab against the selected vectors. It does not re-run the two reflection passes; Investigate does both."
-          onClick={() => act('rerun')}
-        >
-          {busy === 'rerun' ? <Spinner animation="border" size="sm" /> : 'Re-run classifiers'}
-        </Button>
+        {/* NO RE-RUN BUTTON, DELIBERATELY. The classifiers are the third phase of Investigate, not
+            a scan of their own: StartInvestigateHandler runs passive, then active, then chains
+            StartTriageRun, and returns phases ["passive","active","triage"]. There is no way to
+            run Investigate without them.
+            A "Re-run classifiers" button here used to contradict that. It offered a second entry
+            point to something the operator had been told was one pass, which is how this screen
+            came to read as a separate feature they had forgotten to run. It either runs as part of
+            Investigate or it does not run. To run it again, press Investigate. */}
         <Button variant="outline-secondary" disabled={loading} onClick={load}>Refresh</Button>
         <Button variant="secondary" onClick={handleClose}>Close</Button>
       </Modal.Footer>

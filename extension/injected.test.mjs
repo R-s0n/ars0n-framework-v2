@@ -139,6 +139,8 @@ function buildPage({ fetchImpl, xhrBehaviour } = {}) {
     URL,
     URLSearchParams,
     TextDecoder,
+    btoa,
+    Uint8Array,
     Blob,
     FormData,
     ArrayBuffer,
@@ -307,18 +309,116 @@ section('fetch: response body over the cap is truncated and flagged');
   check('truncation flagged', record.responseBodyTruncated, true);
 }
 
-section('fetch: binary responses are not stored');
+// An IDOR that answers with another user's uploaded photo cannot be proved from a capture table
+// that threw the photo away. Media has no text form, so it takes the blob path: the bytes are kept
+// whole and stored content addressed.
+section('fetch: a media response is kept as bytes, not thrown away');
+{
+  const wire = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+  const page = buildPage({
+    fetchImpl: async () =>
+      new Response(wire, { status: 200, headers: { 'Content-Type': 'image/png' } }),
+  });
+  page.configure(ACTIVE);
+  await tick();
+  await page.windowStub.fetch('https://api.example.com/avatar/other-user.png');
+  await tick();
+  const record = page.captured[0] || {};
+  check('the request is still recorded', page.captured.length, 1);
+  check('a blob is attached', Boolean(record.responseBodyBlob), true);
+  check('the mime type rides along', (record.responseBodyBlob || {}).mimeType, 'image/png');
+  check('the wire size is recorded', (record.responseBodyBlob || {}).bytes, wire.length);
+  const stored = Uint8Array.from(atob((record.responseBodyBlob || {}).base64 || ''), (c) => c.charCodeAt(0));
+  check('every byte of the photo is recoverable', Array.from(stored), Array.from(wire));
+  check('the text body stays empty; media is not text', record.responseBody, '');
+}
+
+// A genuinely huge object is stored up to the cap and the row says so, so a capped body is never
+// mistaken for a complete one.
+section('fetch: an oversized media body is capped and flagged, with the wire size kept');
+{
+  const wire = new Uint8Array(5000).fill(9);
+  const page = buildPage({
+    fetchImpl: async () =>
+      new Response(wire, { status: 200, headers: { 'Content-Type': 'video/webm' } }),
+  });
+  page.configure({ ...ACTIVE, maxMediaBytes: 1000 });
+  await tick();
+  await page.windowStub.fetch('https://api.example.com/clip.webm');
+  await tick();
+  const blob = (page.captured[0] || {}).responseBodyBlob || {};
+  check('capped', blob.capped, true);
+  check('wire size is the real size', blob.bytes, 5000);
+  check('stored bytes stop at the cap', atob(blob.base64 || '').length, 1000);
+}
+
+// The operator can still turn it off, and then nothing is read.
+section('fetch: media capture can be switched off');
 {
   const page = buildPage({
     fetchImpl: async () =>
       new Response('binary-ish', { status: 200, headers: { 'Content-Type': 'image/png' } }),
   });
-  page.configure(ACTIVE);
+  page.configure({ ...ACTIVE, captureMediaBodies: false });
   await tick();
   await page.windowStub.fetch('https://api.example.com/logo.png');
   await tick();
-  check('image body skipped', (page.captured[0] || {}).responseBody, '');
+  check('no blob', (page.captured[0] || {}).responseBodyBlob, null);
   check('but the request is still recorded', page.captured.length, 1);
+}
+
+// An export or download endpoint answers with octet-stream, and what it returned is the finding.
+// This used to be skipped alongside images and stored an empty body.
+section('fetch: an octet-stream download is stored in full');
+{
+  const page = buildPage({
+    fetchImpl: async () =>
+      new Response('id,email\n1,other.user@example.com\n', {
+        status: 200,
+        headers: { 'Content-Type': 'application/octet-stream' },
+      }),
+  });
+  page.configure(ACTIVE);
+  await tick();
+  await page.windowStub.fetch('https://api.example.com/export');
+  await tick();
+  check('the export body is kept', (page.captured[0] || {}).responseBody, 'id,email\n1,other.user@example.com\n');
+}
+
+section('fetch: a response that is not valid utf-8 is kept as base64');
+{
+  const wire = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00]);
+  const page = buildPage({
+    fetchImpl: async () =>
+      new Response(wire, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+  });
+  page.configure(ACTIVE);
+  await tick();
+  await page.windowStub.fetch('https://api.example.com/report.pdf');
+  await tick();
+  const body = (page.captured[0] || {}).responseBody || '';
+  check('stored as base64', body.startsWith('base64,'), true);
+  const round = Uint8Array.from(atob(body.slice('base64,'.length)), (c) => c.charCodeAt(0));
+  check('every byte recoverable', Array.from(round), Array.from(wire));
+}
+
+// A blob upload used to be replaced with "[blob 4096 bytes]" past a size threshold, so the large
+// upload, which is the one worth writing up, was the one stored as a sentence about itself.
+section('fetch: a blob request body is read, not described');
+{
+  const page = buildPage();
+  page.configure({ ...ACTIVE, maxBodyBytes: 4 });
+  await tick();
+  await page.windowStub.fetch('https://api.example.com/upload', {
+    method: 'POST',
+    body: new Blob(['0123456789']),
+  });
+  await tick();
+  const record = page.captured[0] || {};
+  // Still subject to the configured cap, and the cap is still flagged; what is gone is the
+  // placeholder that stored nothing at all.
+  check('the blob contents are what got stored', record.postData, '0123');
+  check('and the clip is flagged', record.requestBodyTruncated, true);
 }
 
 section('fetch: response bodies can be switched off');

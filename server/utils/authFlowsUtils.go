@@ -630,16 +630,17 @@ func sendRawRequest(rawRequest, baseURL string, jar http.CookieJar) (int, map[st
 		req.Host = host
 	}
 
-	client := &http.Client{
+	// NoFollowClient, not http.Client: net/http parses the Location header of a 3xx before it
+	// consults CheckRedirect, so ErrUseLastResponse does not stop Client.Do from discarding a
+	// response whose Location will not parse as a URL. The hop is the observation here, and a
+	// hop that only a malformed Location makes interesting is the one most worth keeping.
+	client := NewNoFollowClient(&http.Client{
 		Timeout: 30 * time.Second,
 		Jar:     jar,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse // capture 3xx instead of following
-		},
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
-	}
+	})
 
 	start := time.Now()
 	resp, err := client.Do(req)

@@ -559,33 +559,42 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
         {/* The single most common reason for a thin capture list is that the app's API lives on a
             host outside the recording scope. The extension counts what it rejected; showing it
             here means the answer is where the question gets asked. */}
+        {/* Collapsed by default: this list can be long (a busy SPA drops hundreds of third-party
+            hosts) and it is a diagnostic aside, not a result. The header keeps the host count
+            visible so the "your API may be out of scope" hint is not lost while collapsed. */}
         {Object.keys(droppedHosts).length > 0 && (
-          <div
-            className="rounded p-2 mb-3"
-            style={{ border: '1px solid rgba(255, 193, 7, 0.45)', backgroundColor: 'transparent' }}
-          >
-            <div className="d-flex align-items-start">
-              <i className="bi bi-exclamation-triangle me-2 mt-1 text-warning"></i>
-              <div className="flex-grow-1">
-                <strong className="text-warning">Traffic was seen but not captured.</strong>
-                <div className="small mt-1 text-light" style={{ opacity: 0.75 }}>
+          <Accordion className="mb-3">
+            <Accordion.Item eventKey="dropped-hosts" className="border-warning" style={{ backgroundColor: '#2b2b2b' }}>
+              <Accordion.Header style={{ backgroundColor: '#343a40' }}>
+                <div className="d-flex align-items-center gap-2 w-100 me-3">
+                  <i className="bi bi-exclamation-triangle text-warning"></i>
+                  <strong className="text-warning">Traffic was seen but not captured</strong>
+                  <Badge bg="dark" className="border border-warning text-warning">
+                    {Object.keys(droppedHosts).length} host{Object.keys(droppedHosts).length === 1 ? '' : 's'}
+                  </Badge>
+                </div>
+              </Accordion.Header>
+              <Accordion.Body className="text-white" style={{ backgroundColor: '#2b2b2b' }}>
+                <div className="small mb-2 text-light" style={{ opacity: 0.75 }}>
                   These hosts were requested while recording but are outside the capture scope. If
                   the application's API is among them, add it in the extension popup under
                   <em> Scope</em>, then record again.
                 </div>
-                <div className="d-flex flex-wrap gap-2 mt-2">
+                {/* Every rejected host, ordered by request volume; the one that matters is the API
+                    nobody thought to add to the scope. Scrollable rather than capped so none is
+                    hidden. */}
+                <div className="d-flex flex-wrap gap-2" style={{ maxHeight: '260px', overflowY: 'auto' }}>
                   {Object.entries(droppedHosts)
                     .sort((a, b) => b[1] - a[1])
-                    .slice(0, 15)
                     .map(([host, count]) => (
                       <Badge key={host} bg="dark" className="border border-warning text-warning">
                         {host} <span className="text-white-50">({count})</span>
                       </Badge>
                     ))}
                 </div>
-              </div>
-            </div>
-          </div>
+              </Accordion.Body>
+            </Accordion.Item>
+          </Accordion>
         )}
 
         <Tabs
@@ -911,12 +920,22 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
               )}
             </div>
 
-            {/* ---------------------------------------------------------- scope rules */}
-            <div className="rounded p-3 mb-3" style={{ border: '1px solid rgba(220,53,69,0.45)' }}>
-              <div className="d-flex align-items-center gap-2 mb-2">
-                <span className="text-danger fw-bold small">Scope rules</span>
-                {rulesActive && <Badge bg="danger">in force</Badge>}
-              </div>
+            {/* ---------------------------------------------------------- scope rules
+                Collapsed by default: with a full rule set this list is tall, and it is
+                configuration rather than a result, so it stays out of the way until wanted. The
+                header keeps the "in force" state and the rule count visible while collapsed. */}
+            <Accordion className="mb-3">
+              <Accordion.Item eventKey="scope-rules" className="border-danger" style={{ backgroundColor: '#2b2b2b' }}>
+                <Accordion.Header style={{ backgroundColor: '#343a40' }}>
+                  <div className="d-flex align-items-center gap-2 w-100 me-3">
+                    <span className="text-danger fw-bold small">Scope rules</span>
+                    {rulesActive && <Badge bg="danger">in force</Badge>}
+                    <Badge bg="dark" className="border border-secondary text-white-50">
+                      {scopeRules.length} rule{scopeRules.length === 1 ? '' : 's'}
+                    </Badge>
+                  </div>
+                </Accordion.Header>
+                <Accordion.Body className="text-white" style={{ backgroundColor: '#2b2b2b' }}>
 
               <p className="text-white-50 small mb-2">
                 A rule can name an exact host, a whole subtree, subdomains only, a substring or a
@@ -1031,7 +1050,9 @@ const ManualCrawlResultsModal = ({ show, onHide, scopeTargetId }) => {
                   <div><code>!=cdn.example.com</code> deny that exact host</div>
                 </div>
               </details>
-            </div>
+                </Accordion.Body>
+              </Accordion.Item>
+            </Accordion>
 
             {hostNotice && (
               <Alert variant="dark" className="border border-secondary text-light py-2"

@@ -606,7 +606,7 @@ func (r *tier1Run) hostProbes(host string, t Tier1Target) []Signal {
 				Title: "Source map is publicly retrievable",
 				Detail: "The map returns the original, unminified source including comments and code " +
 					"paths that are not reachable in the shipped bundle.",
-				Evidence:   truncateEvidence(mapURL),
+				Evidence:   evidenceText(mapURL),
 				Confidence: "measured",
 				DedupeKey:  signalHash("host_sourcemap|" + mapURL),
 			})

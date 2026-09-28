@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // Tests for the slot encoder.
@@ -1838,4 +1839,500 @@ func headerNamesOf(h [][2]string) []string {
 		out = append(out, kv[0])
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE PLAN-TIME CAPABILITY QUESTION
+//
+// Measured on live run acaff558 against a real corpus: 6931 of 7425 probes, 93 percent, were
+// refused INSIDE the process after being planned, counted, minted and attempted. Every one of them
+// burned an ordinal, wrote a fidelity row, and was charged to the operator as a probe sent. The
+// four reasons, from triage_fidelity on that run:
+//
+//	path_template_unresolved              5666   81.7%
+//	slot_has_no_name                       971   14.0%   all of them encoder_chain {form}
+//	encoder_mode_not_valid_for_slot_kind   256    3.7%   128 pct_twice + 128 iis_unicode
+//	json_pointer_not_found                  38     0.5%
+//
+// Not one of those four needs a request to discover. The first three need only the slot and the
+// mode. These tests pin the question down at plan time, and the divergence test below is the
+// reason it can never drift back: whatever SlotAcceptsEncoder says, EncodeSlotInto must agree.
+// ---------------------------------------------------------------------------------------------
+
+// encTestSlot is a slot with the fields every encoder reads already set, so each case below edits
+// only the one field it is about.
+func encTestSlot(kind triage.SlotKind) triage.Slot {
+	return triage.Slot{
+		VectorID: "v1", Kind: kind, Key: triage.SlotKey(string(kind) + ":x"), Name: "x",
+		Value: "hello", SegmentIndex: -1, Method: http.MethodGet,
+		ServerReachable: true, Constraints: triage.NewSlotConstraints(),
+	}
+}
+
+func TestASlotRefusesAnEncoderBeforeThereIsAPayloadToRefuse(t *testing.T) {
+	jsonBody := encTestSlot(triage.KindBody)
+	jsonBody.Name = ""
+	jsonBody.FieldPath = "/name"
+	jsonBody.BodyMedia = triage.BodyJSON
+	jsonBody.SegmentIndex = -1
+
+	formBody := encTestSlot(triage.KindBody)
+	formBody.BodyMedia = triage.BodyForm
+
+	pathSeg := encTestSlot(triage.KindPath)
+	pathSeg.Name = ""
+	pathSeg.SegmentIndex = 2
+
+	for _, tc := range []struct {
+		name   string
+		slot   triage.Slot
+		mode   triage.EncoderMode
+		reason DeliveryReason
+	}{
+		// The 971. A JSON body slot has no Name, because a JSON slot is addressed by pointer.
+		// EncodeForm "fits" KindBody in the kind table and then refuses on the missing name once a
+		// payload exists. The media is the fact that decides it and it is known at plan time.
+		{"form encoder into a json body", jsonBody, triage.EncodeForm, ReasonEncoderWrongKind},
+		// The 256. Traversal's round-2 encoder sweep asks for these on every slot kind.
+		{"iis unicode into a body", jsonBody, triage.EncodeIISUnicode, ReasonEncoderWrongKind},
+		{"pct twice into a body", jsonBody, triage.EncodePctTwice, ReasonEncoderWrongKind},
+		// Declared valid for a path in the kind table, and dispatched to the query container,
+		// which can only render into a named query pair. That is a gap in this encoder, and it is
+		// named as one rather than reported as a property of the application.
+		{"pct twice into a path segment", pathSeg, triage.EncodePctTwice, ReasonEncoderNotImplemented},
+		{"cookie encoder into a query", encTestSlot(triage.KindQuery), triage.EncodeCookie, ReasonEncoderWrongKind},
+		{"a fragment takes nothing", triage.Slot{Kind: triage.KindFragment, Constraints: triage.NewSlotConstraints()},
+			triage.EncodeQuery, ReasonFragmentNotTransmitted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, detail := SlotAcceptsEncoder(tc.slot, tc.mode)
+			if reason != tc.reason {
+				t.Fatalf("SlotAcceptsEncoder(%s slot, %q) = %q, want %q", tc.slot.Kind, tc.mode, reason, tc.reason)
+			}
+			if strings.TrimSpace(detail) == "" {
+				t.Errorf("the refusal carries no detail, so the operator cannot see what could not reach this slot")
+			}
+		})
+	}
+
+	// And the accepts, because a capability check that refuses everything would pass every
+	// assertion above and plan no coverage at all.
+	for _, tc := range []struct {
+		name string
+		slot triage.Slot
+		mode triage.EncoderMode
+	}{
+		{"json string into a json body", jsonBody, triage.EncodeJSONString},
+		{"json node replace into a json body", jsonBody, triage.EncodeJSONNodeReplace},
+		{"form into a form body", formBody, triage.EncodeForm},
+		{"query into a query", encTestSlot(triage.KindQuery), triage.EncodeQuery},
+		{"path segment into a path", pathSeg, triage.EncodePathSegment},
+		{"cookie into a cookie", encTestSlot(triage.KindCookie), triage.EncodeCookie},
+		{"header into a header", encTestSlot(triage.KindHeader), triage.EncodeHeaderValue},
+		{"none resolves to the slot kind's own default", jsonBody, triage.EncodeNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if reason, detail := SlotAcceptsEncoder(tc.slot, tc.mode); reason != "" {
+				t.Fatalf("SlotAcceptsEncoder refused a mode that does render into this slot: %s (%s)", reason, detail)
+			}
+		})
+	}
+}
+
+// TestThePlanTimeAnswerAndTheRuntimeAnswerCannotDiverge is the reason the check can be moved
+// forward safely. Two tables saying the same thing is two chances to disagree, and a plan-time
+// table that is more permissive than the encoder puts the refusals straight back on the wire.
+func TestThePlanTimeAnswerAndTheRuntimeAnswerCannotDiverge(t *testing.T) {
+	tmpl := RequestTemplate{
+		Method: http.MethodPost,
+		URL:    "https://example.test/api/v1/orders?q=hello",
+		Body:   []byte(`{"name":"hello","qty":"1"}`),
+	}
+	var slots []triage.Slot
+	for _, k := range []triage.SlotKind{triage.KindQuery, triage.KindPath, triage.KindCookie,
+		triage.KindHeader, triage.KindBody, triage.KindFragment} {
+		s := encTestSlot(k)
+		switch k {
+		case triage.KindPath:
+			s.Name, s.SegmentIndex = "", 2
+		case triage.KindBody:
+			s.Name, s.FieldPath, s.BodyMedia = "", "/name", triage.BodyJSON
+		case triage.KindFragment:
+			s.ServerReachable = false
+		}
+		slots = append(slots, s)
+		if k == triage.KindBody {
+			f := s
+			f.Name, f.FieldPath, f.BodyMedia = "name", "", triage.BodyForm
+			slots = append(slots, f)
+		}
+	}
+
+	for _, s := range slots {
+		for _, mode := range TriageEncoderModes() {
+			planReason, _ := SlotAcceptsEncoder(s, mode)
+			enc := EncodeSlotInto(tmpl, s, mode, []byte("hello"), triage.SlotOverrides{})
+			switch {
+			case planReason != "" && enc.Delivered:
+				t.Errorf("%s slot, mode %q: the plan refused it (%s) and the encoder delivered it. The plan-time table is stricter than the encoder, so real coverage is being dropped",
+					s.Kind, mode, planReason)
+			case planReason != "" && enc.Reason != planReason:
+				t.Errorf("%s slot, mode %q: the plan says %q and the encoder says %q. Two reasons for one fact is two things to keep in step",
+					s.Kind, mode, planReason, enc.Reason)
+			case planReason == "" && !enc.Delivered:
+				// The encoder may still refuse for a reason that needs the payload or the request,
+				// and those are not the plan's to know. The static ones are.
+				switch enc.Reason {
+				case ReasonEncoderWrongKind, ReasonEncoderNotImplemented, ReasonSlotHasNoName,
+					ReasonFragmentNotTransmitted:
+					t.Errorf("%s slot, mode %q: the plan accepted it and the encoder refused with %q, which needs no payload and no request to know. This is the refusal the plan exists to stop being planned",
+						s.Kind, mode, enc.Reason)
+				}
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE IIS UNICODE ENCODER: OVERLONG UTF-8 FOR THE TWO PATH SEPARATORS
+//
+// WHAT THE ENCODING IS, WRITTEN OUT, BECAUSE A TEST THAT ONLY COMPARES THE ENCODER TO ITSELF
+// PROVES NOTHING. UTF-8 (RFC 3629 section 3) encodes U+002F '/' as the single byte 0x2F. The
+// two-byte form 0xC0 0xAF decodes to the same code point when the leading zero bits are not
+// rejected:
+//
+//	0xC0 = 110_00000   the 2-byte lead, carrying payload bits 00000
+//	0xAF = 10_101111   the continuation, carrying payload bits 101111
+//	                   00000 101111 = 0x2F = '/'
+//
+// and 0xC1 0x9C is the same trick for '\' (0x5C):
+//
+//	0xC1 = 110_00001   payload 00001
+//	0x9C = 10_011100   payload 011100
+//	                   00001 011100 = 0x5C = '\'
+//
+// RFC 3629 forbids both as OVERLONG precisely because a lenient decoder turns them into a
+// separator that no separator-checking filter ever saw. Percent-encoded for the wire they are
+// %C0%AF and %C1%9C, the two sequences of the IIS Unicode bug (CVE-2000-0884), where the docroot
+// check ran on the once-decoded request and the Unicode decode ran afterwards.
+//
+// WHAT THESE TESTS PIN DOWN. The byte sequences themselves; that the shortest forms %2F and %5C
+// are never produced, because emitting those would make this mode a duplicate of pct_once while
+// still reporting coverage under the name iis_unicode; that the rendering round-trips through the
+// two decodes the bug consists of; and that a payload of these bytes passes a filter the plain
+// encoding does not.
+// ---------------------------------------------------------------------------------------------
+
+// encPctDecodeOnce is a strict single percent-decode: %XX with two hex digits and nothing else. It
+// is written here rather than taken from net/url because url.QueryUnescape also turns '+' into a
+// space, which would hide a '+' this encoder should have escaped.
+func encPctDecodeOnce(t *testing.T, s []byte) []byte {
+	t.Helper()
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); {
+		if s[i] != '%' {
+			out = append(out, s[i])
+			i++
+			continue
+		}
+		if i+2 >= len(s) {
+			t.Fatalf("a trailing %% with no hex pair at offset %d of %q", i, s)
+		}
+		v, err := strconv.ParseUint(string(s[i+1:i+3]), 16, 8)
+		if err != nil {
+			t.Fatalf("%q at offset %d of %q is not a hex pair", s[i+1:i+3], i, s)
+		}
+		out = append(out, byte(v))
+		i += 3
+	}
+	return out
+}
+
+// encOverlongDecode is the SECOND pass: the lenient UTF-8 decode that accepts an overlong two-byte
+// sequence. 0xC0 and 0xC1 can only ever begin an overlong sequence, which is why RFC 3629 excludes
+// them from UTF-8 altogether and why they are the two lead bytes this pass looks for.
+func encOverlongDecode(b []byte) []byte {
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); {
+		if i+1 < len(b) && (b[i] == 0xC0 || b[i] == 0xC1) && b[i+1]&0xC0 == 0x80 {
+			out = append(out, (b[i]&0x1F)<<6|(b[i+1]&0x3F))
+			i += 2
+			continue
+		}
+		out = append(out, b[i])
+		i++
+	}
+	return out
+}
+
+// encTravNormalise resolves dot segments the way a file open does, so the test can say which file
+// the double-decoding server would have opened.
+func encTravNormalise(v string) string {
+	var out []string
+	for _, seg := range strings.Split(strings.ReplaceAll(v, `\`, "/"), "/") {
+		switch seg {
+		case "", ".":
+		case "..":
+			if len(out) > 0 {
+				out = out[:len(out)-1]
+			}
+		default:
+			out = append(out, seg)
+		}
+	}
+	return strings.Join(out, "/")
+}
+
+func TestTheIISUnicodeEncoderWritesTheOverlongSeparatorsAndNeverTheirShortestForms(t *testing.T) {
+	tmpl, slot := triageTemplateFor("http://127.0.0.1:1", triage.KindQuery)
+
+	for _, tc := range []struct {
+		name    string
+		logical []byte
+		want    string
+		// roundTrips is false for a payload that already carries overlong bytes of its own: the
+		// double decode then yields the payload's OWN decoded form, not the bytes handed in.
+		roundTrips bool
+	}{
+		{
+			name:       "the forward slash becomes the two-byte overlong form",
+			logical:    []byte("../../etc/passwd"),
+			want:       "..%C0%AF..%C0%AFetc%C0%AFpasswd",
+			roundTrips: true,
+		},
+		{
+			name:       "the backslash becomes the other two-byte overlong form",
+			logical:    []byte(`..\..\windows\win.ini`),
+			want:       "..%C1%9C..%C1%9Cwindows%C1%9Cwin.ini",
+			roundTrips: true,
+		},
+		{
+			name:       "both separators in one payload each get their own sequence",
+			logical:    []byte(`../..\etc/passwd`),
+			want:       "..%C0%AF..%C1%9Cetc%C0%AFpasswd",
+			roundTrips: true,
+		},
+		{
+			// A payload whose own text says %c0%af must arrive as the six characters it is, not
+			// as the encoder's work, or nothing downstream can tell the two apart.
+			name:       "a literal percent in the payload is escaped and never passed through raw",
+			logical:    []byte("%c0%af"),
+			want:       "%25c0%25af",
+			roundTrips: true,
+		},
+		{
+			// TR-T6 carries raw overlong dots. They are escaped byte by byte, which is what keeps
+			// them from being normalised into their shortest UTF-8 form on the way out, and the
+			// slash after them is overlong-encoded on top.
+			name:       "a payload that is already overlong keeps its own bytes and gets the separators too",
+			logical:    append([]byte{0xC0, 0xAE, 0xC0, 0xAE, 0x2F}, []byte("etc/passwd")...),
+			want:       "%C0%AE%C0%AE%C0%AFetc%C0%AFpasswd",
+			roundTrips: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enc := EncodeSlotInto(tmpl, slot, triage.EncodeIISUnicode, tc.logical, triage.SlotOverrides{})
+			if !enc.Delivered {
+				t.Fatalf("refused: %s (%s)", enc.Reason, enc.Detail)
+			}
+			if got := string(enc.Wire.Wire); got != tc.want {
+				t.Fatalf("wire = %q, want %q", got, tc.want)
+			}
+			for _, forbidden := range []string{"%2F", "%2f", "/", "%5C", "%5c", `\`, "%E0%80%AF", "%F0%80%80%AF", "%C0%80"} {
+				if strings.Contains(string(enc.Wire.Wire), forbidden) {
+					t.Errorf("the rendering carries %q. That is either a shortest form, a raw separator or a different overlong width, and any of the three makes this mode something other than the one it is named for", forbidden)
+				}
+			}
+			if !strings.Contains(enc.Req.URL, "target="+tc.want) {
+				t.Errorf("request-target %q does not carry the rendered value", enc.Req.URL)
+			}
+			if enc.Wire.Survived != triage.WireSurvivalEncoded {
+				t.Errorf("survival = %q, want encoded: the payload is present through a declared encoder, not verbatim", enc.Wire.Survived)
+			}
+			if tc.roundTrips {
+				once := encPctDecodeOnce(t, enc.Wire.Wire)
+				if got := encOverlongDecode(once); !bytes.Equal(got, tc.logical) {
+					t.Errorf("the double decode produced %q, want the logical bytes %q", got, tc.logical)
+				}
+			}
+		})
+	}
+}
+
+// The point of the encoding is that the bytes on the wire are NOT valid UTF-8 after one decode. A
+// filter that decodes strictly rejects or ignores them and sees no separator at all; the decoder
+// behind it accepts them and opens a different file. If the once-decoded form were valid UTF-8
+// there would be no bug to reach.
+func TestTheOnceDecodedIISUnicodeFormIsRejectedByAStrictUTF8DecoderAndAcceptedByALenientOne(t *testing.T) {
+	tmpl, slot := triageTemplateFor("http://127.0.0.1:1", triage.KindQuery)
+	logical := []byte("../../etc/passwd")
+	enc := EncodeSlotInto(tmpl, slot, triage.EncodeIISUnicode, logical, triage.SlotOverrides{})
+	if !enc.Delivered {
+		t.Fatalf("refused: %s (%s)", enc.Reason, enc.Detail)
+	}
+	once := encPctDecodeOnce(t, enc.Wire.Wire)
+	want := []byte{'.', '.', 0xC0, 0xAF, '.', '.', 0xC0, 0xAF, 'e', 't', 'c', 0xC0, 0xAF, 'p', 'a', 's', 's', 'w', 'd'}
+	if !bytes.Equal(once, want) {
+		t.Fatalf("one decode gave % x, want % x", once, want)
+	}
+	if utf8.Valid(once) {
+		t.Error("the once-decoded bytes are valid UTF-8, so a strict decoder would already have seen the separator and there is no double decode to reach past")
+	}
+	if bytes.IndexByte(once, '/') >= 0 {
+		t.Error("a raw slash is present after ONE decode, so a filter running there would catch it and the second decode is not what produces the separator")
+	}
+	if got := encOverlongDecode(once); !bytes.Equal(got, logical) {
+		t.Fatalf("the second decode gave %q, want %q", got, logical)
+	}
+}
+
+// A path payload has to stay inside ONE segment, or the request goes to a different route and the
+// response says nothing about the slot. The overlong form does that by construction: it carries no
+// byte a path splitter recognises.
+func TestAnIISUnicodePathPayloadStaysInsideOneSegment(t *testing.T) {
+	tmpl, slot := triageTemplateFor("http://127.0.0.1:1", triage.KindPath)
+	before := strings.Count("/api/v1/orders/42", "/")
+	enc := EncodeSlotInto(tmpl, slot, triage.EncodeIISUnicode, []byte("../../etc/passwd"), triage.SlotOverrides{})
+	if !enc.Delivered {
+		t.Fatalf("refused: %s (%s)", enc.Reason, enc.Detail)
+	}
+	_, path, _, ok := triageSplitWireURL(enc.Req.URL)
+	if !ok {
+		t.Fatalf("the encoder produced a URL it cannot parse: %q", enc.Req.URL)
+	}
+	if got := strings.Count(path, "/"); got != before {
+		t.Fatalf("path %q has %d separators and the captured path had %d, so the payload left its segment", path, got, before)
+	}
+	if want := "/api/v1/orders/..%C0%AF..%C0%AFetc%C0%AFpasswd"; path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+}
+
+// The end-to-end proof, through a real net/http client and a real server, with a negative control:
+// the SAME payload under the plain encoder is blocked and under this one is not.
+//
+// The server is CVE-2000-0884 in miniature and in the same order IIS had it. Go performs the first
+// percent-decode, the filter runs on that, and the lenient UTF-8 decode runs afterwards, which is
+// the whole of the bug: the check and the open disagree about what the string says.
+func TestAnIISUnicodePayloadPassesAFilterTheShortestFormDoesNotAndOpensTheFileBehindIt(t *testing.T) {
+	const fileBody = "root:x:0:0:root:/root:/bin/bash\n"
+	files := map[string]string{"etc/passwd": fileBody}
+
+	var opened string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := r.URL.Query().Get("target") // decode one, performed by the server itself
+		for _, seg := range strings.Split(strings.ReplaceAll(v, `\`, "/"), "/") {
+			if seg == ".." {
+				opened = ""
+				w.WriteHeader(http.StatusForbidden)
+				fmt.Fprint(w, "blocked by the path filter")
+				return
+			}
+		}
+		// Decode two, after the check, which is the defect being emulated.
+		opened = encTravNormalise(string(encOverlongDecode([]byte(v))))
+		body, ok := files[opened]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, "ENOENT")
+			return
+		}
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+
+	tmpl, slot := triageTemplateFor(srv.URL, triage.KindQuery)
+	logical := []byte("../../etc/passwd")
+
+	get := func(mode triage.EncoderMode) (int, string) {
+		t.Helper()
+		enc := EncodeSlotInto(tmpl, slot, mode, logical, triage.SlotOverrides{})
+		if !enc.Delivered {
+			t.Fatalf("%s: refused: %s (%s)", mode, enc.Reason, enc.Detail)
+		}
+		req, err := enc.NewRequest(context.Background())
+		if err != nil {
+			t.Fatalf("%s: build request: %v", mode, err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s: send: %v", mode, err)
+		}
+		defer resp.Body.Close()
+		got, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(got)
+	}
+
+	// The negative control. Without it this test would pass against a server that serves the file
+	// to everybody, and the encoder would be credited with a bypass that was never needed.
+	if code, body := get(triage.EncodeQuery); code != http.StatusForbidden {
+		t.Fatalf("the plain encoding got %d %q, and this filter is supposed to stop it. Nothing below would mean anything", code, body)
+	}
+	code, body := get(triage.EncodeIISUnicode)
+	if code != http.StatusOK {
+		t.Fatalf("the overlong encoding got %d %q, want 200: it did not reach past the filter", code, body)
+	}
+	if body != fileBody {
+		t.Errorf("the server returned %q, want the file %q", body, fileBody)
+	}
+	if opened != "etc/passwd" {
+		t.Errorf("the server opened %q, want etc/passwd", opened)
+	}
+}
+
+// The plan-time answer. While this mode was declared and unimplemented, TRAVERSAL asked for it on
+// every query and path slot, the encoder refused it by name, no observation came back, and the
+// class's completeness gate turned the hole into not_run. Measured on the canary oracle,
+// 2026-09-19: ZERO traversal cleans in 80 exam routes and ZERO in 48 matrix cells, every one of
+// them "incomplete: TR-T1L (no_response_under_encoder(iis_unicode))".
+func TestTheIISUnicodeEncoderIsPlannableOnTheTwoSlotKindsThatDeclareIt(t *testing.T) {
+	pathSlot := encTestSlot(triage.KindPath)
+	pathSlot.Name, pathSlot.SegmentIndex = "", 2
+	for _, s := range []triage.Slot{encTestSlot(triage.KindQuery), pathSlot} {
+		if reason, detail := SlotAcceptsEncoder(s, triage.EncodeIISUnicode); reason != "" {
+			t.Errorf("a %s slot refuses iis_unicode at plan time: %s (%s)", s.Kind, reason, detail)
+		}
+	}
+	// And a query slot with no name is still refused for the reason it is actually refused for.
+	noName := encTestSlot(triage.KindQuery)
+	noName.Name = ""
+	if reason, _ := SlotAcceptsEncoder(noName, triage.EncodeIISUnicode); reason != ReasonSlotHasNoName {
+		t.Errorf("an unnamed query slot answers %q, want %q", reason, ReasonSlotHasNoName)
+	}
+}
+
+// Every byte this mode emits for a separator is a percent triplet, so a slot measured to reject
+// percent-encoding cannot carry it. That is a refusal with a name and never a clean.
+func TestASlotThatRejectsPercentEncodingRefusesTheIISUnicodeEncoderByName(t *testing.T) {
+	tmpl, slot := triageTemplateFor("http://127.0.0.1:1", triage.KindQuery)
+	slot.Constraints.PctRejected = true
+	enc := EncodeSlotInto(tmpl, slot, triage.EncodeIISUnicode, []byte("../../etc/passwd"), triage.SlotOverrides{})
+	if enc.Delivered {
+		t.Fatal("a percent-rejecting slot was handed an encoding that is nothing but percent triplets")
+	}
+	if enc.Reason != ReasonSlotRejectsPercentEnc {
+		t.Fatalf("reason = %q, want %q", enc.Reason, ReasonSlotRejectsPercentEnc)
+	}
+	if enc.Wire.Survived.Proven() {
+		t.Fatal("a refused payload must never read as proven")
+	}
+}
+
+// A payload with no separator in it renders identically under this mode and under the plain one.
+// That is a true and unremarkable fact about those bytes, and it is SAID, because a coverage row
+// reading "tested under iis_unicode" over a payload the mode could not touch is the kind of
+// half-truth this layer keeps finding.
+func TestAnIISUnicodeRenderWithNoSeparatorToEncodeSaysSo(t *testing.T) {
+	tmpl, slot := triageTemplateFor("http://127.0.0.1:1", triage.KindQuery)
+	enc := EncodeSlotInto(tmpl, slot, triage.EncodeIISUnicode, []byte("hello world"), triage.SlotOverrides{})
+	if !enc.Delivered {
+		t.Fatalf("refused: %s (%s)", enc.Reason, enc.Detail)
+	}
+	if !strings.Contains(enc.Detail, "no forward slash and no backslash") {
+		t.Errorf("detail = %q, and it does not say that this rendering is the plain one because there was no separator to encode", enc.Detail)
+	}
+	enc2 := EncodeSlotInto(tmpl, slot, triage.EncodeIISUnicode, []byte("../a"), triage.SlotOverrides{})
+	if strings.Contains(enc2.Detail, "no forward slash and no backslash") {
+		t.Errorf("detail = %q on a payload that DOES carry a slash", enc2.Detail)
+	}
 }

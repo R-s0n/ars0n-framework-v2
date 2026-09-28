@@ -222,10 +222,18 @@ var pointerClassLabels = map[string]string{
 	triage.ClassMassAssign.String():   "Mass assignment",
 	triage.ClassHPP.String():          "HTTP parameter pollution",
 	triage.ClassGraphQL.String():      "GraphQL abuse",
-	pointerClassSecret:                "Exposed secret",
-	pointerClassAccessBypass:          "Access control bypass",
-	pointerClassSmuggling:             "Request smuggling",
-	pointerClassUnclassified:          pointerClassLabelUnmapped,
+	// THE CLASSES ADDED AFTER THIS MAP WAS WRITTEN. It was built when the triage layer shipped
+	// ten classes and was not touched as it grew to nineteen, so ELI, CORS and ORM-LEAK rendered
+	// as their bare token with nothing under it. TestEveryRegisteredTriageClassNamesALabelAndANextStep
+	// walks the registry rather than this map, so the next class to register fails the build
+	// instead of shipping a nameless card.
+	triage.ClassELI.String():     "Expression language injection",
+	triage.ClassCORS.String():    "CORS misconfiguration",
+	triage.ClassORMLeak.String(): "ORM leak",
+	pointerClassSecret:           "Exposed secret",
+	pointerClassAccessBypass:     "Access control bypass",
+	pointerClassSmuggling:        "Request smuggling",
+	pointerClassUnclassified:     pointerClassLabelUnmapped,
 }
 
 // pointerClassLabel names a class, falling back to the class id itself rather than to blank: a row
@@ -388,7 +396,30 @@ func pointerDeliveryNote(class, tool, insertionPoint string) string {
 
 // pointerNextTool is the WHICH TOOL half of a pointer. A pointer that does not name the next move
 // is a sentence, not an instruction.
-func pointerNextTool(class string) (string, string) {
+//
+// =================================================================================================
+// declared IS THE VERDICT'S OWN TriageLabel.Tools AND IT OUTRANKS THE SWITCH
+// =================================================================================================
+//
+// The switch below is a static guess made once per class. TriageLabel.Tools is what the classifier
+// decided for THIS verdict from what it actually saw: ssti.go picks its tool list off the engine it
+// fingerprinted, redirect.go off whether the redirect was header or body, xssreflected.go off the
+// encoder the reflection survived. Reading the label first is the difference between "SSTI, so run
+// sstimap" and "this looked like Jinja2, so run tinja".
+//
+// THE SWITCH WAS ALSO STALE, WHICH IS THE OTHER HALF. It was written when this layer shipped ten
+// classes. It ships nineteen, and CRLF, DESER, CORS, HOSTHDR, HPP and ORM-LEAK were none of the
+// ten: every one of them fell to the default arm, so the first positive any of them produced
+// rendered a card with no next step on it. The stale entries are filled in below from each class's
+// own declared Tools, and the registry-walking test is what stops the list going stale again.
+//
+// AN EMPTY LIST IS NOT AN ANSWER. HPP declares Tools: []string{} and DESER declares nil on every
+// verdict they emit, which is the class saying it has nothing to add, not the class naming no
+// tool. The switch answers for them.
+func pointerNextTool(class string, declared []string) (string, string) {
+	if tool, reason := pointerToolFromLabel(declared); tool != "" {
+		return tool, reason
+	}
 	switch class {
 	case triage.ClassXSSReflected.String():
 		return "dalfox", "Dalfox drives the reflection towards an executable position and reports the context it landed in."
@@ -418,6 +449,22 @@ func pointerNextTool(class string) (string, string) {
 		return "graphql-cop", "Graphql-cop enumerates the introspection and batching surface for this endpoint."
 	case triage.ClassPPClient.String():
 		return "pphack", "Pphack checks whether the polluted property reaches a gadget in the page."
+	case triage.ClassELI.String():
+		return "nuclei-dast", "Nuclei DAST carries the expression-language templates, and the class has already narrowed the sink to one parameter."
+	case triage.ClassCRLF.String():
+		return "nuclei", "Nuclei is the detector for header injection, and CRLF's own verdict label names it."
+	case triage.ClassHostHeader.String():
+		return "nuclei", "Nuclei replays the routing-header set, which is what turns a reflected Host into a password-reset poisoning."
+	case triage.ClassCORS.String():
+		return "nuclei", "Nuclei checks the origin-reflection matrix, including the null and subdomain-suffix arms a single probe does not cover."
+	case triage.ClassPPServer.String():
+		return "", "No container in this framework tests server side prototype pollution. The next step is a hand review: the class has already shown the polluted property changing a later response, and what it is worth depends on which gadget that property reaches."
+	case triage.ClassHPP.String():
+		return "", "No scanner decides this one. The next step is a hand review of which parameter copy the application chose, because HPP is only a finding when the copy that wins is not the copy the front end validated."
+	case triage.ClassDeser.String():
+		return "", "No container in this framework sends a deserialization gadget chain, and one sent blind is a remote code execution attempt at an unknown target. The next step is a hand review of the format the class identified before anything else is sent."
+	case triage.ClassORMLeak.String():
+		return "", "No container in this framework detects an ORM keyword leak. The next step is a hand review driving replay_request: re-send the winning request with __startswith on a leaked column and binary-search the value one character at a time. Do NOT follow the harvest's __regex arm."
 	case pointerClassAccessBypass:
 		return "nomore403", "Nomore403 replays the refused request through the bypass set, and a soft 403 is checked rather than assumed."
 	case pointerClassSmuggling:
@@ -426,6 +473,45 @@ func pointerNextTool(class string) (string, string) {
 		return "", "A secret is confirmed by reading it and using it, not by another scanner. The response body is the evidence."
 	}
 	return "", pointerNoToolReason
+}
+
+// triagePointerLabelTools reads Tools off a stored triage_verdicts.label, or returns nil.
+//
+// The column is JSONB written by RecordTriageVerdicts from triage.TriageLabel, so the shape is
+// this codebase's own. It is still decoded defensively: this read is on the pointer path, which
+// runs over every verdict of every run, and a row this function panicked on would take the whole
+// list with it.
+func triagePointerLabelTools(label string) []string {
+	if strings.TrimSpace(label) == "" {
+		return nil
+	}
+	var l triage.TriageLabel
+	if err := json.Unmarshal([]byte(label), &l); err != nil {
+		return nil
+	}
+	return l.Tools
+}
+
+// pointerToolFromLabel turns a verdict's own declared tool list into the card's next step.
+//
+// It returns an empty tool for an empty, nil or all-blank list, which is the common case: most
+// classes declare Tools only on the verdicts where they identified something specific, and a
+// declaration of nothing must not be mistaken for a declaration that there is nothing to run.
+func pointerToolFromLabel(declared []string) (string, string) {
+	tools := make([]string, 0, len(declared))
+	for _, t := range declared {
+		if t = strings.TrimSpace(t); t != "" {
+			tools = append(tools, t)
+		}
+	}
+	if len(tools) == 0 {
+		return "", ""
+	}
+	if len(tools) == 1 {
+		return tools[0], fmt.Sprintf("%s, named by the class's own verdict on this unit rather than by the class in general.", tools[0])
+	}
+	return tools[0], fmt.Sprintf("%s first, then %s. This class named them itself on this unit, from what its own probes saw here.",
+		tools[0], strings.Join(tools[1:], ", "))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1368,7 +1454,7 @@ func collectReflectionPointers(ctx context.Context, scopeTargetID string) ([]Poi
 		rank := EvidenceRank(provenance, deltaChecked)
 
 		class := triage.ClassXSSReflected.String()
-		nextTool, nextReason := pointerNextTool(class)
+		nextTool, nextReason := pointerNextTool(class, nil)
 		p := Pointer{
 			ID:               PointerSourceReflection + ":" + id,
 			Source:           PointerSourceReflection,
@@ -1514,7 +1600,7 @@ func collectFindingPointers(ctx context.Context, scopeTargetID string) ([]Pointe
 		// is today. Which is exactly what this list is for.
 		rank := EvidenceRank(ProvenancePriorFinding, false)
 		class := pointerClassForFinding(f.Tool, f.Kind)
-		nextTool, nextReason := pointerNextTool(class)
+		nextTool, nextReason := pointerNextTool(class, nil)
 		point := strings.TrimSpace(f.Point)
 
 		p := Pointer{
@@ -1673,6 +1759,7 @@ func collectTriagePointers(ctx context.Context, scopeTargetID string) ([]Pointer
 		SELECT v.id::text, v.vector_id, v.slot_key, v.class_id, v.class_name, v.arm, v.state,
 		       v.state_kind, v.is_unknown, v.reason, v.grade, v.oracle, v.provenance,
 		       v.provenance_detail, v.delta_checked, COALESCE(v.evidence_phrase,''),
+		       COALESCE(v.label::text,'{}'),
 		       (`+unprovenForThisPair+`),
 		       COALESCE(av.method,'GET'), COALESCE(av.domain,''), COALESCE(av.path,''),
 		       COALESCE(av.evidence_url,''), COALESCE(av.insertion_point,''),
@@ -1690,12 +1777,13 @@ func collectTriagePointers(ctx context.Context, scopeTargetID string) ([]Pointer
 		var id, vectorID, slotKey, className, arm, state, stateKind, reason, grade string
 		var oracle, provenance, provenanceDetail, phrase string
 		var method, domain, path, evidenceURL, vectorPoint, scheme string
+		var label string
 		var classID int16
 		var isUnknown, deltaChecked bool
 		var unproven int
 		if err := rows.Scan(&id, &vectorID, &slotKey, &classID, &className, &arm, &state,
 			&stateKind, &isUnknown, &reason, &grade, &oracle, &provenance, &provenanceDetail,
-			&deltaChecked, &phrase, &unproven, &method, &domain, &path, &evidenceURL,
+			&deltaChecked, &phrase, &label, &unproven, &method, &domain, &path, &evidenceURL,
 			&vectorPoint, &scheme); err != nil {
 			return nil, cov, fmt.Errorf("pointers: scan triage verdict: %w", err)
 		}
@@ -1712,7 +1800,12 @@ func collectTriagePointers(ctx context.Context, scopeTargetID string) ([]Pointer
 
 		rank := EvidenceRank(TriageProvenance(provenance), deltaChecked)
 		class := firstNonEmpty(className, triage.ClassID(classID).String())
-		nextTool, nextReason := pointerNextTool(class)
+		// THE CLASS'S OWN ANSWER FIRST. triage_verdicts.label is the TriageLabel the classifier
+		// wrote for THIS unit, and its Tools list is the class saying which scanner to point at
+		// given what its probes actually saw here. A malformed label is ignored rather than
+		// fatal: the switch still answers, so a bad byte in one row costs the class's nuance and
+		// not the pointer.
+		nextTool, nextReason := pointerNextTool(class, triagePointerLabelTools(label))
 		point := firstNonEmpty(triageSlotInsertionPoint(slotKey), vectorPoint)
 		// A triage verdict stores no URL of its own: the request it sent is in triage_fidelity and
 		// the detail endpoint reads it from there. So the list URL is the vector's, captured or

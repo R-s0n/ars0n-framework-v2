@@ -140,8 +140,11 @@ func TestThePlaceholderOccupiesNoRealClassID(t *testing.T) {
 				id, id, c.ID(), c.ID())
 		}
 	}
-	if real != 27 {
-		t.Errorf("the register holds %d real classes besides the reserved example, want 27. If a class was added, say so here on purpose", real)
+	// 29 and not the original 27: CORS took 28 and ORM-LEAK took 29, both after CATALOGUE 1.0 was
+	// written and both with their reasoning in the const block in triage/types.go. Saying so here
+	// on purpose is what this assertion is for.
+	if real != 29 {
+		t.Errorf("the register holds %d real classes besides the reserved example, want 29 (the original 27, plus CORS at 28 and ORM-LEAK at 29). If a class was added, say so here on purpose", real)
 	}
 
 	// The count is logged rather than asserted, because classes land in batches and a hardcoded

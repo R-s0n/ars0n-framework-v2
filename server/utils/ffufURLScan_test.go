@@ -2,8 +2,15 @@ package utils
 
 import (
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // The first of these is the important one. ffuf, with -ac enabled, writes the auto-calibration
@@ -302,5 +309,136 @@ func TestStatusMatcherParsing(t *testing.T) {
 	}
 	if !statusMatched(418, "all") {
 		t.Error(`"all" must match everything`)
+	}
+}
+
+// A LIVE TARGET THAT READS AS UNREACHABLE.
+//
+// preflightTarget used a plain http.Client that FOLLOWS, and its get() closure turns any error
+// into ok=false. net/http discards a 3xx whose Location it cannot parse and returns an error
+// instead, so a host that answered every request in full is reported Reachable=false with the
+// note "The target did not answer a request from the framework", and the whole ffuf preflight is
+// abandoned. The operator is then told a scan finding nothing says nothing about the target, for
+// a target that was talking the entire time.
+func TestFfufPreflightSurvivesATargetWhoseLocationWillNotParse(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		// Set through the map so net/http's own header writer cannot rewrite it.
+		w.Header()["Location"] = []string{"https://evil.example/landing%"}
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	out := preflightTarget(srv.URL)
+	t.Logf("requests the target served: %d", atomic.LoadInt32(&hits))
+	t.Logf("Reachable=%v BaselineStatus=%d BaselineSize=%d Note=%q",
+		out.Reachable, out.BaselineStatus, out.BaselineSize, out.Note)
+	if !out.Reachable {
+		t.Fatalf("the target served %d requests and answered every one with a 302, and the "+
+			"preflight reports it unreachable: %q", atomic.LoadInt32(&hits), out.Note)
+	}
+	if out.BaselineStatus != http.StatusFound {
+		t.Errorf("baseline status %d, want the 302 the target actually sent", out.BaselineStatus)
+	}
+}
+
+// The control. The same server with a Location that parses was always reachable, which is what
+// makes the failure above about the Location and not about the test.
+func TestFfufPreflightControlWithAParseableLocation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/landing") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("landed"))
+			return
+		}
+		w.Header().Set("Location", "/landing")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	out := preflightTarget(srv.URL)
+	t.Logf("CONTROL Reachable=%v status=%d note=%q", out.Reachable, out.BaselineStatus, out.Note)
+	if !out.Reachable {
+		t.Fatalf("the control must be reachable: %q", out.Note)
+	}
+}
+
+// Same shape, lower blast radius, in the port scanner. A port answering a 3xx whose Location will
+// not parse never becomes a LiveWebServer, so it vanishes from the attack surface before any
+// scanner is offered it. An asset that is not in the list is not scanned and not reported, which
+// is the quietest false clean there is.
+func TestPortScanStillSeesAWebServerBehindAnUnparseableLocation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header()["Location"] = []string{"https://evil.example/landing%"}
+		w.Header().Set("Server", "oracle-under-test")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	host, port := mustSplitHostPort(t, srv.URL)
+	got := checkForWebService("test-scan", host, port, 10*time.Second)
+	if got == nil {
+		t.Fatal("the port answered a full 302 and was dropped from the attack surface entirely")
+	}
+	if got.StatusCode == nil {
+		t.Fatal("the LiveWebServer carries no status at all")
+	}
+	t.Logf("LiveWebServer url=%s status=%d server=%q", got.URL, *got.StatusCode, got.ServerHeader)
+	if *got.StatusCode != http.StatusFound {
+		t.Errorf("status %d, want the 302 the port actually sent", *got.StatusCode)
+	}
+	if got.ServerHeader != "oracle-under-test" {
+		t.Errorf("Server header %q was lost", got.ServerHeader)
+	}
+}
+
+func mustSplitHostPort(t *testing.T, raw string) (string, int) {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Hostname(), p
+}
+
+// THE NOTE MAY NOT GUESS A CAUSE. "The target did not answer a request from the framework" is a
+// claim about the target, and the code that wrote it could not tell a dead host from a response
+// this process discarded. It is rendered to the operator and stored, so it also may not carry a
+// credential: a transport error embeds the URL, and a URL can carry userinfo.
+func TestPreflightNoteDoesNotGuessACauseOrCarryACredential(t *testing.T) {
+	// Nothing listens here, so the preflight genuinely fails.
+	out := preflightTarget("http://127.0.0.1:1")
+	t.Logf("Note=%q", out.Note)
+	if out.Reachable {
+		t.Fatal("a closed port must not read as reachable")
+	}
+	if strings.Contains(out.Note, "The target did not answer") {
+		t.Error("the note asserts the target stayed silent, which this code cannot know")
+	}
+	if !strings.Contains(out.Note, "did not obtain a response") {
+		t.Error("the note must say what was witnessed: no response was obtained")
+	}
+	if !strings.Contains(out.Note, "network layer") && !strings.Contains(out.Note, "timed out") {
+		t.Errorf("the note must name the failure shape it recognised, got %q", out.Note)
+	}
+
+	// Every branch names a shape and none of them pastes the error text, which is where a
+	// password would come from.
+	const pass = "s3cr3t-not-a-real-credential"
+	leaky := &url.Error{
+		Op:  "Get",
+		URL: "http://scanner:" + pass + "@h.example/x",
+		Err: errors.New("dial tcp: connection refused"),
+	}
+	if got := preflightFailureText(leaky); strings.Contains(got, pass) {
+		t.Errorf("the note carries a credential out of the error text: %q", got)
+	}
+	if got := preflightFailureText(nil); got == "" {
+		t.Error("a nil error must still produce a sentence, not an empty note")
 	}
 }
