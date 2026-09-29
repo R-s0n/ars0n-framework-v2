@@ -30,8 +30,23 @@ function statusVariant(status) {
   // its own, so "Refresh all expired" must not replay a login flow on its account.
   if (s === 'companion') return 'info';
   if (REJECTED_STATUSES.has(s)) return 'danger';
-  if (s === 'error' || s === 'unknown' || s === 'inconclusive') return 'warning';
+  // A refresh that paused for a code, or one that ran but produced nothing, is a "needs attention"
+  // amber rather than a red failure or a green pass.
+  if (s === 'needs_input' || s === 'no_token_found' || s === 'replay_failed' || s === 'no_flow'
+      || s === 'error' || s === 'unknown' || s === 'inconclusive') return 'warning';
   return 'secondary';
+}
+
+// A short placeholder for the value a paused refresh is asking for.
+function refreshInputPlaceholder(inputKind) {
+  switch (String(inputKind || '').toLowerCase()) {
+    case 'otp':
+    case 'totp': return '6-digit code';
+    case 'password': return 'password';
+    case 'url': return 'the URL you landed on';
+    case 'token': return 'token';
+    default: return 'value';
+  }
 }
 
 function isExpired(t) {
@@ -93,6 +108,17 @@ const RefreshSessionModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
   // Keyed by token id so a slow validate on one row never blanks the buttons on the others.
   const [rowBusy, setRowBusy] = useState({});
   const [results, setResults] = useState({});
+  // The value being typed to answer a refresh that paused for input, keyed by token id.
+  const [refreshInput, setRefreshInput] = useState({});
+  // How each linked flow can be refreshed (replay / interactive / browser_only), keyed by flow id.
+  const [flowClass, setFlowClass] = useState({});
+  // The token id whose "paste a fresh value" box is open, and the text in it.
+  const [pasteFor, setPasteFor] = useState(null);
+  const [pasteText, setPasteText] = useState('');
+  // The token id whose "re-capture from browser" panel is open, and when it was opened (so only a
+  // capture newer than that counts, not a stale one).
+  const [recaptureFor, setRecaptureFor] = useState(null);
+  const [recaptureSince, setRecaptureSince] = useState(null);
   const [events, setEvents] = useState({});
   const [expanded, setExpanded] = useState({});
   const [bulk, setBulk] = useState('');
@@ -133,8 +159,31 @@ const RefreshSessionModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
       setNotice('');
       setBulk('');
       setBulkProgress('');
+      setRefreshInput({});
+      setFlowClass({});
+      setPasteFor(null);
+      setPasteText('');
+      setRecaptureFor(null);
+      setRecaptureSince(null);
     }
   }, [show, scopeTargetId, fetchTokens]);
+
+  // Classify each linked flow (replay / interactive / browser_only) so a row can say how it refreshes
+  // before the operator clicks. One fetch per distinct flow, only for flows not classified yet.
+  useEffect(() => {
+    if (!show) return;
+    const flowIds = [...new Set(tokens.map((t) => t.auth_flow_id).filter(Boolean))];
+    flowIds.forEach(async (fid) => {
+      if (flowClass[fid]) return;
+      try {
+        const res = await fetch(`/api/auth-flows/flow/${fid}/refresh-classification`);
+        if (res.ok) {
+          const data = await res.json();
+          setFlowClass((prev) => ({ ...prev, [fid]: data }));
+        }
+      } catch (e) { /* a missing classification just omits the hint */ }
+    });
+  }, [show, tokens]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const markBusy = (id, what) => setRowBusy((prev) => ({ ...prev, [id]: what }));
   const clearBusy = (id) => setRowBusy((prev) => { const next = { ...prev }; delete next[id]; return next; });
@@ -201,7 +250,15 @@ const RefreshSessionModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
     markBusy(id, 'refresh');
     try {
       const res = await fetch(`/api/session-tokens/${id}/refresh`, { method: 'POST' });
-      if (!res.ok) throw new Error((await res.text()) || `Refresh failed (${res.status})`);
+      // A refused refresh (e.g. no_flow) comes back non-200 but with a JSON {status, detail}. Prefer
+      // that friendly detail over dumping the raw body as an error string.
+      if (!res.ok) {
+        const raw = await res.text();
+        let msg = raw || `Refresh failed (${res.status})`;
+        try { const j = JSON.parse(raw); msg = j.detail || j.message || msg; } catch { /* keep raw */ }
+        setResults((prev) => ({ ...prev, [id]: { kind: 'refresh', status: 'error', detail: msg } }));
+        return { status: 'error', detail: msg };
+      }
       const data = await res.json();
       setResults((prev) => ({ ...prev, [id]: { kind: 'refresh', ...data } }));
       if (events[id]) await loadEvents(id);
@@ -213,6 +270,128 @@ const RefreshSessionModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
       clearBusy(id);
     }
   }, [events, loadEvents]);
+
+  // Answer a refresh that paused for a value (an MFA/OTP code). Submits the value, which resumes the
+  // run server-side; the run may complete, or pause again for a further value.
+  const provideRefreshInput = useCallback(async (id, runId, value, stepId) => {
+    markBusy(id, 'refresh');
+    try {
+      const res = await fetch(`/api/session-refresh-runs/${runId}/input`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // step_id echoes the pause we were shown, so a stale/double submit lands on the right step or is
+        // rejected instead of answering a later pause the run may have advanced to.
+        body: JSON.stringify(stepId ? { value, step_id: stepId } : { value }),
+      });
+      const raw = await res.text();
+      let data;
+      try { data = JSON.parse(raw); } catch { data = { status: 'error', detail: raw }; }
+      if (!res.ok) data = { kind: 'refresh', status: 'error', detail: data.error || data.detail || raw };
+      setResults((prev) => ({ ...prev, [id]: { kind: 'refresh', ...data } }));
+      setRefreshInput((prev) => ({ ...prev, [id]: '' }));
+      if (data.status !== 'needs_input') {
+        if (events[id]) await loadEvents(id);
+        await fetchTokens();
+      }
+      return data;
+    } catch (e) {
+      setResults((prev) => ({ ...prev, [id]: { kind: 'refresh', status: 'error', detail: e.message } }));
+      return { status: 'error', detail: e.message };
+    } finally {
+      clearBusy(id);
+    }
+  }, [events, loadEvents, fetchTokens]);
+
+  // Refresh a session by pasting a fresh value. This is the working refresh for a token with no
+  // replayable flow (an OAuth / federated / Cloudflare session): the operator copies a current Cookie
+  // header (or Set-Cookie / Authorization) from their logged-in browser and it upserts every matching
+  // token in place, companions included. Same endpoint Manage Sessions' paste uses.
+  const pasteFreshValue = async (tokenId) => {
+    const raw = pasteText.trim();
+    if (!raw) return;
+    markBusy(tokenId, 'refresh');
+    setError('');
+    try {
+      const res = await fetch(`/api/session-tokens/target/${scopeTargetId}/parse`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw }),
+      });
+      const body = await res.text();
+      if (!res.ok) {
+        let msg = body || `Paste failed (${res.status})`;
+        try { const j = JSON.parse(body); msg = j.error || j.detail || msg; } catch { /* keep raw */ }
+        setError(msg);
+        return;
+      }
+      let count = 0;
+      try { const j = JSON.parse(body); count = (j.tokens || []).length; } catch { /* ignore */ }
+      setPasteFor(null);
+      setPasteText('');
+      await fetchTokens();
+      setNotice(`Updated ${count || ''} token value(s) from the paste. The values were replaced in place.`);
+    } catch (e) {
+      setError('Paste failed: ' + e.message);
+    } finally {
+      clearBusy(tokenId);
+    }
+  };
+
+  // Refresh from the live browser: read the freshest session the extension captured for this host and
+  // upsert it. `since` is when the operator opened the panel, so only a capture from their new login
+  // counts. This is the working refresh for OAuth / federated / Cloudflare sessions.
+  const recaptureSession = async (tokenId, since) => {
+    markBusy(tokenId, 'refresh');
+    setError('');
+    try {
+      const res = await fetch(`/api/session-tokens/${tokenId}/refresh-recapture`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(since ? { since } : {}),
+      });
+      const raw = await res.text();
+      let data;
+      try { data = JSON.parse(raw); } catch { data = { status: 'error', detail: raw }; }
+      if (!res.ok) { setError(data.error || data.detail || `Re-capture failed (${res.status})`); return; }
+      setResults((prev) => ({ ...prev, [tokenId]: { kind: 'refresh', ...data } }));
+      if (data.status === 'recaptured') {
+        setRecaptureFor(null);
+        setRecaptureSince(null);
+        if (events[tokenId]) await loadEvents(tokenId);
+        await fetchTokens();
+      }
+    } catch (e) {
+      setError('Re-capture failed: ' + e.message);
+    } finally {
+      clearBusy(tokenId);
+    }
+  };
+
+  // Opt a token into (or out of) unattended refresh. The server only ever acts on the flag when the
+  // flow is a pure replay and a hand refresh has already worked, so the toggle is a request, not a
+  // guarantee; the row copy says as much. A partial PUT (only auto_refresh) is safe here because the
+  // server merges onto the stored row.
+  const toggleAutoRefresh = async (id, next) => {
+    markBusy(id, 'autorefresh');
+    setError('');
+    try {
+      const res = await fetch(`/api/session-tokens/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auto_refresh: next }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        setError(body || `Could not change auto-refresh (${res.status})`);
+        return;
+      }
+      await fetchTokens();
+    } catch (e) {
+      setError('Could not change auto-refresh: ' + e.message);
+    } finally {
+      clearBusy(id);
+    }
+  };
 
   const validateOne = async (id) => {
     setError('');
@@ -255,7 +434,7 @@ const RefreshSessionModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
     const skipped = staleTokens.length - eligible.length;
     if (eligible.length === 0) {
       setNotice(skipped > 0
-        ? `${skipped} token(s) look expired but have no auth flow linked, so there is nothing to replay. Link a flow in Manage Sessions.`
+        ? `${skipped} token(s) look expired but have no auth flow linked, so there is nothing to replay. Link a login flow in Manage Sessions, or, for an OAuth/federated session with no replayable flow, paste a fresh value there.`
         : 'Nothing is expired. Validate first if you want a fresh verdict.');
       return;
     }
@@ -263,16 +442,55 @@ const RefreshSessionModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
     setError('');
     setNotice('');
     let ok = 0;
+    let needsInputCount = 0;
     for (let i = 0; i < eligible.length; i += 1) {
       setBulkProgress(`Refreshing ${i + 1} of ${eligible.length}: ${eligible[i].name}`);
       const out = await refreshToken(eligible[i].id);
-      if (out && out.new_value_set) ok += 1;
+      if (out && out.status === 'needs_input') {
+        // A flow that pauses for a code cannot be answered mid-sweep (the sweep holds every control
+        // busy), and leaving it paused would keep a live session hanging. Cancel it and tell the
+        // operator to refresh that one individually, where they can enter the code.
+        needsInputCount += 1;
+        if (out.run_id) {
+          try { await fetch(`/api/session-refresh-runs/${out.run_id}/cancel`, { method: 'POST' }); } catch (e) { /* ignore */ }
+        }
+        setResults((prev) => { const n = { ...prev }; delete n[eligible[i].id]; return n; });
+      } else if (out && out.new_value_set) {
+        ok += 1;
+      }
     }
     setBulkProgress('');
     setBulk('');
     await fetchTokens();
     setNotice(`Replayed ${eligible.length} flow(s), ${ok} produced a new token value.`
+      + (needsInputCount > 0 ? ` ${needsInputCount} need a code – refresh those individually.` : '')
       + (skipped > 0 ? ` ${skipped} skipped with no flow linked.` : ''));
+  };
+
+  // Capture OAuth tokens from the corpus: promote the freshest token endpoint response into a durable
+  // access-token credential + a linked refresh secret. A no-op on a BFF app whose tokens never reach the
+  // browser (the server says so plainly), so it is safe to offer for any target.
+  const captureOAuthTokens = async () => {
+    setBulk('capture_oauth');
+    setError('');
+    setNotice('');
+    try {
+      const res = await fetch(`/api/session-tokens/target/${scopeTargetId}/capture-oauth`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      const raw = await res.text();
+      let data;
+      try { data = JSON.parse(raw); } catch { data = { detail: raw }; }
+      if (!res.ok) { setError(data.error || data.detail || `Capture failed (${res.status})`); return; }
+      await fetchTokens();
+      setNotice(data.detail || (data.status === 'captured' ? 'Captured OAuth tokens.' : 'No OAuth tokens found in the corpus.'));
+    } catch (e) {
+      setError('Capture failed: ' + e.message);
+    } finally {
+      setBulk('');
+    }
   };
 
   const activeCount = tokens.filter((t) => t.is_active !== false).length;
@@ -286,13 +504,78 @@ const RefreshSessionModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
       <div className="mt-2 p-2 rounded" style={{ border: '1px solid #444' }}>
         <div className="d-flex align-items-center gap-2">
           <Badge bg={variant}>{r.kind === 'refresh' ? 'refresh' : 'validate'}: {r.status || 'no status'}</Badge>
-          {r.kind === 'refresh' && (
+          {r.kind === 'refresh' && r.status !== 'needs_input' && (
             r.new_value_set
               ? <Badge bg="success">new value stored</Badge>
               : <Badge bg="dark" className="border border-secondary text-white-50">value unchanged</Badge>
           )}
         </div>
         {r.detail && <div className="text-white small mt-1">{r.detail}</div>}
+        {/* A refresh that paused: for a push "approve" it just needs Continue; otherwise a value. */}
+        {r.status === 'needs_input' && r.input_request && r.run_id && (
+          <div className="mt-2">
+            <div className="d-flex gap-2 align-items-start">
+              {r.input_request.no_value ? (
+                <Button
+                  size="sm"
+                  variant="danger"
+                  disabled={anyBusy}
+                  onClick={() => provideRefreshInput(id, r.run_id, '', r.input_request.step_id)}
+                >
+                  {rowBusy[id] === 'refresh' ? <Spinner size="sm" animation="border" /> : 'Continue'}
+                </Button>
+              ) : (
+                <>
+                  <Form.Control
+                    size="sm"
+                    autoFocus
+                    type={r.input_request.input_kind === 'password' ? 'password' : 'text'}
+                    placeholder={refreshInputPlaceholder(r.input_request.input_kind)}
+                    value={refreshInput[id] || ''}
+                    disabled={anyBusy}
+                    onChange={(e) => setRefreshInput((prev) => ({ ...prev, [id]: e.target.value }))}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && (refreshInput[id] || '').trim()) {
+                        provideRefreshInput(id, r.run_id, (refreshInput[id] || '').trim(), r.input_request.step_id);
+                      }
+                    }}
+                    style={{ maxWidth: r.input_request.input_kind === 'url' ? '420px' : '260px' }}
+                  />
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={anyBusy || !(refreshInput[id] || '').trim()}
+                    onClick={() => provideRefreshInput(id, r.run_id, (refreshInput[id] || '').trim(), r.input_request.step_id)}
+                  >
+                    Submit
+                  </Button>
+                </>
+              )}
+              <Button
+                size="sm"
+                variant="outline-secondary"
+                disabled={anyBusy}
+                onClick={async () => {
+                  // Clear the prompt regardless: a failed cancel POST must not leave the box stuck. The
+                  // server-side run, if it survives, is cancelled by the next refresh of this token anyway.
+                  try {
+                    await fetch(`/api/session-refresh-runs/${r.run_id}/cancel`, { method: 'POST' });
+                  } catch (e) {
+                    /* network error: still clear the box below */
+                  } finally {
+                    setResults((prev) => { const n = { ...prev }; delete n[id]; return n; });
+                  }
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+            <div className="text-white-50 mt-1" style={{ fontSize: '0.68rem' }}>
+              The refresh replayed up to this step and is holding a live session; enter the value and it
+              continues from here.
+            </div>
+          </div>
+        )}
         {/* Evidence is the response the verdict was read off. A verdict with no evidence behind it
             is a verdict an operator has to take on faith, which is exactly what gets a scan run
             unauthenticated for an hour. */}
@@ -370,6 +653,10 @@ const RefreshSessionModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
               <Button size="sm" variant="outline-danger" onClick={refreshAllExpired} disabled={anyBusy || tokens.length === 0}>
                 {bulk === 'refresh' ? <Spinner size="sm" animation="border" /> : `Refresh all expired (${staleTokens.length})`}
               </Button>
+              <Button size="sm" variant="outline-danger" onClick={captureOAuthTokens} disabled={anyBusy}
+                title="Promote the freshest OAuth token endpoint response in the crawl into a durable access token + linked refresh secret. A no-op on a BFF app whose tokens never reach the browser.">
+                {bulk === 'capture_oauth' ? <Spinner size="sm" animation="border" /> : 'Capture OAuth tokens'}
+              </Button>
               <Button size="sm" variant="outline-secondary" onClick={fetchTokens} disabled={loading || anyBusy}>
                 {loading ? <Spinner size="sm" animation="border" /> : 'Reload'}
               </Button>
@@ -443,14 +730,68 @@ const RefreshSessionModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                       <Col md={2}>
                         {/* The flow is what refresh replays, so a token without one has a dead Refresh
                             button and the row should say why before it is clicked. */}
+                        {t.refresh_flow_id && (
+                          <div
+                            className={t.refresh_transport === 'browser_only' ? 'text-warning' : 'text-info'}
+                            style={{ fontSize: '0.66rem' }}
+                            title="This token has a dedicated headless refresh flow (an OAuth refresh grant); refresh replays it instead of the login flow."
+                          >
+                            refresh via {t.refresh_strategy || 'flow'}
+                            {t.refresh_transport ? ` (${t.refresh_transport === 'browser_only' ? 'browser only' : t.refresh_transport})` : ''}
+                          </div>
+                        )}
                         {t.auth_flow_id ? (
-                          <span className="text-white-50" style={{ fontSize: '0.72rem' }}>
-                            flow: <span className="text-white">{t.auth_flow_name || 'linked'}</span>
-                          </span>
+                          <>
+                            <span className="text-white-50" style={{ fontSize: '0.72rem' }}>
+                              flow: <span className="text-white">{t.auth_flow_name || 'linked'}</span>
+                            </span>
+                            {flowClass[t.auth_flow_id] && flowClass[t.auth_flow_id].kind !== 'replay' && (
+                              <div
+                                className={flowClass[t.auth_flow_id].kind === 'browser_only' ? 'text-warning' : 'text-info'}
+                                style={{ fontSize: '0.66rem' }}
+                                title={flowClass[t.auth_flow_id].note}
+                              >
+                                {flowClass[t.auth_flow_id].kind === 'browser_only'
+                                  ? 'browser-only, re-paste or re-capture'
+                                  : 'needs a code on refresh'}
+                              </div>
+                            )}
+                            {/* Auto-refresh is only offered on a pure replay: the only flow the server
+                                can renew with nobody watching. On anything else the checkbox would be a
+                                promise the server will not keep. */}
+                            {flowClass[t.auth_flow_id] && flowClass[t.auth_flow_id].kind === 'replay' && (
+                              <Form.Check
+                                type="switch"
+                                id={`auto-refresh-${t.id}`}
+                                className="mt-1"
+                                checked={t.auto_refresh === true}
+                                disabled={anyBusy}
+                                onChange={(e) => toggleAutoRefresh(t.id, e.target.checked)}
+                                label={
+                                  <span
+                                    className="text-white-50"
+                                    style={{ fontSize: '0.66rem' }}
+                                    title={t.last_refreshed_at
+                                      ? 'The server renews this token on its own as it nears expiry. Only fires because this flow is a pure replay and a refresh has already worked once.'
+                                      : 'Turns on unattended renewal once a refresh has worked at least once by hand. Until then the server leaves it alone.'}
+                                  >
+                                    auto-refresh
+                                    {t.auto_refresh && !t.last_refreshed_at ? ' (arms after first manual refresh)' : ''}
+                                  </span>
+                                }
+                              />
+                            )}
+                          </>
                         ) : (
                           <span className="text-warning" style={{ fontSize: '0.72rem' }}>
-                            no flow linked, cannot refresh
+                            no flow linked, refresh by pasting a fresh value
                           </span>
+                        )}
+                        {t.token_role === 'companion' && (
+                          <div className="text-info" style={{ fontSize: '0.66rem' }}
+                            title="A companion is not a credential (a load-balancer or CSRF cookie). It is refreshed alongside the credential it accompanies, never graded on its own.">
+                            companion, refreshes with the credential
+                          </div>
                         )}
                       </Col>
 
@@ -484,15 +825,84 @@ const RefreshSessionModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                           onClick={() => refreshOne(t.id)}
                           title={t.auth_flow_id
                             ? 'Replays the linked auth flow and stores the token it issues'
-                            : 'Link an auth flow in Manage Sessions to enable this'}
+                            : 'No replayable flow linked. Link a login flow in Manage Sessions, or, for an OAuth/federated session, paste a fresh value there.'}
                         >
                           {busyWhat === 'refresh' ? <Spinner size="sm" animation="border" /> : 'Refresh'}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline-danger"
+                          disabled={anyBusy}
+                          onClick={() => {
+                            const opening = recaptureFor !== t.id;
+                            setRecaptureFor(opening ? t.id : null);
+                            setRecaptureSince(opening ? new Date().toISOString() : null);
+                          }}
+                          title="Refresh from your live browser: log in there with the extension recording, and the framework pulls the fresh session it captured. The way to refresh an OAuth / federated / Cloudflare session."
+                        >
+                          Browser
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline-danger"
+                          disabled={anyBusy}
+                          onClick={() => { setPasteFor(pasteFor === t.id ? null : t.id); setPasteText(''); }}
+                          title="Refresh by pasting a fresh value copied from your logged-in browser. Works for any session, including OAuth/federated ones with no replayable flow."
+                        >
+                          Paste
                         </Button>
                         <Button size="sm" variant="outline-secondary" disabled={anyBusy} onClick={() => toggleExpanded(t.id)}>
                           {expanded[t.id] ? 'Hide' : 'History'}
                         </Button>
                       </Col>
                     </Row>
+
+                    {recaptureFor === t.id && (
+                      <div className="mt-2 border-top border-secondary pt-2">
+                        <div className="text-white-50 small mb-1">
+                          Refresh from your live browser, the way an OAuth / federated / Cloudflare session
+                          has to be renewed:
+                        </div>
+                        <ol className="text-white-50 small mb-2" style={{ fontSize: '0.72rem', paddingLeft: '1.1rem' }}>
+                          <li>In your browser, with the extension recording (Manual Crawling or Record Auth Flows), log in / reload an authenticated page so a request with the fresh session cookies is captured.</li>
+                          <li>Come back and press <span className="text-white">Pull latest session</span>. Only a capture from after you opened this panel is used.</li>
+                        </ol>
+                        <Button size="sm" variant="danger" disabled={anyBusy} onClick={() => recaptureSession(t.id, recaptureSince)}>
+                          {busyWhat === 'refresh' ? <Spinner size="sm" animation="border" /> : 'Pull latest session'}
+                        </Button>
+                        <Button size="sm" variant="outline-secondary" className="ms-2" disabled={anyBusy} onClick={() => { setRecaptureFor(null); setRecaptureSince(null); }}>
+                          Cancel
+                        </Button>
+                      </div>
+                    )}
+
+                    {pasteFor === t.id && (
+                      <div className="mt-2 border-top border-secondary pt-2">
+                        <div className="text-white-50 small mb-1">
+                          Paste a fresh <code className="text-white">Cookie</code> header (or a{' '}
+                          <code className="text-white">Set-Cookie</code> / <code className="text-white">Authorization</code>)
+                          from your logged-in browser. Every value in it replaces the matching stored token in place.
+                        </div>
+                        <Form.Control
+                          as="textarea"
+                          rows={3}
+                          className="bg-black text-white border-secondary"
+                          style={{ fontFamily: 'monospace', fontSize: '0.72rem' }}
+                          placeholder={'Cookie: __Host-app_session=...; other=...'}
+                          value={pasteText}
+                          disabled={anyBusy}
+                          onChange={(e) => setPasteText(e.target.value)}
+                        />
+                        <div className="d-flex gap-2 mt-1">
+                          <Button size="sm" variant="danger" disabled={anyBusy || !pasteText.trim()} onClick={() => pasteFreshValue(t.id)}>
+                            {busyWhat === 'refresh' ? <Spinner size="sm" animation="border" /> : 'Update from paste'}
+                          </Button>
+                          <Button size="sm" variant="outline-secondary" disabled={anyBusy} onClick={() => { setPasteFor(null); setPasteText(''); }}>
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
+                    )}
 
                     {t.last_validation_detail && !results[t.id] && (
                       <div className="text-white-50 small mt-2">{t.last_validation_detail}</div>

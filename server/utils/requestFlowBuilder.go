@@ -1199,6 +1199,14 @@ func CreateRequestFlowFromDetectedFlow(w http.ResponseWriter, r *http.Request) {
 				"reload the flow list.")
 		return
 	}
+	if !flowIsReportable(*found) {
+		// A single request is not a flow, so there is nothing to seed a built flow from. The detected
+		// flow list this id came from already dropped it, so this is only reachable through a stale id.
+		writeJSONError(w, http.StatusBadRequest, "not_a_flow",
+			"That request is a single request, not a flow, so there is nothing to build from it. "+
+				"Open it in Replay Requests instead.")
+		return
+	}
 
 	only := map[string]bool{}
 	for _, id := range payload.CaptureIDs {

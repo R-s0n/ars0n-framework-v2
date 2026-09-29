@@ -97,6 +97,11 @@ func main() {
 	// merges operator-owned state onto the surviving row before retiring a duplicate.
 	utils.BackfillEndpointKeys()
 
+	// Unattended session-token renewal. Ticks every minute but only ever acts on a token the operator
+	// has opted in (auto_refresh) whose flow is a pure replay and which is near expiry, so with nothing
+	// opted in it is a no-op. Started here, after the DB is up, because it queries session_tokens.
+	utils.StartSessionAutoRefreshLoop(time.Minute)
+
 	// Hand the embedded knowledge base to the handlers, rooted so their paths start at methodology/
 	// rather than at knowledge-base/. Logged with a count because a zero means the embed stopped
 	// matching and every /knowledge-base route is about to answer 503, which is worth one line here
@@ -392,6 +397,7 @@ func main() {
 	r.HandleFunc("/api/database-export", utils.HandleDatabaseExport).Methods("POST", "OPTIONS")
 	r.HandleFunc("/api/database-import", utils.HandleDatabaseImport).Methods("POST", "OPTIONS")
 	r.HandleFunc("/api/database-import-url", utils.HandleDatabaseImportURL).Methods("POST", "OPTIONS")
+	r.HandleFunc("/api/database-import-base64", utils.HandleDatabaseImportBase64).Methods("POST", "OPTIONS")
 	r.HandleFunc("/api/debug-export-file", utils.DebugExportFile).Methods("POST", "OPTIONS")
 	r.HandleFunc("/api/scope-targets-for-export", utils.GetScopeTargetsForExport).Methods("GET", "OPTIONS")
 	r.HandleFunc("/api/auto-scan-state/{target_id}", getAutoScanState).Methods("GET", "OPTIONS")
@@ -643,6 +649,9 @@ func main() {
 	r.HandleFunc("/session-tokens/target/{scope_target_id}", utils.GetSessionTokens).Methods("GET", "OPTIONS")
 	r.HandleFunc("/session-tokens/target/{scope_target_id}", utils.CreateSessionToken).Methods("POST", "OPTIONS")
 	r.HandleFunc("/session-tokens/target/{scope_target_id}/parse", utils.ParseSessionTokens).Methods("POST", "OPTIONS")
+	// Promote the freshest OAuth token endpoint response in the corpus into durable access + refresh
+	// rows (docs/OAUTH_REFRESH_DESIGN.md, Phase 2). A no-op on a BFF target that never exposes a token.
+	r.HandleFunc("/session-tokens/target/{scope_target_id}/capture-oauth", utils.CaptureOAuthTokens).Methods("POST", "OPTIONS")
 	// The characterisation of every credential this target has: kind, lifetime, the PROVENANCE of
 	// that lifetime, expiry and whether refresh is proven. GET reads the stored measurement and
 	// measures anything never measured; POST re-measures everything. Deliberately not a field on
@@ -652,6 +661,7 @@ func main() {
 	r.HandleFunc("/session-tokens/{id}/activate", utils.ActivateSessionToken).Methods("POST", "OPTIONS")
 	r.HandleFunc("/session-tokens/{id}/validate", utils.ValidateSessionToken).Methods("POST", "OPTIONS")
 	r.HandleFunc("/session-tokens/{id}/refresh", utils.RefreshSessionToken).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-tokens/{id}/refresh-recapture", utils.RecaptureSessionToken).Methods("POST", "OPTIONS")
 	// PROVE the refresh, which is a different act from performing one. /refresh replays whatever
 	// flow is linked, with no scope check, and stores whatever comes back without asking the
 	// target about it; its event is kind=refresh status=refreshed, which is not a proof and never
@@ -664,17 +674,27 @@ func main() {
 	r.HandleFunc("/session-tokens/{id}", utils.UpdateSessionToken).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/session-tokens/{id}", utils.DeleteSessionToken).Methods("DELETE", "OPTIONS")
 
+	// Interactive refresh runs: a refresh that paused for an MFA/OTP code is answered, polled and
+	// cancelled here. See sessionRefreshInteractive.go.
+	r.HandleFunc("/session-refresh-runs/{run_id}/input", utils.ProvideSessionRefreshInput).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-refresh-runs/{run_id}/cancel", utils.CancelSessionRefreshRun).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-refresh-runs/{run_id}", utils.GetSessionRefreshRun).Methods("GET", "OPTIONS")
+
 	r.HandleFunc("/auth-flows/{scope_target_id}", utils.GetAuthFlows).Methods("GET", "OPTIONS")
 	r.HandleFunc("/auth-flows/{scope_target_id}", utils.CreateAuthFlow).Methods("POST", "OPTIONS")
 	r.HandleFunc("/auth-flows/flow/{flow_id}", utils.UpdateAuthFlow).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/auth-flows/flow/{flow_id}", utils.DeleteAuthFlow).Methods("DELETE", "OPTIONS")
 	r.HandleFunc("/auth-flows/flow/{flow_id}/steps", utils.GetAuthFlowSteps).Methods("GET", "OPTIONS")
 	r.HandleFunc("/auth-flows/flow/{flow_id}/steps", utils.AddAuthFlowStep).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth-flows/flow/{flow_id}/refresh-classification", utils.GetFlowRefreshClassification).Methods("GET", "OPTIONS")
 	r.HandleFunc("/auth-flows/flow/{flow_id}/replay", utils.ReplayAuthFlow).Methods("POST", "OPTIONS")
 	r.HandleFunc("/auth-flows/steps/{step_id}", utils.UpdateAuthFlowStep).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/auth-flows/steps/{step_id}", utils.DeleteAuthFlowStep).Methods("DELETE", "OPTIONS")
 	r.HandleFunc("/auth-flows/steps/{step_id}/replay", utils.ReplayAuthFlowStep).Methods("POST", "OPTIONS")
 	r.HandleFunc("/auth-flows/{scope_target_id}/from-captures", utils.CreateAuthFlowFromCaptures).Methods("POST", "OPTIONS")
+	// Adopt a detected/captured refresh request as a headless refresh flow (docs/OAUTH_REFRESH_DESIGN.md
+	// Phase 4): seeds {{token:refresh_token}}, sets flow_purpose='refresh', and links the anchor token.
+	r.HandleFunc("/auth-flows/{scope_target_id}/refresh-from-captures", utils.BuildRefreshFlowFromCaptures).Methods("POST", "OPTIONS")
 
 	// Authorization > Client Identity - unique identifiers (IDOR targets) pulled from endpoint requests.
 	r.HandleFunc("/authz/client-identifiers/{scope_target_id}", utils.GetClientIdentifiers).Methods("GET", "OPTIONS")

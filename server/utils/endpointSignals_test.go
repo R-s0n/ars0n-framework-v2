@@ -385,3 +385,55 @@ func TestInterestScoreOrdersBySeverity(t *testing.T) {
 		t.Fatal("one critical finding must outrank a pile of informational ones")
 	}
 }
+
+// A minified first-party bundle assigns editor-grammar token names and DOM/CSS selectors to
+// variables named token/secret. Both clear the old 3.4 entropy floor, and reporting them as
+// credentials is the false-positive flood that inverted the interest ranking on a real target.
+func TestMinifiedCodeArtifactsAreNotSecrets(t *testing.T) {
+	body := `var token = "delimiter.square"; const secret = "aB3xK9(mZ2pL5wR8nQ)"; token = "string.key.json";`
+	for _, s := range analyzeSecrets(SignalInput{Body: body}) {
+		if s.Kind == "secret_generic_assignment" {
+			t.Fatalf("a namespaced identifier or code fragment must not be reported as a secret: %q", s.Evidence)
+		}
+	}
+}
+
+// A real credential still has to be found, or the fix has thrown out the signal with the noise.
+func TestARealHighEntropyKeyIsStillReported(t *testing.T) {
+	in := SignalInput{Body: `{"api_key": "f4Kx9vQ2mZpL7wR3nB8tYcJ6hD1sA5gE"}`}
+	if _, ok := sigKinds(analyzeSecrets(in))["secret_generic_assignment"]; !ok {
+		t.Fatal("a long unbroken high-entropy value assigned to api_key is a real finding and must survive the tighter gate")
+	}
+}
+
+// A PostHog client key ships in browser code by design. It should be named as publishable, not
+// screamed about as a p1 leak, and it must not ALSO come back through the generic rule.
+func TestPostHogClientKeyIsPublishableNotGenericLeak(t *testing.T) {
+	body := `{"apiKey": "phc_BQx8J4VtX8e5pJGHNf39knNbrjDUddW7GT4o6GLYAtCa"}`
+	kinds := sigKinds(analyzeSecrets(SignalInput{Body: body}))
+	s, ok := kinds["secret_posthog_project_key"]
+	if !ok {
+		t.Fatal("a phc_ key should be recognised as a PostHog project key")
+	}
+	if s.Severity != "p3" {
+		t.Errorf("a publishable client key is not a leak, expected p3, got %s", s.Severity)
+	}
+	if _, dup := kinds["secret_generic_assignment"]; dup {
+		t.Error("a value already reported by a specific provider pattern must not ALSO be a generic p1 secret")
+	}
+}
+
+// One detector firing many times on a single minified bundle must not let it outrank real endpoints.
+func TestInterestScoreCapsRepeatedKindContribution(t *testing.T) {
+	sigs := make([]Signal, 20)
+	for i := range sigs {
+		sigs[i] = Signal{Kind: "secret_generic_assignment", Severity: "p1"}
+	}
+	if got, want := InterestScore(sigs), 30+19*2; got != want {
+		t.Fatalf("twenty same-Kind p1 signals should be capped to %d, got %d", want, got)
+	}
+	distinct := []Signal{{Kind: "a", Severity: "p1"}, {Kind: "b", Severity: "p1"}, {Kind: "c", Severity: "p1"}}
+	if got := InterestScore(distinct); got != 90 {
+		t.Fatalf("three DISTINCT p1 kinds should still sum to 90, got %d", got)
+	}
+}

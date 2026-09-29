@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, Form, InputGroup, Button, Spinner, ProgressBar } from 'react-bootstrap';
 import RequestFlowChart from '../components/RequestFlowChart';
 import BuiltFlowRunMap from '../components/BuiltFlowRunMap';
+import QueryLanguageHelp from '../components/QueryLanguageHelp';
 
 // Request Flows: the flow view, standing on its own.
 //
@@ -62,22 +63,15 @@ import BuiltFlowRunMap from '../components/BuiltFlowRunMap';
 //   A failed load of a DIFFERENT flow does not leave the previous graph on screen pretending to be
 //   the one that was clicked.
 
-const FLOW_LIMIT = 200;
+// Match the Replay Requests capture list: request everything up to the server's scan ceiling so the
+// flows list is not paginated. Narrowing is done with the query, not a page cap.
+const FLOW_LIMIT = 50000;
 
 const MONO = 'Menlo, Consolas, "Courier New", monospace';
 
 // One frozen empty array, so "no flow loaded" hands the chart the same identity every render and it
 // does not lay the whole tree out again for nothing.
 const EMPTY_LIST = [];
-
-const FLOW_QUERY_EXAMPLES = [
-  'method = POST',
-  'status >= 400',
-  'has:header.authorization',
-  'resource_type = xhr',
-  'path ^= /api',
-  'is_direct = true',
-];
 
 // EVERY ROW IN THIS LIST NOW CARRIES A TITLE, and two of those titles are DEFAULTS the server fills
 // in rather than anything an operator typed:
@@ -3759,81 +3753,14 @@ export const RequestFlowsModal = ({
               )}
               {flowsTruncated && (
                 <span className="text-warning ms-1">
-                  (truncated at {FLOW_LIMIT}, narrow the query to see the rest)
+                  (more than {FLOW_LIMIT.toLocaleString()} matched, the ceiling one search can scan; narrow the query to see the rest)
                 </span>
               )}
             </div>
-            <div className="text-white-50 mt-1" style={{ fontSize: '0.66rem' }}>
-              The query matches requests; a flow containing a match is listed whole.
-            </div>
-            {/* WHAT THE QUERY DOES NOT DO. Built flows are ALWAYS returned, whatever is typed above,
-                and a list that let them appear and disappear beside the filtered ones would read as
-                them having been searched. The server's own sentence is printed rather than
-                paraphrased, so this line cannot drift away from the rule it describes. */}
-            {flowsBuiltCount > 0 && (
-              <div className="text-info mt-1" style={{ fontSize: '0.66rem' }}>
-                <i className="bi bi-funnel me-1" />
-                {flowsBuiltNote || (
-                  'Built flows are listed first and are NOT filtered by the query: the query matches '
-                  + 'captured requests, and a built flow holds steps that may never have been sent.'
-                )}
-              </div>
-            )}
-            {/* HOW MANY OF THESE HAVE EVER BEEN PROVED. Said once, over the list, because "none of
-                your built flows has ever run" is a fact about the whole list and discovering it by
-                clicking seven rows is discovering it too late. Only ever drawn from rows that
-                actually reported a state: a build that sends no verification field says nothing
-                here rather than reporting every flow as unrun. */}
-            {builtVerificationTally.reported > 0 && (
-              <div
-                className={`mt-1 ${builtVerificationTally.verified === 0 ? 'text-warning' : 'text-white-50'}`}
-                style={{ fontSize: '0.66rem' }}
-              >
-                <i className={`bi ${builtVerificationTally.verified === 0 ? 'bi-exclamation-triangle' : 'bi-check-circle'} me-1`} />
-                {builtVerificationTally.verified === 0 ? (
-                  <>
-                    <span className="fw-semibold">
-                      Not one of these {builtVerificationTally.reported} built flow
-                      {builtVerificationTally.reported === 1 ? ' has' : 's has'} a current run.
-                    </span>{' '}
-                  </>
-                ) : (
-                  <>{builtVerificationTally.verified} of {builtVerificationTally.reported} built flows verified. </>
-                )}
-                {builtVerificationTally.unverified > 0 && (
-                  <>{builtVerificationTally.unverified} never run. </>
-                )}
-                {builtVerificationTally.stale > 0 && (
-                  <>{builtVerificationTally.stale} stale (ran, then a step was edited). </>
-                )}
-                A built flow is text somebody wrote until it runs, and its map is the trace of a run.
-              </div>
-            )}
-            {/* Said once, not as a mystery pill on every row. */}
-            {flowsLoaded && flows.length > 0 && !anySourceReported && (
-              <div className="text-white-50 mt-1" style={{ fontSize: '0.66rem' }}>
-                <i className="bi bi-info-circle me-1" />
-                This build&apos;s flow list does not report a detection source, so no
-                Passive/Active/Both badge is shown. Nothing is being guessed.
-              </div>
-            )}
-            <div className="mt-1">
-              {FLOW_QUERY_EXAMPLES.map((example) => (
-                <code
-                  key={example}
-                  className="text-info me-2"
-                  style={{ fontSize: '0.66rem', cursor: 'pointer' }}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => setFlowQuery(example)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setFlowQuery(example); }
-                  }}
-                >
-                  {example}
-                </code>
-              ))}
-            </div>
+            {/* The explanatory notes about how the query relates to flows, how built flows are handled,
+                and their run state live in the "How to search" accordion at the top of the modal (passed
+                as `extra` to QueryLanguageHelp), not here - this column stays just the box and the count,
+                the same shape the Replay Requests sitemap column has. */}
           </div>
 
           <div className="flex-grow-1" style={{ overflowY: 'auto', overflowX: 'hidden', minHeight: 0 }}>
@@ -4076,6 +4003,68 @@ That is where conditions and branches live: a detected flow is a reading of hist
 
       <Modal.Body className="d-flex flex-column p-0" style={{ minHeight: 0, overflow: 'hidden' }}>
         <style>{`.rfl-flow-row:hover { background-color: #2b3035 !important; }`}</style>
+        {/* The query-language help, the SAME dropdown accordion the Replay Requests repeater uses, at
+            the top of the modal. The flows list and the repeater filter the capture corpus with one
+            grammar, so they share one help panel (QueryLanguageHelp). The flow-specific notes - how the
+            query relates to flows, how built flows are handled, their run state - ride along as `extra`
+            so they live here instead of cluttering the list column. */}
+        {activeTarget && (
+          <div className="px-2 pt-2">
+            <QueryLanguageHelp
+              onExample={setFlowQuery}
+              extra={(
+                <div className="text-white-50" style={{ fontSize: '0.78rem', lineHeight: 1.6 }}>
+                  <div className="text-light fw-bold mb-1" style={{ fontSize: '0.8rem' }}>About the flows list</div>
+                  <div>The query matches requests; a flow containing a match is listed whole.</div>
+                  <div className="mt-1">
+                    A flow is a mechanism: two or more requests in succession, such as a page loading
+                    its data over several API calls, an OAuth redirect chain, or a create that POSTs
+                    and then reads the result back. A single request that returns or changes data on
+                    its own is not a flow and is shown in Replay Requests, not here. Active detection
+                    sends one request per endpoint, so it produces a flow only when that request
+                    redirects; its single-hop answers are in Replay Requests too.
+                  </div>
+                  {flowsBuiltCount > 0 && (
+                    <div className="text-info mt-1">
+                      <i className="bi bi-funnel me-1" />
+                      {flowsBuiltNote || (
+                        'Built flows are listed first and are NOT filtered by the query: the query matches '
+                        + 'captured requests, and a built flow holds steps that may never have been sent.'
+                      )}
+                    </div>
+                  )}
+                  {builtVerificationTally.reported > 0 && (
+                    <div className={`mt-1 ${builtVerificationTally.verified === 0 ? 'text-warning' : 'text-white-50'}`}>
+                      <i className={`bi ${builtVerificationTally.verified === 0 ? 'bi-exclamation-triangle' : 'bi-check-circle'} me-1`} />
+                      {builtVerificationTally.verified === 0 ? (
+                        <span className="fw-semibold">
+                          Not one of these {builtVerificationTally.reported} built flow
+                          {builtVerificationTally.reported === 1 ? ' has' : 's has'} a current run.{' '}
+                        </span>
+                      ) : (
+                        <>{builtVerificationTally.verified} of {builtVerificationTally.reported} built flows verified. </>
+                      )}
+                      {builtVerificationTally.unverified > 0 && (
+                        <>{builtVerificationTally.unverified} never run. </>
+                      )}
+                      {builtVerificationTally.stale > 0 && (
+                        <>{builtVerificationTally.stale} stale (ran, then a step was edited). </>
+                      )}
+                      A built flow is text somebody wrote until it runs, and its map is the trace of a run.
+                    </div>
+                  )}
+                  {flowsLoaded && flows.length > 0 && !anySourceReported && (
+                    <div className="mt-1">
+                      <i className="bi bi-info-circle me-1" />
+                      This build&apos;s flow list does not report a detection source, so no
+                      Passive/Active/Both badge is shown. Nothing is being guessed.
+                    </div>
+                  )}
+                </div>
+              )}
+            />
+          </div>
+        )}
         {renderBody()}
       </Modal.Body>
     </Modal>

@@ -1395,6 +1395,12 @@ func RunDetectedFlow(w http.ResponseWriter, r *http.Request) {
 					"arrived; reload the flow list.")
 			return
 		}
+		if err == errDetectedFlowSingleRequest {
+			writeJSONError(w, http.StatusBadRequest, "not_a_flow",
+				"That request is a single request, not a flow, so there is nothing to run as one. "+
+					"Send it from Replay Requests instead.")
+			return
+		}
 		log.Printf("[FLOW-RUN] Failed to load flow %s: %v", flowID, err)
 		writeJSONError(w, http.StatusInternalServerError, "internal_error",
 			"The flow could not be loaded: "+err.Error())
@@ -1667,6 +1673,11 @@ func CancelDetectedFlowRun(w http.ResponseWriter, r *http.Request) {
 
 var errDetectedFlowNotFound = fmt.Errorf("no flow starts at that capture")
 
+// errDetectedFlowSingleRequest is returned when the id names a real segment that is a single request
+// rather than a flow. Distinct from not-found so the caller can say "that is a request, not a flow"
+// instead of "that does not exist", which would be wrong and confusing: the capture is right there.
+var errDetectedFlowSingleRequest = fmt.Errorf("that capture is a single request, not a flow")
+
 // loadDetectedFlowForRun re-derives one detected flow, and the target it belongs to.
 //
 // The WHOLE TAB is loaded, because a flow is defined by its boundaries and the boundaries are the
@@ -1705,9 +1716,15 @@ func loadDetectedFlowForRun(flowID string) (captureFlow, string, error) {
 	}
 
 	for _, f := range segmentCaptureFlows(captures) {
-		if len(f.Captures) > 0 && f.Captures[0].ID == rootCaptureID {
-			return f, scopeTargetID, nil
+		if len(f.Captures) == 0 || f.Captures[0].ID != rootCaptureID {
+			continue
 		}
+		// A single request is not a flow, so there is nothing to run as one. Reachable only through a
+		// stale id, because the list this id came from already dropped the single-request segments.
+		if !flowIsReportable(f) {
+			return captureFlow{}, "", errDetectedFlowSingleRequest
+		}
+		return f, scopeTargetID, nil
 	}
 	return captureFlow{}, "", errDetectedFlowNotFound
 }

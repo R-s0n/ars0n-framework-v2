@@ -1828,30 +1828,32 @@ function apiFailure(err, ctx = {}) {
 // === manage_request_variants ===================================================================
 
 const manageRequestVariantsSchema = z.object({
-  action: z.enum(['list', 'rename', 'set_primary']).describe(
+  action: z.enum(['list', 'rename', 'set_primary', 'delete', 'restore']).describe(
     'list: the endpoints of a target with their VARIANTS. A variant is one distinct recorded ' +
     'request/response of an endpoint; the captures the crawl recorded are collapsed into variants by ' +
     'a coarse request/response signature. Each variant carries its name (yours if you set one, ' +
     'otherwise the source it came from - "Active detection", "Manual crawl"), whether it is the ' +
-    'endpoint PRIMARY (the one the sitemap shows and a leaf click opens), its status, and the ' +
-    'request_sig / response_sig that identify it. Narrow with method / host / path. ' +
+    'endpoint PRIMARY (the one the sitemap shows and a leaf click opens), whether it is HIDDEN, its ' +
+    'status, and the request_sig / response_sig that identify it. Narrow with method / host / path. ' +
     'rename: give a variant your own name. An EMPTY name reverts it to the source default. ' +
     'set_primary: make a variant the endpoint\'s one primary; the previous primary is cleared. ' +
-    'Names and the primary are overlay state - they never touch the captures, so a new recording ' +
-    'that joins a variant keeps your choices.'),
+    'delete: HIDE a variant from the repeater\'s list. NOT destructive and fully reversible - the ' +
+    'captures behind it stay in the corpus for every other tool (endpoint consolidation, vectors, ' +
+    'triage, flows, the bundle export). restore: unhide a variant. ' +
+    'Names, the primary and the hidden flag are overlay state - they never touch the captures.'),
 
   target_id: z.string().uuid().describe('The URL scope target UUID. Required for every action.'),
   method: z.string().optional().describe(
-    'list: restrict to this verb. rename / set_primary: the variant\'s method, from list. Required there.'),
+    'list: restrict to this verb. rename / set_primary / delete / restore: the variant\'s method, from list. Required there.'),
   host: z.string().optional().describe(
-    'list: restrict to this host. rename / set_primary: the variant\'s host, from list. Required there.'),
+    'list: restrict to this host. rename / set_primary / delete / restore: the variant\'s host, from list. Required there.'),
   path: z.string().optional().describe(
     'list: restrict to this exact path (query excluded, as the sitemap groups it). ' +
-    'rename / set_primary: the variant\'s path, from list. Required there.'),
+    'rename / set_primary / delete / restore: the variant\'s path, from list. Required there.'),
   request_sig: z.string().optional().describe(
-    'rename / set_primary: the variant\'s request signature, taken from action:"list". Required.'),
+    'rename / set_primary / delete / restore: the variant\'s request signature, taken from action:"list". Required.'),
   response_sig: z.string().optional().describe(
-    'rename / set_primary: the variant\'s response signature, taken from action:"list". Required.'),
+    'rename / set_primary / delete / restore: the variant\'s response signature, taken from action:"list". Required.'),
   name: z.string().optional().describe(
     'rename: the new name. An empty string reverts the variant to its source default name.'),
   max_results: z.number().optional().describe('list: endpoints to return (default 200).'),
@@ -1903,6 +1905,30 @@ async function manageRequestVariants(params) {
       let res;
       try {
         res = await apiPost(`/replay-request/${params.target_id}/variant-meta`, payload);
+      } catch (err) {
+        return apiFailure(err);
+      }
+      return { success: true, ...res };
+    }
+
+    case 'delete':
+    case 'restore': {
+      for (const f of ['method', 'host', 'path', 'request_sig', 'response_sig']) {
+        if (!params[f]) {
+          return { error: `${params.action} needs ${f}. Get it from action:"list".` };
+        }
+      }
+      // Both are the overlay hidden flag: delete hides, restore unhides. Nothing touches the captures.
+      let res;
+      try {
+        res = await apiPost(`/replay-request/${params.target_id}/variant-meta`, {
+          method: params.method,
+          host: params.host,
+          path: params.path,
+          request_sig: params.request_sig,
+          response_sig: params.response_sig,
+          hidden: params.action === 'delete',
+        });
       } catch (err) {
         return apiFailure(err);
       }

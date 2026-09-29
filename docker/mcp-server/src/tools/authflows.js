@@ -34,6 +34,47 @@ function trimSteps(steps, opts) {
   return Array.isArray(steps) ? steps.map((s) => trimStep(s, opts)) : steps;
 }
 
+// The per-step capture rules, shared by add_auth_flow_step and update_auth_flow_step so the two can
+// never drift. A step captures values out of its OWN response for a later step to use as {{af:NAME}},
+// which is what makes a per-request CSRF token work.
+const extractionSchema = z.array(z.object({
+  name: z.string(),
+  source: z.enum(['body', 'header', 'cookie']),
+  source_key: z.string().optional(),
+  pattern: z.string().optional(),
+  decode_as: z.enum(['none', 'html', 'url']).optional(),
+  optional: z.boolean().optional(),
+}));
+
+// What the user must supply for this step when the flow is REFRESHED. Shared by add and update.
+const interactionSchema = z.object({
+  kind: z.enum(['none', 'input', 'totp_auto', 'action']),
+  var_name: z.string().optional(),
+  input_kind: z.enum(['otp', 'totp', 'password', 'text', 'url', 'token']).optional(),
+  prompt: z.string().optional(),
+  optional: z.boolean().optional(),
+  totp_secret: z.string().optional(),
+  action_kind: z.enum(['approve', 'magic_link']).optional(),
+});
+
+const INTERACTION_DESC = "What the user must supply for this step when the flow is REFRESHED. Omit, " +
+  "or {kind:'none'}, means fully automatable. {kind:'input', var_name:'mfa_code', input_kind:'otp', " +
+  "prompt:'Enter the 6-digit code'} makes refresh PAUSE at this step and ask the operator for the " +
+  "value, substituted into the request as {{af:var_name}} - this is how an MFA/OTP login refreshes " +
+  "instead of failing (answer the pause with check_session_tokens action:'provide_refresh_input'). " +
+  "{kind:'totp_auto', var_name:'mfa_code', totp_secret:'<base32>'} instead GENERATES the TOTP code " +
+  "from the operator's stored authenticator secret at refresh time, so an authenticator-MFA login " +
+  "refreshes with NO pause. {kind:'action', action_kind:'approve', prompt:'Approve the push on your " +
+  "phone'} pauses for a push/2FA approval (answer with provide_refresh_input, no value needed). " +
+  "{kind:'action', action_kind:'magic_link', var_name:'link_url', prompt:'Click the emailed link and " +
+  "paste the URL you land on'} pauses for a magic link (answer with the URL, used as {{af:var_name}}).";
+
+const EXTRACTION_DESC = "Values to capture out of THIS step's response for later steps to refer to " +
+  "as {{af:NAME}}. This is what makes a per-request CSRF token work: step 1 captures the token, " +
+  "step 2 uses it. pattern is a Go RE2 regex whose capture group 1 is the value, e.g. " +
+  "name=\"csrf\" value=\"([^\"]+)\". A required capture that does not match stops every later step " +
+  "that needs it, rather than sending a blank token.";
+
 // === List flows for a target ===
 const listAuthFlowsSchema = z.object({
   target_id: z.string().uuid().describe('The scope target UUID (use list_targets to resolve a name).'),
@@ -134,22 +175,18 @@ const addAuthFlowStepSchema = z.object({
   raw_request: z.string().describe('The full raw HTTP request: request line (e.g. "POST /login HTTP/1.1"), headers (including Host), a blank line, then the body. The app sends this to the target and records the live response. Placeholders of the form {{af:NAME}} are replaced with values an EARLIER step captured, and Content-Length is recomputed afterwards; a step with no placeholders is sent byte for byte as stored.'),
   name: z.string().optional().describe('Optional label for the step, e.g. "Submit credentials".'),
   replay: z.boolean().optional().describe('Send the request and record the response now (default true). Set false to store the request without sending.'),
-  extractions: z.array(z.object({
-    name: z.string(),
-    source: z.enum(['body', 'header', 'cookie']),
-    source_key: z.string().optional(),
-    pattern: z.string().optional(),
-    decode_as: z.enum(['none', 'html', 'url']).optional(),
-    optional: z.boolean().optional(),
-  })).optional().describe("Values to capture out of THIS step's response for later steps to refer to as {{af:NAME}}. This is what makes a per-request CSRF token work: step 1 captures the token, step 2 uses it. pattern is a Go RE2 regex whose capture group 1 is the value, e.g. name=\"csrf\" value=\"([^\"]+)\". A required capture that does not match stops every later step that needs it, rather than sending a blank token."),
+  extractions: extractionSchema.optional().describe(EXTRACTION_DESC),
+  interaction: interactionSchema.optional().describe(INTERACTION_DESC),
 });
 async function addAuthFlowStep(params) {
-  return trimStep(await apiPost(`/auth-flows/flow/${params.flow_id}/steps`, {
+  const body = {
     raw_request: params.raw_request,
     name: params.name || '',
     replay: params.replay === undefined ? true : params.replay,
     extractions: params.extractions || [],
-  }));
+  };
+  if (params.interaction !== undefined) body.interaction = params.interaction;
+  return trimStep(await apiPost(`/auth-flows/flow/${params.flow_id}/steps`, body));
 }
 
 // === Update a step ===
@@ -158,10 +195,15 @@ const updateAuthFlowStepSchema = z.object({
   raw_request: z.string().optional(),
   name: z.string().optional(),
   step_order: z.number().int().min(1).optional().describe('Reorder the step within its flow.'),
+  extractions: extractionSchema.optional().describe(
+    EXTRACTION_DESC + ' Omit to leave the existing rules untouched; pass [] to clear them. Without ' +
+    'this a wrong capture rule could be created but never edited or removed via this tool.'),
+  interaction: interactionSchema.optional().describe(
+    INTERACTION_DESC + ' Omit to leave it alone; {kind:"none"} clears it.'),
 });
 async function updateAuthFlowStep(params) {
   const body = {};
-  for (const k of ['raw_request', 'name', 'step_order']) {
+  for (const k of ['raw_request', 'name', 'step_order', 'extractions', 'interaction']) {
     if (params[k] !== undefined) body[k] = params[k];
   }
   return trimStep(await apiPut(`/auth-flows/steps/${params.step_id}`, body));
@@ -192,6 +234,75 @@ async function replayAuthFlow(params) {
   return trimSteps(await apiPost(`/auth-flows/flow/${params.flow_id}/replay`, {}));
 }
 
+// === Classify how a flow can be refreshed ===
+// Answers the one question you need before turning auto_refresh on for a token: can this flow renew
+// itself headlessly (kind "replay"), does it need a value from the operator each run (kind
+// "interactive": an MFA/OTP or push step), or can it not be replayed at all (kind "browser_only": it
+// crosses a federated identity provider, hits a bot challenge, or carries a single-use OAuth code)?
+// Also names the provider it crosses when it recognises one, so the label is precise.
+const classifyAuthFlowRefreshSchema = z.object({
+  flow_id: z.string().uuid().describe('The auth flow UUID to classify.'),
+});
+async function classifyAuthFlowRefresh(params) {
+  return apiGet(`/auth-flows/flow/${params.flow_id}/refresh-classification`);
+}
+
+// === List capture candidates that look like part of an auth exchange ===
+// The manual crawl already recorded the login/register/MFA/reset requests with their real headers,
+// cookies and CSRF values. This surfaces the ones that look like auth so they can be imported as a
+// flow with import_auth_flow_from_captures, instead of transcribing raw requests by hand.
+const listAuthFlowCandidatesSchema = z.object({
+  target_id: z.string().uuid().describe('The scope target UUID whose recorded requests to scan.'),
+});
+async function listAuthFlowCandidates(params) {
+  return apiGet(`/manual-crawl/captures/target/${params.target_id}/auth-candidates`);
+}
+
+// === Build a flow directly from recorded captures ===
+// The AI-native equivalent of the UI's "Import from Manual Crawl". Ordering is by capture timestamp
+// on the server, so the sequence matches what happened rather than the order the ids were listed.
+const importAuthFlowFromCapturesSchema = z.object({
+  target_id: z.string().uuid().describe('The scope target UUID.'),
+  category: CATEGORY.describe('Which auth flow these captures document.'),
+  capture_ids: z.array(z.string().uuid()).min(1).describe(
+    'The manual_crawl capture ids to turn into steps, from list_auth_flow_candidates.'),
+  name: z.string().optional().describe('Optional name for the created flow.'),
+});
+async function importAuthFlowFromCaptures(params) {
+  return apiPost(`/auth-flows/${params.target_id}/from-captures`, {
+    category: params.category,
+    name: params.name || '',
+    capture_ids: params.capture_ids,
+  });
+}
+
+// === Adopt a detected refresh request as a headless refresh flow ===
+// Turns the app's own silent-refresh request (a capture whose oauth_role is "refresh_request" in
+// list_auth_flow_candidates) into a flow_purpose='refresh' flow: it rewrites the captured refresh token
+// to the {{token:refresh_token}} placeholder so replay spends the CURRENT stored refresh token, and links
+// the flow to the anchor session token as its refresh_flow_id. From then on refreshing that token replays
+// this flow (a headless OAuth refresh grant) instead of the interactive login. This is the OAuth answer
+// to "renew the session without logging in again".
+const buildRefreshFlowSchema = z.object({
+  target_id: z.string().uuid().describe('The scope target UUID.'),
+  capture_ids: z.array(z.string().uuid()).min(1).describe(
+    'The manual_crawl capture id(s) of the refresh request (oauth_role "refresh_request" in ' +
+    'list_auth_flow_candidates). Must include the request that carries grant_type=refresh_token.'),
+  anchor_token_id: z.string().uuid().optional().describe(
+    'The session token (the access-token credential) to link this refresh flow to. When given, its ' +
+    'refresh_flow_id is set so refresh uses the new flow. Omit to build the flow without linking.'),
+  name: z.string().optional().describe('Optional name for the refresh flow.'),
+  refresh_strategy: z.string().optional().describe('Default oauth_refresh_grant.'),
+});
+async function buildRefreshFlow(params) {
+  return apiPost(`/auth-flows/${params.target_id}/refresh-from-captures`, {
+    capture_ids: params.capture_ids,
+    anchor_token_id: params.anchor_token_id || '',
+    name: params.name || '',
+    refresh_strategy: params.refresh_strategy || '',
+  });
+}
+
 module.exports = {
   listAuthFlowsSchema, listAuthFlows,
   createAuthFlowSchema, createAuthFlow,
@@ -203,4 +314,8 @@ module.exports = {
   deleteAuthFlowStepSchema, deleteAuthFlowStep,
   replayAuthFlowStepSchema, replayAuthFlowStep,
   replayAuthFlowSchema, replayAuthFlow,
+  classifyAuthFlowRefreshSchema, classifyAuthFlowRefresh,
+  listAuthFlowCandidatesSchema, listAuthFlowCandidates,
+  importAuthFlowFromCapturesSchema, importAuthFlowFromCaptures,
+  buildRefreshFlowSchema, buildRefreshFlow,
 };

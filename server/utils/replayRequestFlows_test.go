@@ -542,6 +542,55 @@ func TestReplayRequestFlowSummaryCounts(t *testing.T) {
 	}
 }
 
+// A flow is two or more requests. A single request is not a flow, it is a repeater request, and
+// reportableCaptureFlows is what drops it before the list, the card count and the detection source
+// map ever see it. The shape here is active detection's exactly: one session, several document
+// captures that each answered in a single hop, plus one that redirected. Active detection issues one
+// request per endpoint, so a direct answer leaves a single capture and only a redirect chain leaves
+// two - which is the whole reason the operator was seeing "a ton of active flow detected" with one
+// request each.
+func TestReplayRequestFlowReportableDropsSingleRequest(t *testing.T) {
+	noTab := func(c FlowCapture) FlowCapture { c.TabID = nil; return c }
+	hop := FlowRedirectHop{
+		From:       "https://app.test/z",
+		Location:   "https://app.test/z2",
+		StatusCode: 302,
+	}
+	captures := []FlowCapture{
+		// Two endpoints that answered directly: one capture each, so one-request segments.
+		noTab(flowCap("a1", "GET", "https://app.test/x", "document", flowAt(0))),
+		noTab(flowCap("a2", "GET", "https://app.test/y", "document", flowAt(1))),
+		// One endpoint that redirected, and the hop the runner then followed: two captures, one flow.
+		noTab(withChain(withStatus(flowCap("a3", "GET", "https://app.test/z", "document", flowAt(2)), 302), hop)),
+		noTab(flowCap("a4", "GET", "https://app.test/z2", "document", flowAt(3))),
+	}
+
+	// The raw segmenter still cuts all four into segments: three of them, two single-request and one
+	// pair. Segmentation is unchanged; reportability is a separate decision on top of it.
+	if got := flowRootIDs(segmentCaptureFlows(captures)); len(got) != 3 {
+		t.Fatalf("the segmenter itself should still produce three segments, got %v", got)
+	}
+
+	reportable := reportableCaptureFlows(captures)
+	if got := flowRootIDs(reportable); len(got) != 1 || got[0] != "a3" {
+		t.Fatalf("only the redirect chain is a flow; expected [a3], got %v", got)
+	}
+	if got := flowMemberIDs(reportable[0]); len(got) != 2 || got[1] != "a4" {
+		t.Fatalf("the redirect destination must stay in its flow, got %v", got)
+	}
+
+	// The predicate itself, on the boundary.
+	if flowIsReportable(captureFlow{Captures: captures[:1]}) {
+		t.Fatalf("a one-request segment is not a flow")
+	}
+	if !flowIsReportable(captureFlow{Captures: captures[2:]}) {
+		t.Fatalf("a two-request segment is a flow")
+	}
+	if flowIsReportable(captureFlow{}) {
+		t.Fatalf("an empty segment is not a flow")
+	}
+}
+
 func TestReplayRequestFlowIDRoundTrip(t *testing.T) {
 	session := "22222222-2222-2222-2222-222222222222"
 	root := "33333333-3333-3333-3333-333333333333"

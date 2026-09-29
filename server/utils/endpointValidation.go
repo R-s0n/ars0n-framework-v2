@@ -366,6 +366,14 @@ func ExecuteEndpointValidation(scanID, scopeTargetID string, probe ProbeContext)
 		run.commit(remainder)
 	}
 
+	if walled := run.budget.BlockedHosts(); len(walled) > 0 {
+		run.assumptions = append(run.assumptions, fmt.Sprintf(
+			"Probing was stopped on %s after a sustained wall of WAF/bot-manager blocks, to avoid an "+
+				"IP ban on a shared edge. Endpoints on those hosts are reported unverified rather than "+
+				"measured; re-run from an IP the target trusts, or drive them through the browser.",
+			strings.Join(walled, ", ")))
+	}
+
 	if run.controlCapHit > 0 {
 		run.assumptions = append(run.assumptions, fmt.Sprintf(
 			"The per-directory not-found oracle was capped at %d directories and %d endpoint(s) "+
@@ -451,7 +459,7 @@ func (r *validationRun) calibrate() bool {
 	// to discriminate, say the question is open rather than answering it wrongly.
 	probeURL := r.baseURL + "/"
 	discriminating := false
-	if better := authRequiredProbeURL(r.scopeTargetID); better != "" {
+	if better := authRequiredProbeURL(r.scopeTargetID, r.baseHost); better != "" {
 		probeURL = better
 		discriminating = true
 	} else if better := sessionFlowProbeURL(r.scopeTargetID); better != "" {
@@ -674,6 +682,22 @@ func candidateScore(c validationCandidate) int {
 // issue those requests, which is evidence the re-probe has no way to recover.
 func (r *validationRun) evaluate(c validationCandidate) ValidationVerdict {
 	v := r.probeEndpoint(c)
+
+	// Feed the per-host WAF breaker from the probe result, before any crawl promotion: a block is
+	// about whether THIS traffic reached the application, which crawl evidence never changes. A block
+	// verdict increments the streak; a DEFINITIVE application response (a non-block status: 2xx/3xx/
+	// 404/400/500...) resets it. A bare 401/403/406/429/451 that was NOT classified as a block is
+	// left neutral: the unsafe-method path does not run block detection, so resetting on its 403
+	// would let a WAF wall of write endpoints escape the breaker, while an auth wall (valid.auth_
+	// required) never increments it in the first place. Skips and the host-abandoned short-circuit
+	// (HTTPStatus 0) do neither.
+	switch {
+	case v.ReasonCode == "unverified.blocked":
+		r.budget.NoteBlock(hostOf(c.url), true)
+	case v.HTTPStatus > 0 && !IsBlockStatus(v.HTTPStatus):
+		r.budget.NoteBlock(hostOf(c.url), false)
+	}
+
 	if v.Status != validationStatusUnverified {
 		return v
 	}
@@ -746,6 +770,23 @@ func (r *validationRun) probeEndpoint(c validationCandidate) ValidationVerdict {
 			"The path segment %q suggests requesting this would change state on the target, so it "+
 				"was not requested. GET /logout would destroy the session and turn every later "+
 				"verdict into a login wall.", seg))
+	}
+
+	// A host that has already shown a sustained WAF wall this run is abandoned: sending more only
+	// spends the budget on blocks and raises the IP-ban risk on a shared edge. The endpoint is kept
+	// and reported unverified, never ruled out, because a request that reaches the application would
+	// still settle it.
+	if r.budget.HostBlocked(hostOf(c.url)) {
+		v.Status = validationStatusUnverified
+		v.ReasonCode = "unverified.host_blocked"
+		v.Reason = fmt.Sprintf("%s returned a sustained wall of WAF/bot-manager blocks earlier in "+
+			"this run, so probing it was stopped to avoid an IP ban. This endpoint was not measured; "+
+			"it is kept and not ruled out.", hostOf(c.url))
+		v.RuleFired = "host_abandoned_waf"
+		v.Confidence = "assumed"
+		v.Flags = append(v.Flags, "waf", "host_abandoned")
+		v.Falsifier = "A request that reaches the application would settle it."
+		return v
 	}
 
 	if c.method != http.MethodGet && c.method != http.MethodHead && c.method != http.MethodOptions {

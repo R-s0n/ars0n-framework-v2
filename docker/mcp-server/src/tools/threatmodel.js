@@ -886,7 +886,14 @@ const manageThreatModelNotesSchema = z.object({
     'notable_objects, the control name for security_controls. Required on create. On list it ' +
     'narrows to that one group. On update it is only settable for notable_objects, which is the ' +
     'one collection whose route lets the name change; everywhere else the row keeps the group it ' +
-    'was created under.'),
+    'was created under. ' +
+    'PRE-BUILT FIRST: each collection has a standard catalogue of names the UI modal offers ' +
+    '(ApplicationQuestionsModal QUESTIONS, MechanismsModal MECHANISMS, NotableObjectsModal ' +
+    'DEFAULT_OBJECTS, SecurityControlsModal SECURITY_CONTROLS). Review those and reuse the exact ' +
+    'standard name for anything they cover, filling the relevant standard entries before you add ' +
+    'anything else; a name that is not in the catalogue should be a deliberate custom entry for a ' +
+    'genuine gap, not a synonym for a standard one. The names are free text and unchecked, so a ' +
+    'near-miss silently makes a new group and the model reads as sparser and more custom than it is.'),
   content: z.string().optional().describe(
     'The body of the row, again a different column per collection: the answer for ' +
     'application_questions, the notes for mechanisms, the JSON example for notable_objects, the ' +

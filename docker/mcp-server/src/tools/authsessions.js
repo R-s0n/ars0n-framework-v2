@@ -1,6 +1,6 @@
 const { z } = require('zod');
 const { clip: clipTo, bodyOptions, DEFAULTS } = require('../utils/clip');
-const { apiGet, apiPost, apiPut, apiDelete } = require('../api');
+const { apiGet, apiPost, apiPut, apiPatch, apiDelete } = require('../api');
 const { limitResults, clampLimit } = require('../utils/truncate');
 
 // Authentication state over MCP: auth flows and their steps, browser-extension recordings, and the
@@ -353,6 +353,8 @@ const manageAuthRecordingSchema = z.object({
     'start: scheme://host[:port] the flow begins at. Recordings are deliberately not scope ' +
     'filtered, so this is a starting point, not a boundary: an auth flow that bounces through an ' +
     'identity provider on another domain is recorded whole.'),
+  notes: z.string().optional().describe(
+    'start: free-text notes stored on the recording, e.g. which account it is or what to look for.'),
 
   requests: z.array(z.object({
     seq: z.number().int().optional().describe(
@@ -437,6 +439,7 @@ async function manageAuthRecording(params) {
         name: params.name,
         category: params.category,
         base_url: params.base_url || '',
+        notes: params.notes || '',
       });
     }
 
@@ -644,6 +647,25 @@ const manageSessionTokensSchema = z.object({
     'create / update: whether scans send it. Prefer the activate and deactivate actions for ' +
     'flipping it on an existing token; this is here so a token can be created live in one call.'),
   notes: z.string().optional().describe('Free text, e.g. which account this session belongs to.'),
+  auto_refresh: z.boolean().optional().describe(
+    'Opt this token into unattended refresh: the server renews it as it nears expiry, without you ' +
+    'asking. Off by default and deliberately narrow. It only ever fires when the token is active, ' +
+    'has already been refreshed once by hand successfully, and its linked flow classifies as a pure ' +
+    'replay (no MFA/OTP step, no federated identity provider, no bot challenge). A flow that would ' +
+    'pause for a code or open a browser is never run unattended, because it cannot succeed with ' +
+    'nobody watching. Check the flow with classify_auth_flow_refresh before turning this on: kind ' +
+    'must be "replay".'),
+  refresh_flow_id: z.string().uuid().optional().describe(
+    'update: the headless REFRESH flow to link (auth_flow_id stays the interactive CREATION flow). Set by ' +
+    'build_refresh_flow automatically; set it here to link an existing refresh flow by hand. Once set, ' +
+    'refresh replays this flow instead of the creation flow.'),
+  refresh_strategy: z.string().optional().describe(
+    'update: how this session renews: oauth_refresh_grant | replay_request | browser_recapture | none. ' +
+    'Descriptive; the actual path is chosen by what is linked (refresh_flow_id vs recapture).'),
+  refresh_transport: z.string().optional().describe(
+    'update: a capability fact, not a gate: headless | browser_only | unknown. browser_only means the ' +
+    'refresh mechanism is known but the container cannot execute it (Cloudflare / a browser-only step), ' +
+    'so refresh must go through the browser (recapture).'),
 
   raw: z.string().optional().describe(
     'parse: the text to pull tokens out of. A raw HTTP request with its headers, a curl command ' +
@@ -758,19 +780,46 @@ async function manageSessionTokens(params) {
 // stored token value with what came back. Neither belongs behind an action name a caller reaches
 // for while doing something else.
 const checkSessionTokensSchema = z.object({
-  action: z.enum(['validate', 'refresh', 'validate_all']).describe(
+  action: z.enum(['validate', 'refresh', 'validate_all', 'provide_refresh_input', 'refresh_status', 'cancel_refresh', 'recapture', 'capture_oauth']).describe(
     'validate: send one authenticated request with this token and report what came back. This is ' +
     'the check to run before a scan, because an expired token turns every endpoint into a login ' +
     'wall and the scan will happily fingerprint that wall as the application. ' +
     'refresh: replay the token\'s auth flow and store the new value it issues. Needs the token to ' +
     'have an auth_flow_id, and sends the entire login sequence, so it costs real requests and may ' +
-    'trip rate limiting or an account lockout if run in a loop. ' +
+    'trip rate limiting or an account lockout if run in a loop. A flow with a step that needs a ' +
+    'user-supplied value (an MFA/OTP code) does NOT fail: it returns status "needs_input" with a ' +
+    'run_id and an input_request; supply the value with provide_refresh_input. ' +
+    'provide_refresh_input: answer a paused refresh (run_id + value); it resumes and may complete or ' +
+    'ask for another value. refresh_status: read a run. cancel_refresh: abandon a paused run. ' +
+    'recapture: refresh a session from the LIVE BROWSER instead of by replaying - reads the freshest ' +
+    'Cookie the crawl captured for the token\'s host and upserts the credential and its companions. ' +
+    'This is the working refresh for an OAuth / federated / Cloudflare session with no replayable flow; ' +
+    'the human must first log in in their browser with the extension recording. Pass `since` (RFC3339) ' +
+    'to only accept a capture newer than that, so a stale one is not re-used. ' +
+    'capture_oauth: scan the manual-crawl corpus for this target (needs target_id) and promote the ' +
+    'freshest OAuth token endpoint response into durable rows: the access token as a credential and the ' +
+    'refresh token as a linked refresh secret. A no-op on a confidential-client / BFF app whose tokens ' +
+    'never reach the browser (nothing token-shaped to capture). Run it after a login was captured. ' +
     'validate_all: validate every active token on a target, one at a time.'),
 
   token_id: z.string().uuid().optional().describe(
     'The session token UUID. Required for validate and refresh.'),
   target_id: z.string().uuid().optional().describe(
     'The scope target UUID. Required for validate_all.'),
+  run_id: z.string().uuid().optional().describe(
+    'The refresh run UUID from a "needs_input" result. Required for provide_refresh_input, ' +
+    'refresh_status and cancel_refresh.'),
+  value: z.string().optional().describe(
+    'provide_refresh_input: the value the paused step asked for (e.g. the MFA/OTP code, or the URL a ' +
+    'magic link landed on). Ask the human for a code delivered out of band; do not invent one. Omit ' +
+    'it for a push "approve" pause (input_request.no_value true) - that is just a Continue.'),
+  step_id: z.string().uuid().optional().describe(
+    'provide_refresh_input: echo input_request.step_id from the needs_input result. It ties your value ' +
+    'to the exact pause you are answering, so a stale or repeated answer is rejected rather than landing ' +
+    'on a later step the run has since advanced to. Optional but recommended.'),
+  since: z.string().optional().describe(
+    'recapture: an RFC3339 timestamp; only a captured session newer than this is accepted, so a stale ' +
+    'capture is not re-used. Pass the moment before you asked the human to log in.'),
   include_inactive: z.boolean().optional().describe(
     'validate_all: also check tokens that are switched off (default false). Useful before ' +
     'activating one, so you know it works before a scan depends on it.'),
@@ -786,16 +835,38 @@ async function checkSessionTokens(params) {
 
     case 'refresh': {
       if (!params.token_id) return { error: 'refresh needs token_id' };
-      const out = await apiPost(`/session-tokens/${params.token_id}/refresh`, {});
-      return clean({
-        ...compactCheck(out),
-        // A refresh that reports success without setting a value has run the flow and failed to
-        // find a token in the result, which looks identical to success from the status alone.
-        new_value_set: out.new_value_set,
-        note: out.new_value_set === false
-          ? 'The flow ran but no new token was extracted from it, so the stored value is unchanged.'
-          : undefined,
-      });
+      return compactRefresh(await apiPost(`/session-tokens/${params.token_id}/refresh`, {}));
+    }
+
+    case 'provide_refresh_input': {
+      if (!params.run_id) return { error: 'provide_refresh_input needs run_id' };
+      // A push "approve" pause needs no value (just a continue); the server rejects an empty value for
+      // any pause that actually needs one, so pass whatever was given. step_id, when supplied, ties the
+      // answer to the pause it was meant for.
+      return compactRefresh(await apiPost(`/session-refresh-runs/${params.run_id}/input`,
+        params.step_id ? { value: params.value || '', step_id: params.step_id } : { value: params.value || '' }));
+    }
+
+    case 'refresh_status': {
+      if (!params.run_id) return { error: 'refresh_status needs run_id' };
+      return compactRefresh(await apiGet(`/session-refresh-runs/${params.run_id}`));
+    }
+
+    case 'cancel_refresh': {
+      if (!params.run_id) return { error: 'cancel_refresh needs run_id' };
+      return compactRefresh(await apiPost(`/session-refresh-runs/${params.run_id}/cancel`, {}));
+    }
+
+    case 'recapture': {
+      if (!params.token_id) return { error: 'recapture needs token_id' };
+      const body = {};
+      if (params.since) body.since = params.since;
+      return compactRefresh(await apiPost(`/session-tokens/${params.token_id}/refresh-recapture`, body));
+    }
+
+    case 'capture_oauth': {
+      if (!params.target_id) return { error: 'capture_oauth needs target_id' };
+      return await apiPost(`/session-tokens/target/${params.target_id}/capture-oauth`, {});
     }
 
     case 'validate_all': {
@@ -870,6 +941,10 @@ function compactStep(s, full, opts) {
     response_status: s.response_status === null ? undefined : s.response_status,
     response_time_ms: s.response_time_ms === null ? undefined : s.response_time_ms,
     error: s.error,
+    // The single-step replay endpoint attaches these when a replay did NOT complete, so the response
+    // shown is the previous run's. Dropping them here made a failed replay read as a stale success.
+    replay_error: s.replay_error,
+    replay_note: s.replay_note,
     location: headerValue(headers, 'location'),
     content_type: headerValue(headers, 'content-type'),
     // Names only in compact form, purely to keep a listing small. detail:"full" returns
@@ -882,6 +957,10 @@ function compactStep(s, full, opts) {
     extractions: s.extractions && s.extractions.length ? s.extractions : undefined,
     captured: s.captured,
     substituted: s.substituted,
+    // What the user must supply for this step on refresh (an MFA/OTP code), and a suggestion when the
+    // step looks like it needs one but has not been annotated.
+    interaction: s.interaction,
+    suggested_interaction: s.suggested_interaction,
 
     ...(full ? {
       // NEVER clipped. This is the field update_step writes back, and the Go handler replaces the
@@ -982,6 +1061,20 @@ function compactToken(t) {
     // matters is the long one: the short ones are "HTTP 200".
     last_validation_detail: t.last_validation_detail,
     last_refreshed_at: t.last_refreshed_at,
+    // Only surfaced when on, so an ordinary listing stays quiet and a token that renews itself
+    // unattended is impossible to miss.
+    auto_refresh: t.auto_refresh === true ? true : undefined,
+    // OAuth model (docs/OAUTH_REFRESH_DESIGN.md). Surfaced only when set, so a plain token stays quiet.
+    // credential_kind names what the value IS (oauth_access_token, oauth_refresh_token, jwt, ...);
+    // refresh_token_id links an access token to the refresh secret that renews it; refresh_flow_id is the
+    // headless refresh flow (auth_flow_id stays the interactive creation flow); refresh_strategy is how it
+    // renews (oauth_refresh_grant | replay_request | browser_recapture); refresh_transport is whether the
+    // container can execute that (headless | browser_only).
+    credential_kind: t.credential_kind || undefined,
+    refresh_token_id: t.refresh_token_id || undefined,
+    refresh_flow_id: t.refresh_flow_id || undefined,
+    refresh_strategy: t.refresh_strategy || undefined,
+    refresh_transport: t.refresh_transport || undefined,
     created_at: t.created_at,
     updated_at: t.updated_at,
   });
@@ -1000,30 +1093,27 @@ function compactCheck(out) {
   });
 }
 
-// === helpers ===================================================================================
-
-const API_BASE = process.env.API_URL || 'http://api:8443';
-
-// api.js exports get, post, put and delete but not patch, and the one PATCH route in this contract
-// does not justify widening the shared client for every tool in the server. Same error shape as
-// api.js on purpose, and the same tolerant body read: several Go handlers answer a successful
-// write with an empty body, and res.json() throws on that.
-async function apiPatch(path, body = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+// compactRefresh keeps the fields that make an interactive refresh legible: the status (which may be
+// "needs_input"), the run_id and input_request needed to answer a pause, and whether a value was set.
+function compactRefresh(out) {
+  if (!out || typeof out !== 'object') return { status: 'unknown' };
+  return clean({
+    status: out.status,
+    detail: out.detail,
+    run_id: out.run_id,
+    input_request: out.input_request,
+    new_value_set: out.new_value_set,
+    note: out.new_value_set === false && out.status !== 'needs_input'
+      ? 'The flow ran but no new token was extracted from it, so the stored value is unchanged.'
+      : undefined,
+    evidence: out.evidence,
   });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`API PATCH ${path} failed (${res.status}): ${text}`);
-  if (!text) return {};
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { message: text };
-  }
 }
 
+// === helpers ===================================================================================
+
+// apiPatch is the shared client's (api.js), imported at the top of this file: it has the same
+// tolerant body read this module used to duplicate, so the one PATCH route here uses it too.
 async function findFlow(targetID, flowID) {
   const flows = await apiGet(`/auth-flows/${targetID}`);
   const hit = (Array.isArray(flows) ? flows : []).find((f) => f.id === flowID);
@@ -1048,7 +1138,8 @@ function tokenBody(params, forUpdate = false) {
                   'value_prefix',
                   'token_value', 'scope_domains', 'cookie_path', 'cookie_domain', 'cookie_secure',
                   'cookie_httponly', 'cookie_samesite', 'expires_at', 'is_active', 'notes',
-                  'auth_flow_id'];
+                  'auto_refresh', 'auth_flow_id',
+                  'refresh_flow_id', 'refresh_strategy', 'refresh_transport'];
   const body = {};
   for (const f of fields) {
     if (params[f] !== undefined) body[f] = params[f];

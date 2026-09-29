@@ -1,7 +1,10 @@
 const { z } = require('zod');
+const fs = require('fs');
 const { apiGet, apiPost } = require('../api');
 const { query } = require('../db');
 const { limitResults, clampLimit } = require('../utils/truncate');
+
+const API_BASE = () => process.env.API_URL || 'http://api:8443';
 
 // The parts of the Wildcard workflow that had no MCP path at all.
 //
@@ -277,15 +280,22 @@ async function getTargetUrlScreenshot(params) {
 // === Database bundles ==========================================================================
 
 const manageDatabaseBundleSchema = z.object({
-  action: z.enum(['list', 'export', 'import_url', 'import_file']).describe(
+  action: z.enum(['list', 'export', 'import_url', 'import_file', 'inspect']).describe(
     'list: which scope targets can be exported, with their row counts. ' +
-    'export: build a .rs0n bundle of the chosen targets and all their scan data. ' +
-    'import_url: pull a bundle from a URL and merge it in. ' +
-    'import_file: import a bundle already on disk. Both imports ADD to this install.'),
+    'export: build a .rs0n bundle - EVERY table for the chosen targets plus their FK-linked child rows ' +
+    '(the whole URL workflow: crawl, endpoints, replay, flows, auth, vectors, triage, fuzz, findings). ' +
+    'import_url: fetch a bundle from a URL and merge it. ' +
+    'import_file: import a .rs0n from a path the MCP server can read (streamed to the API as base64). ' +
+    'inspect: summarise a .rs0n on disk - targets, tables, row counts - WITHOUT importing it. ' +
+    'Imports MERGE (upsert by primary key), never wipe.'),
   scope_target_ids: z.array(z.string().uuid()).optional()
-    .describe('export: which targets to include. Omit to export everything list returns.'),
+    .describe('export: which targets to include. Omit to export every target list returns.'),
   url: z.string().optional().describe('import_url: where to fetch the bundle from.'),
-  file_path: z.string().optional().describe('import_file: path to a .rs0n file readable by the API container.'),
+  file_path: z.string().optional().describe(
+    'import_file / inspect: path to a .rs0n readable by the MCP server. ' +
+    'export: write the bundle to this path instead of returning its bytes.'),
+  as_base64: z.boolean().optional().describe(
+    'export: also return the bundle bytes base64 encoded. Bundles are large; prefer file_path.'),
 });
 
 async function manageDatabaseBundle(params) {
@@ -301,16 +311,45 @@ async function manageDatabaseBundle(params) {
         ids = rows.map((r) => r.id).filter(Boolean);
       }
       if (!ids.length) return { error: 'Nothing to export' };
-      return apiPost('/api/database-export', { scope_target_ids: ids });
+      // Binary .rs0n: raw fetch, never apiPost (its res.text() parse would corrupt the gzip bytes).
+      const res = await fetch(`${API_BASE()}/api/database-export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope_target_ids: ids }),
+      });
+      if (!res.ok) return { error: `export failed (${res.status}): ${(await res.text()).slice(0, 300)}` };
+      const buf = Buffer.from(await res.arrayBuffer());
+      const out = { format: 'rs0n', bytes: buf.length, scope_targets: ids.length };
+      if (params.file_path) {
+        try { fs.writeFileSync(params.file_path, buf); out.saved_path = params.file_path; }
+        catch (e) { return { error: `bundle built but could not write file_path: ${e.message}` }; }
+      }
+      if (params.as_base64) out.base64 = buf.toString('base64');
+      if (!params.file_path && !params.as_base64) {
+        out.note = 'Bundle built. Pass file_path to save it (recommended) or as_base64 to receive the bytes.';
+      }
+      return out;
     }
 
     case 'import_url':
       if (!params.url) return { error: 'import_url needs url' };
       return apiPost('/api/database-import-url', { url: params.url });
 
-    case 'import_file':
+    case 'import_file': {
       if (!params.file_path) return { error: 'import_file needs file_path' };
-      return apiPost('/api/database-import', { file_path: params.file_path });
+      let data;
+      try { data = fs.readFileSync(params.file_path); }
+      catch (e) { return { error: `cannot read file_path: ${e.message}` }; }
+      return apiPost('/api/database-import-base64', { data: data.toString('base64') });
+    }
+
+    case 'inspect': {
+      if (!params.file_path) return { error: 'inspect needs file_path' };
+      let data;
+      try { data = fs.readFileSync(params.file_path); }
+      catch (e) { return { error: `cannot read file_path: ${e.message}` }; }
+      return apiPost('/api/debug-export-file', { data: data.toString('base64') });
+    }
 
     default:
       return { error: `unknown action: ${params.action}` };
@@ -320,23 +359,23 @@ async function manageDatabaseBundle(params) {
 // === CSV export ================================================================================
 
 const exportScanDataSchema = z.object({
-  datasets: z.array(z.string()).optional().describe(
-    'Which datasets to include, e.g. ["subdomains","httpx","nuclei","roi"]. Omit for all of them. ' +
-    'The UI offers: amass, httpx, gau, sublist3r, ctl, subfinder, shuffledns, gospider, ' +
-    'subdomainizer, cewl, nuclei, subdomains, roi.'),
-  target_id: z.string().uuid().optional().describe('Restrict the export to one scope target.'),
-  as_base64: z.boolean().optional().describe(
-    'Return the ZIP bytes base64 encoded. Off by default: the archive is large and unreadable in a ' +
-    'conversation, and the per-dataset query tools return the same data as rows.'),
+  scope_target_ids: z.array(z.string().uuid()).optional()
+    .describe('Which scope targets to include. Omit to export every target.'),
+  target_id: z.string().uuid().optional()
+    .describe('Single-target shorthand (same as scope_target_ids: [id]).'),
+  curated_only: z.boolean().optional()
+    .describe('Drop the long recon/ per-table dump and keep the high-signal folders (auth, urls, findings, threat, config).'),
+  file_path: z.string().optional()
+    .describe('Write the CSV zip to this path (readable by the MCP server) instead of returning its bytes.'),
+  as_base64: z.boolean().optional()
+    .describe('Also return the ZIP bytes base64. Large; prefer file_path, or the query_* tools to read rows.'),
 });
 
 async function exportScanData(params) {
-  const all = ['amass', 'httpx', 'gau', 'sublist3r', 'ctl', 'subfinder', 'shuffledns',
-    'gospider', 'subdomainizer', 'cewl', 'nuclei', 'subdomains', 'roi'];
-  const wanted = params.datasets && params.datasets.length ? params.datasets : all;
   const body = {};
-  for (const d of all) body[d] = wanted.includes(d);
+  if (params.scope_target_ids && params.scope_target_ids.length) body.scope_target_ids = params.scope_target_ids;
   if (params.target_id) body.scope_target_id = params.target_id;
+  if (params.curated_only) body.curated_only = true;
 
   // This route answers with a ZIP archive, not JSON. Handled directly rather than through apiPost,
   // because the shared parser would coerce the binary into {message: "PK..."} and hand
@@ -351,18 +390,18 @@ async function exportScanData(params) {
   }
   const buf = Buffer.from(await res.arrayBuffer());
 
-  if (params.as_base64) {
-    return { format: 'zip', bytes: buf.length, datasets: wanted, base64: buf.toString('base64') };
+  const out = { format: 'zip', bytes: buf.length };
+  if (params.file_path) {
+    try { fs.writeFileSync(params.file_path, buf); out.saved_path = params.file_path; }
+    catch (e) { return { error: `export ok but could not write file_path: ${e.message}` }; }
   }
-  return {
-    format: 'zip',
-    bytes: buf.length,
-    datasets: wanted,
-    note: 'A ZIP of CSVs, which is a file rather than something readable in a conversation. Set ' +
-          'as_base64 to receive the bytes. To actually READ this data, the per-dataset query tools ' +
-          'are better: query_subdomains, query_live_servers, query_nuclei_findings, ' +
-          'query_technologies, query_dns_records and find_high_value_targets all return rows.',
-  };
+  if (params.as_base64) out.base64 = buf.toString('base64');
+  if (!params.file_path && !params.as_base64) {
+    out.note = 'A ZIP of CSVs (one per table, grouped auth/ urls/ findings/ threat/ config/ recon/). ' +
+      'Pass file_path to save it or as_base64 for the bytes. To READ rows in-conversation, prefer ' +
+      'query_subdomains, query_live_servers, query_endpoints, query_nuclei_findings, query_technologies.';
+  }
+  return out;
 }
 
 // === HackerOne scope ===========================================================================

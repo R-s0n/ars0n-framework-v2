@@ -31,6 +31,18 @@ import (
 // a byte sequence a real request carries.
 var authFlowVarPattern = regexp.MustCompile(`\{\{af:([A-Za-z0-9_]{1,64})(?:\|(raw|url|json))?\}\}`)
 
+// tokenVarPattern matches {{token:NAME}}: a value seeded from a STORED session token rather than
+// captured from an earlier step's response. A refresh flow uses it to carry the stored refresh secret
+// into the token request, e.g. grant_type=refresh_token&refresh_token={{token:refresh_token}}. It is a
+// separate namespace from {{af:}} on purpose: a step could legitimately extract a var called
+// refresh_token, and the two must not collide. Resolved from vars under the reserved key "token:"+NAME.
+// Recognised names are seeded by executeSessionRefreshRun: refresh_token, credential, access_token.
+var tokenVarPattern = regexp.MustCompile(`\{\{token:([A-Za-z0-9_]{1,64})(?:\|(raw|url|json))?\}\}`)
+
+// tokenVarKeyPrefix is the reserved key prefix under which {{token:NAME}} values live in the vars map,
+// so they cannot collide with an {{af:NAME}} extraction of the same NAME.
+const tokenVarKeyPrefix = "token:"
+
 // AuthFlowExtraction captures one value out of a step's response.
 type AuthFlowExtraction struct {
 	Name    string `json:"name"`
@@ -242,7 +254,7 @@ func authFlowVarNames(raw string) []string {
 // blank csrf produces a 400 the operator then debugs at the target; a step that refuses to send says
 // which capture did not fire.
 func substituteAuthFlowVars(raw string, vars map[string]string) (out string, used []string, unresolved []string) {
-	if !strings.Contains(raw, "{{af:") {
+	if !strings.Contains(raw, "{{af:") && !strings.Contains(raw, "{{token:") {
 		return raw, nil, nil
 	}
 
@@ -252,18 +264,22 @@ func substituteAuthFlowVars(raw string, vars map[string]string) (out string, use
 	seenUsed := map[string]bool{}
 	seenMissing := map[string]bool{}
 
-	replace := func(section string, inBody bool) string {
-		return authFlowVarPattern.ReplaceAllStringFunc(section, func(token string) string {
-			groups := authFlowVarPattern.FindStringSubmatch(token)
+	// applyPattern resolves one placeholder family. keyPrefix maps the placeholder NAME to its vars key,
+	// so {{af:x}} reads vars["x"] and {{token:x}} reads vars["token:x"]; used/unresolved carry that same
+	// prefixed key, which asPlaceholders renders back to the right {{...}} form.
+	applyPattern := func(section string, inBody bool, pat *regexp.Regexp, keyPrefix string) string {
+		return pat.ReplaceAllStringFunc(section, func(match string) string {
+			groups := pat.FindStringSubmatch(match)
 			name, encoding := groups[1], groups[2]
+			key := keyPrefix + name
 
-			value, ok := vars[name]
+			value, ok := vars[key]
 			if !ok {
-				if !seenMissing[name] {
-					seenMissing[name] = true
-					unresolved = append(unresolved, name)
+				if !seenMissing[key] {
+					seenMissing[key] = true
+					unresolved = append(unresolved, key)
 				}
-				return token
+				return match
 			}
 
 			if encoding == "" {
@@ -278,12 +294,18 @@ func substituteAuthFlowVars(raw string, vars map[string]string) (out string, use
 				}
 			}
 
-			if !seenUsed[name] {
-				seenUsed[name] = true
-				used = append(used, name)
+			if !seenUsed[key] {
+				seenUsed[key] = true
+				used = append(used, key)
 			}
 			return encodeAuthFlowValue(value, encoding)
 		})
+	}
+
+	replace := func(section string, inBody bool) string {
+		section = applyPattern(section, inBody, authFlowVarPattern, "")
+		section = applyPattern(section, inBody, tokenVarPattern, tokenVarKeyPrefix)
+		return section
 	}
 
 	if sep == "" {
@@ -399,7 +421,11 @@ func prepareStepRequest(raw string, vars map[string]string) (string, []string, s
 func asPlaceholders(names []string) []string {
 	out := make([]string, 0, len(names))
 	for _, name := range names {
-		out = append(out, "{{af:"+name+"}}")
+		if strings.HasPrefix(name, tokenVarKeyPrefix) {
+			out = append(out, "{{token:"+strings.TrimPrefix(name, tokenVarKeyPrefix)+"}}")
+		} else {
+			out = append(out, "{{af:"+name+"}}")
+		}
 	}
 	return out
 }

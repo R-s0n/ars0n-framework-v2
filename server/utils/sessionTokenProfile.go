@@ -171,6 +171,14 @@ const (
 	// access_token whose fingerprint is this credential. The fingerprint is the whole of the join:
 	// a response that minted somebody else's token says nothing about this one.
 	CredentialKindOAuthAccess CredentialKind = "oauth_access_token"
+	// CredentialKindOAuthRefresh is a refresh token: a durable secret SPENT to mint a fresh access
+	// token, never attached to a resource request. Stored on a token_role='refresh' row. See
+	// docs/OAUTH_REFRESH_DESIGN.md.
+	CredentialKindOAuthRefresh CredentialKind = "oauth_refresh_token"
+	// CredentialKindOAuthID is an OIDC id_token: it NAMES the principal (a signed JWT of claims) and is
+	// informational, stored token_role='companion' unless an app actually sends it as the session
+	// bearer, in which case it is a credential.
+	CredentialKindOAuthID CredentialKind = "id_token"
 	// CredentialKindPrincipalName is a value that NAMES a principal rather than proving one: a
 	// username, a user id, an account handle, a last-signed-in-as pointer.
 	//
@@ -3500,6 +3508,10 @@ var SessionTokenProfileSchema = []string{
 	`ALTER TABLE session_tokens ADD COLUMN IF NOT EXISTS value_fingerprint VARCHAR(16) DEFAULT '';`,
 	`ALTER TABLE session_tokens ADD COLUMN IF NOT EXISTS profile_warnings TEXT DEFAULT '';`,
 	`ALTER TABLE session_tokens ADD COLUMN IF NOT EXISTS profiled_at TIMESTAMP;`,
+	// NOTE: token_role, auto_refresh, the 'refresh' role widening, the OAuth refresh columns and
+	// flow_purpose are NOT here. They live in utils.AuthSessionSchema (the single authoritative list for
+	// additive auth/session schema), which both createTables and the test harness apply. Keeping them
+	// in one place is what stops the two databases drifting.
 }
 
 // EnsureSessionTokenProfileSchema applies the profile columns. It is idempotent and cheap enough

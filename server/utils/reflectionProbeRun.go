@@ -303,6 +303,23 @@ func runReflectionProbe(runID, scopeTargetID string, vectors []vectorRow, plan [
 			}
 		}
 
+		// This host already showed a sustained WAF wall this run; stop sending to it. Continuing spends
+		// the budget on blocks and, on a shared edge such as Cloudflare, raises the IP-ban risk. A
+		// passive row is kept (the session had no part in it); otherwise the input is recorded as not
+		// sent, never as a clean not_reflected. Other hosts keep going, which is why this is per host.
+		if item.Host != "" && budget.HostBlocked(item.Host) {
+			res, havePassive := passive[passiveProbeKey(item.Target.VectorID, item.Target.Parameter)]
+			if havePassive {
+				_ = storeReflectionProbe(ctx, scopeTargetID, item.Target, res.Outcome, "passive")
+			} else {
+				out := reflectionHostBlockedOutcome(item.Target.InsertionPoint)
+				_ = storeReflectionProbe(ctx, scopeTargetID, item.Target, out, "active")
+				perVector[item.Target.VectorID] = append(perVector[item.Target.VectorID], out.Status)
+				updateReflectionSummary(ctx, item.Target.VectorID, perVector[item.Target.VectorID])
+			}
+			continue
+		}
+
 		var material *ScopedAuthMaterial
 		if item.Host != "" {
 			material, _ = authCtx.For(item.Host)
@@ -310,8 +327,31 @@ func runReflectionProbe(runID, scopeTargetID string, vectors []vectorRow, plan [
 
 		// Which verdict is stored, and from which pass. See reflectionKeepPassive.
 		res, havePassive := passive[passiveProbeKey(item.Target.VectorID, item.Target.Parameter)]
-		outcome, source := reflectionKeepPassive(
-			ProbeReflection(ctx, client, item.Target, material), res.Outcome, havePassive)
+		active := ProbeReflection(ctx, client, item.Target, material)
+		// Feed the per-host WAF breaker from the ACTIVE result (never the kept passive row: a block is
+		// about what the target did with THIS request). Two rules, matching endpointValidation.evaluate
+		// and the streak's own contract ("consecutive blocks, with nothing reaching the application in
+		// between"):
+		//   - Increment only on a genuine rejection, EXCLUDING 3xx. On a cookie-session SPA an expired
+		//     session redirects (3xx) rather than 401s, and counting that as an edge block gives the
+		//     wrong remedy; the periodic session check catches a dead session and says "re-capture". A
+		//     403/406/418/429/451 or a challenge-body 200 still counts: a canary carrying < that is
+		//     rejected is exactly the WAF drop the breaker exists to stop hammering.
+		//   - Reset only on a response that reached the application normally.
+		//   - Everything else (is_credential, probe_refused, needs_browser, a transport/5xx error, or a
+		//     3xx) never produced a usable wire answer, so it neither increments nor resets: otherwise a
+		//     host dense with credential inputs resets the streak between real blocks and never trips.
+		if item.Host != "" {
+			switch active.Status {
+			case ReflectionBlocked:
+				if !(active.HTTPStatus >= 300 && active.HTTPStatus < 400) {
+					budget.NoteBlock(item.Host, true)
+				}
+			case ReflectionRaw, ReflectionEncoded, ReflectionNotReflected, ReflectionObserved:
+				budget.NoteBlock(item.Host, false)
+			}
+		}
+		outcome, source := reflectionKeepPassive(active, res.Outcome, havePassive)
 		if err := storeReflectionProbe(ctx, scopeTargetID, item.Target, outcome, source); err != nil {
 			log.Printf("[REFLECT] storing probe for vector %s param %q: %v",
 				item.Target.VectorID, item.Target.Parameter, err)
@@ -343,7 +383,27 @@ func runReflectionProbe(runID, scopeTargetID string, vectors []vectorRow, plan [
 	status, runErr := "completed", ""
 	if sessionLost != "" {
 		status = "error"
-		runErr = "The session stopped being honoured; the rest was not sent. Refresh it and re-run."
+		// "Re-capture", not just "refresh": logging in again in the browser does not update the
+		// framework's stored token. The fresh session has to be brought back in (a new manual crawl,
+		// or Manage Sessions), which is the step that was missed when this last came up.
+		runErr = "The session stopped being honoured; the rest was not sent. Re-capture the session " +
+			"into the framework (a fresh manual crawl, or Manage Sessions) and re-run."
+	}
+	// A host abandoned for a WAF wall is a different headline from a dead session, and the remedy is
+	// different too: refreshing the session will not get past an edge that blocks automated clients by
+	// IP and TLS fingerprint. The headline is prepended so it leads, but the run-level STATUS must not
+	// be downgraded from a genuine session-death error back to "completed": a dead-session run left an
+	// untested tail that has to be re-run, and a green status buries that. So status is only forced to
+	// completed when the session did NOT die; when both happened the error status stands.
+	if walled := budget.BlockedHosts(); len(walled) > 0 {
+		if sessionLost == "" {
+			status = "completed"
+		}
+		runErr = strings.TrimSpace(fmt.Sprintf(
+			"%s blocked automated requests at the edge after a sustained wall of WAF/bot-manager "+
+				"challenges, so probing there was stopped. Refreshing the session will not help; drive "+
+				"this target in a browser (domdig / the extension). %s",
+			strings.Join(walled, ", "), runErr))
 	}
 	if cancelled {
 		// Cancelled is its own terminal state, and the remaining rows stay not_probed. Marking the
@@ -506,11 +566,14 @@ func preflightReflectionCredential(ctx context.Context, scopeTargetID string, pl
 	material, _ := LoadScopedAuthContext(scopeTargetID).For(first.Host)
 	outcome := ProbeReflection(ctx, client, first.Target, material)
 
-	switch outcome.HTTPStatus {
-	case 401:
-		return "Session token expired or rejected. Refresh it and try again."
-	case 403:
-		return "The target answered 403. Get past it or refresh the session token, then try again."
+	// 401 is a genuine credential problem and refreshing is the right remedy, so fail fast. A 403 is
+	// NOT aborted here: it is usually a WAF dropping the canary payload on one endpoint (a payload
+	// carrying < is exactly what a WAF drops), not a dead session, and on a Cloudflare-fronted target
+	// it is an edge block that refreshing the session cannot fix. Aborting the whole run on one
+	// endpoint's 403, and telling the operator to refresh, was a false stop with the wrong remedy.
+	// The per-host block breaker in the run loop abandons a host that returns a sustained wall of them.
+	if outcome.HTTPStatus == 401 {
+		return "Session token expired or rejected (401). Refresh it and try again."
 	}
 	return ""
 }
@@ -537,6 +600,19 @@ func reflectionUntestedTail(tail []reflectionPlanItem,
 		out = append(out, item)
 	}
 	return out
+}
+
+// reflectionHostBlockedOutcome is the row an input gets when its host was abandoned mid-run after a
+// sustained WAF wall, so the probe was deliberately not sent. ReflectionBlocked, never
+// ReflectionNotReflected: the input's reflection is UNKNOWN, and an edge that refuses the client is
+// exactly the "blocked" case, not a clean one.
+func reflectionHostBlockedOutcome(insertionPoint string) ReflectionOutcome {
+	return ReflectionOutcome{
+		Status:         ReflectionBlocked,
+		InsertionPoint: insertionPoint,
+		Detail: "Not sent: this host was abandoned after a sustained wall of WAF/bot-manager " +
+			"blocks earlier in this run. Whether this input reflects is unknown; drive it in a browser.",
+	}
 }
 
 // reflectionUntestedOutcome is the row an input gets when the session died before it was sent.

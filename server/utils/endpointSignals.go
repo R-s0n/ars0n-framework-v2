@@ -514,6 +514,9 @@ var secretPatterns = []secretPattern{
 	{"twilio_sid", regexp.MustCompile(`\bAC[0-9a-fA-F]{32}\b`), "p1", false},
 	{"sendgrid_key", regexp.MustCompile(`\bSG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b`), "p0", false},
 	{"npm_token", regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`), "p0", false},
+	// PostHog client keys ship in browser code by design. Without this the generic rule below reports
+	// each one as a p1 leak, which is the fastest way to make an operator stop reading the section.
+	{"posthog_project_key", regexp.MustCompile(`\bphc_[A-Za-z0-9]{40,}\b`), "p3", true},
 }
 
 // Generic assignments only count as secrets when the name says secret and the value looks random.
@@ -522,6 +525,9 @@ var reGenericSecret = regexp.MustCompile(`(?i)\b(api[_-]?key|apikey|secret|passw
 func analyzeSecrets(in SignalInput) []Signal {
 	var out []Signal
 	seen := map[string]bool{}
+	// Values already reported by a specific provider pattern (a real key format, publishable or not),
+	// so the generic rule below does not double-report them at p1.
+	seenValues := map[string]bool{}
 
 	for _, p := range secretPatterns {
 		// EVERY MATCH. Capped at five, a bundle leaking a dozen provider keys reported five of them,
@@ -532,6 +538,7 @@ func analyzeSecrets(in SignalInput) []Signal {
 				continue
 			}
 			seen[key] = true
+			seenValues[match] = true
 			detail := "A credential matching a known provider format was found in the response body."
 			if p.publishable {
 				detail = "This key type is designed to be public and shipped in client code. It is " +
@@ -554,8 +561,16 @@ func analyzeSecrets(in SignalInput) []Signal {
 			continue
 		}
 		name, value := m[1], m[2]
-		if shannonEntropy(value) < 3.4 || looksLikePlaceholder(value) {
+		// The generic rule is the false-positive-prone one. On a minified first-party bundle it
+		// otherwise reports editor-grammar token names (delimiter.square), DOM/CSS selectors
+		// ([type=password]) and code fragments as credentials. A real secret is a long, unbroken,
+		// high-entropy run; raise the entropy floor from 3.4 (which minified identifiers clear) and
+		// reject anything shaped like source code or a namespaced identifier.
+		if shannonEntropy(value) < 4.0 || looksLikePlaceholder(value) || looksLikeCodeToken(value) {
 			continue
+		}
+		if seenValues[value] {
+			continue // already reported by a specific provider pattern above
 		}
 		key := "generic|" + value
 		if seen[key] {
@@ -572,6 +587,22 @@ func analyzeSecrets(in SignalInput) []Signal {
 		})
 	}
 	return out
+}
+
+// reDottedIdent matches namespaced identifiers a minified editor grammar assigns to variables named
+// token/keyword (delimiter.square, string.key.json, attribute.value.hex.css). reCodePunct matches
+// source-code and CSS-selector punctuation that no credential token contains.
+var (
+	reDottedIdent = regexp.MustCompile(`^[A-Za-z_$][\w$-]*(\.[A-Za-z_$][\w$-]*)+$`)
+	reCodePunct   = regexp.MustCompile("[(){}\\[\\]<>;!~,&?`]")
+)
+
+// looksLikeCodeToken reports whether a value the generic-secret rule matched is really minified
+// source, a DOM/CSS selector or a namespaced identifier rather than a credential. A real API key,
+// token or password is an unbroken run of credential characters; these carry code punctuation or a
+// dotted-identifier shape that no secret does.
+func looksLikeCodeToken(v string) bool {
+	return reCodePunct.MatchString(v) || reDottedIdent.MatchString(v)
 }
 
 func looksLikePlaceholder(v string) bool {
@@ -1125,9 +1156,22 @@ func RollupSignals(perEndpoint map[string][]Signal) (target []Signal, kept map[s
 }
 
 // InterestScore turns an endpoint's signals into one number for ordering.
+//
+// Diminishing returns per Kind: the first signal of a Kind scores its full severity weight, each
+// further signal of the SAME Kind scores a token 2. Without this, one minified bundle carrying
+// twenty secret_generic_assignment hits scored 600 and ranked above every real endpoint, which is
+// the same ranking inversion the vendor-script suppression fights, arriving through first-party
+// bundles instead. Distinct Kinds still add up, so a genuinely rich endpoint still outscores a bare
+// one; what is capped is one detector firing many times on the same response.
 func InterestScore(sigs []Signal) int {
 	score := 0
+	seenKind := map[string]bool{}
 	for _, s := range sigs {
+		if seenKind[s.Kind] {
+			score += 2
+			continue
+		}
+		seenKind[s.Kind] = true
 		switch s.Severity {
 		case "p0":
 			score += 100

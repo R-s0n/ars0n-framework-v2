@@ -242,3 +242,44 @@ func TestAbortReasonNamesTheWorkingBaseline(t *testing.T) {
 	}
 	_ = fmt.Sprintf // keep fmt used if the assertions above change
 }
+
+// A sustained WAF/bot-manager wall on one host abandons THAT host without aborting the run or
+// touching the hosts that answer. This is the gap that let a Cloudflare-fronted CDN take 1104
+// signal-free 403s in one run instead of ~25.
+func TestWAFBlockWallAbandonsOneHostWithoutAbortingTheRun(t *testing.T) {
+	b := NewHostBudget()
+	b.Acquire("static.example.com", 2, 2, "test")
+	b.Acquire("app.example.com", 2, 2, "test")
+
+	for i := 0; i < PacingBlockStreakAbandon; i++ {
+		b.NoteBlock("static.example.com", true)
+	}
+	if !b.HostBlocked("static.example.com") {
+		t.Fatalf("a host returning %d consecutive blocks should be abandoned", PacingBlockStreakAbandon)
+	}
+	if b.HostBlocked("app.example.com") {
+		t.Fatal("abandoning one host must not abandon another")
+	}
+	if b.Aborted() != "" {
+		t.Fatalf("a per-host WAF wall must not abort the whole run, got %q", b.Aborted())
+	}
+	if got := b.BlockedHosts(); len(got) != 1 || got[0] != "static.example.com" {
+		t.Fatalf("BlockedHosts should name exactly the walled host, got %v", got)
+	}
+}
+
+// A reached response between block runs resets the streak, so an application that merely auth-walls
+// some paths (answering real content in between) is never mistaken for a WAF wall and abandoned.
+func TestReachedResponseResetsTheBlockStreak(t *testing.T) {
+	b := NewHostBudget() // NoteBlock lazily registers the host, so no Acquire is needed
+	for i := 0; i < PacingBlockStreakAbandon-1; i++ {
+		b.NoteBlock("h.example.com", true)
+	}
+	b.NoteBlock("h.example.com", false) // one reached response
+	for i := 0; i < PacingBlockStreakAbandon-1; i++ {
+		b.NoteBlock("h.example.com", true)
+	}
+	if b.HostBlocked("h.example.com") {
+		t.Fatal("a reached response between block runs must reset the streak")
+	}
+}

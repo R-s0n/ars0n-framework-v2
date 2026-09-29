@@ -2835,47 +2835,10 @@ func createTables() {
 			created_at TIMESTAMP DEFAULT NOW(),
 			updated_at TIMESTAMP DEFAULT NOW()
 		);`,
-		// What this step captures out of its own response for a later step to use.
-		//
-		// An auth flow could not log into anything with a per-request CSRF token without it, which is
-		// most applications: the shared cookie jar carries the session, but the token lives in the
-		// response body and a step is otherwise sent verbatim. A JSONB column rather than its own
-		// table because the rules are only ever read, written and deleted with the step they belong
-		// to, and a separate table would buy a foreign key nobody needs at the cost of a join on
-		// every step read.
-		`ALTER TABLE auth_flow_steps ADD COLUMN IF NOT EXISTS extractions JSONB NOT NULL DEFAULT '[]'::jsonb;`,
-		`CREATE INDEX IF NOT EXISTS idx_auth_flows_scope_target ON auth_flows(scope_target_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_auth_flow_steps_flow ON auth_flow_steps(auth_flow_id);`,
-
-		// Replay order has to be a fact, not a tie-break. Every read orders by step_order alone, so
-		// two steps sharing a number made the order of those two whatever the planner returned, and
-		// an auth flow whose steps can swap is an auth flow that fails intermittently.
-		//
-		// Built concurrently-safe: existing installs may already hold duplicates, so the index is
-		// created only if it can be, and the append path claims its number atomically regardless.
-		`DO $$
-		 BEGIN
-		   IF NOT EXISTS (
-		     SELECT 1 FROM auth_flow_steps a
-		     JOIN auth_flow_steps b ON a.auth_flow_id = b.auth_flow_id
-		       AND a.step_order = b.step_order AND a.id <> b.id
-		   ) THEN
-		     CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_flow_steps_order
-		       ON auth_flow_steps(auth_flow_id, step_order);
-		   END IF;
-		 END $$;`,
-
-		// magic_link joins the category list. The extension records it, so the modal has to be able
-		// to show it; a recorded flow with nowhere to appear is a flow the operator cannot use.
-		// Rewritten rather than added to because a CHECK constraint cannot be extended in place.
-		`ALTER TABLE auth_flows DROP CONSTRAINT IF EXISTS auth_flows_category_check;`,
-		`ALTER TABLE auth_flows ADD CONSTRAINT auth_flows_category_check
-		   CHECK (category IN ('register','login','mfa_otp','magic_link','reset'));`,
-		// How the flow was produced. Recorded flows come from the browser extension and carry the
-		// recording they came from; manual flows were typed in as raw requests or curl.
-		`ALTER TABLE auth_flows
-		   ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'manual',
-		   ADD COLUMN IF NOT EXISTS recording_id UUID;`,
+		// The column/index/CHECK additions to auth_flows and auth_flow_steps (extractions, interaction,
+		// the indexes, the magic_link category widening, source/recording_id, flow_purpose) live in
+		// utils.AuthSessionSchema, appended below, so the test database gets the identical set. See that
+		// file for why. The CREATE TABLEs above stay here.
 
 		// ---------------------------------------------------------------- extension recording
 		//
@@ -2962,33 +2925,9 @@ func createTables() {
 			created_at TIMESTAMP DEFAULT NOW(),
 			updated_at TIMESTAMP DEFAULT NOW()
 		);`,
-		// What the value IS, as opposed to how it travels.
-		//
-		// credential: the thing that proves who you are. companion: a value that is not a credential
-		// but without which the credential does not work, which in practice means a load balancer
-		// affinity cookie. Measured on a real target: GET /my-account with a valid session cookie
-		// returned 302 to the login page, and the identical request carrying the AWSALB cookie from
-		// the same login response returned 200. The session store was per backend, so without the
-		// routing cookie the request reached a backend that had never seen the login.
-		//
-		// The failure that makes this worth a column is silent and inverts a whole scan: every
-		// authenticated endpoint answers as if anonymous and the scanner fingerprints the login wall
-		// as the application. Registering the routing cookie as an ordinary token was the only way to
-		// get it onto the wire, and it then reported not_honoured forever, because on its own it
-		// changes nothing.
-		`ALTER TABLE session_tokens ADD COLUMN IF NOT EXISTS token_role VARCHAR(16)
-		   NOT NULL DEFAULT 'credential';`,
-		`DO $$
-		 BEGIN
-		   IF NOT EXISTS (
-		     SELECT 1 FROM pg_constraint WHERE conname = 'session_tokens_token_role_check'
-		   ) THEN
-		     ALTER TABLE session_tokens ADD CONSTRAINT session_tokens_token_role_check
-		       CHECK (token_role IN ('credential','companion'));
-		   END IF;
-		 END $$;`,
-		`CREATE INDEX IF NOT EXISTS idx_session_tokens_target
-		   ON session_tokens(scope_target_id, is_active);`,
+		// The column/index/CHECK additions to session_tokens (token_role, auto_refresh, the 'refresh'
+		// role widening, the OAuth refresh columns, the indexes) live in utils.AuthSessionSchema,
+		// appended below, so the test database gets the identical set. The CREATE TABLE above stays here.
 		`CREATE TABLE IF NOT EXISTS session_token_events (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			session_token_id UUID NOT NULL REFERENCES session_tokens(id) ON DELETE CASCADE,
@@ -3667,6 +3606,12 @@ func createTables() {
 	// conflict waiting to happen.
 	queries = append(queries, utils.TriageSchema...)
 
+	// The additive schema for the auth-flow and session-token tables, defined in
+	// utils/authSessionSchema.go so the utils test suite (which cannot import package main) applies the
+	// identical set and DB-backed tests never drift from production. Appended after the CREATE TABLEs
+	// above so the ALTERs land on tables that already exist.
+	queries = append(queries, utils.AuthSessionSchema...)
+
 	for _, query := range queries {
 		_, err := dbPool.Exec(context.Background(), query)
 		if err != nil {
@@ -3794,6 +3739,15 @@ func createTables() {
 		WHERE status IN ('pending','running');
 		UPDATE endpoint_investigation_scans SET status = 'error',
 			error = 'Investigation was interrupted by a server restart and did not finish. Re-run it.'
+		WHERE status IN ('pending','running');
+		-- And the PARENT run row. The two child updates above un-stick the validation and investigation
+		-- scans, but endpoint_scan_runs itself was still missed, so a combined run sat 'running' across
+		-- restarts forever (measured 2026-09-29: a run from 2026-09-08 was still 'running'/'investigate'
+		-- after several restarts). It does not block RequestIssuingScansRunning the way the child rows
+		-- do, but a run that can never finish must not read as still running in the history and status
+		-- API. Set terminal so the record is honest.
+		UPDATE endpoint_scan_runs SET status = 'error',
+			error = 'The endpoint scan was interrupted by a server restart and did not finish. Re-run it.'
 		WHERE status IN ('pending','running');`
 	if _, err := dbPool.Exec(context.Background(), resolveStuckURLScansQuery); err != nil {
 		log.Printf("[WARN] Failed to resolve stuck FFUF/WAF-probe/x8/Arjun/fuzz/vector/endpoint scans on startup: %v", err)

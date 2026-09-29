@@ -53,6 +53,16 @@ type AuthFlowStep struct {
 	// {{af:NAME}}. See authFlowsVariables.go.
 	Extractions []AuthFlowExtraction `json:"extractions"`
 
+	// What the user must supply for this step when the flow is REFRESHED: an MFA/OTP code, a password,
+	// or any value the framework cannot derive. Nil (or kind "none") means fully automatable. See
+	// sessionRefreshInteractive.go - refresh pauses at a step that needs input and asks the operator.
+	Interaction *StepInteraction `json:"interaction,omitempty"`
+
+	// Filled at read time for the UI, never stored: an interaction this step LOOKS like it needs
+	// (e.g. it submits a code) but has not been annotated with yet. Absent when the step is already
+	// annotated or nothing looked interactive.
+	SuggestedInteraction *StepInteraction `json:"suggested_interaction,omitempty"`
+
 	// Filled by a replay, never stored: what each rule actually did, and which placeholders this
 	// step's request had filled in. Reported so the wiring is visible rather than inferred from a
 	// step that mysteriously worked or mysteriously did not.
@@ -137,7 +147,7 @@ func CreateAuthFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validAuthFlowCategories[payload.Category] {
-		http.Error(w, "Invalid category (must be register, login, mfa_otp, or reset)", http.StatusBadRequest)
+		http.Error(w, "Invalid category (must be register, login, mfa_otp, magic_link, or reset)", http.StatusBadRequest)
 		return
 	}
 	if strings.TrimSpace(payload.Name) == "" {
@@ -251,6 +261,13 @@ func GetAuthFlowSteps(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to fetch steps", http.StatusInternalServerError)
 		return
 	}
+	// Offer an interaction suggestion for a step that looks like it submits a code but has not been
+	// annotated yet, so the operator can set it in one click rather than knowing to look.
+	for i := range steps {
+		if steps[i].Interaction.isNone() {
+			steps[i].SuggestedInteraction = DetectStepInteraction(steps[i])
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(steps)
 }
@@ -263,6 +280,7 @@ func AddAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 		RawRequest  string               `json:"raw_request"`
 		Replay      *bool                `json:"replay"`
 		Extractions []AuthFlowExtraction `json:"extractions"`
+		Interaction *StepInteraction     `json:"interaction"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -284,6 +302,11 @@ func AddAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	extractionsJSON, _ := json.Marshal(orEmptyExtractions(payload.Extractions))
+	interactionJSON, problem := normalizeStepInteractionJSON(payload.Interaction)
+	if problem != "" {
+		http.Error(w, problem, http.StatusBadRequest)
+		return
+	}
 
 	// Order is chosen and claimed in one statement. Reading MAX and then inserting let two concurrent
 	// appends pick the same number, and with no uniqueness on (auth_flow_id, step_order) both
@@ -292,18 +315,21 @@ func AddAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 	stepID := uuid.New().String()
 	var nextOrder int
 	if err := dbPool.QueryRow(context.Background(),
-		`INSERT INTO auth_flow_steps (id, auth_flow_id, step_order, name, raw_request, extractions)
-		 SELECT $1, $2, COALESCE(MAX(step_order),0)+1, $3, $4, $5
+		`INSERT INTO auth_flow_steps (id, auth_flow_id, step_order, name, raw_request, extractions, interaction)
+		 SELECT $1, $2, COALESCE(MAX(step_order),0)+1, $3, $4, $5, $6
 		 FROM auth_flow_steps WHERE auth_flow_id = $2
 		 RETURNING step_order`,
-		stepID, flowID, payload.Name, payload.RawRequest, extractionsJSON).Scan(&nextOrder); err != nil {
+		stepID, flowID, payload.Name, payload.RawRequest, extractionsJSON, interactionJSON).Scan(&nextOrder); err != nil {
 		log.Printf("[ERROR] Failed to insert auth flow step: %v", err)
 		http.Error(w, "Failed to add step", http.StatusInternalServerError)
 		return
 	}
 
-	// Replay by default (the app "records the response"), unless explicitly disabled.
-	if payload.Replay == nil || *payload.Replay {
+	// Replay by default (the app "records the response"), unless explicitly disabled. A step with an
+	// interaction (it needs an MFA/OTP code, or generates a TOTP, or is a later-phase action/browser
+	// step) is NOT auto-replayed: on its own it has nothing meaningful to send outside a live run.
+	interactive := payload.Interaction != nil && !payload.Interaction.isNone()
+	if (payload.Replay == nil || *payload.Replay) && !interactive {
 		replayStepByID(stepID)
 	}
 
@@ -326,6 +352,8 @@ func UpdateAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 		StepOrder  *int    `json:"step_order"`
 		// Omitted leaves the rules alone; [] clears them.
 		Extractions *[]AuthFlowExtraction `json:"extractions"`
+		// Omitted leaves it alone; an object sets it, and {"kind":"none"} clears it.
+		Interaction *StepInteraction `json:"interaction"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -351,15 +379,28 @@ func UpdateAuthFlowStep(w http.ResponseWriter, r *http.Request) {
 		extractionsJSON, _ = json.Marshal(orEmptyExtractions(*payload.Extractions))
 	}
 
+	// nil interactionJSON leaves the column alone (COALESCE); a present payload sets it, with
+	// {"kind":"none"} normalising to {} which clears it.
+	var interactionJSON []byte
+	if payload.Interaction != nil {
+		j, problem := normalizeStepInteractionJSON(payload.Interaction)
+		if problem != "" {
+			http.Error(w, problem, http.StatusBadRequest)
+			return
+		}
+		interactionJSON = j
+	}
+
 	if _, err := dbPool.Exec(context.Background(),
 		`UPDATE auth_flow_steps SET
 		   name = COALESCE($1, name),
 		   raw_request = COALESCE($2, raw_request),
 		   step_order = COALESCE($3, step_order),
 		   extractions = COALESCE($5, extractions),
+		   interaction = COALESCE($6, interaction),
 		   updated_at = NOW()
 		 WHERE id = $4`,
-		payload.Name, payload.RawRequest, payload.StepOrder, stepID, extractionsJSON); err != nil {
+		payload.Name, payload.RawRequest, payload.StepOrder, stepID, extractionsJSON, interactionJSON); err != nil {
 		log.Printf("[ERROR] Failed to update auth flow step: %v", err)
 		http.Error(w, "Failed to update step", http.StatusInternalServerError)
 		return
@@ -666,33 +707,35 @@ func sendRawRequest(rawRequest, baseURL string, jar http.CookieJar) (int, map[st
 // the Content-Length the body actually has. An explicit Content-Length that disagrees with the body
 // is corrected too, because the body is the thing the operator edited.
 func normalizeRawRequest(raw string) string {
-	raw = strings.ReplaceAll(raw, "\r\n", "\n")
 	if strings.TrimSpace(raw) == "" {
 		return raw
 	}
 
-	head, body, found := strings.Cut(raw, "\n\n")
-	if !found {
-		// No blank line: everything is headers, and there is no body.
-		head = strings.TrimRight(raw, "\n")
+	// Split head from body on the FIRST blank line, honouring either framing, and NEVER touch the
+	// body. The old version replaced every \r\n in the whole string, body included, then recomputed
+	// the length from the shortened bytes: self-consistent and corrupt, and it rewrote every boundary
+	// CRLF of a multipart or binary body so the request stopped being the one that was pasted. Only the
+	// headers are normalised here; the body is stored byte-for-byte. Same reasoning as
+	// refreshContentLength, which the substitution path already uses for exactly this.
+	head, sep, body := splitRawRequestHeadBody(raw)
+	if sep == "" {
+		// No blank line: everything is headers, and there is no body. The terminator is added below.
+		head = strings.TrimRight(raw, "\r\n")
 		body = ""
 	}
 
-	lines := strings.Split(head, "\n")
+	lines := strings.Split(strings.ReplaceAll(head, "\r\n", "\n"), "\n")
 	kept := make([]string, 0, len(lines)+1)
+	hasChunked := false
 	for _, ln := range lines {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(ln)), "content-length:") {
+		l := strings.ToLower(strings.TrimSpace(ln))
+		if strings.HasPrefix(l, "content-length:") {
 			continue // recomputed below
 		}
-		kept = append(kept, ln)
-	}
-
-	hasChunked := false
-	for _, ln := range kept {
-		l := strings.ToLower(ln)
-		if strings.HasPrefix(strings.TrimSpace(l), "transfer-encoding:") && strings.Contains(l, "chunked") {
+		if strings.HasPrefix(l, "transfer-encoding:") && strings.Contains(l, "chunked") {
 			hasChunked = true
 		}
+		kept = append(kept, ln)
 	}
 	if body != "" && !hasChunked {
 		kept = append(kept, fmt.Sprintf("Content-Length: %d", len(body)))
@@ -833,15 +876,16 @@ func sanitizeForTextColumn(s string) string {
 
 const stepSelectCols = `id, auth_flow_id, step_order, name, raw_request, response_status,
 	response_headers, COALESCE(response_body,''), response_time_ms, COALESCE(error,''),
-	created_at, updated_at, COALESCE(extractions,'[]'::jsonb)`
+	created_at, updated_at, COALESCE(extractions,'[]'::jsonb), COALESCE(interaction,'{}'::jsonb)`
 
 func scanStep(row interface{ Scan(...interface{}) error }) (AuthFlowStep, error) {
 	var s AuthFlowStep
 	var headersJSON []byte
 	var extractionsJSON []byte
+	var interactionJSON []byte
 	if err := row.Scan(&s.ID, &s.AuthFlowID, &s.StepOrder, &s.Name, &s.RawRequest, &s.ResponseStatus,
 		&headersJSON, &s.ResponseBody, &s.ResponseTimeMs, &s.Error, &s.CreatedAt, &s.UpdatedAt,
-		&extractionsJSON); err != nil {
+		&extractionsJSON, &interactionJSON); err != nil {
 		return s, err
 	}
 	if len(headersJSON) > 0 {
@@ -849,6 +893,14 @@ func scanStep(row interface{ Scan(...interface{}) error }) (AuthFlowStep, error)
 	}
 	if len(extractionsJSON) > 0 {
 		_ = json.Unmarshal(extractionsJSON, &s.Extractions)
+	}
+	// {} unmarshals to a zero StepInteraction (kind ""), which normalizeStepInteraction treats as
+	// "none". Left as a pointer so a step with no interaction serialises without the object.
+	if len(interactionJSON) > 0 {
+		var si StepInteraction
+		if json.Unmarshal(interactionJSON, &si) == nil && !si.isNone() {
+			s.Interaction = &si
+		}
 	}
 	return s, nil
 }

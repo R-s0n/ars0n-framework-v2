@@ -73,6 +73,11 @@ var replayVariantMetaSchema = []string{
 	// in the same transaction; the index is what stops two tabs racing to two primaries.
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_replay_variant_meta_one_primary
 	   ON replay_variant_meta (scope_target_id, method, host, path) WHERE is_primary;`,
+	// hidden hides a variant from the repeater's variants list WITHOUT touching the captures behind it.
+	// "Delete" here is a display choice, not a data deletion: the recordings stay in the corpus for
+	// every other tool (endpoint consolidation, vectors, triage, the bundle export), and unhide brings
+	// the row back. Added as a column so it lives on the same overlay as the name and the primary flag.
+	`ALTER TABLE replay_variant_meta ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT FALSE;`,
 }
 
 var replayVariantMetaSchemaOnce sync.Once
@@ -96,7 +101,7 @@ func EnsureReplayVariantMetaSchema() {
 // Types
 // ---------------------------------------------------------------------------
 
-// ReplayVariantMeta is one overlay row: a user's name and/or primary choice for one variant.
+// ReplayVariantMeta is one overlay row: a user's name, primary choice and/or hidden flag for a variant.
 type ReplayVariantMeta struct {
 	Method      string `json:"method"`
 	Host        string `json:"host"`
@@ -105,6 +110,7 @@ type ReplayVariantMeta struct {
 	ResponseSig string `json:"response_sig"`
 	Name        string `json:"name"`
 	IsPrimary   bool   `json:"is_primary"`
+	Hidden      bool   `json:"hidden"`
 }
 
 func replayVariantMetaKey(method, host, path, reqSig, respSig string) string {
@@ -114,7 +120,7 @@ func replayVariantMetaKey(method, host, path, reqSig, respSig string) string {
 func loadReplayVariantMeta(scopeTargetID string) (map[string]ReplayVariantMeta, error) {
 	EnsureReplayVariantMetaSchema()
 	rows, err := dbPool.Query(context.Background(),
-		`SELECT method, host, path, request_sig, response_sig, COALESCE(name,''), is_primary
+		`SELECT method, host, path, request_sig, response_sig, COALESCE(name,''), is_primary, hidden
 		   FROM replay_variant_meta WHERE scope_target_id = $1`, scopeTargetID)
 	if err != nil {
 		return nil, err
@@ -124,7 +130,7 @@ func loadReplayVariantMeta(scopeTargetID string) (map[string]ReplayVariantMeta, 
 	for rows.Next() {
 		var m ReplayVariantMeta
 		if err := rows.Scan(&m.Method, &m.Host, &m.Path, &m.RequestSig, &m.ResponseSig,
-			&m.Name, &m.IsPrimary); err != nil {
+			&m.Name, &m.IsPrimary, &m.Hidden); err != nil {
 			log.Printf("[REPLAY-VARIANTS] Failed to scan meta row: %v", err)
 			continue
 		}
@@ -176,11 +182,16 @@ type replayVariantMetaRequest struct {
 	// Pointer so a rename does not silently touch the primary. true makes this the endpoint's one
 	// primary and clears the previous one; false clears it.
 	SetPrimary *bool `json:"set_primary"`
+	// Pointer so a rename/primary change does not touch visibility. true HIDES the variant from the
+	// repeater's list (the captures behind it are untouched); false unhides it.
+	Hidden *bool `json:"hidden"`
 }
 
-// UpsertReplayVariantMeta sets a variant's name and/or makes it the endpoint's primary. Both live on
-// one row, and a row that ends up with no name and not primary is deleted rather than kept as an
-// empty overlay, so the table holds only real operator choices.
+// UpsertReplayVariantMeta sets a variant's name, primary flag and/or hidden flag. All three live on one
+// overlay row, and a row that ends up with no name, not primary and not hidden is deleted rather than
+// kept as an empty overlay, so the table holds only real operator choices. Nothing here touches the
+// captures: hiding a variant is a display choice, and the recordings stay in the corpus for every other
+// tool.
 func UpsertReplayVariantMeta(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	EnsureReplayVariantMetaSchema()
@@ -208,9 +219,9 @@ func UpsertReplayVariantMeta(w http.ResponseWriter, r *http.Request) {
 				"and are all required.")
 		return
 	}
-	if req.Name == nil && req.SetPrimary == nil {
+	if req.Name == nil && req.SetPrimary == nil && req.Hidden == nil {
 		writeJSONError(w, http.StatusBadRequest, "nothing_to_do",
-			"Pass name (to rename) or set_primary (to choose the primary), or both.")
+			"Pass name (to rename), set_primary (to choose the primary), or hidden (to hide/unhide).")
 		return
 	}
 
@@ -224,14 +235,14 @@ func UpsertReplayVariantMeta(w http.ResponseWriter, r *http.Request) {
 
 	// Read the current row, so an omitted field keeps its stored value rather than being wiped.
 	var curName string
-	var curPrimary bool
+	var curPrimary, curHidden bool
 	found := true
 	err = tx.QueryRow(ctx,
-		`SELECT COALESCE(name,''), is_primary FROM replay_variant_meta
+		`SELECT COALESCE(name,''), is_primary, hidden FROM replay_variant_meta
 		  WHERE scope_target_id=$1 AND method=$2 AND host=$3 AND path=$4
 		    AND request_sig=$5 AND response_sig=$6`,
 		scopeTargetID, req.Method, req.Host, req.Path, req.RequestSig, req.ResponseSig).
-		Scan(&curName, &curPrimary)
+		Scan(&curName, &curPrimary, &curHidden)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			found = false
@@ -249,6 +260,10 @@ func UpsertReplayVariantMeta(w http.ResponseWriter, r *http.Request) {
 	if req.SetPrimary != nil {
 		primary = *req.SetPrimary
 	}
+	hidden := curHidden
+	if req.Hidden != nil {
+		hidden = *req.Hidden
+	}
 
 	// Making this the primary clears whatever was primary on the same endpoint first, so the partial
 	// unique index never has two to enforce against.
@@ -262,8 +277,8 @@ func UpsertReplayVariantMeta(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if name == "" && !primary {
-		// Nothing left worth storing: this variant is back to its default name and default primary.
+	if name == "" && !primary && !hidden {
+		// Nothing left worth storing: default name, default primary, visible again.
 		if found {
 			if _, err := tx.Exec(ctx,
 				`DELETE FROM replay_variant_meta
@@ -277,12 +292,12 @@ func UpsertReplayVariantMeta(w http.ResponseWriter, r *http.Request) {
 	} else {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO replay_variant_meta
-			   (scope_target_id, method, host, path, request_sig, response_sig, name, is_primary, updated_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+			   (scope_target_id, method, host, path, request_sig, response_sig, name, is_primary, hidden, updated_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
 			 ON CONFLICT (scope_target_id, method, host, path, request_sig, response_sig)
-			 DO UPDATE SET name=EXCLUDED.name, is_primary=EXCLUDED.is_primary, updated_at=NOW()`,
+			 DO UPDATE SET name=EXCLUDED.name, is_primary=EXCLUDED.is_primary, hidden=EXCLUDED.hidden, updated_at=NOW()`,
 			scopeTargetID, req.Method, req.Host, req.Path, req.RequestSig, req.ResponseSig,
-			name, primary); err != nil {
+			name, primary, hidden); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "internal_error", err.Error())
 			return
 		}
@@ -295,10 +310,16 @@ func UpsertReplayVariantMeta(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":    true,
+		"hidden":     hidden,
 		"name":       name,
 		"is_primary": primary,
 	})
 }
+
+// Hiding a variant is done through UpsertReplayVariantMeta with {"hidden": true} (and unhidden with
+// {"hidden": false}); there is deliberately no endpoint that DELETES the captures behind a variant.
+// "Delete" in the repeater removes a variant from the LIST only - the recordings stay in the corpus for
+// endpoint consolidation, the vector/triage tools, the flow views and the bundle export.
 
 // ---------------------------------------------------------------------------
 // GET /replay-request/{scope_target_id}/variants
@@ -315,6 +336,7 @@ type replayVariantOut struct {
 	Name        string `json:"name"`
 	NameCustom  bool   `json:"name_custom"`
 	IsPrimary   bool   `json:"is_primary"`
+	Hidden      bool   `json:"hidden"`
 	Status      int    `json:"status"`
 	Source      string `json:"source"`
 	MimeType    string `json:"mime_type"`
@@ -420,16 +442,22 @@ func GetReplayVariants(w http.ResponseWriter, r *http.Request) {
 					v.IsPrimary = true
 					storedPrimary = true
 				}
+				v.Hidden = m.Hidden
 			}
 			if v.Name == "" {
 				v.Name = v.Source
 			}
 			ep.Variants = append(ep.Variants, v)
 		}
-		// No stored primary: the newest recording (first in order) is the effective primary, matching
-		// what the sitemap shows.
-		if !storedPrimary && len(ep.Variants) > 0 {
-			ep.Variants[0].IsPrimary = true
+		// No stored primary: the newest VISIBLE recording is the effective primary, matching what the
+		// sitemap shows (a hidden variant is never the effective primary).
+		if !storedPrimary {
+			for i := range ep.Variants {
+				if !ep.Variants[i].Hidden {
+					ep.Variants[i].IsPrimary = true
+					break
+				}
+			}
 		}
 		out = append(out, ep)
 	}

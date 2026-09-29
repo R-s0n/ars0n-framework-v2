@@ -72,6 +72,14 @@ type EndpointInvestigationResult struct {
 	// the result must not read as though the write surface was exercised.
 	VerbNotReplayed string `json:"verb_not_replayed,omitempty"`
 
+	// Blocked is set when this response is a WAF/bot-manager challenge rather than the application.
+	// Transient control for the Tier 0 per-host breaker; not stored.
+	Blocked bool `json:"-"`
+	// NotInvestigated is set when the row was recorded without sending a request, e.g. because its
+	// host was abandoned after a sustained WAF wall. The row is kept so the count still lines up with
+	// what was eligible, and reads as skipped rather than as investigated-and-empty.
+	NotInvestigated string `json:"not_investigated,omitempty"`
+
 	// What was actually requested, when that differs from URL because observed parameters were
 	// supplied. URL stays the canonical endpoint so the row still lines up with the consolidated
 	// list; this says what the application was really asked.
@@ -294,10 +302,28 @@ func ExecuteEndpointInvestigation(scanID, scopeTargetID string) {
 
 	var results []EndpointInvestigationResult
 	perEndpoint := map[string][]Signal{}
+	// The same per-host WAF breaker Validate uses. Tier 0 sends one request per eligible endpoint, so
+	// a walled CDN would otherwise re-take the whole block wall a second time. The work list is
+	// ordered is_direct first, so the application hosts are profiled before a blocked CDN is reached
+	// and abandoned. Separate budget instance per phase, so the abandonment does not carry state in
+	// from validation but is re-derived from what this phase actually sees.
+	blockGuard := NewHostBudget()
 	for i, ep := range endpoints {
+		epHost := hostOf(ep.URL)
+		if blockGuard.HostBlocked(epHost) {
+			results = append(results, EndpointInvestigationResult{
+				EndpointID: ep.ID, URL: canonicalURL[ep.ID], Method: ep.Method,
+				NotInvestigated: epHost + " was abandoned after a sustained WAF/bot-manager wall; " +
+					"not investigated, to avoid an IP ban.",
+			})
+			UpdateEndpointInvestigationStatus(scanID, "running", len(endpoints), i+1, "", "", "")
+			continue
+		}
+
 		log.Printf("[INFO] Investigating endpoint %d/%d: %s", i+1, len(endpoints), ep.URL)
 
 		result := investigateEndpoint(ep.ID, canonicalURL[ep.ID], ep.URL, ep.Method, authCtx, observed[ep.ID], scope)
+		blockGuard.NoteBlock(epHost, result.Blocked)
 		results = append(results, result)
 		if len(result.Signals) > 0 {
 			perEndpoint[ep.ID] = result.Signals
@@ -544,6 +570,13 @@ func investigateEndpoint(endpointID, canonicalURL, probeURL, method string, auth
 
 	result.ResponseSize = len(body)
 	bodyStr := string(body)
+
+	// Whether this response is a WAF/bot-manager challenge rather than the application. Used by the
+	// Tier 0 per-host breaker to abandon a walled host. IsChallengeBody detects the challenge markers;
+	// the block statuses are counted too EXCEPT 401/403, which are ordinary auth and must not trip the
+	// breaker (an auth-walled API is real surface, not a WAF wall).
+	result.Blocked = IsChallengeBody(bodyStr) ||
+		(IsBlockStatus(resp.StatusCode) && resp.StatusCode != 401 && resp.StatusCode != 403)
 
 	// THE CHAIN IS ASKED ABOUT BEFORE ANYTHING IS DERIVED FROM THE BODY. Everything below this
 	// point describes A PAGE, and on a broken chain there is no page: the body is a redirect

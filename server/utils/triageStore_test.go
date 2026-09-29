@@ -61,6 +61,12 @@ func triageTestDB(t *testing.T) context.Context {
 	if err := EnsureTriageSchema(ctx); err != nil {
 		t.Fatalf("apply schema: %v", err)
 	}
+	// The auth-flow and session-token additive schema, applied here so every DB-backed test runs against
+	// the same columns/constraints production uses (createTables lives in package main and cannot be
+	// called from here). Without this a column added to the migration reads as "does not exist" in tests.
+	if err := EnsureAuthSessionSchema(ctx); err != nil {
+		t.Fatalf("apply auth/session schema: %v", err)
+	}
 	return ctx
 }
 

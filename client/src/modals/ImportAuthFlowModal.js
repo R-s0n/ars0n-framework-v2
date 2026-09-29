@@ -8,7 +8,7 @@ import { Modal, Button, Form, Spinner, Badge, ListGroup, Alert } from 'react-boo
 // part of an auth exchange, in the order they happened, and turns the chosen ones into steps with
 // the response that was actually observed attached.
 
-const CATEGORY_LABELS = { register: 'Register', login: 'Login', mfa_otp: 'MFA/OTP', reset: 'Reset' };
+const CATEGORY_LABELS = { register: 'Register', login: 'Login', mfa_otp: 'MFA/OTP', magic_link: 'Magic Link', reset: 'Reset' };
 
 function statusVariant(status) {
   if (!status) return 'secondary';
@@ -87,13 +87,24 @@ const ImportAuthFlowModal = ({ show, handleClose, category, activeTarget, onImpo
     [candidates, previewId]
   );
 
+  // A capture can be selected and then hidden by toggling the category filter. Importing it anyway
+  // would send a step the operator cannot see or untick, so only the selections that are currently
+  // VISIBLE are importable. The selection itself is kept (so toggling the filter back restores it),
+  // and any hidden-but-selected count is disclosed rather than silently imported.
+  const visibleIds = useMemo(() => new Set(visible.map((c) => c.capture_id)), [visible]);
+  const importableIds = useMemo(
+    () => selectedIds.filter((id) => visibleIds.has(id)),
+    [selectedIds, visibleIds]
+  );
+  const hiddenSelectedCount = selectedIds.length - importableIds.length;
+
   const toggle = (id) => {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
     setPreviewId(id);
   };
 
   const doImport = async () => {
-    if (!activeTarget || selectedIds.length === 0) return;
+    if (!activeTarget || importableIds.length === 0) return;
     setBusy(true);
     setError('');
     try {
@@ -104,8 +115,9 @@ const ImportAuthFlowModal = ({ show, handleClose, category, activeTarget, onImpo
           category,
           name: flowName.trim() || `${categoryLabel} (from manual crawl)`,
           // Ordering is by capture timestamp on the server, so the sequence matches what happened
-          // rather than the order the boxes were ticked.
-          capture_ids: selectedIds,
+          // rather than the order the boxes were ticked. Only visible selections are sent, so a
+          // capture hidden by the filter is never imported behind the operator's back.
+          capture_ids: importableIds,
         }),
       });
       if (!res.ok) {
@@ -150,7 +162,10 @@ const ImportAuthFlowModal = ({ show, handleClose, category, activeTarget, onImpo
                 className="small"
               />
               <span className="ms-auto text-white-50 small">
-                {selectedIds.length} selected
+                {importableIds.length} selected
+                {hiddenSelectedCount > 0 && (
+                  <span className="text-warning"> (+{hiddenSelectedCount} hidden by filter)</span>
+                )}
               </span>
               <Button variant="outline-secondary" size="sm" onClick={fetchCandidates} disabled={loading}>
                 Refresh
@@ -241,8 +256,8 @@ const ImportAuthFlowModal = ({ show, handleClose, category, activeTarget, onImpo
           Steps keep the response that was recorded. Nothing is re-sent until you hit Replay.
         </span>
         <Button variant="outline-secondary" onClick={handleClose}>Cancel</Button>
-        <Button variant="danger" onClick={doImport} disabled={busy || selectedIds.length === 0}>
-          {busy ? <Spinner size="sm" animation="border" /> : `Import ${selectedIds.length || ''} step${selectedIds.length === 1 ? '' : 's'}`}
+        <Button variant="danger" onClick={doImport} disabled={busy || importableIds.length === 0}>
+          {busy ? <Spinner size="sm" animation="border" /> : `Import ${importableIds.length || ''} step${importableIds.length === 1 ? '' : 's'}`}
         </Button>
       </Modal.Footer>
     </Modal>

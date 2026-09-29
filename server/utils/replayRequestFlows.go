@@ -63,10 +63,13 @@ const (
 	// happened to redirect to ten minutes earlier. The observed follow took 2.1s.
 	flowRedirectFollowSeconds = 15
 
-	// Ceilings, not page sizes. The largest corpus seen is ~6,000 rows for a whole target.
+	// Ceilings, not page sizes. The largest corpus seen is ~6,000 rows for a whole target. The flows
+	// list does NOT paginate: like the Replay Requests capture list, the default and max both equal the
+	// scan ceiling, so every matching flow is returned and "truncated" only fires if a target ever
+	// exceeds the ceiling itself. Narrowing is done with the query, not by a page cap.
 	flowScanCeiling   = 50000
-	flowsDefaultLimit = 200
-	flowsMaxLimit     = 2000
+	flowsDefaultLimit = flowScanCeiling
+	flowsMaxLimit     = flowScanCeiling
 )
 
 // Resource types that root a flow. `document` is here as well as `main_frame` because the two
@@ -371,6 +374,54 @@ func segmentCaptureFlows(captures []FlowCapture) []captureFlow {
 		result = append(result, *f)
 	}
 	return result
+}
+
+// ---------------------------------------------------------------------------
+// What counts as a flow at all
+// ---------------------------------------------------------------------------
+
+// flowMinRequests is the floor for calling a segment a flow, and it is the whole of the definition:
+// a flow is a MECHANISM, two or more requests executed in succession to carry something out. A page
+// loading its data over several API calls, an OAuth handshake's redirects, a create/update/delete
+// round trip that POSTs and then reads the result back - those are flows. A single request that
+// returns data or changes it is NOT a flow; it is one request, it belongs to Replay Requests, and
+// listing it here as a flow of one is the noise this floor removes.
+//
+// It bites hardest on ACTIVE detection, which issues exactly one request per endpoint. An endpoint
+// that answers directly leaves a single capture, so before this floor every one of those hundreds of
+// direct answers was listed as its own "flow" - the thing the operator was looking at on
+// console.nebius.com, where a Cloudflare-challenged target answers most probes in one hop. An
+// endpoint that REDIRECTS leaves the request plus every hop the runner followed, which is two or more
+// captures segmented into one flow, and that redirect chain is exactly the routing active detection
+// exists to find. The floor keeps the second and drops the first.
+//
+// Counted on TOTAL captures, not the significant subset the diagram draws. The rule the operator
+// stated is "at least two requests", and a segment with two requests is a flow whatever their
+// resource types; the noise filter still decides which of them the diagram SHOWS, it does not decide
+// whether the segment is a flow.
+const flowMinRequests = 2
+
+// flowIsReportable reports whether a segment is a flow worth listing, opening, running or naming.
+// See flowMinRequests for the reasoning. One predicate so the list, the card count, the detection
+// source map and the three by-id lookups all draw the line in the same place.
+func flowIsReportable(flow captureFlow) bool {
+	return len(flow.Captures) >= flowMinRequests
+}
+
+// reportableCaptureFlows segments captures and returns only the segments that are flows. Every place
+// that ENUMERATES flows reads this instead of segmentCaptureFlows directly, so a single-request
+// segment is a flow in all of them or in none. The by-id lookups (the flow detail view, the builder
+// seed and the detected-flow run) segment directly and apply flowIsReportable to the one segment they
+// matched, so they refuse a single-request id the same way rather than rendering a flow of one.
+func reportableCaptureFlows(captures []FlowCapture) []captureFlow {
+	segments := segmentCaptureFlows(captures)
+	out := make([]captureFlow, 0, len(segments))
+	for _, f := range segments {
+		if flowIsReportable(f) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // flowTabKey renders a nullable tab id as a sortable, comparable string. Every row in the live
@@ -1010,7 +1061,7 @@ func GetReplayRequestFlows(w http.ResponseWriter, r *http.Request) {
 	}
 
 	summaries := []FlowSummary{}
-	for _, flow := range segmentCaptureFlows(captures) {
+	for _, flow := range reportableCaptureFlows(captures) {
 		if !flowHasMatch(flow) {
 			continue
 		}
@@ -1148,6 +1199,14 @@ func GetReplayRequestFlow(w http.ResponseWriter, r *http.Request) {
 	for _, flow := range segmentCaptureFlows(captures) {
 		if len(flow.Captures) == 0 || flow.Captures[0].ID != rootCaptureID {
 			continue
+		}
+		// A segment of one request is not a flow, so the detail view refuses it the same way the list
+		// never shows it. This is reachable only by a stale or hand-built flow id, because the list this
+		// id comes from already dropped the single-request segments.
+		if !flowIsReportable(flow) {
+			writeJSONError(w, http.StatusNotFound, "not_a_flow",
+				"That request is a single request, not a flow. Open it in Replay Requests instead.")
+			return
 		}
 		nodes, edges, hidden := renderFlowGraph(flow, deriveFlowLinks(flow), showAll)
 		summary := summarizeFlow(flow)

@@ -716,7 +716,10 @@ func (s *triageDBFreshCreds) sessionTokenCandidates(host string, now time.Time) 
 		       COALESCE(scope_domains,'{}'), COALESCE(cookie_domain,''),
 		       expires_at, COALESCE(updated_at, created_at)
 		FROM session_tokens
-		WHERE scope_target_id = $1 AND is_active = TRUE AND COALESCE(token_value,'') <> ''`,
+		WHERE scope_target_id = $1 AND is_active = TRUE AND COALESCE(token_value,'') <> ''
+		  -- A refresh secret is spent to mint, never replayed against an endpoint as a credential, so it
+		  -- is excluded from the triage credential candidates just as it is from ApplySessionTokens.
+		  AND COALESCE(token_role,'credential') <> 'refresh'`,
 		s.scopeTargetID)
 	if err != nil {
 		// An install that has not migrated is not a reason to fail a run, and the capture path

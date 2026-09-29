@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -194,16 +195,33 @@ func allocAuthRecordingSeqs(recordingID string, inputs []AuthRecordedRequestInpu
 		counter = maxSeq
 	}
 
+	// Reserve every seq the extension supplied BEFORE assigning any auto number, so an auto-assigned
+	// value can never land on one the extension already used in this same batch. Honouring supplied
+	// seqs is what lets a retried batch dedupe through ON CONFLICT DO NOTHING, so they are taken as-is
+	// and never reassigned; without reserving them first, a mixed batch (some supplied, some not) let
+	// counter++ produce a number a later supplied seq also carried, and ON CONFLICT then silently
+	// dropped one of the two requests.
+	reserved := make(map[int]bool, len(inputs))
+	for _, input := range inputs {
+		if input.Seq > 0 {
+			reserved[input.Seq] = true
+			if input.Seq > counter {
+				counter = input.Seq
+			}
+		}
+	}
+
 	seqs := make([]int, len(inputs))
 	for i, input := range inputs {
 		if input.Seq > 0 {
 			seqs[i] = input.Seq
-			if input.Seq > counter {
-				counter = input.Seq
-			}
 			continue
 		}
 		counter++
+		for reserved[counter] {
+			counter++
+		}
+		reserved[counter] = true
 		seqs[i] = counter
 	}
 
@@ -324,6 +342,22 @@ func CaptureAuthRecordingRequests(w http.ResponseWriter, r *http.Request) {
 	status, err := lookupAuthRecordingStatus(payload.RecordingID)
 	if err != nil {
 		writeJSONError(w, http.StatusNotFound, "recording_not_found", "Unknown recording")
+		return
+	}
+
+	// An abandoned recording was superseded by a newer one for the same target (see StartAuthRecording).
+	// A stale tab still holding the old id must not keep writing into the dead recording, where the
+	// operator would never see the rows and would never import them. Accept nothing, and tell the caller
+	// the recording is no longer live so it can stop. A STOPPED recording still accepts, on purpose:
+	// stop races with the extension's final flush and that last request is usually the one that matters.
+	if status == "abandoned" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"stored":   0,
+			"received": len(payload.Requests),
+			"status":   status,
+			"note": "This recording was superseded by a newer one for the same target, so its " +
+				"captures are no longer collected.",
+		})
 		return
 	}
 
@@ -706,8 +740,13 @@ func ImportAuthRecording(w http.ResponseWriter, r *http.Request) {
 		Name     string `json:"name"`
 		Category string `json:"category"`
 	}
-	// An empty body is a valid import: it means "use the recording's own name and category".
-	json.NewDecoder(r.Body).Decode(&payload)
+	// An empty body is a valid import: it means "use the recording's own name and category". A body
+	// that is present but malformed is not the same thing, and swallowing its error silently imported
+	// with defaults instead of telling the caller their JSON was wrong.
+	if derr := json.NewDecoder(r.Body).Decode(&payload); derr != nil && !errors.Is(derr, io.EOF) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_body", "Invalid request body: "+derr.Error())
+		return
+	}
 
 	if cat := strings.ToLower(strings.TrimSpace(payload.Category)); cat != "" && !validAuthRecordingCategories[cat] {
 		writeJSONError(w, http.StatusBadRequest, "invalid_category",
@@ -809,8 +848,12 @@ func importAuthRecordingToFlow(ctx context.Context, recordingID, nameOverride, c
 		var setCookies []string
 		json.Unmarshal(setCookiesJSON, &setCookies)
 
+		// Label with the CONTIGUOUS position the step will actually hold, not the recorded seq. The
+		// rows are inserted with step_order = i+1, so a recording whose included seqs are non-contiguous
+		// (say 3, 7, 12 after unchecking the others) would otherwise read "3. / 7. / 12." over steps
+		// that are really 1, 2, 3.
 		steps = append(steps, importStep{
-			name:            authStepName(seq, method, rawURL, host, baseHost),
+			name:            authStepName(len(steps)+1, method, rawURL, host, baseHost),
 			rawRequest:      rawRequest,
 			responseStatus:  responseStatus,
 			responseHeaders: authStepResponseHeaders(flatResponseHeaders, setCookies),
@@ -832,6 +875,26 @@ func importAuthRecordingToFlow(ctx context.Context, recordingID, nameOverride, c
 	}
 	defer tx.Rollback(ctx)
 
+	// Re-read auth_flow_id UNDER A ROW LOCK, inside the transaction, rather than trusting the value
+	// read before the tx began. Two imports of the same recording (a double-clicked Import, or Stop's
+	// auto-import racing a manual one) both used to see NULL and both INSERT a new flow, leaving one
+	// orphaned. FOR UPDATE serialises them: the second blocks until the first commits, then sees the
+	// auth_flow_id the first set and takes the UPDATE path.
+	var lockedFlowID *string
+	if err := tx.QueryRow(ctx,
+		`SELECT auth_flow_id FROM auth_recordings WHERE id = $1 FOR UPDATE`, recordingID).
+		Scan(&lockedFlowID); err != nil {
+		return "", 0, fmt.Errorf("failed to lock recording: %w", err)
+	}
+	existingFlowID = lockedFlowID
+
+	// Carry the operator's per-step capture rules across a re-import. Re-import replaces the steps
+	// wholesale, and the re-INSERT below never carried the extractions column, so re-recording a flow
+	// silently reset every {{af:...}} rule to empty and the token step then refused. Keyed on
+	// step_order, so a rule the operator attached to step 2 lands back on step 2 when the flow is
+	// re-recorded in the same shape (the normal case).
+	preservedExtractions := map[int][]byte{}
+
 	flowID := ""
 	if existingFlowID != nil && *existingFlowID != "" {
 		tag, uErr := tx.Exec(ctx, `
@@ -846,6 +909,29 @@ func importAuthRecordingToFlow(ctx context.Context, recordingID, nameOverride, c
 		}
 		if tag.RowsAffected() > 0 {
 			flowID = *existingFlowID
+
+			exRows, exErr := tx.Query(ctx,
+				`SELECT step_order, COALESCE(extractions,'[]'::jsonb) FROM auth_flow_steps WHERE auth_flow_id = $1`,
+				flowID)
+			if exErr != nil {
+				return "", 0, fmt.Errorf("failed to read existing capture rules: %w", exErr)
+			}
+			for exRows.Next() {
+				var order int
+				var ex []byte
+				if sErr := exRows.Scan(&order, &ex); sErr != nil {
+					exRows.Close()
+					return "", 0, fmt.Errorf("failed to read existing capture rules: %w", sErr)
+				}
+				if len(ex) > 0 && string(ex) != "[]" {
+					preservedExtractions[order] = ex
+				}
+			}
+			exRows.Close()
+			if exErr := exRows.Err(); exErr != nil {
+				return "", 0, fmt.Errorf("failed to read existing capture rules: %w", exErr)
+			}
+
 			// Replace the steps wholesale rather than diffing. The sequence is what makes the flow
 			// replayable, and a partial update would leave step_order values from two different
 			// imports interleaved.
@@ -870,13 +956,18 @@ func importAuthRecordingToFlow(ctx context.Context, recordingID, nameOverride, c
 
 	for i, step := range steps {
 		headersJSON, _ := json.Marshal(step.responseHeaders)
+		// Carry forward the capture rules that were on the step at this position, if any.
+		extractionsJSON := preservedExtractions[i+1]
+		if len(extractionsJSON) == 0 {
+			extractionsJSON = []byte("[]")
+		}
 		if _, sErr := tx.Exec(ctx, `
 			INSERT INTO auth_flow_steps
-			  (id, auth_flow_id, step_order, name, raw_request, response_status, response_headers, response_body)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			  (id, auth_flow_id, step_order, name, raw_request, response_status, response_headers, response_body, extractions)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 			uuid.New().String(), flowID, i+1, sanitizeForPostgres(step.name),
 			sanitizeForPostgres(step.rawRequest), step.responseStatus, headersJSON,
-			sanitizeForPostgres(step.responseBody)); sErr != nil {
+			sanitizeForPostgres(step.responseBody), extractionsJSON); sErr != nil {
 			return "", 0, fmt.Errorf("failed to insert step %d: %w", i+1, sErr)
 		}
 	}
@@ -961,9 +1052,14 @@ func lookupAuthRecordingStatus(recordingID string) (string, error) {
 // rejected would otherwise inflate the number the operator is shown.
 func refreshAuthRecordingCounts(recordingID string) (int, error) {
 	var total int
+	// last_seen_at only advances while the recording is live. Bumping it for a stopped or abandoned
+	// recording (a late flush, or a stale tab still posting) made a dead recording read as freshly
+	// active in the list. request_count is still recomputed either way, because a late flush that is
+	// stored is a real row worth counting.
 	err := dbPool.QueryRow(context.Background(), `
 		UPDATE auth_recordings a
-		SET request_count = c.total, last_seen_at = NOW()
+		SET request_count = c.total,
+		    last_seen_at = CASE WHEN a.status = 'recording' THEN NOW() ELSE a.last_seen_at END
 		FROM (SELECT COUNT(*) AS total FROM auth_recorded_requests WHERE recording_id = $1) c
 		WHERE a.id = $1
 		RETURNING a.request_count`, recordingID).Scan(&total)

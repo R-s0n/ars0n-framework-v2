@@ -188,7 +188,12 @@ type AuthFlowCandidate struct {
 	HasBody      bool      `json:"has_body"`
 	SetsCookie   bool      `json:"sets_cookie"`
 	SuggestedCat string    `json:"suggested_category"`
-	RawRequest   string    `json:"raw_request"`
+	// OAuthRole names an OAuth exchange when the request is one: "creation_exchange" (a first login,
+	// grant_type=authorization_code / a single-use code / an IdP host) or "refresh_request" (the app's
+	// own silent refresh, grant_type=refresh_token / a /session/renew call). Empty otherwise. It is what
+	// lets the operator pick the refresh request to adopt as a refresh flow. See sessionOAuthDetect.go.
+	OAuthRole  string `json:"oauth_role,omitempty"`
+	RawRequest string `json:"raw_request"`
 	// Set when the capture itself looks incomplete, as opposed to the application being unusual.
 	// Empty on a healthy candidate, so a client can show it only when it means something.
 	CaptureWarning string `json:"capture_warning,omitempty"`
@@ -243,6 +248,7 @@ func GetAuthFlowCandidates(w http.ResponseWriter, r *http.Request) {
 			HasBody:        postData != "",
 			SetsCookie:     headerString(responseHeaders, "set-cookie") != "",
 			SuggestedCat:   category,
+			OAuthRole:      oauthCaptureRole(urlStr, method, postData),
 			RawRequest:     BuildRawHTTPRequest(method, urlStr, headers, postData),
 			CaptureWarning: authCaptureWarning(method, postData),
 		}
@@ -379,7 +385,7 @@ func CreateAuthFlowFromCaptures(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validAuthFlowCategories[payload.Category] {
-		http.Error(w, "Invalid category (must be register, login, mfa_otp, or reset)", http.StatusBadRequest)
+		http.Error(w, "Invalid category (must be register, login, mfa_otp, magic_link, or reset)", http.StatusBadRequest)
 		return
 	}
 	if len(payload.CaptureIDs) == 0 {
