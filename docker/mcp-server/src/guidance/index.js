@@ -118,7 +118,7 @@ function asLies(value) {
 // call gets the one-line reminder. Ordering tool-level first therefore meant the tool-level lie led
 // every reminder and an action-specific lie reached a caller only if that action happened to be the
 // first call of the session. MEASURED on this registry: 156 action overrides define lies and the
-// action lie led 0 of the 343 compact lines. For a tool with 8 actions that is 7 lessons delivered
+// action lie led 0 of the 348 compact lines. For a tool with 8 actions that is 7 lessons delivered
 // on no call at all. Leading with the action's own lie costs nothing, because the tool-level lie is
 // in the full entry that already went out on the session's first call for this tool whatever action
 // that was, while the action lie has been delivered zero times. Repeat the one nobody has heard.
@@ -180,7 +180,7 @@ const MIN_SENTENCE = 24;
 // The compact reminder's ceiling, in characters, roughly 50 tokens.
 //
 // It is enforced rather than hoped for. MEASURED without it: the mean line was 217 characters and
-// 213 of the 343 compact lines were over 200, the worst being run_endpoint_scan at 394. That is
+// 213 of the 348 compact lines were over 200, the worst being run_endpoint_scan at 394. That is
 // the cost that repeats, on every call after the first, for the whole length of a scan loop, and a
 // reminder that is half the size of the lesson is not a reminder.
 const COMPACT_MAX = 200;
@@ -271,7 +271,7 @@ function fitLead(sentence, budget) {
 // brief is tracked per tool, so it went out in full on the session's first call for this tool no
 // matter which action that was, whereas the action's lie has been delivered zero times unless that
 // first call happened to be the same action. MEASURED before this rule: 156 action overrides define
-// lies and their lie led 0 of the 343 compact lines.
+// lies and their lie led 0 of the 348 compact lines.
 //
 // A caller on an action with no lies of its own still gets the tool-level lie, unchanged.
 //

@@ -94,6 +94,9 @@ const RecordAuthFlowsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl
   const [previewId, setPreviewId] = useState(null);
 
   const pollRef = useRef(null);
+  // The id of a recording the operator just stopped, so a poll that was already in flight cannot
+  // resolve afterwards and briefly resurrect it as active. Cleared when a new recording starts.
+  const justStoppedIdRef = useRef(null);
 
   const tabLabel = CATEGORY_LABELS[activeTab] || activeTab;
 
@@ -124,7 +127,14 @@ const RecordAuthFlowsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl
       const res = await fetch(`/api/auth-recording/active/${scopeTargetId}`);
       if (!res.ok) return; // a transient failure keeps the last known state so Stop does not vanish
       const data = await res.json();
-      setActiveRecording(data && data.recording ? data.recording : null);
+      // The endpoint answers 200 with {recording:null, error:...} on a transient DB error rather than
+      // hiding it behind a non-200. Treat that exactly like a dropped poll and keep the last known
+      // state, or the live-recording banner vanishes on a blip the server deliberately reported.
+      if (data && data.error) return;
+      const rec = data && data.recording ? data.recording : null;
+      // Ignore a poll that resolves after Stop and still names the recording we just stopped.
+      if (rec && justStoppedIdRef.current && rec.id === justStoppedIdRef.current) return;
+      setActiveRecording(rec);
     } catch (_) {
       // Same reasoning: a dropped poll is not evidence that the recording ended.
     }
@@ -201,6 +211,7 @@ const RecordAuthFlowsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl
     setBusy('start');
     setError('');
     setNotice('');
+    justStoppedIdRef.current = null; // a new recording is expected to appear as active
     try {
       const res = await fetch('/api/auth-recording/start', {
         method: 'POST',
@@ -229,6 +240,7 @@ const RecordAuthFlowsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl
     if (!activeRecording) return;
     setBusy('stop');
     setError('');
+    justStoppedIdRef.current = activeRecording.id; // so an in-flight poll cannot resurrect it
     try {
       const res = await fetch('/api/auth-recording/stop', {
         method: 'POST',
@@ -380,7 +392,9 @@ const RecordAuthFlowsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl
             <Nav variant="pills" className="mb-3">
               {CATEGORIES.map((c) => {
                 const flowCount = flows.filter((f) => f.category === c.value).length;
-                const recCount = recordings.filter((r) => r.category === c.value).length;
+                // A recording that has already been imported IS one of the flows counted above, so
+                // counting it again here made an imported recording read as two artifacts in the tab.
+                const recCount = recordings.filter((r) => r.category === c.value && !r.auth_flow_id).length;
                 return (
                   <Nav.Item key={c.value}>
                     <Nav.Link

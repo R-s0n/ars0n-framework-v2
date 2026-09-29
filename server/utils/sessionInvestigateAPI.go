@@ -160,6 +160,12 @@ type SessionInvestigationCounts struct {
 	// value, a passed expires_at column and a credential whose own exp has gone by.
 	Active   int `json:"active"`
 	Sendable int `json:"sendable"`
+	// Expired counts ACTIVE stored credentials that are switched on but known to be dead: their last
+	// validation verdict was a rejection (expired / not_honoured / invalid / ...), or their
+	// expires_at column has passed. Neither Active nor Sendable reflects a validation verdict, so
+	// without this the card shows a confident "3 active" for three cookies that will send every scan
+	// into a login wall. It is the difference between "3 active" and "3 active, all dead".
+	Expired int `json:"expired"`
 	// Captured counts credentials the runner's source found in manual_crawl_captures that no
 	// session_tokens row holds. They are not stored and nobody typed them in; a browser produced
 	// them and the manual crawl caught them.
@@ -542,6 +548,16 @@ func buildSessionInvestigation(scopeTargetID string, tokens []SessionToken, opts
 		}
 		if c.Refresh.Status == RefreshProven {
 			report.Counts.RefreshProven++
+		}
+	}
+
+	// Counted from the stored rows directly, because the validate verdict (last_validation_status) is
+	// on the session_tokens row and is not carried into the characterisation above. An active token
+	// the operator validated as dead, or one whose expires_at has passed, is counted here so the card
+	// can say "active, but expired" instead of a bare "active".
+	for _, tok := range tokens {
+		if tok.IsActive && sessionTokenLooksDead(tok, now) {
+			report.Counts.Expired++
 		}
 	}
 	// SAID AS A COUNT, because the two counts below are counted over THIS set and the only other
@@ -996,6 +1012,13 @@ func claimsOf(p *SessionTokenProfile) []InvestigatedClaim {
 // than re-derived, because a screen that disagrees with the runner about what is being sent is
 // worse than no screen.
 func credentialIsSendable(tok SessionToken, now time.Time) (bool, string) {
+	// A refresh secret is spent to mint a fresh credential, never sent on a resource request.
+	// ApplySessionTokens excludes token_role='refresh' from what a scan attaches, so this mirror must
+	// too, or the Authentication card counts it Active/Sendable and can pick it as the governing
+	// credential, reporting a session TTL off a value no scan will ever send.
+	if tok.TokenRole == tokenRoleRefresh {
+		return false, "a refresh secret is spent to mint a credential, never sent on a request"
+	}
 	if !tok.IsActive {
 		return false, "switched off in the Session Manager, so no scan will send it"
 	}

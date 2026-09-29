@@ -22,6 +22,51 @@ const CATEGORIES = [
 
 const CATEGORY_LABELS = CATEGORIES.reduce((acc, c) => ({ ...acc, [c.value]: c.label }), {});
 
+// The interaction editor works in "types" that map onto the server's (kind, input_kind, action_kind)
+// shape. interactionType reads a stored interaction back to a type; buildInteraction builds the object
+// for a chosen type, keeping any var_name/prompt/secret the operator already set.
+const INTERACTION_TYPES = [
+  { value: 'otp', label: 'A code I enter (OTP / SMS / email)' },
+  { value: 'password', label: 'A password I enter' },
+  { value: 'totp', label: 'Authenticator (auto-generate from a secret)' },
+  { value: 'approve', label: 'Approve on my device (push / 2FA)' },
+  { value: 'magic_link', label: 'A magic link I click' },
+];
+
+function interactionType(inter) {
+  if (!inter || !inter.kind || inter.kind === 'none') return 'none';
+  if (inter.kind === 'action') return inter.action_kind === 'magic_link' ? 'magic_link' : 'approve';
+  if (inter.kind === 'totp_auto') return 'totp';
+  if (inter.kind === 'input') {
+    if (inter.input_kind === 'totp') return 'totp';
+    if (inter.input_kind === 'password') return 'password';
+    if (inter.input_kind === 'url') return 'magic_link';
+  }
+  return 'otp';
+}
+
+function buildInteraction(type, prev = {}) {
+  switch (type) {
+    case 'otp':
+      return { kind: 'input', input_kind: 'otp', var_name: prev.var_name || 'mfa_code', prompt: prev.prompt || 'Enter the 6-digit code' };
+    case 'password':
+      return { kind: 'input', input_kind: 'password', var_name: prev.var_name || 'password', prompt: prev.prompt || 'Enter the password' };
+    case 'totp':
+      return {
+        kind: (prev.totp_secret || '').trim() ? 'totp_auto' : 'input',
+        input_kind: 'totp', var_name: prev.var_name || 'mfa_code',
+        prompt: prev.prompt || 'Enter the 6-digit code from your authenticator',
+        totp_secret: prev.totp_secret || '',
+      };
+    case 'approve':
+      return { kind: 'action', action_kind: 'approve', prompt: prev.prompt || 'Approve the push notification on your device, then Continue' };
+    case 'magic_link':
+      return { kind: 'action', action_kind: 'magic_link', input_kind: 'url', var_name: prev.var_name || 'link_url', prompt: prev.prompt || 'Click the emailed link and paste the URL you land on' };
+    default:
+      return null;
+  }
+}
+
 const AUTH_TYPES = [
   { value: '', label: '(none)' },
   { value: 'password', label: 'Username / Password' },
@@ -55,9 +100,36 @@ const REQUEST_LINE_RE = /^([A-Za-z]+)\s+((?:\/|\*|https?:\/\/)\S*)(?:\s+(HTTP\/[
 const VALUE_FLAGS = new Set([
   '-o', '--output', '-x', '--proxy', '-m', '--max-time', '--connect-timeout', '-w', '--write-out',
   '-T', '--upload-file', '--cert', '--key', '--resolve', '--retry', '-D', '--dump-header',
-  '--cacert', '--capath', '-E', '--interface', '--limit-rate', '-F', '--form', '--form-string',
+  '--cacert', '--capath', '-E', '--interface', '--limit-rate',
   '--proto', '--max-redirs', '--cookie-jar', '-c',
 ]);
+
+// Builds a multipart/form-data body from curl -F fields. curl -F is how a copied registration or
+// upload form arrives, and dropping it turned the step into a body-less request that answered as if
+// the form were empty. Text fields (name=value) are reproduced in full; a file field (name=@path)
+// cannot be read from the browser, so it becomes an empty named part rather than being dropped, which
+// is visible in the request the operator then edits. CRLF framing because multipart requires it.
+function buildMultipartBody(formParts) {
+  const boundary = '----ars0nAuthFlowBoundary' + Math.random().toString(36).slice(2);
+  const chunks = [];
+  formParts.forEach((part) => {
+    const eq = part.indexOf('=');
+    if (eq < 0) return;
+    const name = part.slice(0, eq);
+    let value = part.slice(eq + 1);
+    let filename = '';
+    if (value.startsWith('@') || value.startsWith('<')) {
+      // A file reference. The path is the filename; the bytes are not available in the browser.
+      const ref = value.slice(1).split(';')[0];
+      filename = ref.split(/[\\/]/).pop() || ref;
+      value = '';
+    }
+    let disp = `Content-Disposition: form-data; name="${name}"`;
+    if (filename) disp += `; filename="${filename}"`;
+    chunks.push(`--${boundary}\r\n${disp}\r\n\r\n${value}\r\n`);
+  });
+  return { body: chunks.join('') + `--${boundary}--\r\n`, boundary };
+}
 
 function byteLength(text) {
   return new TextEncoder().encode(text || '').length;
@@ -123,6 +195,7 @@ function curlToRaw(input) {
   const headerArgs = [];
   const cookieArgs = [];
   const bodyParts = [];
+  const formParts = [];
 
   for (; i < argv.length; i++) {
     let token = argv[i];
@@ -155,6 +228,8 @@ function curlToRaw(input) {
         : encodeURIComponent(raw));
     } else if (token === '--url') {
       url = value();
+    } else if (token === '-F' || token === '--form' || token === '--form-string') {
+      formParts.push(value());
     } else if (token === '-b' || token === '--cookie') {
       cookieArgs.push(value());
     } else if (token === '-A' || token === '--user-agent') {
@@ -182,7 +257,15 @@ function curlToRaw(input) {
     throw new Error(`could not parse the URL ${url}`);
   }
 
-  const body = bodyParts.join('&');
+  let body = bodyParts.join('&');
+  // A multipart form (-F) sets the body and its own content type. -d wins if both were somehow given,
+  // because -d is the explicit raw body.
+  let multipartContentType = '';
+  if (!body && formParts.length) {
+    const built = buildMultipartBody(formParts);
+    body = built.body;
+    multipartContentType = `multipart/form-data; boundary=${built.boundary}`;
+  }
   if (!method) method = body ? 'POST' : 'GET';
 
   const cookies = cookieArgs.filter(Boolean);
@@ -206,9 +289,11 @@ function curlToRaw(input) {
   });
 
   if (cookies.length) headers.push(`Cookie: ${cookies.join('; ')}`);
-  // curl's own default for -d, and the wrong one to leave out: many login endpoints reject a body
-  // sent with no content type.
-  if (body && !hasContentType) headers.push('Content-Type: application/x-www-form-urlencoded');
+  if (body && !hasContentType) {
+    // A multipart form carries its own boundary; otherwise curl's own default for -d, and the wrong
+    // one to leave out: many login endpoints reject a body sent with no content type.
+    headers.push(`Content-Type: ${multipartContentType || 'application/x-www-form-urlencoded'}`);
+  }
   if (body) headers.push(`Content-Length: ${byteLength(body)}`);
 
   const target = `${parsed.pathname || '/'}${parsed.search || ''}`;
@@ -351,7 +436,11 @@ const ManualAuthFlowModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
       const data = res.ok ? await res.json() : [];
       const list = Array.isArray(data) ? data : [];
       setSteps(list.length
-        ? list.map((s) => newStep({ id: s.id, name: s.name || '', text: s.raw_request || '' }))
+        ? list.map((s) => newStep({
+            id: s.id, name: s.name || '', text: s.raw_request || '',
+            interaction: s.interaction || null,
+            suggested: s.suggested_interaction || null,
+          }))
         : [newStep()]);
     } catch (e) {
       setSteps([newStep()]);
@@ -448,32 +537,61 @@ const ManualAuthFlowModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
         if (!res.ok) { setError((await res.text()) || `Could not create the flow (${res.status})`); return; }
         const created = await res.json();
         flowId = created.id;
+        // The flow now exists on the server. Record it as the one being edited BEFORE the step loop, so
+        // if a step save fails partway and the operator retries, save() updates this flow instead of
+        // POSTing a second copy and splitting the steps across two flows.
+        setEditingId(flowId);
       }
 
-      for (const id of removedStepIds) {
-        await fetch(`/api/auth-flows/steps/${id}`, { method: 'DELETE' });
+      // A step that HAD an id but has been emptied is one the operator removed by clearing its text.
+      // It was filtered out of `converted` above, so without deleting it here it survives on the server
+      // at its old order while everything else renumbers around it.
+      const emptiedIds = steps.filter((s) => s.id && !s.text.trim()).map((s) => s.id);
+      const toDelete = [...new Set([...removedStepIds, ...emptiedIds])];
+
+      const failures = [];
+      for (const id of toDelete) {
+        const res = await fetch(`/api/auth-flows/steps/${id}`, { method: 'DELETE' });
+        // 404 means it is already gone, which is the outcome we wanted.
+        if (!res.ok && res.status !== 404) failures.push(`delete a step: ${(await res.text()) || res.status}`);
       }
 
+      // Ids of steps created in this run, so a retry after a later failure updates them instead of
+      // POSTing a second copy. Merged back into the working list below, even when the run failed part
+      // way, which is what stops the duplicate-on-retry the reload used to prevent only on success.
+      const newIds = {};
+      let savedCount = 0;
       for (let i = 0; i < converted.length; i++) {
         const step = converted[i];
         const order = i + 1;
+        // An input interaction is sent as-is so refresh pauses here for the value. A kind this editor
+        // does not manage (a future totp_auto/action/browser authored elsewhere) is PRESERVED rather
+        // than wiped. Only an absent/none interaction is sent as {kind:'none'} to clear it.
+        const interaction = step.interaction && step.interaction.kind && step.interaction.kind !== 'none'
+          ? step.interaction
+          : { kind: 'none' };
         if (step.id) {
-          await fetch(`/api/auth-flows/steps/${step.id}`, {
+          const res = await fetch(`/api/auth-flows/steps/${step.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: step.name, raw_request: step.raw, step_order: order }),
+            body: JSON.stringify({ name: step.name, raw_request: step.raw, step_order: order, interaction }),
           });
+          if (res.ok) savedCount += 1;
+          else failures.push(`step ${order}: ${(await res.text()) || res.status}`);
         } else {
           const res = await fetch(`/api/auth-flows/flow/${flowId}/steps`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: step.name, raw_request: step.raw, replay: replayOnSave }),
+            body: JSON.stringify({ name: step.name, raw_request: step.raw, replay: replayOnSave, interaction }),
           });
-          if (res.ok) {
+          if (!res.ok) { failures.push(`step ${order}: ${(await res.text()) || res.status}`); continue; }
+          savedCount += 1;
+          const createdStep = await res.json();
+          if (createdStep && createdStep.id) {
+            if (step.key) newIds[step.key] = createdStep.id;
             // A new step is appended at the end by the server. When it was inserted in the middle
             // of the list, its order has to be corrected or the flow replays out of sequence.
-            const createdStep = await res.json();
-            if (createdStep && createdStep.id && createdStep.step_order !== order) {
+            if (createdStep.step_order !== order) {
               await fetch(`/api/auth-flows/steps/${createdStep.id}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
@@ -484,11 +602,19 @@ const ManualAuthFlowModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
         }
       }
 
+      if (Object.keys(newIds).length) {
+        setSteps((prev) => prev.map((s) => (newIds[s.key] ? { ...s, id: newIds[s.key] } : s)));
+      }
+
       await fetchFlows();
+      if (failures.length) {
+        setError(`Saved ${savedCount} of ${converted.length} step(s). ${failures.length} failed: ${failures.join('; ')}`);
+        return;
+      }
       // Reload from the server so every row carries its real id, otherwise a second save would
       // create duplicates of the steps just written.
       await loadFlowForEdit({ id: flowId, ...payload });
-      setNotice(`Saved ${converted.length} step(s).${replayOnSave ? ' Each new step was sent as it was saved.' : ''}`);
+      setNotice(`Saved ${savedCount} step(s).${replayOnSave ? ' Each new step was sent as it was saved.' : ''}`);
     } catch (e) {
       setError('Save failed: ' + e.message);
     } finally {
@@ -709,6 +835,94 @@ const ManualAuthFlowModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                       {notes.map((n, ni) => (
                         <div key={ni} className="text-white-50" style={{ fontSize: '0.7rem' }}>{n}</div>
                       ))}
+
+                      {/* Refresh interaction: mark a step that needs a value from the operator at
+                          refresh time (an MFA/OTP code) so refresh pauses here and asks for it. */}
+                      {(() => {
+                        const itype = interactionType(step.interaction);
+                        const isOn = itype !== 'none';
+                        const inter = step.interaction || {};
+                        const needsVar = itype === 'otp' || itype === 'password' || itype === 'totp' || itype === 'magic_link';
+                        return (
+                          <div className="mt-2 pt-2 border-top border-secondary">
+                            {step.suggested && !isOn && (
+                              <div className="text-info mb-1" style={{ fontSize: '0.7rem' }}>
+                                <i className="bi bi-lightbulb me-1" />
+                                This step looks like it submits a code.{' '}
+                                <Button variant="link" size="sm" className="p-0 align-baseline"
+                                  onClick={() => updateStep(step.key, { interaction: buildInteraction('otp', step.suggested || {}) })}>
+                                  Mark as needs a code on refresh
+                                </Button>
+                              </div>
+                            )}
+                            <Form.Check
+                              type="switch"
+                              id={`interaction-${step.key}`}
+                              className="small"
+                              label="This step needs me (a code, an approval, or a magic link) on refresh"
+                              checked={isOn}
+                              onChange={(e) => updateStep(step.key, { interaction: e.target.checked ? buildInteraction('otp', {}) : null })}
+                            />
+                            {isOn && (
+                              <Row className="g-2 mt-1">
+                                <Col md={5}>
+                                  <Form.Select
+                                    size="sm"
+                                    className="bg-dark text-white border-secondary"
+                                    value={itype}
+                                    onChange={(e) => updateStep(step.key, { interaction: buildInteraction(e.target.value, inter) })}
+                                  >
+                                    {INTERACTION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                                  </Form.Select>
+                                </Col>
+                                {needsVar && (
+                                  <Col md={3}>
+                                    <Form.Control
+                                      size="sm"
+                                      className="bg-dark text-white border-secondary"
+                                      placeholder="var name, e.g. mfa_code"
+                                      value={inter.var_name || ''}
+                                      onChange={(e) => updateStep(step.key, { interaction: { ...inter, var_name: e.target.value } })}
+                                    />
+                                  </Col>
+                                )}
+                                <Col md={needsVar ? 4 : 7}>
+                                  <Form.Control
+                                    size="sm"
+                                    className="bg-dark text-white border-secondary"
+                                    placeholder="Prompt shown when refresh pauses"
+                                    value={inter.prompt || ''}
+                                    onChange={(e) => updateStep(step.key, { interaction: { ...inter, prompt: e.target.value } })}
+                                  />
+                                </Col>
+                                {itype === 'totp' && (
+                                  <Col md={12}>
+                                    <Form.Control
+                                      size="sm"
+                                      className="bg-dark text-white border-secondary"
+                                      placeholder="Authenticator secret (base32) - optional. If set, the code is generated automatically with no prompt."
+                                      value={inter.totp_secret || ''}
+                                      onChange={(e) => {
+                                        const secret = e.target.value;
+                                        updateStep(step.key, { interaction: { ...inter, totp_secret: secret, kind: secret.trim() ? 'totp_auto' : 'input' } });
+                                      }}
+                                    />
+                                  </Col>
+                                )}
+                                <Col md={12}>
+                                  <div className="text-white-50" style={{ fontSize: '0.68rem' }}>
+                                    {itype === 'approve'
+                                      ? 'Refresh pauses here; approve on your device and press Continue, then this step is sent.'
+                                      : inter.kind === 'totp_auto'
+                                        ? <>The code is generated from the secret each refresh and substituted as <code className="text-info">{`{{af:${inter.var_name || 'mfa_code'}}}`}</code>. Put that placeholder where the code goes in the request above.</>
+                                        : <>Refresh pauses and asks for this value, then substitutes it as <code className="text-info">{`{{af:${inter.var_name || 'mfa_code'}}}`}</code>. Put that placeholder where it goes in the request above.</>}
+                                  </div>
+                                </Col>
+                              </Row>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   );
                 })}

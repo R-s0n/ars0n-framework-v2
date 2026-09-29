@@ -44,7 +44,11 @@ func (c *ScopedAuthContext) ApplySessionTokens(scopeTargetID string) {
 		       COALESCE(scope_domains, '{}'), COALESCE(cookie_domain,''), COALESCE(name,'')
 		FROM session_tokens
 		WHERE scope_target_id = $1 AND is_active = TRUE AND COALESCE(token_value,'') <> ''
-		  AND (expires_at IS NULL OR expires_at > NOW())`,
+		  AND (expires_at IS NULL OR expires_at > NOW())
+		  -- A refresh secret is spent to mint a fresh credential, never sent on a resource request. It
+		  -- must never be attached to a scan, so it is excluded here, not just in the per-token
+		  -- AuthMaterial guard (which this path does not call). Credentials and companions still ride.
+		  AND COALESCE(token_role,'credential') <> 'refresh'`,
 		scopeTargetID)
 	if err != nil {
 		// The table not existing yet, on an install that has not migrated, is not a reason to fail

@@ -459,7 +459,7 @@ func (r *validationRun) calibrate() bool {
 	// to discriminate, say the question is open rather than answering it wrongly.
 	probeURL := r.baseURL + "/"
 	discriminating := false
-	if better := authRequiredProbeURL(r.scopeTargetID); better != "" {
+	if better := authRequiredProbeURL(r.scopeTargetID, r.baseHost); better != "" {
 		probeURL = better
 		discriminating = true
 	} else if better := sessionFlowProbeURL(r.scopeTargetID); better != "" {

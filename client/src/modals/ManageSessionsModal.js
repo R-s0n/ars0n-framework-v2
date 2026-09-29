@@ -177,6 +177,21 @@ function validationVariant(status) {
   return 'secondary';
 }
 
+// The verdicts that mean the target refused the token, matching RefreshSessionModal and the server's
+// sessionTokenRejectedStatuses. A companion is deliberately absent: it is a routing cookie, never
+// graded on its own, so it must not read as expired.
+const REJECTED_STATUSES = new Set(['expired', 'not_honoured', 'invalid', 'unauthorized', 'rejected', 'failed', 'revoked']);
+
+// isTokenExpired: the token's own clock has passed, or its last validation verdict was a rejection.
+// This is the check Manage Sessions was missing, so an on-but-dead token read as a green "active".
+function isTokenExpired(t) {
+  if (t.expires_at) {
+    const exp = new Date(t.expires_at).getTime();
+    if (!Number.isNaN(exp) && exp <= Date.now()) return true;
+  }
+  return REJECTED_STATUSES.has(String(t.last_validation_status || '').toLowerCase());
+}
+
 const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl }) => {
   const [tokens, setTokens] = useState([]);
   const [flows, setFlows] = useState([]);
@@ -195,6 +210,12 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
   const [pasteResult, setPasteResult] = useState(null);
 
   const targetHost = useMemo(() => hostFromUrl(scopeTargetUrl), [scopeTargetUrl]);
+  const expiredActiveCount = useMemo(
+    // Mirror the per-row "expired" badge, which excludes refresh secrets (a refresh token is not graded
+    // as a credential), so the header count and the visible badges agree.
+    () => tokens.filter((t) => t.is_active !== false && t.token_role !== 'refresh' && isTokenExpired(t)).length,
+    [tokens],
+  );
   const wire = useMemo(() => buildWire(form, form.scope_domains[0] || targetHost),
     [form, targetHost]);
 
@@ -245,6 +266,8 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
       setDomainDraft('');
       setPasteOpen(false);
       setPasteRaw('');
+      setPasteFlowId('');
+      setPasteName('');
       setPasteResult(null);
       setError('');
       setNotice('');
@@ -352,7 +375,12 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
   // A NEW token needs a credential typed in; an EXISTING one already has one and the box is a
   // replace-it box. Requiring the value on an edit is what would force an operator to paste a live
   // credential into the browser to change a cookie path.
-  const canSave = form.name.trim() !== '' && form.auth_flow_id !== ''
+  //
+  // The auth flow is NOT required. It enables replay-based refresh, but a session from an OAuth or
+  // federated login has no replayable flow to link, and forcing one there would block storing the
+  // session at all. A token with no flow is refreshed by pasting a fresh value instead, which the
+  // refresh screen already handles ("no flow linked, cannot refresh").
+  const canSave = form.name.trim() !== ''
     && (form.token_value.trim() !== '' || form.has_value === true);
 
   const saveToken = async () => {
@@ -406,7 +434,10 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
       await fetchTokens();
       setDomainDraft('');
       if (!form.id && created && created.id) {
-        setForm((prev) => ({ ...prev, id: created.id, scope_domains: domains }));
+        // has_value is set because a create always carries a value (canSave requires it), and the POST
+        // response is only {id}. Without this the row summary reads "No value stored" right after a
+        // successful save while the value sits in the box.
+        setForm((prev) => ({ ...prev, id: created.id, scope_domains: domains, has_value: true }));
         setNotice('Token saved. It is now available to every tool that sends authenticated requests.');
       } else {
         setForm((prev) => ({ ...prev, scope_domains: domains }));
@@ -422,8 +453,10 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
   const deleteToken = async (id) => {
     if (!window.confirm('Delete this session token? Tools using it will fall back to unauthenticated requests.')) return;
     setBusy(true);
+    setError('');
     try {
-      await fetch(`/api/session-tokens/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/session-tokens/${id}`, { method: 'DELETE' });
+      if (!res.ok && res.status !== 404) throw new Error((await res.text()) || `Delete failed (${res.status})`);
       if (form.id === id) setForm(EMPTY_FORM);
       await fetchTokens();
       setNotice('Token deleted.');
@@ -435,7 +468,9 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
   };
 
   const parseRaw = async () => {
-    if (!pasteRaw.trim() || !pasteFlowId || !scopeTargetId) return;
+    // The flow is optional: pasting a fresh cookie is exactly how a session with no replayable flow
+    // (an OAuth or federated login) is refreshed, so requiring a flow here would block that path.
+    if (!pasteRaw.trim() || !scopeTargetId) return;
     setBusy(true);
     setError('');
     setPasteResult(null);
@@ -483,7 +518,7 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
 
   const renderFlowSelect = (value, onChange, controlId) => (
     <Form.Select size="sm" id={controlId} value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="">Select the flow that issues this token</option>
+      <option value="">No flow (refresh by re-pasting a fresh value)</option>
       {flowOptions.map(([cat, list]) => (
         <optgroup key={cat} label={FLOW_CATEGORY_LABELS[cat] || cat}>
           {list.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
@@ -519,13 +554,18 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
               </Button>
               <span className="text-white-50 small ms-auto">
                 {tokens.length} token(s), {tokens.filter((t) => t.is_active !== false).length} active
+                {expiredActiveCount > 0 && (
+                  <span className="text-danger"> ({expiredActiveCount} expired)</span>
+                )}
               </span>
             </div>
 
             {flows.length === 0 && (
-              <Alert variant="warning" className="py-2 small">
-                No auth flows exist for this target yet. Every token has to be tied to the flow that
-                issues it, so create a login flow under Authentication first, then come back here.
+              <Alert variant="secondary" className="py-2 small">
+                No auth flows exist for this target yet. You can still store and paste session tokens.
+                Linking a token to a login flow is what lets Refresh Session re-mint it automatically;
+                without one, refresh it by pasting a fresh value. A replayable login flow can be
+                recorded or written under Authentication.
               </Alert>
             )}
 
@@ -549,7 +589,7 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                 />
                 <Row className="g-2 mb-2">
                   <Col md={5}>
-                    <Form.Label className="text-white small mb-1">Auth flow (required)</Form.Label>
+                    <Form.Label className="text-white small mb-1">Auth flow (optional)</Form.Label>
                     {renderFlowSelect(pasteFlowId, setPasteFlowId, 'paste-flow')}
                   </Col>
                   <Col md={4}>
@@ -567,7 +607,7 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                       variant="danger"
                       className="w-100"
                       onClick={parseRaw}
-                      disabled={busy || !pasteRaw.trim() || !pasteFlowId}
+                      disabled={busy || !pasteRaw.trim()}
                     >
                       {busy ? <Spinner size="sm" animation="border" /> : 'Parse and create'}
                     </Button>
@@ -653,9 +693,22 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                             <span className="text-truncate me-2">{t.name}</span>
                             <span className="d-flex align-items-center gap-1 flex-shrink-0">
                               <Badge bg="secondary">{TYPE_LABEL[t.token_type] || t.token_type}</Badge>
+                              {t.token_role === 'companion' && (
+                                <Badge bg="info" title="A routing / CSRF cookie, not a credential. Refreshed alongside the credential it accompanies, never graded on its own.">companion</Badge>
+                              )}
+                              {t.token_role === 'refresh' && (
+                                <Badge bg="warning" text="dark" title="A refresh secret: spent to mint a fresh credential, never sent on a resource request and never graded on its own.">refresh secret</Badge>
+                              )}
+                              {t.credential_kind === 'oauth_access_token' && (
+                                <Badge bg="dark" className="border border-info text-info" title="An OAuth access token captured from a token endpoint response.">OAuth access</Badge>
+                              )}
                               {t.is_active !== false
-                                ? <Badge bg="success">active</Badge>
+                                ? <Badge bg={isTokenExpired(t) ? 'secondary' : 'success'}>active</Badge>
                                 : <Badge bg="dark" className="border border-secondary text-white-50">off</Badge>}
+                              {isTokenExpired(t) && t.token_role !== 'refresh' && <Badge bg="danger">expired</Badge>}
+                              {t.auto_refresh && (
+                                <Badge bg="dark" className="border border-info text-info" title="Opted into unattended refresh: the server renews it as it nears expiry (only while its flow stays a pure replay).">auto</Badge>
+                              )}
                               <i
                                 role="button"
                                 className="bi bi-trash text-danger ms-1"
@@ -910,12 +963,13 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                   </Col>
 
                   <Col md={6}>
-                    <Form.Label className="text-white small mb-1">Auth flow (required)</Form.Label>
+                    <Form.Label className="text-white small mb-1">Auth flow (optional)</Form.Label>
                     {renderFlowSelect(form.auth_flow_id, (v) => setField({ auth_flow_id: v }), 'token-flow')}
                     <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
-                      The link is what makes this token refreshable. When it expires, Refresh replays this
-                      flow and lifts the new value out of the response. A token with no flow can only ever be
-                      pasted in again by hand.
+                      Linking a login flow is what lets Refresh Session re-mint this token automatically:
+                      when it expires, Refresh replays the flow and lifts the new value out of the response.
+                      Leave it blank for a session with no replayable flow (an OAuth or federated login) and
+                      refresh it by pasting a fresh value instead.
                     </div>
                   </Col>
                   <Col md={3}>
@@ -968,8 +1022,8 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                     {!canSave && (
                       <span className="text-white-50 small">
                         {form.has_value === true
-                          ? 'A name and an auth flow are both required.'
-                          : 'A name, a value and an auth flow are all required.'}
+                          ? 'A name is required.'
+                          : 'A name and a value are required.'}
                       </span>
                     )}
                     {/* The verdict lives on the saved row rather than in the form, because the form

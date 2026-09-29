@@ -54,7 +54,7 @@ const { consolidateEndpointsSchema, consolidateEndpoints, runEndpointScanSchema,
 const { manageAttackVectorsSchema, manageAttackVectors } = require('./tools/attackvectors');
 const { findSubdomainTakeoverSchema, findSubdomainTakeover, findExposedPanelsSchema, findExposedPanels, findApiEndpointsSchema, findApiEndpoints, findInterestingResponsesSchema, findInterestingResponses, findSensitiveFilesSchema, findSensitiveFiles, compareScansSchema, compareScans, getScopeStatsSchema, getScopeStats, findUniqueHostsSchema, findUniqueHosts, queryByCidrSchema, queryByCidr, queryByTechStackSchema, queryByTechStack, searchGlobalSchema, searchGlobal } = require('./tools/bugbounty');
 const { getSettingsSchema, getSettings, updateSettingsSchema, updateSettings, setApiKeySchema, setApiKey, deleteApiKeySchema, deleteApiKey, setAiApiKeySchema, setAiApiKey, deleteAiApiKeySchema, deleteAiApiKey } = require('./tools/settings');
-const { listAuthFlowsSchema, listAuthFlows, createAuthFlowSchema, createAuthFlow, updateAuthFlowSchema, updateAuthFlow, deleteAuthFlowSchema, deleteAuthFlow, getAuthFlowStepsSchema, getAuthFlowSteps, addAuthFlowStepSchema, addAuthFlowStep, updateAuthFlowStepSchema, updateAuthFlowStep, deleteAuthFlowStepSchema, deleteAuthFlowStep, replayAuthFlowStepSchema, replayAuthFlowStep, replayAuthFlowSchema, replayAuthFlow } = require('./tools/authflows');
+const { listAuthFlowsSchema, listAuthFlows, createAuthFlowSchema, createAuthFlow, updateAuthFlowSchema, updateAuthFlow, deleteAuthFlowSchema, deleteAuthFlow, getAuthFlowStepsSchema, getAuthFlowSteps, addAuthFlowStepSchema, addAuthFlowStep, updateAuthFlowStepSchema, updateAuthFlowStep, deleteAuthFlowStepSchema, deleteAuthFlowStep, replayAuthFlowStepSchema, replayAuthFlowStep, replayAuthFlowSchema, replayAuthFlow, classifyAuthFlowRefreshSchema, classifyAuthFlowRefresh, listAuthFlowCandidatesSchema, listAuthFlowCandidates, importAuthFlowFromCapturesSchema, importAuthFlowFromCaptures, buildRefreshFlowSchema, buildRefreshFlow } = require('./tools/authflows');
 const { replayRequestSchema, replayRequest, manageRequestVersionsSchema, manageRequestVersions, manageRequestVariantsSchema, manageRequestVariants, manageDetectedFlowsSchema, manageDetectedFlows } = require('./tools/requestflows');
 const { manageFlowDetectionSchema, manageFlowDetection, manageFlowConfigSchema, manageFlowConfig, getFlowMetricsSchema, getFlowMetrics } = require('./tools/flowdetection');
 const { manageFlowBuilderSchema, manageFlowBuilder } = require('./tools/flowbuilder');
@@ -628,12 +628,12 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_database_bundle', 'List, export and import .rs0n database bundles: a whole scope target with every scan it has accumulated. This is how a target moves between installs.', manageDatabaseBundleSchema.shape, async (params) => {
+  server.tool('manage_database_bundle', 'List, export, import and inspect .rs0n database bundles: a whole scope target with EVERY table it touches - recon plus the full URL workflow (crawl, endpoints, replay, flows, auth, vectors, triage, fuzz, findings) and all FK-linked child rows. This is how a target moves between installs. export saves to file_path (or returns base64); import_file/import_url/inspect read a bundle; imports merge by primary key.', manageDatabaseBundleSchema.shape, async (params) => {
     const result = await manageDatabaseBundle(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('export_scan_data', 'Export scan results as CSV bundles, per dataset: amass, httpx, gau, sublist3r, ctl, subfinder, shuffledns, gospider, subdomainizer, cewl, nuclei, subdomains, roi.', exportScanDataSchema.shape, async (params) => {
+  server.tool('export_scan_data', 'Export a scope target as a ZIP of CSVs - one CSV per database table (every column), grouped by workflow (auth/ urls/ findings/ threat/ config/ recon/) with a manifest. Covers the whole target, not just recon. Save to file_path, or use the query_* tools to read rows directly.', exportScanDataSchema.shape, async (params) => {
     const result = await exportScanData(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
@@ -726,7 +726,7 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('check_session_tokens', 'Test whether session tokens are still honoured by the target, and refresh the dead ones by replaying the auth flow they are tied to. Separate from the CRUD tool because these send real traffic.', checkSessionTokensSchema.shape, async (params) => {
+  server.tool('check_session_tokens', 'Test whether session tokens are still honoured by the target, and refresh the dead ones by replaying the auth flow they are tied to. Refresh is interactive: a flow with an MFA/OTP step returns status "needs_input" with a run_id, answered by action:"provide_refresh_input". Separate from the CRUD tool because these send real traffic.', checkSessionTokensSchema.shape, async (params) => {
     const result = await checkSessionTokens(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
@@ -918,12 +918,12 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
   // ============================================================
   // AUTH FLOWS (document & replay register/login/mfa_otp/reset HTTP flows)
   // ============================================================
-  server.tool('list_auth_flows', 'List a scope target\'s documented authentication flows (register/login/mfa_otp/reset), with step counts. Optionally filter by category.', listAuthFlowsSchema.shape, async (params) => {
+  server.tool('list_auth_flows', 'List a scope target\'s documented authentication flows (register/login/mfa_otp/magic_link/reset), with step counts. Optionally filter by category.', listAuthFlowsSchema.shape, async (params) => {
     const result = await listAuthFlows(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('create_auth_flow', 'Create an auth flow for a target in a category (register/login/mfa_otp/reset), optionally tagging the auth mechanism (auth_type) and a base_url the steps replay against.', createAuthFlowSchema.shape, async (params) => {
+  server.tool('create_auth_flow', 'Create an auth flow for a target in a category (register/login/mfa_otp/magic_link/reset), optionally tagging the auth mechanism (auth_type) and a base_url the steps replay against.', createAuthFlowSchema.shape, async (params) => {
     const result = await createAuthFlow(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
@@ -943,12 +943,12 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('add_auth_flow_step', 'Add a step to an auth flow by supplying a full raw HTTP request; by default the app SENDS it to the target and records the live response (cookies/session carry over from earlier steps). This is the primary way for AI to build a flow.', addAuthFlowStepSchema.shape, async (params) => {
+  server.tool('add_auth_flow_step', 'Add a step to an auth flow by supplying a full raw HTTP request; by default the app SENDS it to the target and records the live response (cookies/session carry over from earlier steps). Pass interaction to mark a step that needs a user-supplied value on refresh (an MFA/OTP code). This is the primary way for AI to build a flow.', addAuthFlowStepSchema.shape, async (params) => {
     const result = await addAuthFlowStep(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('update_auth_flow_step', 'Update a step\'s raw request, name, or order. Does not re-send it (use replay_auth_flow_step).', updateAuthFlowStepSchema.shape, async (params) => {
+  server.tool('update_auth_flow_step', 'Update a step\'s raw request, name, order, capture rules (extractions: omit to leave alone, [] to clear), or refresh interaction (interaction: omit to leave alone, {kind:"none"} to clear). Does not re-send it (use replay_auth_flow_step).', updateAuthFlowStepSchema.shape, async (params) => {
     const result = await updateAuthFlowStep(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
@@ -968,6 +968,26 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
+  server.tool('classify_auth_flow_refresh', 'Classify how an auth flow can be refreshed before relying on it: kind "replay" (renews headlessly, safe for a token\'s auto_refresh), "interactive" (pauses each run for an MFA/OTP or push you supply), or "browser_only" (cannot be replayed: crosses a federated identity provider, hits a bot challenge, or carries a single-use OAuth code; re-capture in the browser instead). Also names the provider it crosses when recognised, and lists the reasons.', classifyAuthFlowRefreshSchema.shape, async (params) => {
+    const result = await classifyAuthFlowRefresh(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('list_auth_flow_candidates', 'List the manual-crawl captures that look like part of an authentication exchange (login/register/MFA/reset), so they can be turned into a flow with import_auth_flow_from_captures instead of transcribing raw requests by hand.', listAuthFlowCandidatesSchema.shape, async (params) => {
+    const result = await listAuthFlowCandidates(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('import_auth_flow_from_captures', 'Build an auth flow (register/login/mfa_otp/magic_link/reset) directly from recorded manual-crawl captures, one step per capture in timestamp order, keeping the real headers/cookies/CSRF values that were observed. The AI-native equivalent of the UI\'s "Import from Manual Crawl".', importAuthFlowFromCapturesSchema.shape, async (params) => {
+    const result = await importAuthFlowFromCaptures(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('build_refresh_flow', 'Adopt the app\'s own silent-refresh request (a capture whose oauth_role is "refresh_request" in list_auth_flow_candidates) as a headless refresh flow: it rewrites the captured refresh token to a {{token:refresh_token}} placeholder so replay spends the CURRENT stored refresh token, sets flow_purpose=refresh, and links it to the anchor session token (anchor_token_id) as its refresh_flow_id. Afterwards, check_session_tokens action:"refresh" on that token replays this flow (a headless OAuth refresh grant) instead of the interactive login, minting a new access token and rotating the refresh token. Needs at least one capture carrying grant_type=refresh_token.', buildRefreshFlowSchema.shape, async (params) => {
+    const result = await buildRefreshFlow(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
   // ============================================================
   // REQUEST FLOW REPLAY - the repeater, detected flows, active detection, and the builder.
   // Same rule as manage_wildcard_tools: everything the Request Flow Replay screens can do is
@@ -984,7 +1004,7 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_request_variants', `The VARIANTS of a target's endpoints. A variant is one distinct recorded request/response of an endpoint (method+host+path); the crawl's captures collapse into variants by a coarse request/response signature. Each variant has a NAME - yours if you set one, otherwise the source it came from ("Active detection", "Manual crawl") - and one variant per endpoint is the PRIMARY, the one the sitemap shows and a leaf click opens. list them (filter by method/host/path), rename one (empty name reverts to the source default), or set_primary. Names and the primary are overlay state and never touch the captures, so a new recording that joins a variant keeps your choices. This is the same model the Configure repeater's variants column shows.`, manageRequestVariantsSchema.shape, async (params) => {
+  server.tool('manage_request_variants', `The VARIANTS of a target's endpoints. A variant is one distinct recorded request/response of an endpoint (method+host+path); the crawl's captures collapse into variants by a coarse request/response signature. Each variant has a NAME - yours if you set one, otherwise the source it came from ("Active detection", "Manual crawl") - and one variant per endpoint is the PRIMARY, the one the sitemap shows and a leaf click opens. list them (filter by method/host/path), rename one (empty name reverts to the source default), set_primary, delete (HIDE from the list - reversible, keeps the captures for every other tool), or restore (unhide). Names, the primary and the hidden flag are overlay state and never touch the captures, so a new recording that joins a variant keeps your choices. This is the same model the Configure repeater's variants column shows.`, manageRequestVariantsSchema.shape, async (params) => {
     const result = await manageRequestVariants(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });

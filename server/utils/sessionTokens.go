@@ -50,11 +50,17 @@ var validSessionTokenTypes = map[string]bool{
 const (
 	tokenRoleCredential = "credential"
 	tokenRoleCompanion  = "companion"
+	// A refresh row is a stored secret SPENT to mint another credential (an OAuth refresh_token, or any
+	// value the app trades for a fresh access token). It is never attached to a resource request and
+	// never graded by an honoured/not-honoured comparison; it is graded only by whether it still mints.
+	// Its own expires_at IS tracked, because a dead refresh token means the whole session is dead.
+	tokenRoleRefresh = "refresh"
 )
 
 var validSessionTokenRoles = map[string]bool{
 	tokenRoleCredential: true,
 	tokenRoleCompanion:  true,
+	tokenRoleRefresh:    true,
 }
 
 // normalizeTokenRole defaults an unset role to credential and refuses anything it does not know.
@@ -67,7 +73,7 @@ func normalizeTokenRole(role string) (string, error) {
 		return tokenRoleCredential, nil
 	}
 	if !validSessionTokenRoles[role] {
-		return "", fmt.Errorf("token_role must be credential or companion")
+		return "", fmt.Errorf("token_role must be credential, companion, or refresh")
 	}
 	return role, nil
 }
@@ -83,7 +89,30 @@ const (
 	// own changes nothing, so the honoured/not-honoured comparison is meaningless for it and
 	// reporting not_honoured reads as "dead credential" for a value that is working perfectly.
 	tokenStatusCompanion = "companion"
+	// A refresh secret is graded by whether it still mints a fresh credential, not by an
+	// honoured/not-honoured comparison, so like a companion it is never sent on its own for grading.
+	// Deliberately absent from sessionTokenRejectedStatuses so it is never read as a dead credential.
+	tokenStatusRefresh = "refresh"
 )
+
+// sessionTokenRejectedStatuses are the validation verdicts that mean the target refused the token.
+// Mirrors the client's REJECTED_STATUSES (RefreshSessionModal.js) so the card, Manage Sessions and
+// Refresh Session all agree on what counts as "expired". A companion's verdict is "companion", which
+// is deliberately absent, so a routing cookie is never treated as a dead credential.
+var sessionTokenRejectedStatuses = map[string]bool{
+	"expired": true, "not_honoured": true, "invalid": true,
+	"unauthorized": true, "rejected": true, "failed": true, "revoked": true,
+}
+
+// sessionTokenLooksDead reports whether a token is known to be dead: its expires_at column has passed
+// or its last validation verdict was a rejection. Used to count active-but-expired credentials so a
+// screen can say "active, but expired" rather than a bare "active".
+func sessionTokenLooksDead(tok SessionToken, now time.Time) bool {
+	if tok.ExpiresAt != nil && tok.ExpiresAt.Before(now) {
+		return true
+	}
+	return sessionTokenRejectedStatuses[strings.ToLower(strings.TrimSpace(tok.LastValidationStatus))]
+}
 
 // SessionToken mirrors a session_tokens row, with the linked flow's name joined on for display.
 type SessionToken struct {
@@ -112,8 +141,23 @@ type SessionToken struct {
 	LastValidationStatus string     `json:"last_validation_status"`
 	LastValidationDetail string     `json:"last_validation_detail"`
 	LastRefreshedAt      *time.Time `json:"last_refreshed_at"`
-	CreatedAt            time.Time  `json:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at"`
+	// AutoRefresh opts this token into unattended refresh as it nears expiry, applied only when its flow
+	// is fully automatable and a refresh has worked before. Off by default. See sessionAutoRefreshLoop.
+	AutoRefresh bool `json:"auto_refresh"`
+	// OAuth access/refresh-token model (docs/OAUTH_REFRESH_DESIGN.md). All optional; empty means unset.
+	// RefreshTokenID / RefreshFlowID are stored as UUID strings ('' = NULL), like AuthFlowID.
+	RefreshTokenID     string    `json:"refresh_token_id"`     // the refresh-role row that renews this one
+	RefreshFlowID      string    `json:"refresh_flow_id"`      // the headless REFRESH flow (auth_flow_id stays creation)
+	RefreshStrategy    string    `json:"refresh_strategy"`     // oauth_refresh_grant | replay_request | browser_recapture | none
+	RefreshTransport   string    `json:"refresh_transport"`    // headless | browser_only | unknown (capability, not a gate)
+	RefreshMaterialKey string    `json:"refresh_material_key"` // optional writeback JSON key override
+	// CredentialKind is the measured/assigned kind of the value (oauth_access_token, oauth_refresh_token,
+	// jwt, opaque_bearer, ...). It is the credential_kind column (also surfaced nested as profile.kind);
+	// read-only here so the UI and MCP can badge an OAuth token without loading the full profile. Written
+	// by captureOAuthTriad and the profiler, not by the generic token PUT.
+	CredentialKind string    `json:"credential_kind"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 
 	// Profile is what the token characterisation engine measured about this credential: its kind,
 	// its lifetime and the provenance of that lifetime, and whether the session can be refreshed.
@@ -144,6 +188,13 @@ type sessionTokenPayload struct {
 	ExpiresAt      *time.Time `json:"expires_at"`
 	IsActive       *bool      `json:"is_active"`
 	Notes          *string    `json:"notes"`
+	AutoRefresh    *bool      `json:"auto_refresh"`
+	// OAuth refresh model, all optional on write (nil = leave alone).
+	RefreshTokenID     *string `json:"refresh_token_id"`
+	RefreshFlowID      *string `json:"refresh_flow_id"`
+	RefreshStrategy    *string `json:"refresh_strategy"`
+	RefreshTransport   *string `json:"refresh_transport"`
+	RefreshMaterialKey *string `json:"refresh_material_key"`
 }
 
 const sessionTokenCols = `t.id::text, t.scope_target_id::text, COALESCE(t.auth_flow_id::text,''),
@@ -154,7 +205,11 @@ const sessionTokenCols = `t.id::text, t.scope_target_id::text, COALESCE(t.auth_f
 	COALESCE(t.cookie_domain,''), COALESCE(t.cookie_secure,false), COALESCE(t.cookie_httponly,false),
 	COALESCE(t.cookie_samesite,''), t.expires_at, COALESCE(t.is_active,false), COALESCE(t.notes,''),
 	t.last_validated_at, COALESCE(t.last_validation_status,''), COALESCE(t.last_validation_detail,''),
-	t.last_refreshed_at, t.created_at, t.updated_at`
+	t.last_refreshed_at, COALESCE(t.auto_refresh,false),
+	COALESCE(t.refresh_token_id::text,''), COALESCE(t.refresh_flow_id::text,''),
+	COALESCE(t.refresh_strategy,''), COALESCE(t.refresh_transport,''),
+	COALESCE(t.refresh_material_key,''), COALESCE(t.credential_kind,''),
+	t.created_at, t.updated_at`
 
 const sessionTokenFrom = ` FROM session_tokens t LEFT JOIN auth_flows f ON f.id = t.auth_flow_id `
 
@@ -188,6 +243,13 @@ type SessionTokenView struct {
 	LastValidationStatus string     `json:"last_validation_status"`
 	LastValidationDetail string     `json:"last_validation_detail"`
 	LastRefreshedAt      *time.Time `json:"last_refreshed_at"`
+	AutoRefresh          bool       `json:"auto_refresh"`
+	RefreshTokenID       string     `json:"refresh_token_id"`
+	RefreshFlowID        string     `json:"refresh_flow_id"`
+	RefreshStrategy      string     `json:"refresh_strategy"`
+	RefreshTransport     string     `json:"refresh_transport"`
+	RefreshMaterialKey   string     `json:"refresh_material_key"`
+	CredentialKind       string     `json:"credential_kind"`
 	CreatedAt            time.Time  `json:"created_at"`
 	UpdatedAt            time.Time  `json:"updated_at"`
 
@@ -252,6 +314,13 @@ func sessionTokenView(t SessionToken) SessionTokenView {
 		LastValidationStatus: t.LastValidationStatus,
 		LastValidationDetail: t.LastValidationDetail,
 		LastRefreshedAt:      t.LastRefreshedAt,
+		AutoRefresh:          t.AutoRefresh,
+		RefreshTokenID:       t.RefreshTokenID,
+		RefreshFlowID:        t.RefreshFlowID,
+		RefreshStrategy:      t.RefreshStrategy,
+		RefreshTransport:     t.RefreshTransport,
+		RefreshMaterialKey:   t.RefreshMaterialKey,
+		CredentialKind:       t.CredentialKind,
 		CreatedAt:            t.CreatedAt, UpdatedAt: t.UpdatedAt,
 		HasValue:         !cred.IsZero(),
 		ValueFingerprint: cred.Fingerprint(),
@@ -468,13 +537,17 @@ func UpdateSessionToken(w http.ResponseWriter, r *http.Request) {
 		  cookie_path = $10, cookie_domain = $11, cookie_secure = $12, cookie_httponly = $13,
 		  cookie_samesite = $14, expires_at = $15, is_active = $16, notes = $17,
 		  last_validation_status = $18, last_validation_detail = $19, token_role = $21,
+		  auto_refresh = $22, refresh_token_id = $23, refresh_flow_id = $24, refresh_strategy = $25,
+		  refresh_transport = $26, refresh_material_key = $27,
 		  updated_at = NOW()
 		WHERE id = $20`,
 		nullUUID(token.AuthFlowID), token.Name, token.TokenType, token.HeaderName, token.CookieName,
 		token.ParamName, token.ValuePrefix, token.TokenValue, token.ScopeDomains, token.CookiePath,
 		token.CookieDomain, token.CookieSecure, token.CookieHTTPOnly, token.CookieSameSite,
 		DeriveSessionTokenExpiry(token.TokenValue, expiresAt),
-		token.IsActive, token.Notes, validationStatus, validationDetail, tokenID, token.TokenRole)
+		token.IsActive, token.Notes, validationStatus, validationDetail, tokenID, token.TokenRole,
+		token.AutoRefresh, nullUUID(token.RefreshTokenID), nullUUID(token.RefreshFlowID),
+		token.RefreshStrategy, token.RefreshTransport, token.RefreshMaterialKey)
 	if err != nil {
 		log.Printf("[SESSION-TOKEN] Failed to update token %s: %v", tokenID, err)
 		http.Error(w, "Failed to update session token", http.StatusInternalServerError)
@@ -632,6 +705,30 @@ func ParseRawSessionTokens(raw, fallbackHost string) []SessionToken {
 // The parsing is stdlib, not hand-rolled. http.Response.Cookies covers quoted values, the two
 // Expires date formats servers actually emit, Max-Age, and SameSite, and every one of those has a
 // hand-rolled version somewhere that gets one of them wrong.
+// reCompanionCookie matches cookie names that are ROUTING or INFRASTRUCTURE, not the session
+// credential: CSRF/XSRF tokens (issued with the session, not the session itself), load-balancer and
+// bot-management cookies. Classifying these as companion means refresh renews them FROM THE SAME LOGIN
+// RESPONSE as the credential (refreshCompanionCookies) instead of demanding each its own auth flow,
+// and they are not graded on their own by validation. The actual session credential (app_session,
+// sid, JSESSIONID, a JWT cookie, ...) does not match and stays a credential.
+var reCompanionCookie = regexp.MustCompile(`(?i)(csrf|xsrf|` + // anti-CSRF tokens
+	`^cf_clearance$|^__cf_bm$|^__cflb$|^cf_ob_info$|^cf_use_ob$|^__cfwaitingroom$|` + // Cloudflare
+	`^aws-?alb|^awsalbcors$|^awsalbtg|` + // AWS ALB
+	`^bigipserver|^f5_|^lb-|` + // F5 / generic load balancer
+	`^incap_ses_|^visid_incap_|^nlbi_|` + // Incapsula
+	`^ak_bmsc$|^bm_sv$|^bm_mi$|^bm_sz$|^_abck$|` + // Akamai bot manager
+	`^arraffinity|^gclb$|^route$|_affinity$)`) // Azure / GCP / generic affinity
+
+// classifyCookieRole returns "companion" for a routing/infra/CSRF cookie, or "" (credential default)
+// otherwise. The turnstile/challenge clearance cookies can never be minted by an app flow at all, so
+// making them companions keeps them out of the per-token flow-refresh they can never satisfy.
+func classifyCookieRole(name string) string {
+	if reCompanionCookie.MatchString(strings.TrimSpace(name)) {
+		return tokenRoleCompanion
+	}
+	return ""
+}
+
 func parseSetCookieTokens(value, fallbackHost string) []SessionToken {
 	resp := &http.Response{Header: http.Header{"Set-Cookie": []string{value}}}
 
@@ -650,6 +747,7 @@ func parseSetCookieTokens(value, fallbackHost string) []SessionToken {
 		token := SessionToken{
 			Name:           c.Name,
 			TokenType:      tokenTypeCookie,
+			TokenRole:      classifyCookieRole(c.Name),
 			CookieName:     c.Name,
 			TokenValue:     c.Value,
 			CookiePath:     path,
@@ -689,6 +787,7 @@ func parseCookieHeaderTokens(value, fallbackHost string) []SessionToken {
 		token := SessionToken{
 			Name:       c.Name,
 			TokenType:  tokenTypeCookie,
+			TokenRole:  classifyCookieRole(c.Name),
 			CookieName: c.Name,
 			TokenValue: c.Value,
 			CookiePath: "/",
@@ -808,6 +907,226 @@ func ParseSessionTokens(w http.ResponseWriter, r *http.Request) {
 
 	// The same projection the list uses.
 	writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{"tokens": sessionTokenViews(tokens)})
+}
+
+// cookieHeaderFromCaptureHeaders pulls the request-side Cookie header out of a stored capture's
+// headers blob, case-insensitively.
+func cookieHeaderFromCaptureHeaders(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(raw, &m) != nil {
+		return ""
+	}
+	for k, v := range m {
+		if strings.EqualFold(strings.TrimSpace(k), "cookie") {
+			if s, ok := v.(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// sessionHostMatches reports whether a captured request's host belongs to the token's host (exact or a
+// sub/parent domain), so a recapture only reads cookies the session was actually sent to.
+func sessionHostMatches(captureHost, tokenHost string) bool {
+	captureHost = strings.ToLower(strings.TrimSpace(captureHost))
+	tokenHost = strings.ToLower(strings.TrimSpace(tokenHost))
+	if captureHost == "" || tokenHost == "" {
+		return false
+	}
+	return captureHost == tokenHost ||
+		strings.HasSuffix(captureHost, "."+tokenHost) ||
+		strings.HasSuffix(tokenHost, "."+captureHost)
+}
+
+// freshestCapturedCookieHeader finds the most recent Cookie request header the crawl captured for a
+// host, optionally only after `since`. This is what browser re-capture reads: the operator logs in in
+// their real browser (past Cloudflare, past the OAuth/IdP interactive steps) with the extension
+// recording, and the fresh session rides in the Cookie header of the requests it captured.
+func freshestCapturedCookieHeader(scopeTargetID, host, since string) (string, error) {
+	query := `SELECT COALESCE(url,''), headers FROM manual_crawl_captures
+	          WHERE scope_target_id = $1 AND headers IS NOT NULL AND headers::text ILIKE '%cookie%'`
+	args := []interface{}{scopeTargetID}
+	if s := strings.TrimSpace(since); s != "" {
+		// Fail CLOSED on a malformed since. The whole point of this filter is to reject a capture older
+		// than the moment the operator opened the panel, so if the timestamp cannot be parsed we must
+		// refuse, not silently drop the clause and hand back the newest capture of any age (which would
+		// re-store a dead session and report it as a fresh recapture). The browser always sends
+		// toISOString (RFC3339); a caller such as the MCP recapture action must do the same.
+		ts, perr := time.Parse(time.RFC3339, s)
+		if perr != nil {
+			ts, perr = time.Parse(time.RFC3339Nano, s)
+		}
+		if perr != nil {
+			return "", fmt.Errorf("since must be an RFC3339 timestamp (e.g. 2026-09-28T09:00:00Z), got %q", s)
+		}
+		query += ` AND timestamp > $2`
+		args = append(args, ts)
+	}
+	query += ` ORDER BY timestamp DESC LIMIT 500`
+
+	rows, err := dbPool.Query(context.Background(), query, args...)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var url string
+		var headers []byte
+		if rows.Scan(&url, &headers) != nil {
+			continue
+		}
+		if !sessionHostMatches(flowURLHost(url), host) {
+			continue
+		}
+		if ck := cookieHeaderFromCaptureHeaders(headers); strings.TrimSpace(ck) != "" {
+			return ck, nil
+		}
+	}
+	return "", rows.Err()
+}
+
+// RecaptureSessionToken handles POST /session-tokens/{id}/refresh-recapture. It refreshes a session
+// from the live browser instead of by replaying a flow: it reads the freshest Cookie header the crawl
+// captured for the token's host and upserts every value in it (the credential and its companions -
+// app_session, CSRF, cf_clearance - all at once). This is the working refresh for an OAuth / federated
+// / Cloudflare session, which no headless replay can renew.
+func RecaptureSessionToken(w http.ResponseWriter, r *http.Request) {
+	tokenID := sessionTokenIDFrom(r)
+	token, err := loadSessionToken(tokenID)
+	if err != nil {
+		http.Error(w, "Session token not found", http.StatusNotFound)
+		return
+	}
+
+	var payload struct {
+		Since string `json:"since"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&payload) // optional body
+	}
+
+	// Reject a malformed since here, with a clear 400, rather than letting it fall through to the read
+	// (which fails closed, but as a 500). An empty since means "no lower bound" and is fine.
+	if s := strings.TrimSpace(payload.Since); s != "" {
+		if _, e1 := time.Parse(time.RFC3339, s); e1 != nil {
+			if _, e2 := time.Parse(time.RFC3339Nano, s); e2 != nil {
+				http.Error(w, "since must be an RFC3339 timestamp (e.g. 2026-09-28T09:00:00Z)", http.StatusBadRequest)
+				return
+			}
+		}
+	}
+
+	host := ""
+	if len(token.ScopeDomains) > 0 {
+		host = token.ScopeDomains[0]
+	}
+	if host == "" {
+		_, host, _ = ScopeTargetBase(token.ScopeTargetID)
+	}
+	if host == "" {
+		http.Error(w, "Could not determine this token's host", http.StatusBadRequest)
+		return
+	}
+
+	cookieHeader, err := freshestCapturedCookieHeader(token.ScopeTargetID, host, payload.Since)
+	if err != nil {
+		log.Printf("[SESSION-TOKEN] recapture read failed for %s: %v", tokenID, err)
+		http.Error(w, "Could not read captured requests", http.StatusInternalServerError)
+		return
+	}
+	if strings.TrimSpace(cookieHeader) == "" {
+		detail := fmt.Sprintf("No captured request carrying a Cookie for %s was found%s. Log in in your "+
+			"browser with the extension recording (Manual Crawling, or Record Auth Flows), then re-capture.",
+			host, sinceSuffix(payload.Since))
+		recordSessionTokenEvent(tokenID, "refresh", "no_capture", detail, nil)
+		writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{
+			"status": "no_capture", "detail": detail, "new_value_set": false,
+		})
+		return
+	}
+
+	// A logged-in browser's Cookie header carries the whole jar: the session credential and the routing
+	// / CSRF companions it needs, but also analytics, consent and ad-tracking cookies. Re-capture must
+	// REFRESH THE SESSION THIS TARGET ALREADY MANAGES, not promote every incidental cookie to a managed
+	// credential. So a parsed cookie is upserted only when it is already tracked for this target, or when
+	// it classifies as a companion (a routing / CSRF / challenge cookie the session genuinely needs).
+	// Everything else is skipped; it is still in the capture if it is ever wanted.
+	tracked := map[string]bool{}
+	if trows, terr := dbPool.Query(context.Background(),
+		`SELECT DISTINCT lower(COALESCE(cookie_name,'')) FROM session_tokens
+		 WHERE scope_target_id = $1 AND token_type = $2 AND COALESCE(cookie_name,'') <> ''`,
+		token.ScopeTargetID, tokenTypeCookie); terr == nil {
+		for trows.Next() {
+			var n string
+			if trows.Scan(&n) == nil && n != "" {
+				tracked[n] = true
+			}
+		}
+		trows.Close()
+	}
+
+	parsed := ParseRawSessionTokens("Cookie: "+cookieHeader, host)
+	updated := []SessionToken{}
+	skipped := 0
+	for i := range parsed {
+		t := parsed[i]
+		if !recaptureShouldRefreshCookie(t.CookieName, tracked) {
+			skipped++
+			continue
+		}
+		t.ScopeTargetID = token.ScopeTargetID
+		t.IsActive = true
+		if err := normalizeSessionTokenWiring(&t); err != nil {
+			continue
+		}
+		stored, err := upsertParsedSessionToken(t, false)
+		if err != nil {
+			log.Printf("[SESSION-TOKEN] recapture upsert failed for %q: %v", t.Name, err)
+			continue
+		}
+		updated = append(updated, stored)
+	}
+	if len(updated) == 0 {
+		http.Error(w, "The captured Cookie header held no tracked session cookie or companion to refresh. "+
+			"If this is a new session, store its cookies once (paste, or Manage Sessions) so re-capture "+
+			"knows which ones to refresh.", http.StatusUnprocessableEntity)
+		return
+	}
+
+	skippedNote := ""
+	if skipped > 0 {
+		skippedNote = fmt.Sprintf(" %d other cookie(s) in the jar (analytics / consent / tracking) were "+
+			"left alone.", skipped)
+	}
+	detail := fmt.Sprintf("Re-captured %d value(s) from the browser session on %s, credential and "+
+		"companions together.%s", len(updated), host, skippedNote)
+	recordSessionTokenEvent(tokenID, "refresh", "recaptured", detail, nil)
+	writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{
+		"status": "recaptured", "detail": detail, "new_value_set": true,
+		"updated": len(updated), "tokens": sessionTokenViews(updated),
+	})
+}
+
+// recaptureShouldRefreshCookie decides whether a cookie from the browser jar is one re-capture should
+// upsert: only if this target already tracks it (by lower-cased cookie name) or it classifies as a
+// companion (routing / CSRF / challenge). Analytics, consent and ad-tracking cookies are neither, so
+// they are left out rather than promoted to managed credentials.
+func recaptureShouldRefreshCookie(cookieName string, tracked map[string]bool) bool {
+	if tracked[strings.ToLower(strings.TrimSpace(cookieName))] {
+		return true
+	}
+	return classifyCookieRole(cookieName) == tokenRoleCompanion
+}
+
+func sinceSuffix(since string) string {
+	if strings.TrimSpace(since) == "" {
+		return ""
+	}
+	return " after you started this re-capture"
 }
 
 // upsertParsedSessionToken writes one parsed token, updating the row with the same identity on this
@@ -942,6 +1261,17 @@ func runSessionTokenValidation(token SessionToken) (string, string, map[string]i
 				"too, so the comparison isolates the credential.", evidence
 	}
 
+	// A refresh secret is spent to mint a fresh credential; it is never sent on a resource request, so
+	// the honoured/not-honoured comparison says nothing about it. It is graded by whether it still
+	// mints (the refresh run, RecordRefreshProof), not here.
+	if token.TokenRole == tokenRoleRefresh {
+		evidence["role"] = tokenRoleRefresh
+		return tokenStatusRefresh,
+			"This is a refresh secret, not a resource credential, so it is not graded on its own. It " +
+				"is spent to mint a fresh credential; its health is whether a refresh run still " +
+				"succeeds with it, not an honoured/not-honoured check.", evidence
+	}
+
 	_, host, base := ScopeTargetBase(token.ScopeTargetID)
 	if host == "" || base == "" {
 		return tokenStatusError,
@@ -963,7 +1293,7 @@ func runSessionTokenValidation(token SessionToken) (string, string, map[string]i
 	if flowProbe := authFlowProbeURL(token.AuthFlowID); flowProbe != "" {
 		target = flowProbe
 		probeSource = "auth_flow_last_step"
-	} else if epProbe := authRequiredProbeURL(token.ScopeTargetID); epProbe != "" {
+	} else if epProbe := authRequiredProbeURL(token.ScopeTargetID, host); epProbe != "" {
 		// Better than the base URL by construction: validation already established that this exact
 		// URL answers 401 or 403 without credentials, so the two arms cannot come back identical
 		// for a reason unrelated to the session. The base URL fallback below is the one that
@@ -1061,11 +1391,17 @@ func runSessionTokenValidation(token SessionToken) (string, string, map[string]i
 	evidence["credential_attached"] = authed.AuthApplied || token.QueryParam() != ""
 
 	// A challenge page means a WAF answered and the application was never reached, so nothing in
-	// this measurement describes the token.
+	// this measurement describes the token. This is NOT a dead session, and saying "refresh it" sends
+	// the operator down a path that cannot work: on an edge like Cloudflare the challenge is bound to
+	// the browser's IP and TLS fingerprint, so no captured session an automated client replays will
+	// ever get past it. tokenStatusError so SessionStillHonoured proceeds rather than killing the run.
 	if IsChallengeBody(authed.Body) {
+		evidence["edge_blocked"] = true
 		return tokenStatusError,
-			"A WAF or bot manager answered instead of the application, so this measurement says " +
-				"nothing about the token.", evidence
+			"A WAF or bot manager answered instead of the application, so this says nothing about the " +
+				"token. This target blocks automated clients at the edge; refreshing the session will " +
+				"not help (the challenge is bound to the browser's IP and TLS fingerprint). Drive it in " +
+				"a browser (domdig / the extension) instead.", evidence
 	}
 
 	// Refused outright. The target read the credential and rejected it, which is a more useful
@@ -1082,12 +1418,28 @@ func runSessionTokenValidation(token SessionToken) (string, string, map[string]i
 	}
 
 	if ResponsesEquivalent(authedFP, anonFP) {
+		// The two arms matched. What that MEANS depends on where we asked. Against a discriminating
+		// probe (the auth flow's last step, or an endpoint validation proved answers 401/403 to an
+		// anonymous caller) a match is real evidence the credential is not honoured. Against the base
+		// URL it is not: a static landing page or an SPA shell answers identically signed in or out,
+		// so a token that works fine on the API measures the same way. Reporting not_honoured there is
+		// the false negative that killed session-gated scans on every SPA. Return inconclusive
+		// (tokenStatusError, which SessionStillHonoured proceeds past) so the credential is still
+		// attached and the scan runs and reports what the target actually does.
+		if probeSource == "base_url" {
+			return tokenStatusError, fmt.Sprintf(
+				"Could not confirm the session from here: the only probe available was the base URL, "+
+					"which answered the same way with the token as without it (%s both ways). On a "+
+					"static landing page or an SPA shell that is expected even for a live token, so "+
+					"this is inconclusive rather than dead. The credential is still attached and the "+
+					"scan will proceed; run a validation scan to record a route that refuses anonymous "+
+					"callers and the next check can settle it.",
+				FingerprintSummary(authedFP)), evidence
+		}
 		return tokenStatusNotHonoured, fmt.Sprintf(
-			"The base URL answered the same way with the token as without it (%s both ways), so it "+
-				"is not being honoured. Worth checking before this is read as a dead credential: if "+
-				"the base URL is a public landing page that looks identical signed in or out, a token "+
-				"that works fine on the API would still measure like this.",
-			FingerprintSummary(authedFP)), evidence
+			"%s answered the same way with the token as without it (%s both ways), and that endpoint "+
+				"refuses anonymous callers, so the credential is not being honoured.",
+			target, FingerprintSummary(authedFP)), evidence
 	}
 
 	return tokenStatusActive, fmt.Sprintf(
@@ -1109,11 +1461,13 @@ func RefreshSessionToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The link to a flow is the entire refresh mechanism. Without it there is nothing to replay, and
-	// saying so plainly beats a generic failure that leaves the operator poking at the button.
-	if token.AuthFlowID == "" {
+	// A link to a flow is the entire refresh mechanism. The REFRESH flow (headless) is preferred, the
+	// CREATION flow (auth_flow) is the fallback; with neither there is nothing to replay, and saying so
+	// plainly beats a generic failure that leaves the operator poking at the button.
+	if token.RefreshFlowID == "" && token.AuthFlowID == "" {
 		detail := "This token is not tied to an auth flow, so there is no way to produce another " +
-			"one. Link it to the login flow that issues it, then refresh."
+			"one. Link it to the login flow that issues it, then refresh. For a session with no " +
+			"replayable flow (an OAuth or federated login), refresh it by pasting a fresh value."
 		recordSessionTokenEvent(tokenID, "refresh", "no_flow", detail, nil)
 		writeSessionTokenJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"status": "no_flow", "detail": detail, "new_value_set": false,
@@ -1121,64 +1475,17 @@ func RefreshSessionToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var issuedCookies []string
-	value, expires, evidence, err := replayFlowForToken(token, &issuedCookies)
+	// Refresh runs through the interactive, resumable runner (sessionRefreshInteractive.go). A flow the
+	// framework can drive on its own completes in one shot and returns the classic
+	// {status, detail, new_value_set}; a flow with a step that needs the operator (an MFA/OTP code)
+	// pauses and returns status "needs_input" with a run_id, which is answered at
+	// POST /session-refresh-runs/{run_id}/input.
+	run, err := startSessionRefreshRun(token)
 	if err != nil {
-		detail := "The auth flow could not be replayed: " + truncateReason(err.Error())
-		recordSessionTokenEvent(tokenID, "refresh", "replay_failed", detail, evidence)
-		writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{
-			"status": "replay_failed", "detail": detail, "new_value_set": false,
-		})
+		http.Error(w, "Failed to start the refresh: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	if value == "" {
-		detail := fmt.Sprintf(
-			"The flow replayed, but no new value for %s turned up in the responses. Check the "+
-				"flow's steps still succeed, and that the credential really is issued as a "+
-				"Set-Cookie or in a response body rather than by a redirect this replay does not "+
-				"follow.", sessionTokenIdentity(token))
-		recordSessionTokenEvent(tokenID, "refresh", "no_token_found", detail, evidence)
-		writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{
-			"status": "no_token_found", "detail": detail, "new_value_set": false,
-		})
-		return
-	}
-
-	// expires_at is replaced outright rather than merged, NULL included. Carrying the previous
-	// expiry forward would describe a value that no longer exists, and a fresh session cookie with
-	// no expiry genuinely has none.
-	//
-	// The validation verdict is cleared for the same reason it is cleared on a paste: it described
-	// the old value.
-	if _, err := dbPool.Exec(context.Background(), `
-		UPDATE session_tokens
-		SET token_value = $1, expires_at = $2, last_refreshed_at = NOW(),
-		    last_validation_status = '', last_validation_detail = '', updated_at = NOW()
-		WHERE id = $3`, value, DeriveSessionTokenExpiry(value, expires), tokenID); err != nil {
-		log.Printf("[SESSION-TOKEN] Failed to write refreshed value for %s: %v", tokenID, err)
-		http.Error(w, "Failed to store the refreshed token", http.StatusInternalServerError)
-		return
-	}
-
-	detail := fmt.Sprintf("Replayed the linked auth flow and took a new value for %s from %s.",
-		sessionTokenIdentity(token), evidence["source"])
-
-	// Companions come from the same login response, so they are taken from it at the same time.
-	// Refreshing a credential and leaving its companion behind is worse than not refreshing at all:
-	// the new session is genuine, the routing cookie still points at the backend the OLD session
-	// lived on, and every authenticated request lands somewhere that has never seen this login.
-	if names := refreshCompanionCookies(token.ScopeTargetID, tokenID, issuedCookies); len(names) > 0 {
-		evidence["companions_refreshed"] = names
-		detail += fmt.Sprintf(" Also refreshed the companion value(s) %s from the same response.",
-			strings.Join(names, ", "))
-	}
-
-	recordSessionTokenEvent(tokenID, "refresh", "refreshed", detail, evidence)
-
-	writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{
-		"status": "refreshed", "detail": detail, "new_value_set": true,
-	})
+	writeSessionTokenJSON(w, http.StatusOK, refreshRunResponse(run))
 }
 
 // refreshCompanionCookies updates the active companion cookies on a target from the Set-Cookie
@@ -1321,25 +1628,34 @@ func replayFlowForToken(token SessionToken, issuedCookies *[]string) (string, *t
 		return "", nil, evidence, fmt.Errorf("every step of the flow failed to send")
 	}
 
-	// Cookies first for a cookie token and the body first for everything else, because that is where
-	// each one is issued. The last occurrence wins in both: a flow that logs in and then rotates the
-	// session on an MFA step issues the value twice, and the first one is already dead by the time
-	// the flow finishes.
+	value, expires, source := extractRefreshedTokenValue(token, setCookies, bodies)
+	if source != "" {
+		evidence["source"] = source
+	}
+	return value, expires, evidence, nil
+}
+
+// extractRefreshedTokenValue pulls the fresh value for a token out of the Set-Cookie headers and the
+// response bodies one flow replay produced. Returns "" when nothing matched; source names where the
+// value was found, for the evidence. Shared by the one-shot refresh (replayFlowForToken) and the
+// resumable interactive runner (sessionRefreshInteractive.go) so the two cannot disagree.
+//
+// Cookies first for a cookie token and the body first for everything else, because that is where each
+// one is issued. The last occurrence wins in both: a flow that logs in and then rotates the session on
+// an MFA step issues the value twice, and the first is already dead by the time the flow finishes.
+func extractRefreshedTokenValue(token SessionToken, setCookies, bodies []string) (string, *time.Time, string) {
 	if token.TokenType == tokenTypeCookie {
 		if value, expires := cookieValueFromSetCookies(setCookies, token.CookieName); value != "" {
-			evidence["source"] = "the Set-Cookie header of the replayed flow"
-			return value, expires, evidence, nil
+			return value, expires, "the Set-Cookie header of the replayed flow"
 		}
 		if value := tokenValueFromBodies(bodies, sessionTokenBodyKeys(token)); value != "" {
-			evidence["source"] = "a response body of the replayed flow"
-			return value, nil, evidence, nil
+			return value, nil, "a response body of the replayed flow"
 		}
-		return "", nil, evidence, nil
+		return "", nil, ""
 	}
 
 	if value := tokenValueFromBodies(bodies, sessionTokenBodyKeys(token)); value != "" {
-		evidence["source"] = "a response body of the replayed flow"
-		return value, nil, evidence, nil
+		return value, nil, "a response body of the replayed flow"
 	}
 	// A bearer token is occasionally handed back as a cookie the front end then reads and promotes
 	// to an Authorization header, so the cookies are still worth a look.
@@ -1348,11 +1664,10 @@ func replayFlowForToken(token SessionToken, issuedCookies *[]string) (string, *t
 			continue
 		}
 		if value, expires := cookieValueFromSetCookies(setCookies, name); value != "" {
-			evidence["source"] = "the Set-Cookie header of the replayed flow"
-			return value, expires, evidence, nil
+			return value, expires, "the Set-Cookie header of the replayed flow"
 		}
 	}
-	return "", nil, evidence, nil
+	return "", nil, ""
 }
 
 // cookieValueFromSetCookies finds the last value issued for one cookie name across a whole replay.
@@ -1464,6 +1779,11 @@ func normalizeTokenKey(key string) string {
 // exactly the way a scan would. Returns nil for a token that rides in the URL, which is not a
 // failure: see QueryParam and ApplyToURL.
 func (t SessionToken) AuthMaterial(host string) *ScopedAuthMaterial {
+	// A refresh secret is spent to mint a fresh credential, never sent on a resource request. It must
+	// never be attached to a scan, so it produces no auth material regardless of its token_type.
+	if t.TokenRole == tokenRoleRefresh {
+		return nil
+	}
 	material := &ScopedAuthMaterial{
 		Host:    strings.ToLower(host),
 		Headers: map[string]string{},
@@ -1495,6 +1815,10 @@ func (t SessionToken) AuthMaterial(host string) *ScopedAuthMaterial {
 // QueryParam returns the query parameter this token rides in, or empty if it travels in a header or
 // a cookie. An api_key with no header name is a query parameter by elimination.
 func (t SessionToken) QueryParam() string {
+	// A refresh secret never rides in a URL (or anywhere on a request); it is spent to mint, not sent.
+	if t.TokenRole == tokenRoleRefresh {
+		return ""
+	}
 	if t.ParamName == "" {
 		return ""
 	}
@@ -1554,33 +1878,38 @@ func normalizeSessionTokenWiring(t *SessionToken) error {
 	t.CookieName = strings.TrimSpace(t.CookieName)
 	t.ParamName = strings.TrimSpace(t.ParamName)
 
-	switch t.TokenType {
-	case tokenTypeBearer:
-		if t.HeaderName == "" {
-			t.HeaderName = "Authorization"
-		}
-		if t.ValuePrefix == "" {
-			t.ValuePrefix = "Bearer "
-		}
-	case tokenTypeHeader:
-		if t.HeaderName == "" {
-			return fmt.Errorf("a header token needs a header_name, or it can never be sent")
-		}
-	case tokenTypeCookie:
-		if t.CookieName == "" {
-			return fmt.Errorf("a cookie token needs a cookie_name, or it can never be sent")
-		}
-		if t.CookiePath == "" {
-			t.CookiePath = "/"
-		}
-	case tokenTypeAPIKey:
-		if t.HeaderName == "" && t.ParamName == "" {
-			return fmt.Errorf("an api_key token needs a header_name or a param_name, or it can " +
-				"never be sent")
-		}
-	case tokenTypeQuery:
-		if t.ParamName == "" {
-			return fmt.Errorf("a query token needs a param_name, or it can never be sent")
+	// A refresh secret is never wired to a header/cookie/query slot, so the per-type "needs a slot"
+	// requirements below do not apply to it: enforcing them would reject a refresh row for lacking a
+	// slot it will never use. Its token_type enum is still validated above; the slot is just optional.
+	if t.TokenRole != tokenRoleRefresh {
+		switch t.TokenType {
+		case tokenTypeBearer:
+			if t.HeaderName == "" {
+				t.HeaderName = "Authorization"
+			}
+			if t.ValuePrefix == "" {
+				t.ValuePrefix = "Bearer "
+			}
+		case tokenTypeHeader:
+			if t.HeaderName == "" {
+				return fmt.Errorf("a header token needs a header_name, or it can never be sent")
+			}
+		case tokenTypeCookie:
+			if t.CookieName == "" {
+				return fmt.Errorf("a cookie token needs a cookie_name, or it can never be sent")
+			}
+			if t.CookiePath == "" {
+				t.CookiePath = "/"
+			}
+		case tokenTypeAPIKey:
+			if t.HeaderName == "" && t.ParamName == "" {
+				return fmt.Errorf("an api_key token needs a header_name or a param_name, or it can " +
+					"never be sent")
+			}
+		case tokenTypeQuery:
+			if t.ParamName == "" {
+				return fmt.Errorf("a query token needs a param_name, or it can never be sent")
+			}
 		}
 	}
 
@@ -1655,6 +1984,24 @@ func applySessionTokenPayload(t *SessionToken, p sessionTokenPayload) {
 	if p.Notes != nil {
 		t.Notes = *p.Notes
 	}
+	if p.AutoRefresh != nil {
+		t.AutoRefresh = *p.AutoRefresh
+	}
+	if p.RefreshTokenID != nil {
+		t.RefreshTokenID = strings.TrimSpace(*p.RefreshTokenID)
+	}
+	if p.RefreshFlowID != nil {
+		t.RefreshFlowID = strings.TrimSpace(*p.RefreshFlowID)
+	}
+	if p.RefreshStrategy != nil {
+		t.RefreshStrategy = *p.RefreshStrategy
+	}
+	if p.RefreshTransport != nil {
+		t.RefreshTransport = *p.RefreshTransport
+	}
+	if p.RefreshMaterialKey != nil {
+		t.RefreshMaterialKey = *p.RefreshMaterialKey
+	}
 }
 
 func insertSessionToken(t SessionToken) (string, error) {
@@ -1664,8 +2011,10 @@ func insertSessionToken(t SessionToken) (string, error) {
 		  (scope_target_id, auth_flow_id, name, token_type, token_role, header_name, cookie_name,
 		   param_name,
 		   value_prefix, token_value, scope_domains, cookie_path, cookie_domain, cookie_secure,
-		   cookie_httponly, cookie_samesite, expires_at, is_active, notes)
-		VALUES ($1,$2,$3,$4,$19,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+		   cookie_httponly, cookie_samesite, expires_at, is_active, notes, auto_refresh,
+		   refresh_token_id, refresh_flow_id, refresh_strategy, refresh_transport, refresh_material_key)
+		VALUES ($1,$2,$3,$4,$19,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$20,
+		   $21,$22,$23,$24,$25)
 		RETURNING id::text`,
 		t.ScopeTargetID, nullUUID(t.AuthFlowID), t.Name, t.TokenType, t.HeaderName, t.CookieName,
 		t.ParamName, t.ValuePrefix, t.TokenValue, t.ScopeDomains, t.CookiePath, t.CookieDomain,
@@ -1673,7 +2022,9 @@ func insertSessionToken(t SessionToken) (string, error) {
 		// A bearer token that states its own exp should not be stored as "never expires", which is
 		// how a credential dead for eleven days went on passing every expiry check in the framework.
 		DeriveSessionTokenExpiry(t.TokenValue, t.ExpiresAt), t.IsActive,
-		t.Notes, t.TokenRole).Scan(&id)
+		t.Notes, t.TokenRole, t.AutoRefresh,
+		nullUUID(t.RefreshTokenID), nullUUID(t.RefreshFlowID), t.RefreshStrategy, t.RefreshTransport,
+		t.RefreshMaterialKey).Scan(&id)
 	return id, err
 }
 
@@ -1690,7 +2041,10 @@ func scanSessionToken(row interface{ Scan(...interface{}) error }) (SessionToken
 		&t.HeaderName, &t.CookieName, &t.ParamName, &t.ValuePrefix, &t.TokenValue, &t.ScopeDomains,
 		&t.CookiePath, &t.CookieDomain, &t.CookieSecure, &t.CookieHTTPOnly, &t.CookieSameSite,
 		&t.ExpiresAt, &t.IsActive, &t.Notes, &t.LastValidatedAt, &t.LastValidationStatus,
-		&t.LastValidationDetail, &t.LastRefreshedAt, &t.CreatedAt, &t.UpdatedAt)
+		&t.LastValidationDetail, &t.LastRefreshedAt, &t.AutoRefresh,
+		&t.RefreshTokenID, &t.RefreshFlowID, &t.RefreshStrategy, &t.RefreshTransport, &t.RefreshMaterialKey,
+		&t.CredentialKind,
+		&t.CreatedAt, &t.UpdatedAt)
 	if t.ScopeDomains == nil {
 		t.ScopeDomains = []string{}
 	}
@@ -1792,7 +2146,17 @@ func writeSessionTokenJSON(w http.ResponseWriter, status int, payload interface{
 // Preferred over the scope target's base URL, which cannot answer the question at all when the root
 // is a static shell, a CDN index or a 404: it returns the same bytes signed in or out, so a healthy
 // token measures as not_honoured. That false negative is what made the whole check untrustworthy.
-func authRequiredProbeURL(scopeTargetID string) string {
+// authRequiredProbeURL finds a validated auth-gated endpoint to use as the discriminating probe.
+//
+// Host-filtered on purpose. The cookie being validated applies only to its own host, so probing a
+// gated endpoint on a DIFFERENT in-scope host (auth.nebius.com when the token is for
+// console.nebius.com) sends the cookie nowhere, both arms come back identical, and a live token
+// measures as not-honoured. Only GET/HEAD, because the validator sends GET: a POST-only gateway
+// answers 404/405 to a GET whether or not the caller is authenticated, so it discriminates nothing.
+func authRequiredProbeURL(scopeTargetID, host string) string {
+	if strings.TrimSpace(host) == "" {
+		return ""
+	}
 	var url string
 	err := dbPool.QueryRow(context.Background(), `
 		SELECT url FROM endpoint_validation_results
@@ -1800,8 +2164,9 @@ func authRequiredProbeURL(scopeTargetID string) string {
 		  AND status = 'valid'
 		  AND reason_code = 'valid.auth_required'
 		  AND COALESCE(method,'GET') IN ('GET','HEAD')
+		  AND lower(split_part(url,'/',3)) = lower($2)
 		ORDER BY url
-		LIMIT 1`, scopeTargetID).Scan(&url)
+		LIMIT 1`, scopeTargetID, host).Scan(&url)
 	if err != nil {
 		return ""
 	}
@@ -2087,7 +2452,7 @@ func SessionStillHonoured(ctx context.Context, scopeTargetID string) (alive bool
 	rows, err := dbPool.Query(ctx,
 		`SELECT `+sessionTokenCols+sessionTokenFrom+
 			`WHERE t.scope_target_id = $1 AND COALESCE(t.is_active,false)
-			   AND COALESCE(t.token_role,'credential') <> 'companion'
+			   AND COALESCE(t.token_role,'credential') NOT IN ('companion','refresh')
 			 ORDER BY t.created_at ASC`, scopeTargetID)
 	if err != nil {
 		// A database problem is not evidence that the session died, and stopping a four hour scan
@@ -2112,10 +2477,11 @@ func SessionStillHonoured(ctx context.Context, scopeTargetID string) (alive bool
 		switch status {
 		case tokenStatusActive, tokenStatusCompanion:
 			return true, ""
-		case tokenStatusError:
-			// Could not be graded, which is not the same as being refused. Try the next credential
-			// and, if that was the only one, let the scan continue rather than killing it on a
-			// probe that failed for its own reasons.
+		case tokenStatusError, tokenStatusRefresh:
+			// Error: could not be graded, which is not the same as being refused. Refresh: a mint secret
+			// is never a session-liveness signal (and is excluded by the query above; this is defence in
+			// depth). Skip either and, if it was the only row, let the scan continue rather than killing
+			// it on a probe that failed for its own reasons or on a value that was never a credential.
 			continue
 		default:
 			// The reason aborts a scan and lands in the run record, so it names the row exactly as

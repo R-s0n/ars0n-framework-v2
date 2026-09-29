@@ -215,6 +215,39 @@ func TestAnUnreadableExpiryIsNotTreatedAsExpired(t *testing.T) {
 	}
 }
 
+// A refresh secret is spent to mint a fresh credential and must NEVER be attached to a scan. The
+// per-token AuthMaterial guard does not cover this path (ApplySessionTokens reads columns directly),
+// so the exclusion has to live in the SELECT. This pins it: an active refresh-role bearer with a live
+// value passes every other filter, so if the role exclusion regresses it goes on the wire.
+func TestARefreshRoleSecretIsNeverAttachedToAScan(t *testing.T) {
+	ctx := triageTestDB(t)
+	if err := EnsureSessionTokenProfileSchema(ctx); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	target := sessionSourceTestTarget(t, ctx)
+	if _, err := dbPool.Exec(ctx, `
+		INSERT INTO session_tokens
+		  (scope_target_id, name, token_type, token_role, header_name, token_value, is_active)
+		VALUES ($1,'oauth refresh secret','bearer','refresh','Authorization','refresh-secret-value-abc',TRUE)`,
+		target); err != nil {
+		t.Fatalf("insert refresh token: %v", err)
+	}
+
+	c := newTestAuthContext()
+	c.ApplySessionTokens(target)
+	if n := attachedCount(c); n != 0 {
+		t.Fatalf("a refresh-role secret was attached to %d scope(s); it must never go on the wire", n)
+	}
+
+	// The exclusion must not over-reach: a normal credential on the same target is still attached.
+	sessionSourceInsertToken(t, ctx, target, "live credential", "an-opaque-live-credential", nil)
+	c2 := newTestAuthContext()
+	c2.ApplySessionTokens(target)
+	if attachedCount(c2) == 0 {
+		t.Fatalf("a normal credential alongside a refresh row was not attached; the exclusion over-reached")
+	}
+}
+
 // The unit behind the gate, without a database, so every branch is pinned cheaply.
 func TestCredentialSaysItIsDead(t *testing.T) {
 	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)

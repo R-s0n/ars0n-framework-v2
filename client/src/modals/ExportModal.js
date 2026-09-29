@@ -1,38 +1,14 @@
-import { Modal, Button, Card, Spinner, Tab, Tabs, Form, Table, Badge } from 'react-bootstrap';
+import { Modal, Button, Spinner, Tab, Tabs, Form, Table, Badge } from 'react-bootstrap';
 import { useState, useEffect } from 'react';
 
 function ExportModal({ show, handleClose }) {
   const [activeTab, setActiveTab] = useState('csv');
   
-  const [selectedOptions, setSelectedOptions] = useState({
-    amass: true,
-    httpx: true,
-    gau: true,
-    sublist3r: true,
-    assetfinder: true,
-    ctl: true,
-    subfinder: true,
-    shuffledns: true,
-    gospider: true,
-    subdomainizer: true,
-    roi: true,
-    subdomains: true,
-    cloud_enum: true,
-    metabigor_company: true,
-    katana_company: true,
-    dnsx_company: true,
-    securitytrails_company: true,
-    github_recon: true,
-    shodan_company: true,
-    censys_company: true,
-    amass_enum_company: true,
-    amass_intel: true,
-    nuclei: true,
-    cewl: true,
-    ip_port_scans: true,
-    consolidated_attack_surface: true
-  });
-  
+  // CSV export is now schema-driven and complete (one CSV per table, grouped by workflow), so the old
+  // 26 per-tool checkboxes are gone. The only choices are which targets and whether to drop the long
+  // recon tail. Coverage comes from the same engine as the .rs0n bundle, so it can never go stale.
+  const [curatedOnly, setCuratedOnly] = useState(false);
+
   const [isExporting, setIsExporting] = useState(false);
   
   const [scopeTargets, setScopeTargets] = useState([]);
@@ -40,11 +16,12 @@ function ExportModal({ show, handleClose }) {
   const [loadingScopeTargets, setLoadingScopeTargets] = useState(false);
   const [isDatabaseExporting, setIsDatabaseExporting] = useState(false);
 
+  // Both tabs choose scope targets now, so load them whenever the modal opens.
   useEffect(() => {
-    if (show && activeTab === 'database') {
+    if (show) {
       fetchScopeTargets();
     }
-  }, [show, activeTab]);
+  }, [show]);
 
   const fetchScopeTargets = async () => {
     setLoadingScopeTargets(true);
@@ -66,34 +43,14 @@ function ExportModal({ show, handleClose }) {
     }
   };
 
-  const handleOptionClick = (option) => {
-    setSelectedOptions(prev => ({
-      ...prev,
-      [option]: !prev[option]
-    }));
-  };
 
+  // Both tabs select scope targets now, so these act on the same set.
   const handleSelectAll = () => {
-    if (activeTab === 'csv') {
-      setSelectedOptions(Object.keys(selectedOptions).reduce((acc, key) => {
-        acc[key] = true;
-        return acc;
-      }, {}));
-    } else if (activeTab === 'database') {
-      const allIds = new Set(scopeTargets.map(target => target.id));
-      setSelectedScopeTargets(allIds);
-    }
+    setSelectedScopeTargets(new Set(scopeTargets.map(target => target.id)));
   };
 
   const handleDeselectAll = () => {
-    if (activeTab === 'csv') {
-      setSelectedOptions(Object.keys(selectedOptions).reduce((acc, key) => {
-        acc[key] = false;
-        return acc;
-      }, {}));
-    } else if (activeTab === 'database') {
-      setSelectedScopeTargets(new Set());
-    }
+    setSelectedScopeTargets(new Set());
   };
 
   const handleScopeTargetToggle = (targetId) => {
@@ -109,6 +66,10 @@ function ExportModal({ show, handleClose }) {
   };
 
   const handleExport = async () => {
+    if (selectedScopeTargets.size === 0) {
+      alert('Please select at least one scope target to export.');
+      return;
+    }
     try {
       setIsExporting(true);
       const response = await fetch(`/api/api/export-data`, {
@@ -116,7 +77,10 @@ function ExportModal({ show, handleClose }) {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(selectedOptions)
+        body: JSON.stringify({
+          scope_target_ids: Array.from(selectedScopeTargets),
+          curated_only: curatedOnly,
+        })
       });
 
       if (!response.ok) {
@@ -128,7 +92,7 @@ function ExportModal({ show, handleClose }) {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `export-${new Date().toISOString().slice(0,19).replace(/:/g, '-')}.zip`;
+      a.download = `ars0n-csv-export-${new Date().toISOString().slice(0,19).replace(/:/g, '-')}.zip`;
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
@@ -183,170 +147,93 @@ function ExportModal({ show, handleClose }) {
     }
   };
 
-  const exportOptions = [
-    {
-      id: 'amass',
-      label: 'Amass (Wildcard)',
-      description: 'Comprehensive wildcard subdomain discovery including DNS records, IP addresses, ASNs, subnets, service providers, and cloud assets.'
-    },
-    {
-      id: 'httpx',
-      label: 'HTTPX',
-      description: 'HTTP probing results for discovered domains and subdomains.'
-    },
-    {
-      id: 'gau',
-      label: 'GAU (Get All URLs)',
-      description: 'URL discovery from archived sources like Wayback Machine and CommonCrawl.'
-    },
-    {
-      id: 'sublist3r',
-      label: 'Passive OSINT',
-      description: 'Subdomain enumeration from free passive OSINT sources (RapidDNS, URLScan.io, OTX, HackerTarget).'
-    },
-    {
-      id: 'assetfinder',
-      label: 'Assetfinder',
-      description: 'Asset discovery tool for finding domains and subdomains.'
-    },
-    {
-      id: 'ctl',
-      label: 'Certificate Transparency Logs',
-      description: 'Subdomain discovery through SSL certificate transparency logs.'
-    },
-    {
-      id: 'subfinder',
-      label: 'Subfinder',
-      description: 'Passive subdomain discovery using multiple data sources.'
-    },
-    {
-      id: 'shuffledns',
-      label: 'ShuffleDNS',
-      description: 'DNS bruteforce tool for subdomain enumeration.'
-    },
-    {
-      id: 'gospider',
-      label: 'GoSpider',
-      description: 'Web crawler for discovering URLs and endpoints.'
-    },
-    {
-      id: 'subdomainizer',
-      label: 'Subdomainizer',
-      description: 'Subdomain discovery through JavaScript files and external sources.'
-    },
-    {
-      id: 'cewl',
-      label: 'CeWL',
-      description: 'Custom word list generation from web crawling.'
-    },
-    {
-      id: 'cloud_enum',
-      label: 'Cloud Enum',
-      description: 'Multi-cloud asset enumeration for AWS, Azure, and Google Cloud platforms.'
-    },
-    {
-      id: 'metabigor_company',
-      label: 'Metabigor Company',
-      description: 'Network intelligence gathering including ASN and IP range discovery for companies.'
-    },
-    {
-      id: 'katana_company',
-      label: 'Katana Company',
-      description: 'Advanced web crawling for cloud asset discovery and endpoint enumeration.'
-    },
-    {
-      id: 'dnsx_company',
-      label: 'DNSx Company',
-      description: 'Advanced DNS toolkit for company domain resolution and record discovery.'
-    },
-    {
-      id: 'securitytrails_company',
-      label: 'SecurityTrails Company',
-      description: 'Historical DNS data and passive domain intelligence.'
-    },
-    {
-      id: 'github_recon',
-      label: 'GitHub Recon',
-      description: 'GitHub organization reconnaissance for domain and asset discovery.'
-    },
-    {
-      id: 'shodan_company',
-      label: 'Shodan Company',
-      description: 'Internet-connected device and service discovery for companies.'
-    },
-    {
-      id: 'censys_company',
-      label: 'Censys Company',
-      description: 'Internet-wide scanning platform for asset discovery and monitoring.'
-    },
-    {
-      id: 'amass_enum_company',
-      label: 'Amass Enum Company',
-      description: 'Company-focused subdomain enumeration with cloud asset discovery.'
-    },
-    {
-      id: 'amass_intel',
-      label: 'Amass Intel',
-      description: 'Network intelligence gathering for ASN and IP range discovery.'
-    },
-    {
-      id: 'nuclei',
-      label: 'Nuclei',
-      description: 'Vulnerability scanning with customizable templates.'
-    },
-    {
-      id: 'ip_port_scans',
-      label: 'IP/Port Scans',
-      description: 'Network range scanning for live IPs and open ports.'
-    },
-    {
-      id: 'consolidated_attack_surface',
-      label: 'Consolidated Attack Surface',
-      description: 'Comprehensive attack surface mapping including all discovered assets.'
-    },
-    {
-      id: 'subdomains',
-      label: 'Consolidated Subdomains',
-      description: 'All subdomain discovery results consolidated across multiple tools.'
-    },
-    {
-      id: 'roi',
-      label: 'ROI Analysis',
-      description: 'Target analysis with vulnerability indicators, SSL/TLS issues, and security metrics.'
-    }
-  ];
+
+  // Shared scope-target picker: both CSV and .rs0n export choose targets the same way now.
+  const renderScopeTargetTable = () => (
+    loadingScopeTargets ? (
+      <div className="text-center py-4">
+        <Spinner animation="border" variant="danger" />
+        <p className="text-white mt-3">Loading scope targets...</p>
+      </div>
+    ) : (
+      <div style={{ maxHeight: '50vh', overflowY: 'auto' }}>
+        <Table striped variant="dark" hover>
+          <thead>
+            <tr>
+              <th style={{ width: '40px' }}>
+                <Form.Check
+                  type="checkbox"
+                  checked={selectedScopeTargets.size === scopeTargets.length && scopeTargets.length > 0}
+                  onChange={() => {
+                    if (selectedScopeTargets.size === scopeTargets.length) {
+                      setSelectedScopeTargets(new Set());
+                    } else {
+                      setSelectedScopeTargets(new Set(scopeTargets.map(target => target.id)));
+                    }
+                  }}
+                />
+              </th>
+              <th>Type</th>
+              <th>Scope Target</th>
+              <th>Status</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            {scopeTargets.map((target) => (
+              <tr key={target.id}>
+                <td>
+                  <Form.Check
+                    type="checkbox"
+                    checked={selectedScopeTargets.has(target.id)}
+                    onChange={() => handleScopeTargetToggle(target.id)}
+                  />
+                </td>
+                <td>
+                  <Badge bg={target.type === 'Company' ? 'warning' : target.type === 'Wildcard' ? 'info' : 'secondary'}>
+                    {target.type}
+                  </Badge>
+                </td>
+                <td className="text-white">{target.scope_target}</td>
+                <td>
+                  <Badge bg={target.active ? 'success' : 'secondary'}>
+                    {target.active ? 'Active' : 'Inactive'}
+                  </Badge>
+                </td>
+                <td className="text-white-50 small">
+                  {new Date(target.created_at).toLocaleDateString()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      </div>
+    )
+  );
 
   const renderCSVExport = () => (
     <>
-      <div className="mb-4">
-        <p className="text-white-50 mb-0">
-          Select the data you want to export. All options are selected by default.
+      <div className="mb-3">
+        <p className="text-white-50 mb-2">
+          A ZIP of CSVs for the selected targets: one file per database table, grouped by workflow
+          (auth, urls, findings, threat, config, recon), with a manifest. This covers everything the
+          target holds, not just recon.
         </p>
+        <div className="d-flex justify-content-between align-items-center">
+          <span className="text-white">
+            <strong>{selectedScopeTargets.size}</strong> of <strong>{scopeTargets.length}</strong> targets selected
+          </span>
+          <Form.Check
+            type="switch"
+            id="csv-curated-only"
+            className="text-white-50"
+            checked={curatedOnly}
+            onChange={(e) => setCuratedOnly(e.target.checked)}
+            label="Curated only (skip the long recon table dump)"
+          />
+        </div>
       </div>
-      <div className="d-flex flex-column gap-3" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
-        {exportOptions.map((option) => (
-          <Card 
-            key={option.id} 
-            className={`bg-dark border ${selectedOptions[option.id] ? 'border-danger' : 'border-secondary'}`}
-            onClick={() => handleOptionClick(option.id)}
-            style={{ 
-              cursor: 'pointer',
-              transition: 'all 0.2s ease-in-out'
-            }}
-          >
-            <Card.Body className="py-3">
-              <div>
-                <h6 className={`mb-1 ${selectedOptions[option.id] ? 'text-danger' : 'text-white'}`}>
-                  {option.label}
-                </h6>
-                <p className="text-white-50 small mb-0">
-                  {option.description}
-                </p>
-              </div>
-            </Card.Body>
-          </Card>
-        ))}
-      </div>
+      {renderScopeTargetTable()}
     </>
   );
 
@@ -354,7 +241,8 @@ function ExportModal({ show, handleClose }) {
     <>
       <div className="mb-4">
         <p className="text-white-50 mb-2">
-          Export complete database for selected scope targets. This includes all scan results, configurations, and related data.
+          Export the complete database for the selected targets: every table and every FK-linked child
+          row, so the whole target (recon and the full URL workflow) moves to another install intact.
         </p>
         <div className="d-flex justify-content-between align-items-center">
           <span className="text-white">
@@ -365,72 +253,13 @@ function ExportModal({ show, handleClose }) {
           </Badge>
         </div>
       </div>
-
-      {loadingScopeTargets ? (
-        <div className="text-center py-4">
-          <Spinner animation="border" variant="danger" />
-          <p className="text-white mt-3">Loading scope targets...</p>
-        </div>
-      ) : (
-        <div style={{ maxHeight: '50vh', overflowY: 'auto' }}>
-          <Table striped variant="dark" hover>
-            <thead>
-              <tr>
-                <th style={{ width: '40px' }}>
-                  <Form.Check
-                    type="checkbox"
-                    checked={selectedScopeTargets.size === scopeTargets.length && scopeTargets.length > 0}
-                    onChange={() => {
-                      if (selectedScopeTargets.size === scopeTargets.length) {
-                        setSelectedScopeTargets(new Set());
-                      } else {
-                        setSelectedScopeTargets(new Set(scopeTargets.map(target => target.id)));
-                      }
-                    }}
-                  />
-                </th>
-                <th>Type</th>
-                <th>Scope Target</th>
-                <th>Status</th>
-                <th>Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {scopeTargets.map((target) => (
-                <tr key={target.id}>
-                  <td>
-                    <Form.Check
-                      type="checkbox"
-                      checked={selectedScopeTargets.has(target.id)}
-                      onChange={() => handleScopeTargetToggle(target.id)}
-                    />
-                  </td>
-                  <td>
-                    <Badge bg={target.type === 'Company' ? 'warning' : target.type === 'Wildcard' ? 'info' : 'secondary'}>
-                      {target.type}
-                    </Badge>
-                  </td>
-                  <td className="text-white">{target.scope_target}</td>
-                  <td>
-                    <Badge bg={target.active ? 'success' : 'secondary'}>
-                      {target.active ? 'Active' : 'Inactive'}
-                    </Badge>
-                  </td>
-                  <td className="text-white-50 small">
-                    {new Date(target.created_at).toLocaleDateString()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        </div>
-      )}
+      {renderScopeTargetTable()}
     </>
   );
 
   const isDisabled = () => {
     if (activeTab === 'csv') {
-      return !Object.values(selectedOptions).some(value => value) || isExporting;
+      return selectedScopeTargets.size === 0 || isExporting || loadingScopeTargets;
     } else if (activeTab === 'database') {
       return selectedScopeTargets.size === 0 || isDatabaseExporting || loadingScopeTargets;
     }

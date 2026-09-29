@@ -84,6 +84,27 @@ func TestReflectionUntestedTail(t *testing.T) {
 	}
 }
 
+// A host abandoned mid-run for a WAF wall must read as blocked (unknown), never as not_reflected: an
+// edge that refuses the client is the "blocked" case, and recording it clean would be the silent
+// negative the whole status vocabulary exists to prevent.
+func TestReflectionHostBlockedOutcome(t *testing.T) {
+	for _, point := range ReflectionProbedPoints() {
+		out := reflectionHostBlockedOutcome(point)
+		if out.Status != ReflectionBlocked {
+			t.Fatalf("point %q: status = %q, want %q", point, out.Status, ReflectionBlocked)
+		}
+		if out.Status == ReflectionNotReflected {
+			t.Fatalf("point %q recorded not_reflected, which claims a measurement nobody made", point)
+		}
+		if out.InsertionPoint != point {
+			t.Fatalf("the insertion point was lost: %q", out.InsertionPoint)
+		}
+		if !strings.Contains(strings.ToLower(out.Detail), "not sent") {
+			t.Fatalf("the row does not say the probe was not sent: %q", out.Detail)
+		}
+	}
+}
+
 // UNTESTED, NEVER CLEAN. A negative nobody asked for is the silent clean the status vocabulary
 // exists to stop.
 func TestReflectionUntestedOutcome(t *testing.T) {

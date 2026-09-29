@@ -254,7 +254,11 @@ func flowCardFlowsMetric(scopeTargetID string) FlowCardMetric {
 		return unavailableMetric(err, started)
 	}
 
-	segments := segmentCaptureFlows(captures)
+	// reportableCaptureFlows, not segmentCaptureFlows: the card's flow count must be the number the
+	// list would show, and the list drops single-request segments (a flow is two or more requests).
+	// Counting the raw segments here would put a headline on the card that the button below it disagrees
+	// with, which is the "counts that are not counts" failure this file is otherwise careful about.
+	segments := reportableCaptureFlows(captures)
 
 	inputs := make([]FlowDetectionInput, 0, len(segments))
 	for _, flow := range segments {

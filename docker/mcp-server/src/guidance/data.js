@@ -264,13 +264,24 @@ module.exports = {
     lies: 'The grouping names are free text and are not checked against the lists the modals offer, ' +
       'so a typo silently creates a new group instead of erroring, and the collection then looks ' +
       'sparser than it is.',
+    rule: 'PRE-BUILT FIRST, CUSTOM ONLY FOR GAPS. Each of these four collections has a catalogue of ' +
+      'standard names the UI modal offers - the QUESTIONS list in ApplicationQuestionsModal, the ' +
+      'MECHANISMS list in MechanismsModal, DEFAULT_OBJECTS in NotableObjectsModal and ' +
+      'SECURITY_CONTROLS in SecurityControlsModal. Review those standard names and fill the ones ' +
+      'that apply to THIS target FIRST, reusing their exact text as the name (fill a standard entry ' +
+      'only where you have real evidence for it; do not pad the rest). Create a CUSTOM name ONLY for ' +
+      'a genuine target-specific gap no standard name covers. Because the names are free text and ' +
+      'unchecked, a custom name where a standard one fits fragments the model and reads as coverage ' +
+      'that is not there - it is the most common mistake here, so reach for the catalogue before ' +
+      'inventing a name.',
     next: 'manage_threat_model action:"create"',
     learn: 'kb://methodology/web-app-methodology',
     derived: false,
     actions: {
       list: {
         tool: 'Every row in one collection on a target, with a count per grouping name. Pass name ' +
-          'to narrow to one group.',
+          'to narrow to one group. List FIRST to see which standard catalogue names are already ' +
+          'filled before adding more, so you fill the pre-built set rather than duplicating it.',
         next: 'manage_threat_model_notes action:"create"',
       },
       update: {
@@ -284,7 +295,9 @@ module.exports = {
       create: {
         tool: 'Adds a row under a grouping name. The column each field writes differs per ' +
           'collection: name is the question text, mechanism name, object name or control name, and ' +
-          'content is the answer, notes, JSON example or note respectively.',
+          'content is the answer, notes, JSON example or note respectively. Prefer a name from the ' +
+          'modal\'s standard catalogue (see the rule on this tool); a custom name is for a gap the ' +
+          'catalogue does not cover, not a synonym for one it does.',
         lies: 'notable_objects expects a pasted JSON example in content, and mechanisms expect a ' +
           'short mechanism name rather than prose, for the same reason threat mechanisms do: these ' +
           'names become labels a human scans.',
@@ -781,8 +794,7 @@ module.exports = {
     vuln: 'The extractions array is what makes a per-request CSRF token work: step one captures the ' +
       'token with an RE2 regex whose group 1 is the value, step two spends it. A required capture ' +
       'that does not match stops the later steps rather than sending a blank token.',
-    lies: 'It sends by default. Pass replay:false to store a request without putting it on the ' +
-      'wire, and remember that nothing here checks scope or the exclusion list.',
+    lies: 'It sends by default. Pass replay:false to store a request without putting it on the wire.',
     next: 'get_auth_flow_steps, then replay_auth_flow',
     derived: true,
   },
@@ -800,9 +812,8 @@ module.exports = {
   delete_auth_flow_step: {
     step: S_CRAWL,
     tool: 'Removes a step from a flow.',
-    lies: 'Because there is no enabled column on auth flow steps and replay ignores every exclusion ' +
-      'and scope rule, deleting is the ONLY way to stop a step being sent. Keep its content as ' +
-      'prose in the flow description if you still need the record.',
+    lies: 'There is no per-step disable, so deleting is how you take a step out of a flow. Keep its ' +
+      'content as prose in the flow description if you still want the record.',
     next: 'get_auth_flow_steps',
     derived: true,
   },
@@ -811,8 +822,9 @@ module.exports = {
     step: S_CRAWL,
     tool: 'Re-sends one step at the live target and re-records its response, seeding cookies from ' +
       'the earlier steps.',
-    lies: 'No exclusion row and no scope rule applies to this path: grep authFlowsUtils.go and ' +
-      'every boundary check returns zero hits. A step whose Host is out of scope goes there.',
+    lies: 'It seeds cookies and {{af:}} values from the earlier steps ALREADY-RECORDED responses ' +
+      'rather than by re-running them, so if an earlier step holds a stale response the token it ' +
+      'carries forward is stale too. Replay the whole flow to refresh them.',
     next: 'get_auth_flow_steps, or check_session_tokens action:"validate"',
     derived: false,
   },
@@ -820,12 +832,63 @@ module.exports = {
   replay_auth_flow: {
     step: S_CRAWL,
     tool: 'Runs an entire flow end to end with one shared cookie jar and re-records every step ' +
-      'response. This is how a session is re-established after a token expires.',
-    lies: 'It is all or nothing and completely unguarded: no scope check, no exclusion list, no way ' +
-      'to disable one step. A "DO NOT REPLAY" in the flow name stops nothing, and a loop of replays ' +
-      'is a loop of full login sequences that can trip lockout.',
+      'response. This is how a session is re-established after a token expires. Each step goes to the ' +
+      'host that step targets, which is what lets a flow that crosses to an identity provider replay ' +
+      'correctly.',
+    lies: 'It replays EVERY step, so a loop of replays is a loop of full login sequences and can trip ' +
+      'account lockout or a rate limit. It is all or nothing: there is no per-step disable.',
     next: 'manage_session_tokens action:"parse", then check_session_tokens action:"validate"',
     derived: false,
+  },
+
+  classify_auth_flow_refresh: {
+    step: S_CRAWL,
+    tool: 'Reads a flow and says how it can be refreshed: "replay" (renews with a headless replay), ' +
+      '"interactive" (pauses each run for an MFA/OTP or push you supply), or "browser_only" (cannot ' +
+      'replay at all: crosses a federated identity provider, hits a bot challenge, or carries a ' +
+      'single-use OAuth code). Names the provider when it recognises one.',
+    vuln: 'This is the gate to check before turning a token\'s auto_refresh on: only kind "replay" is ' +
+      'safe to run unattended. An interactive flow needs you present to answer the pause; a ' +
+      'browser_only flow has to be re-captured in the browser.',
+    lies: 'The verdict is drawn from the recorded step requests and responses, so it is only as ' +
+      'current as the last replay: a flow that recently grew an MFA step still reads "replay" until ' +
+      'its steps are re-recorded.',
+    next: 'manage_session_tokens action:"update" auto_refresh:true (only if kind is "replay")',
+    derived: true,
+  },
+
+  list_auth_flow_candidates: {
+    step: S_CRAWL,
+    tool: 'Scans the manual-crawl captures for the ones that look like an auth exchange ' +
+      '(login/register/MFA/reset), so they can be imported as a flow instead of hand-typing raw ' +
+      'requests from memory.',
+    next: 'import_auth_flow_from_captures',
+    derived: true,
+  },
+
+  import_auth_flow_from_captures: {
+    step: S_CRAWL,
+    tool: 'Builds a flow directly from recorded captures, one step per capture in timestamp order.',
+    vuln: 'The captured requests carry the exact anti-CSRF, cookie and session values the app issued, ' +
+      'which a hand-synthesised login never has, so an imported flow replays far more faithfully than ' +
+      'one typed by hand.',
+    next: 'get_auth_flow_steps, then replay_auth_flow',
+    derived: true,
+  },
+
+  build_refresh_flow: {
+    step: S_CRAWL,
+    tool: 'Adopts the app\'s own silent-refresh request (a capture whose oauth_role is "refresh_request") ' +
+      'as a headless refresh flow: it rewrites the captured refresh token to {{token:refresh_token}} so ' +
+      'replay spends the CURRENT stored one, sets flow_purpose=refresh, and links it to the anchor token.',
+    vuln: 'This is what turns an OAuth session from "browser-only, re-login every time" into one the ' +
+      'framework renews headlessly: afterwards check_session_tokens refresh replays this flow, mints a ' +
+      'fresh access token and rotates the refresh token, with no interactive login.',
+    lies: 'It needs a capture that actually carries grant_type=refresh_token; a BFF / confidential-client ' +
+      'app (Nebius) never exposes one to the browser, so there is nothing to adopt and the refresh stays ' +
+      'browser-recapture only. Check list_auth_flow_candidates oauth_role first.',
+    next: 'check_session_tokens action:"refresh" on the anchor token',
+    derived: true,
   },
 
   // === requestflows.js ==========================================================================
@@ -844,6 +907,26 @@ module.exports = {
     next: 'manage_request_versions action:"create", or manage_threat_model action:"create"',
     learn: 'kb://methodology/web-app-methodology',
     derived: false,
+    rule: 'THIS IS THE FRAMEWORK\'S BURP-REPEATER. Whenever you need to send a hand-crafted or ' +
+      'MODIFIED request and read the raw response - an IDOR/BOLA id swap, a tampered scope/tenant ' +
+      'header, an auth-required probe, a redirect_uri or open-redirect test, a validated-vs-rejected ' +
+      'check on a threat - reach for this (search_captures -> get_capture -> edit the bytes -> send), ' +
+      'not for an external tool and not by giving up. Pulling a real captured request out of the ' +
+      'corpus first is what gives the crafted one the right verb, headers and credentials to be a ' +
+      'fair test. ' +
+      'WHEN THE TARGET EDGE-BLOCKS THE FRAMEWORK: some targets sit behind a bot/fingerprint wall ' +
+      '(Cloudflare and the like) that refuses every request THIS process makes, regardless of a ' +
+      'valid session - a uniform 403 or challenge page from send, from the scanners, from everything ' +
+      'in the containers, because the clearance is bound to a real browser\'s IP and TLS ' +
+      'fingerprint. There, replay from here is blocked too; drive the exact same crafted request in a ' +
+      'REAL browser instead (Claude in Chrome, or domdig for DOM sinks), where the session and ' +
+      'fingerprint are genuine, and use the browser network panel as the repeater. ' +
+      'AND TAKE HEART - THIS IS AN EDGE, NOT A DEAD END: a target that blocks your automated egress ' +
+      'blocks every other automated attacker the same way, so the easy scanner wins are already gone ' +
+      'and the bug is waiting for whoever has the patience to test by hand. This framework is built ' +
+      'to test ANY target, not only the scannable ones. When scanning is off the table, slow down, ' +
+      'work the surface manually through the browser, and be persistent; that persistence is the ' +
+      'whole advantage.',
     actions: {
       query_syntax: {
         tool: 'Returns the search grammar, its fields and its operators with no round trip. The ' +
@@ -941,6 +1024,17 @@ module.exports = {
         next: 'manage_threat_model action:"create"',
       },
     },
+  },
+
+  manage_request_variants: {
+    step: S_SCANNING,
+    tool: 'The distinct recorded captures of one endpoint, grouped as its variants with one marked ' +
+      'primary. List them, rename them, set which is primary, and hide or restore one from the list.',
+    lies: 'delete and restore only HIDE or unhide a variant from this list through a non-destructive ' +
+      'overlay flag; they never touch the underlying capture, the sitemap, or any scan result. ' +
+      'Nothing here puts a request on the wire.',
+    next: 'replay_request action:"send"',
+    derived: false,
   },
 
   manage_detected_flows: {

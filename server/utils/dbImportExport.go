@@ -499,14 +499,17 @@ func HandleDatabaseExport(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[INFO] Database export request for %d scope targets", len(req.ScopeTargetIDs))
 
-	exportData, err := exportDatabaseData(req.ScopeTargetIDs)
+	// v2 generic engine: schema-driven, covers every per-target table and its FK-reachable children.
+	// See dbBundle.go. The legacy exportDatabaseData/exportTableQueries path is retained only so old
+	// callers and the v1 import test data still compile; nothing calls it now.
+	bundle, err := exportBundle(r.Context(), req.ScopeTargetIDs)
 	if err != nil {
 		log.Printf("[ERROR] Failed to export database data: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to export data: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	jsonData, err := json.Marshal(exportData)
+	jsonData, err := json.Marshal(bundle)
 	if err != nil {
 		log.Printf("[ERROR] Failed to marshal export data: %v", err)
 		http.Error(w, "Failed to marshal export data", http.StatusInternalServerError)
@@ -581,14 +584,8 @@ func HandleDatabaseImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var exportData ExportData
-	if err := json.Unmarshal(jsonData, &exportData); err != nil {
-		log.Printf("[ERROR] Failed to unmarshal export data: %v", err)
-		http.Error(w, "Invalid export data format", http.StatusBadRequest)
-		return
-	}
-
-	if err := importDatabaseData(&exportData); err != nil {
+	scopeTargets, tables, records, err := processBundleImportJSON(r.Context(), jsonData)
+	if err != nil {
 		log.Printf("[ERROR] Failed to import database data: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to import data: %v", err), http.StatusInternalServerError)
 		return
@@ -596,15 +593,15 @@ func HandleDatabaseImport(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]interface{}{
 		"message":                "Database import completed successfully",
-		"imported_scope_targets": len(exportData.ScopeTargets),
-		"imported_tables":        len(exportData.TableData),
-		"total_records":          exportData.ExportMetadata.TotalRecords,
+		"imported_scope_targets": scopeTargets,
+		"imported_tables":        tables,
+		"total_records":          records,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 
-	log.Printf("[INFO] Database import completed successfully. Imported %d scope targets", len(exportData.ScopeTargets))
+	log.Printf("[INFO] Database import completed successfully. Imported %d scope targets", scopeTargets)
 }
 
 func HandleDatabaseImportURL(w http.ResponseWriter, r *http.Request) {
@@ -702,14 +699,8 @@ func HandleDatabaseImportURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var exportData ExportData
-	if err := json.Unmarshal(jsonData, &exportData); err != nil {
-		log.Printf("[ERROR] Failed to unmarshal export data: %v", err)
-		http.Error(w, "Invalid export data format", http.StatusBadRequest)
-		return
-	}
-
-	if err := importDatabaseData(&exportData); err != nil {
+	scopeTargets, tables, records, err := processBundleImportJSON(r.Context(), jsonData)
+	if err != nil {
 		log.Printf("[ERROR] Failed to import database data: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to import data: %v", err), http.StatusInternalServerError)
 		return
@@ -717,15 +708,63 @@ func HandleDatabaseImportURL(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]interface{}{
 		"message":                "Database import from URL completed successfully",
-		"imported_scope_targets": len(exportData.ScopeTargets),
-		"imported_tables":        len(exportData.TableData),
-		"total_records":          exportData.ExportMetadata.TotalRecords,
+		"imported_scope_targets": scopeTargets,
+		"imported_tables":        tables,
+		"total_records":          records,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 
-	log.Printf("[INFO] Database import from URL completed successfully. Imported %d scope targets", len(exportData.ScopeTargets))
+	log.Printf("[INFO] Database import from URL completed successfully. Imported %d scope targets", scopeTargets)
+}
+
+// HandleDatabaseImportBase64 imports a bundle whose gzip bytes are delivered base64-encoded in a JSON
+// body ({"data": "..."}). It exists so a non-browser client - the MCP server above all - can import a
+// bundle without assembling a multipart upload: it reads a .rs0n from its own disk, base64s it, and
+// POSTs here. Same engine as the file and URL imports (processBundleImportJSON), so v1 and v2 bundles
+// both work.
+func HandleDatabaseImportBase64(w http.ResponseWriter, r *http.Request) {
+	log.Println("[INFO] Starting database import from base64 body")
+
+	var req DatabaseImportRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if len(req.Data) == 0 {
+		http.Error(w, "data is required (base64 of the gzip .rs0n bundle)", http.StatusBadRequest)
+		return
+	}
+
+	gzipReader, err := gzip.NewReader(bytes.NewReader(req.Data))
+	if err != nil {
+		http.Error(w, "Invalid file format (expected gzip .rs0n)", http.StatusBadRequest)
+		return
+	}
+	defer gzipReader.Close()
+
+	jsonData, err := io.ReadAll(gzipReader)
+	if err != nil {
+		http.Error(w, "Failed to decompress data", http.StatusInternalServerError)
+		return
+	}
+
+	scopeTargets, tables, records, err := processBundleImportJSON(r.Context(), jsonData)
+	if err != nil {
+		log.Printf("[ERROR] Failed to import database data: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to import data: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":                "Database import completed successfully",
+		"imported_scope_targets": scopeTargets,
+		"imported_tables":        tables,
+		"total_records":          records,
+	})
+	log.Printf("[INFO] Base64 database import completed. Imported %d scope targets", scopeTargets)
 }
 
 func exportDatabaseData(scopeTargetIDs []string) (*ExportData, error) {

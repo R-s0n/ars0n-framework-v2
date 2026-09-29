@@ -1,9 +1,21 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Modal, Row, Col, Button, Form, Spinner, Badge, ListGroup } from 'react-bootstrap';
+import { Modal, Row, Col, Button, Form, Spinner, Badge, ListGroup, Alert } from 'react-bootstrap';
 import AuthFlowChart from '../components/AuthFlowChart';
 import ImportAuthFlowModal from './ImportAuthFlowModal';
 
-const CATEGORY_LABELS = { register: 'Register', login: 'Login', mfa_otp: 'MFA/OTP', reset: 'Reset' };
+const CATEGORY_LABELS = { register: 'Register', login: 'Login', mfa_otp: 'MFA/OTP', magic_link: 'Magic Link', reset: 'Reset' };
+
+// Pull a human message out of a failed response, whether the handler wrote plain text or a JSON
+// error envelope. Falls back to the status so a failure never surfaces as a blank string.
+async function errorText(res) {
+  try {
+    const body = await res.text();
+    if (body) {
+      try { const j = JSON.parse(body); return j.message || j.error || body; } catch { return body; }
+    }
+  } catch { /* fall through */ }
+  return `Request failed (HTTP ${res.status})`;
+}
 
 const AUTH_TYPES = [
   { value: '', label: '(none)' },
@@ -66,6 +78,7 @@ const AuthFlowModal = ({ show, handleClose, category, activeTarget, onFlowsChang
   const [loadingFlows, setLoadingFlows] = useState(false);
   const [loadingSteps, setLoadingSteps] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
   const [newFlowName, setNewFlowName] = useState('');
   const [flowForm, setFlowForm] = useState({ name: '', description: '', auth_type: '', base_url: '' });
@@ -121,125 +134,163 @@ const AuthFlowModal = ({ show, handleClose, category, activeTarget, onFlowsChang
   // Load flows when the modal opens (or target/category changes).
   useEffect(() => {
     if (show && activeTarget && category) fetchFlows(false);
-    if (!show) { setSelectedFlowId(null); setSteps([]); setSelectedStepId(null); }
+    if (!show) { setSelectedFlowId(null); setSteps([]); setSelectedStepId(null); setError(''); }
   }, [show, activeTarget, category, fetchFlows]);
 
-  // Load steps + sync the flow-detail form whenever the selected flow changes.
+  // Load steps when the SELECTED FLOW changes. Deliberately NOT keyed on `flows`: adding a step calls
+  // fetchFlows(true) to refresh the left-list step counts, and if this effect depended on `flows` it
+  // would re-fire and reset the step selection back to the first step, undoing the "select the step I
+  // just added" that addStep does.
   useEffect(() => {
     fetchSteps(selectedFlowId, false);
+  }, [selectedFlowId, fetchSteps]);
+
+  // Sync the flow-detail form when the selected flow, or the loaded flow object, changes.
+  useEffect(() => {
     const f = flows.find((x) => x.id === selectedFlowId);
     if (f) setFlowForm({ name: f.name || '', description: f.description || '', auth_type: f.auth_type || '', base_url: f.base_url || '' });
-  }, [selectedFlowId, flows, fetchSteps]);
+  }, [selectedFlowId, flows]);
 
   // Keep the editable raw-request textarea in sync with the selected step.
   useEffect(() => { setEditRaw(selectedStep ? selectedStep.raw_request : ''); }, [selectedStepId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const notifyChange = () => { if (onFlowsChange) onFlowsChange(); };
 
+  // Persist the raw-request textarea if the operator edited it but has not pressed Save. Replay and
+  // Run send the STORED step, so without this a replay runs the previous bytes while the screen shows
+  // the edited ones. Returns false (and surfaces the error) if the save was rejected, so the caller
+  // does not go on to replay a request it failed to store.
+  const persistEditIfDirty = async () => {
+    if (!selectedStepId || !selectedStep) return true;
+    if (editRaw === selectedStep.raw_request) return true;
+    const res = await fetch(`/api/auth-flows/steps/${selectedStepId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw_request: editRaw }),
+    });
+    if (!res.ok) { setError('Could not save the edited request: ' + (await errorText(res))); return false; }
+    return true;
+  };
+
   const createFlow = async () => {
     if (!newFlowName.trim() || !activeTarget) return;
-    setBusy(true);
+    setBusy(true); setError('');
     try {
       const res = await fetch(`/api/auth-flows/${activeTarget.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ category, name: newFlowName.trim() }),
       });
-      if (res.ok) {
-        const created = await res.json();
-        setNewFlowName('');
-        await fetchFlows(true);
-        if (created && created.id) setSelectedFlowId(created.id);
-        notifyChange();
-      }
-    } finally { setBusy(false); }
+      if (!res.ok) { setError('Could not create the flow: ' + (await errorText(res))); return; }
+      const created = await res.json();
+      setNewFlowName('');
+      await fetchFlows(true);
+      if (created && created.id) setSelectedFlowId(created.id);
+      notifyChange();
+    } catch (e) { setError('Could not create the flow: ' + e.message); }
+    finally { setBusy(false); }
   };
 
   const deleteFlow = async (flowId) => {
     if (!window.confirm('Delete this auth flow and all its steps?')) return;
-    setBusy(true);
+    setBusy(true); setError('');
     try {
-      await fetch(`/api/auth-flows/flow/${flowId}`, { method: 'DELETE' });
+      const res = await fetch(`/api/auth-flows/flow/${flowId}`, { method: 'DELETE' });
+      if (!res.ok) { setError('Could not delete the flow: ' + (await errorText(res))); return; }
       if (selectedFlowId === flowId) setSelectedFlowId(null);
       await fetchFlows(true);
       notifyChange();
-    } finally { setBusy(false); }
+    } catch (e) { setError('Could not delete the flow: ' + e.message); }
+    finally { setBusy(false); }
   };
 
   const saveFlow = async () => {
     if (!selectedFlowId) return;
-    setBusy(true);
+    setBusy(true); setError('');
     try {
-      await fetch(`/api/auth-flows/flow/${selectedFlowId}`, {
+      const res = await fetch(`/api/auth-flows/flow/${selectedFlowId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(flowForm),
       });
+      if (!res.ok) { setError('Could not save the flow: ' + (await errorText(res))); return; }
       await fetchFlows(true);
-    } finally { setBusy(false); }
+    } catch (e) { setError('Could not save the flow: ' + e.message); }
+    finally { setBusy(false); }
   };
 
   const addStep = async () => {
     if (!selectedFlowId || !addStepRaw.trim()) return;
-    setBusy(true);
+    setBusy(true); setError('');
     try {
       const res = await fetch(`/api/auth-flows/flow/${selectedFlowId}/steps`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: addStepName.trim(), raw_request: addStepRaw, replay: true }),
       });
-      if (res.ok) {
-        const created = await res.json();
-        setAddStepName('');
-        setAddStepRaw('');
-        await fetchSteps(selectedFlowId, true);
-        if (created && created.id) setSelectedStepId(created.id);
-        await fetchFlows(true); // refresh step counts in the left list
-        notifyChange();
-      }
-    } finally { setBusy(false); }
+      if (!res.ok) { setError('Could not add the step: ' + (await errorText(res))); return; }
+      const created = await res.json();
+      setAddStepName('');
+      setAddStepRaw('');
+      await fetchSteps(selectedFlowId, true);
+      if (created && created.id) setSelectedStepId(created.id);
+      await fetchFlows(true); // refresh step counts in the left list
+      notifyChange();
+    } catch (e) { setError('Could not add the step: ' + e.message); }
+    finally { setBusy(false); }
   };
 
   const saveStep = async () => {
     if (!selectedStepId) return;
-    setBusy(true);
+    setBusy(true); setError('');
     try {
-      await fetch(`/api/auth-flows/steps/${selectedStepId}`, {
+      const res = await fetch(`/api/auth-flows/steps/${selectedStepId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ raw_request: editRaw }),
       });
+      if (!res.ok) { setError('Could not save the step: ' + (await errorText(res))); return; }
       await fetchSteps(selectedFlowId, true);
-    } finally { setBusy(false); }
+    } catch (e) { setError('Could not save the step: ' + e.message); }
+    finally { setBusy(false); }
   };
 
   const replayStep = async () => {
     if (!selectedStepId) return;
-    setBusy(true);
+    setBusy(true); setError('');
     try {
-      await fetch(`/api/auth-flows/steps/${selectedStepId}/replay`, { method: 'POST' });
+      if (!(await persistEditIfDirty())) return;
+      const res = await fetch(`/api/auth-flows/steps/${selectedStepId}/replay`, { method: 'POST' });
+      if (!res.ok) { setError('Replay failed: ' + (await errorText(res))); }
       await fetchSteps(selectedFlowId, true);
-    } finally { setBusy(false); }
+    } catch (e) { setError('Replay failed: ' + e.message); }
+    finally { setBusy(false); }
   };
 
   const deleteStep = async (stepId) => {
-    setBusy(true);
+    if (!window.confirm('Delete this step? This removes it from the flow.')) return;
+    setBusy(true); setError('');
     try {
-      await fetch(`/api/auth-flows/steps/${stepId}`, { method: 'DELETE' });
+      const res = await fetch(`/api/auth-flows/steps/${stepId}`, { method: 'DELETE' });
+      if (!res.ok) { setError('Could not delete the step: ' + (await errorText(res))); return; }
       if (selectedStepId === stepId) setSelectedStepId(null);
       await fetchSteps(selectedFlowId, true);
       await fetchFlows(true);
       notifyChange();
-    } finally { setBusy(false); }
+    } catch (e) { setError('Could not delete the step: ' + e.message); }
+    finally { setBusy(false); }
   };
 
   const runFlow = async () => {
     if (!selectedFlowId) return;
-    setBusy(true);
+    setBusy(true); setError('');
     try {
-      await fetch(`/api/auth-flows/flow/${selectedFlowId}/replay`, { method: 'POST' });
+      if (!(await persistEditIfDirty())) return;
+      const res = await fetch(`/api/auth-flows/flow/${selectedFlowId}/replay`, { method: 'POST' });
+      if (!res.ok) { setError('Run failed: ' + (await errorText(res))); }
       await fetchSteps(selectedFlowId, true);
-    } finally { setBusy(false); }
+    } catch (e) { setError('Run failed: ' + e.message); }
+    finally { setBusy(false); }
   };
 
   return (
@@ -249,6 +300,11 @@ const AuthFlowModal = ({ show, handleClose, category, activeTarget, onFlowsChang
         <Modal.Title className="text-danger">{categoryLabel} Auth Flows</Modal.Title>
       </Modal.Header>
       <Modal.Body className="text-white" style={{ minHeight: '70vh' }}>
+        {error && (
+          <Alert variant="danger" dismissible onClose={() => setError('')} className="py-2 mb-3">
+            {error}
+          </Alert>
+        )}
         {!activeTarget ? (
           <div className="text-center text-white-50 py-5">Select a scope target first.</div>
         ) : (

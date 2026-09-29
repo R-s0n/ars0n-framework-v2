@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  Button, Form, InputGroup, Spinner, Badge, Accordion, Table, OverlayTrigger, Tooltip, Modal,
+  Button, Form, InputGroup, Spinner, Badge, OverlayTrigger, Tooltip, Modal,
 } from 'react-bootstrap';
+import QueryLanguageHelp from './QueryLanguageHelp';
 
 // Single Request: a repeater over the requests the manual crawl already recorded.
 //
@@ -89,58 +90,6 @@ const AUTOSAVE_IDLE_MS = 3000;
 // cannot be confused with anything that appears in a real request.
 const GLYPH_CR = '␍';
 const GLYPH_LF = '␊';
-
-const QUERY_FIELDS = [
-  ['method', 'Request method', 'method = POST'],
-  ['status', 'Response status code', 'status >= 400'],
-  ['host', 'Hostname from the url', 'host ~ assurant'],
-  ['domain', 'Same as host', 'domain = api.example.com'],
-  ['path', 'Url path, no query string', 'path ^= /api'],
-  ['url', 'The whole url', 'url ~ /admin'],
-  ['query', 'The raw query string', 'query ~ redirect'],
-  ['mime', 'Response mime type', 'mime ~ json'],
-  ['ext', 'File extension from the path', 'ext = js'],
-  ['body', 'Request body', 'body ~ password'],
-  ['resp.body', 'Response body. Recorded bodies only, see the note below', 'resp.body ~ token'],
-  ['size', 'Response body length in bytes. Recorded bodies only', 'size > 10000'],
-  ['time', 'Request duration in milliseconds', 'time > 2000'],
-  ['status_class', 'First digit of the status: 1, 2, 3, 4 or 5', 'status_class = 4'],
-  ['resource_type', 'Browser resource type', 'resource_type = xhr'],
-  ['initiator', 'What issued the request', 'initiator ~ main.js'],
-  ['is_direct', 'On the scope target host itself: true or false', 'is_direct = true'],
-  ['graphql', 'GraphQL operation name', 'graphql ~ mutation'],
-  ['header.<NAME>', 'A REQUEST header, by name', 'header.cookie ~ session'],
-  ['resp.header.<NAME>', 'A RESPONSE header, by name', 'resp.header.server ~ nginx'],
-  ['param.<NAME>', 'A GET or POST parameter, by name', 'param.id = 5'],
-  ['has:header.<NAME>', 'Presence test on a request header', 'has:header.authorization'],
-  ['has:param.<NAME>', 'Presence test on a parameter', 'has:param.debug'],
-];
-
-const QUERY_OPERATORS = [
-  ['=', 'Equals, case insensitive', 'method = GET'],
-  ['!=', 'Not equals', 'method != GET'],
-  ['~', 'Contains, case insensitive', 'host ~ assurant'],
-  ['!~', 'Does not contain', 'path !~ /static'],
-  ['^=', 'Starts with', 'path ^= /api'],
-  ['$=', 'Ends with', 'url $= .json'],
-  ['=~', 'Matches a regular expression (RE2)', 'path =~ ^/api/v[0-9]+/'],
-  ['>  <  >=  <=', 'Numeric. Valid on status, size, time and status_class', 'size >= 5000'],
-];
-
-const QUERY_EXAMPLES = [
-  ['method = POST AND status >= 400', 'Writes that the application rejected.'],
-  ['host ~ assurant AND (ext = js OR ext = json)', 'Script and data files on one host.'],
-  ['has:header.authorization AND NOT path ^= /static', 'Authenticated requests, minus the asset noise.'],
-  ['resp.header.content-type ~ json AND size > 5000', 'Substantial JSON responses.'],
-  ['header.cookie ~ session AND method != GET', 'Session-carrying requests that change state.'],
-  ['login', 'A bare term. Substring match across url, method and status.'],
-  ['status_class = 5 AND time > 2000', 'Server errors that were also slow.'],
-  ['path =~ ^/api/v[0-9]+/ AND method != GET', 'Versioned API routes that are not reads.'],
-  ['param.id = 5 OR has:param.redirect', 'Object references and redirect parameters.'],
-  ['graphql ~ mutation AND resp.body ~ error', 'GraphQL mutations whose response mentioned an error.'],
-  ['is_direct = true AND resource_type = xhr', 'XHR traffic on the scope target host itself.'],
-  ['path = "/a b/c"', 'Double quotes for any value containing spaces.'],
-];
 
 function statusVariant(status) {
   const code = Number(status);
@@ -586,6 +535,9 @@ function buildTree(rows, variantMeta) {
         name: (m && m.name) ? m.name : (source || 'Recorded'),
         nameCustom: !!(m && m.name),
         isPrimary: !!(m && m.is_primary),
+        // Hidden is a display choice stored in the overlay; the capture behind it is untouched. A hidden
+        // variant is dropped from the list and can never be the effective primary.
+        hidden: !!(m && m.hidden),
         count: 1,
         row: r,
       };
@@ -593,11 +545,13 @@ function buildTree(rows, variantMeta) {
       order.push(vkey);
     });
     const variants = order.map((k) => byKey.get(k));
-    // The PRIMARY is the operator's chosen variant, or the newest recording when none is chosen. It is
-    // the one whose status the sitemap shows and the one a leaf click opens. Mark it on the variant
-    // itself so the column's star reflects the EFFECTIVE primary, not only a stored one - otherwise an
-    // endpoint nobody has chosen a primary for shows no star at all while the sitemap still picks one.
-    const primary = variants.find((v) => v.isPrimary) || variants[0] || null;
+    // The PRIMARY is the operator's chosen VISIBLE variant, or the newest visible recording when none is
+    // chosen. It is the one whose status the sitemap shows and the one a leaf click opens. Marked on the
+    // variant so the column's star reflects the EFFECTIVE primary, not only a stored one.
+    const visible = variants.filter((v) => !v.hidden);
+    const primary = visible.find((v) => v.isPrimary) || visible[0] || null;
+    // Clear any stale stored-primary flag on hidden variants so exactly one visible variant is starred.
+    variants.forEach((v) => { if (v !== primary) v.isPrimary = false; });
     if (primary) primary.isPrimary = true;
     return {
       key: group.epKey,
@@ -608,21 +562,23 @@ function buildTree(rows, variantMeta) {
       status: primary ? primary.status : undefined,
       primaryStatus: primary ? primary.status : undefined,
       primaryId: primary ? primary.id : null,
-      hasQuery: variants.some((v) => v.hasQuery),
-      url: primary ? primary.url : (variants[0] ? variants[0].url : ''),
+      hasQuery: visible.some((v) => v.hasQuery),
+      url: primary ? primary.url : (visible[0] ? visible[0].url : ''),
       variants,
-      variantCount: variants.length,
+      variantCount: visible.length,
+      hiddenCount: variants.length - visible.length,
+      hasVisible: visible.length > 0,
       captureCount: group.rows.length,
-      canonicalId: variants[0] ? variants[0].id : null,
-      row: primary ? primary.row : (variants[0] ? variants[0].row : null),
+      canonicalId: visible[0] ? visible[0].id : null,
+      row: primary ? primary.row : (visible[0] ? visible[0].row : null),
     };
   };
 
   const finish = (node) => {
     node.leaves = Array.from(node.groups.values()).map(makeLeaf);
-    // Count ENDPOINTS under this node now, not captures: the per-endpoint variant count carries the
-    // "hit N times" fact, and a folder badge of endpoints is what the deduped tree is about.
-    let count = node.leaves.length;
+    // Count ENDPOINTS under this node now, not captures. Fully-hidden endpoints (every variant hidden)
+    // are not counted, so the folder badge matches the default sitemap, which does not draw them.
+    let count = node.leaves.filter((l) => l.hasVisible).length;
     const children = Array.from(node.dirs.values()).sort((a, b) => a.name.localeCompare(b.name));
     children.forEach((child) => { count += finish(child); });
     node.children = children;
@@ -788,6 +744,8 @@ export const SingleRequestPane = ({
   // targets and endpoints differ.
   const [variantRenamingId, setVariantRenamingId] = useState(null);
   const [variantRenameText, setVariantRenameText] = useState('');
+  // Reveal hidden variants (and the endpoints whose every variant is hidden) so they can be restored.
+  const [showHiddenVariants, setShowHiddenVariants] = useState(false);
 
   const textareaRef = useRef(null);
   const mirrorRef = useRef(null);
@@ -894,6 +852,7 @@ export const SingleRequestPane = ({
         map[variantMetaKey(m.method, m.host, m.path, m.request_sig, m.response_sig)] = {
           name: m.name || '',
           is_primary: !!m.is_primary,
+          hidden: !!m.hidden,
         };
       });
       setVariantMeta(map);
@@ -951,6 +910,20 @@ export const SingleRequestPane = ({
     postVariantMeta(variant, { set_primary: true });
   };
 
+  // "Delete" a variant HIDES it from the list. It is NOT destructive: the captures behind it stay in
+  // the corpus for every other tool, and it is reversible (unhide, or the "show hidden" toggle). Because
+  // it is reversible there is no confirm - a hide the operator did not mean is one click to undo. The
+  // overlay reload rebuilds the tree, dropping the variant from the column and the sitemap.
+  const hideVariant = (variant) => {
+    if (!variant) return;
+    postVariantMeta(variant, { hidden: true });
+  };
+
+  const unhideVariant = (variant) => {
+    if (!variant) return;
+    postVariantMeta(variant, { hidden: false });
+  };
+
   // Fresh target, fresh state. A previous target's request left in the pane is a request sent to
   // the wrong host the moment somebody hits Replay.
   useEffect(() => {
@@ -958,6 +931,7 @@ export const SingleRequestPane = ({
     setCaptures([]);
     setVariantMeta({});
     setVariantRenamingId(null);
+    setShowHiddenVariants(false);
     setTotal(0);
     setCorpusTotal(null);
     setTruncated(false);
@@ -1957,18 +1931,6 @@ export const SingleRequestPane = ({
         >
           {leaf.label}{leaf.hasQuery ? '?' : ''}
         </code>
-        {/* How many distinct request/response variants this one endpoint collapsed. Only shown when it
-            is more than one, so a normal single-recording endpoint stays quiet. */}
-        {leaf.variantCount > 1 && (
-          <Badge
-            bg="dark"
-            className="border border-info text-info ms-1"
-            style={{ fontSize: '0.55rem' }}
-            title={`${leaf.variantCount} variants from ${leaf.captureCount} captures`}
-          >
-            ×{leaf.variantCount}
-          </Badge>
-        )}
         {primaryStatus != null && (
           <Badge
             bg={statusVariant(primaryStatus)}
@@ -2005,7 +1967,9 @@ export const SingleRequestPane = ({
         {open && (
           <div>
             {node.children.map((child) => renderNode(child, depth + 1))}
-            {node.leaves.map((leaf) => renderLeaf(leaf, depth + 1))}
+            {node.leaves
+              .filter((leaf) => showHiddenVariants || leaf.hasVisible)
+              .map((leaf) => renderLeaf(leaf, depth + 1))}
           </div>
         )}
       </div>
@@ -2246,22 +2210,34 @@ export const SingleRequestPane = ({
           cursor: 'pointer',
           borderLeft: `3px solid ${active ? '#dc3545' : 'transparent'}`,
           backgroundColor: active ? '#2b3035' : 'transparent',
+          opacity: variant.hidden ? 0.5 : 1,
         }}
       >
         <div className="d-flex align-items-center mb-1">
-          {/* Primary star: filled and gold when this is the endpoint's primary, hollow otherwise.
-              Clicking a hollow one makes this the primary; the filled one is already it. */}
-          <button
-            type="button"
-            className="btn btn-link p-0 me-2"
-            style={{ lineHeight: 1, color: variant.isPrimary ? '#ffc107' : '#6c757d' }}
-            title={variant.isPrimary
-              ? 'Primary variant. This is the one the sitemap shows and a leaf click opens.'
-              : 'Make this the primary variant (shown in the sitemap).'}
-            onClick={(e) => { e.stopPropagation(); setPrimaryVariant(variant); }}
-          >
-            <i className={`bi ${variant.isPrimary ? 'bi-star-fill' : 'bi-star'}`} style={{ fontSize: '0.72rem' }} />
-          </button>
+          {/* Primary star: filled and red (the framework accent) when this is the endpoint's primary,
+              hollow grey otherwise. Clicking a hollow one makes this the primary. A hidden variant can
+              never be primary, so it shows a muted "hidden" tag in the star's place instead. */}
+          {variant.hidden ? (
+            <span
+              className="me-2 text-white-50"
+              style={{ fontSize: '0.6rem', letterSpacing: '0.03em' }}
+              title="Hidden from the list. The recording is still in the corpus for every other tool."
+            >
+              <i className="bi bi-eye-slash" style={{ fontSize: '0.72rem' }} />
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-link p-0 me-2"
+              style={{ lineHeight: 1, color: variant.isPrimary ? '#dc3545' : '#6c757d' }}
+              title={variant.isPrimary
+                ? 'Primary variant. This is the one the sitemap shows and a leaf click opens.'
+                : 'Make this the primary variant (shown in the sitemap).'}
+              onClick={(e) => { e.stopPropagation(); setPrimaryVariant(variant); }}
+            >
+              <i className={`bi ${variant.isPrimary ? 'bi-star-fill' : 'bi-star'}`} style={{ fontSize: '0.72rem' }} />
+            </button>
+          )}
           <Badge bg={statusVariant(variant.status)} style={{ fontSize: '0.55rem' }}>
             {variant.status || '?'}
           </Badge>
@@ -2319,15 +2295,38 @@ export const SingleRequestPane = ({
             {variant.count > 1 ? ` · ×${variant.count} captures` : ''}
           </span>
           {!renaming && (
-            <button
-              type="button"
-              className="btn btn-link p-0 ms-auto text-white-50"
-              title="Rename this variant"
-              onClick={(e) => { e.stopPropagation(); beginVariantRename(variant); }}
-              style={{ fontSize: '0.72rem', lineHeight: 1 }}
-            >
-              <i className="bi bi-pencil" />
-            </button>
+            <span className="ms-auto d-flex gap-2">
+              <button
+                type="button"
+                className="btn btn-link p-0 text-white-50"
+                title="Rename this variant"
+                onClick={(e) => { e.stopPropagation(); beginVariantRename(variant); }}
+                style={{ fontSize: '0.72rem', lineHeight: 1 }}
+              >
+                <i className="bi bi-pencil" />
+              </button>
+              {variant.hidden ? (
+                <button
+                  type="button"
+                  className="btn btn-link p-0 text-white-50"
+                  title="Restore this variant to the list"
+                  onClick={(e) => { e.stopPropagation(); unhideVariant(variant); }}
+                  style={{ fontSize: '0.72rem', lineHeight: 1 }}
+                >
+                  <i className="bi bi-arrow-counterclockwise" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-link p-0 text-white-50"
+                  title="Remove this variant from the list. It stays in the scan results and every other tool; use the toggle above to restore it."
+                  onClick={(e) => { e.stopPropagation(); hideVariant(variant); }}
+                  style={{ fontSize: '0.72rem', lineHeight: 1 }}
+                >
+                  <i className="bi bi-trash" />
+                </button>
+              )}
+            </span>
           )}
         </div>
       </div>
@@ -2353,16 +2352,42 @@ export const SingleRequestPane = ({
     // model reads the same whether an endpoint was recorded once or forty times.
     if (endpointVariants.length >= 1) {
       const edits = versions.filter((v) => v && !v.is_original);
+      const hiddenInEndpoint = endpointVariants.filter((v) => v.hidden).length;
+      const visibleVariants = endpointVariants.filter((v) => !v.hidden);
+      const shownSource = showHiddenVariants ? endpointVariants : visibleVariants;
+      // Primary first, the rest keeping their newest-first order (stable sort). The primary is the one
+      // the sitemap shows and a click opens, so it belongs at the top of the column too.
+      const orderedVariants = [...shownSource].sort((a, b) => {
+        if (a.isPrimary && !b.isPrimary) return -1;
+        if (b.isPrimary && !a.isPrimary) return 1;
+        return 0;
+      });
       return (
         <>
           <div
-            className="px-2 py-1 border-bottom border-secondary text-white-50"
-            style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}
-            title="One row per distinct recorded request/response for this endpoint. Duplicates were collapsed. The starred one is primary."
+            className="px-2 py-1 border-bottom border-secondary d-flex align-items-center"
+            style={{ fontSize: '0.62rem', letterSpacing: '0.04em' }}
           >
-            Variants ({endpointVariants.length})
+            <span
+              className="text-white-50"
+              style={{ textTransform: 'uppercase' }}
+              title="One row per distinct recorded request/response for this endpoint. Duplicates were collapsed. The starred one is primary and shown first."
+            >
+              Variants ({visibleVariants.length})
+            </span>
+            {hiddenInEndpoint > 0 && (
+              <button
+                type="button"
+                className="btn btn-link p-0 ms-auto text-white-50"
+                style={{ fontSize: '0.62rem', lineHeight: 1 }}
+                onClick={() => setShowHiddenVariants((s) => !s)}
+                title="Hidden variants are removed from the list but kept in the scan results. Show them to restore."
+              >
+                {showHiddenVariants ? 'hide' : 'show'} {hiddenInEndpoint} hidden
+              </button>
+            )}
           </div>
-          {endpointVariants.map((v, i) => renderVariantRow(v, i))}
+          {orderedVariants.map((v, i) => renderVariantRow(v, i))}
           {edits.length > 0 && (
             <>
               <div
@@ -2417,122 +2442,7 @@ export const SingleRequestPane = ({
         .srp-version-row .btn-link:hover { color: #dc3545 !important; }
         .srp-hop-row:hover { background-color: #2b3035 !important; }
       `}</style>
-      <Accordion className="mb-2" data-bs-theme="dark">
-        <Accordion.Item eventKey="0" className="bg-dark border-secondary">
-          <Accordion.Header>
-            <span className="text-danger">
-              <i className="bi bi-question-circle me-2" />
-              How to search: the query language
-            </span>
-          </Accordion.Header>
-          <Accordion.Body style={{ maxHeight: '45vh', overflowY: 'auto' }}>
-            <div className="row g-3">
-              <div className="col-lg-5">
-                <div className="text-light small fw-bold mb-1">Fields</div>
-                <Table size="sm" variant="dark" borderless className="mb-0">
-                  <tbody>
-                    {QUERY_FIELDS.map(([name, meaning, example]) => (
-                      <tr key={name}>
-                        <td style={{ whiteSpace: 'nowrap' }}><code className="text-danger">{name}</code></td>
-                        <td className="text-white-50" style={{ fontSize: '0.75rem' }}>{meaning}</td>
-                        <td>
-                          <code
-                            className="text-info"
-                            style={{ fontSize: '0.72rem', cursor: 'pointer' }}
-                            onClick={() => setQuery(example)}
-                          >
-                            {example}
-                          </code>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </Table>
-              </div>
-
-              <div className="col-lg-3">
-                <div className="text-light small fw-bold mb-1">Operators</div>
-                <Table size="sm" variant="dark" borderless className="mb-3">
-                  <tbody>
-                    {QUERY_OPERATORS.map(([symbol, meaning, example]) => (
-                      <tr key={symbol}>
-                        <td style={{ whiteSpace: 'nowrap' }}><code className="text-danger">{symbol}</code></td>
-                        <td className="text-white-50" style={{ fontSize: '0.75rem' }}>
-                          {meaning}
-                          <div>
-                            <code
-                              className="text-info"
-                              style={{ fontSize: '0.72rem', cursor: 'pointer' }}
-                              onClick={() => setQuery(example)}
-                            >
-                              {example}
-                            </code>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </Table>
-
-                <div className="text-light small fw-bold mb-1">Booleans and grouping</div>
-                <div className="text-white-50" style={{ fontSize: '0.75rem' }}>
-                  <div><code className="text-danger">AND</code>, <code className="text-danger">OR</code>,{' '}
-                    <code className="text-danger">NOT</code> and parentheses.</div>
-                  <div className="mt-1">
-                    <code className="text-danger">AND</code> is implied between adjacent terms, so{' '}
-                    <code className="text-info">method = POST status &gt;= 400</code> means the same as{' '}
-                    <code className="text-info">method = POST AND status &gt;= 400</code>.
-                  </div>
-                  <div className="mt-1">
-                    A <strong>bare term</strong> with no field is a case insensitive substring match across
-                    url, method and status. Typing <code className="text-info">login</code> matches any
-                    capture whose url contains "login".
-                  </div>
-                  <div className="mt-1">
-                    Use <strong>double quotes</strong> for a value containing spaces:{' '}
-                    <code className="text-info">path = "/a b/c"</code>.
-                  </div>
-                </div>
-              </div>
-
-              <div className="col-lg-4">
-                <div className="text-light small fw-bold mb-1">Examples, click to use</div>
-                <Table size="sm" variant="dark" borderless className="mb-0">
-                  <tbody>
-                    {QUERY_EXAMPLES.map(([example, meaning]) => (
-                      <tr key={example}>
-                        <td>
-                          <code
-                            className="text-info"
-                            style={{ fontSize: '0.73rem', cursor: 'pointer' }}
-                            onClick={() => setQuery(example)}
-                          >
-                            {example}
-                          </code>
-                          <div className="text-white-50" style={{ fontSize: '0.7rem' }}>{meaning}</div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </Table>
-                <div className="text-white-50 mt-2" style={{ fontSize: '0.72rem' }}>
-                  A query the parser cannot read is reported under the search box with the position it
-                  stopped at. The tree keeps showing the last good result, so a syntax error never looks
-                  like a search that matched nothing.
-                </div>
-                <div className="text-warning mt-2" style={{ fontSize: '0.72rem' }}>
-                  <i className="bi bi-info-circle me-1" />
-                  The manual crawl does not store a response body for every capture. A capture without
-                  one is excluded from <code className="text-danger">size</code> and{' '}
-                  <code className="text-danger">resp.body</code> entirely, including from the negative
-                  forms: <code className="text-info">resp.body !~ password</code> will not answer for a
-                  body nobody recorded. Every other field covers the whole corpus.
-                </div>
-              </div>
-            </div>
-          </Accordion.Body>
-        </Accordion.Item>
-      </Accordion>
+      <QueryLanguageHelp onExample={setQuery} />
 
       <div className="d-flex flex-grow-1" style={{ minHeight: 0 }}>
         {/* Left: search and the sitemap. */}
@@ -3025,14 +2935,18 @@ export const SingleRequestPane = ({
           <div className="d-flex align-items-center px-2 py-1 border-bottom border-secondary">
             <span className="text-white-50" style={{ fontSize: '0.72rem' }}>VARIANTS</span>
             {versionsLoading && <Spinner animation="border" size="sm" variant="danger" className="ms-2" />}
-            {(endpointVariants.length >= 1 ? endpointVariants.length : versions.length) > 0 && (
+            {(endpointVariants.length >= 1
+              ? endpointVariants.filter((v) => !v.hidden).length
+              : versions.length) > 0 && (
               <Badge
                 bg="dark"
                 className="border border-secondary text-white-50 ms-2"
                 style={{ fontSize: '0.55rem' }}
                 title={endpointVariants.length >= 1 ? 'variants of this endpoint' : 'edits of this request'}
               >
-                {endpointVariants.length >= 1 ? endpointVariants.length : versions.length}
+                {endpointVariants.length >= 1
+                  ? endpointVariants.filter((v) => !v.hidden).length
+                  : versions.length}
               </Badge>
             )}
             {versionCaptureId && versionsAvailable && (

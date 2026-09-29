@@ -786,3 +786,115 @@ func TestTheScanAbortReasonQuotesTheLabelAsStored(t *testing.T) {
 		}
 	}
 }
+
+func TestRecaptureShouldRefreshCookie(t *testing.T) {
+	// Only the session's own cookie (already tracked) and companions survive; analytics do not.
+	tracked := map[string]bool{"__host-app_session": true}
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"__Host-app_session", true},  // already tracked (case-insensitive)
+		{"__HOST-APP_SESSION", true},  // tracked, different case
+		{"cf_clearance", true},        // companion (Cloudflare)
+		{"__cf_bm", true},             // companion (Cloudflare bot manager)
+		{"__Host-psifi.x-csrf-token", true}, // companion (CSRF)
+		{"awsalb", true},              // companion (load balancer)
+		{"_ga", false},                // analytics
+		{"_twpid", false},             // tracking
+		{"__stripe_mid", false},       // third-party
+		{"OptanonConsent", false},     // consent
+		{"hubspotutk", false},         // marketing
+	}
+	for _, c := range cases {
+		if got := recaptureShouldRefreshCookie(c.name, tracked); got != c.want {
+			t.Errorf("recaptureShouldRefreshCookie(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestRefreshRoleIsNeverWiredOntoARequest(t *testing.T) {
+	// A refresh secret is spent to mint, never attached to a resource request, regardless of token_type.
+	for _, typ := range []string{tokenTypeBearer, tokenTypeCookie, tokenTypeHeader, tokenTypeQuery, tokenTypeAPIKey} {
+		tok := SessionToken{
+			TokenRole: tokenRoleRefresh, TokenType: typ, TokenValue: "refresh-secret-abc",
+			HeaderName: "Authorization", CookieName: "sid", ParamName: "rt",
+		}
+		if m := tok.AuthMaterial("app.test"); m != nil {
+			t.Errorf("%s refresh row produced auth material %+v, must be nil", typ, m)
+		}
+		if q := tok.QueryParam(); q != "" {
+			t.Errorf("%s refresh row produced query param %q, must be empty", typ, q)
+		}
+		if u := tok.ApplyToURL("https://app.test/x"); u != "https://app.test/x" {
+			t.Errorf("%s refresh row rewrote the URL to %q, must leave it untouched", typ, u)
+		}
+	}
+	// A credential of the same type still wires normally (guard did not over-reach).
+	cred := SessionToken{TokenRole: tokenRoleCredential, TokenType: tokenTypeBearer, TokenValue: "v", HeaderName: "Authorization", ValuePrefix: "Bearer "}
+	if m := cred.AuthMaterial("app.test"); m == nil || m.Headers["Authorization"] != "Bearer v" {
+		t.Fatalf("a bearer credential must still produce auth material, got %+v", m)
+	}
+}
+
+func TestRefreshRoleValidationIsNotGraded(t *testing.T) {
+	// A refresh row returns the refresh verdict without sending anything, and that verdict is not a
+	// rejection (so it never reads as a dead credential).
+	tok := SessionToken{TokenRole: tokenRoleRefresh, TokenType: tokenTypeBearer, TokenValue: "refresh-secret-xyz"}
+	status, detail, _ := runSessionTokenValidation(tok)
+	if status != tokenStatusRefresh {
+		t.Fatalf("refresh validation status = %q, want %q", status, tokenStatusRefresh)
+	}
+	if detail == "" {
+		t.Fatal("refresh validation should explain why it is not graded")
+	}
+	if sessionTokenRejectedStatuses[tokenStatusRefresh] {
+		t.Fatal("the refresh status must not be a rejected status, or it reads as a dead credential")
+	}
+	if sessionTokenLooksDead(tok, time.Now()) {
+		t.Fatal("a refresh row with no passed expiry must not look dead")
+	}
+}
+
+func TestRefreshRoleNormalizesWithoutAWiringSlot(t *testing.T) {
+	// A refresh row keeps a valid token_type but must not be rejected for lacking a header/cookie/param.
+	// ScopeDomains is set so normalize does not fall through to the scopeTargetHost DB lookup.
+	tok := SessionToken{TokenRole: tokenRoleRefresh, TokenType: tokenTypeCookie, TokenValue: "v", ScopeDomains: []string{"app.test"}}
+	if err := normalizeSessionTokenWiring(&tok); err != nil {
+		t.Fatalf("a refresh cookie row without a cookie_name must not error, got: %v", err)
+	}
+	if tok.TokenRole != tokenRoleRefresh {
+		t.Fatalf("role was changed to %q", tok.TokenRole)
+	}
+	// A credential cookie with no name is still rejected (guard did not disable the requirement).
+	bad := SessionToken{TokenRole: tokenRoleCredential, TokenType: tokenTypeCookie, TokenValue: "v", ScopeDomains: []string{"app.test"}}
+	if err := normalizeSessionTokenWiring(&bad); err == nil {
+		t.Fatal("a credential cookie without a cookie_name must still be rejected")
+	}
+}
+
+func TestNormalizeTokenRoleAcceptsRefresh(t *testing.T) {
+	for _, in := range []string{"refresh", "REFRESH", " refresh "} {
+		got, err := normalizeTokenRole(in)
+		if err != nil || got != tokenRoleRefresh {
+			t.Errorf("normalizeTokenRole(%q) = %q,%v; want refresh,nil", in, got, err)
+		}
+	}
+	if _, err := normalizeTokenRole("bogus"); err == nil {
+		t.Fatal("an unknown role must still be rejected")
+	}
+}
+
+func TestCredentialIsSendableExcludesRefresh(t *testing.T) {
+	// credentialIsSendable mirrors ApplySessionTokens, which excludes refresh rows, so a refresh row
+	// must report not-sendable (and thus never be counted Active/Sendable or chosen as governing).
+	refresh := SessionToken{TokenRole: tokenRoleRefresh, TokenType: tokenTypeBearer, TokenValue: "refresh-secret", IsActive: true}
+	if ok, why := credentialIsSendable(refresh, time.Now()); ok || why == "" {
+		t.Fatalf("a refresh row must be not-sendable with a reason, got ok=%v why=%q", ok, why)
+	}
+	// A normal active credential is still sendable (no over-reach).
+	cred := SessionToken{TokenRole: tokenRoleCredential, TokenType: tokenTypeBearer, TokenValue: "opaque-live-value", IsActive: true}
+	if ok, why := credentialIsSendable(cred, time.Now()); !ok {
+		t.Fatalf("a normal active credential must be sendable, got not sendable: %q", why)
+	}
+}

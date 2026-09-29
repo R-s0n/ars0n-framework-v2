@@ -5489,6 +5489,12 @@ func (rr *triageRunner) runPrelude(ctx context.Context, u *triageUnitPlan) triag
 	if len(required) == 0 {
 		return triage.PreludeTokenNotRequired
 	}
+	// If dispatch's per-host breaker already abandoned this host for a WAF wall, the token fetch would
+	// just take the wall again on the prelude's own client (which does not feed the breaker). The token
+	// genuinely cannot be obtained from here, so report that without the extra doomed requests.
+	if rr.pace != nil && rr.pace.HostBlocked(hostOf(u.Template.URL)) {
+		return triage.PreludeTokenUnobtainable
+	}
 	res := FetchPreludeTokens(ctx, triagePreludeClient(), PreludeSpec{
 		URL:      u.Template.URL,
 		Method:   http.MethodGet,
@@ -6431,6 +6437,16 @@ func (rr *triageRunner) dispatch(ctx context.Context, u *triageUnitPlan, tmpl Re
 		obs.TransportMsg = "out_of_scope: " + host
 		return obs
 	}
+	// This host already showed a sustained WAF wall this run; stop sending to it. Recorded as a
+	// transport non-answer (like out-of-scope) so it reads as UNTESTED, never a clean probe. Per host,
+	// so a walled CDN does not stop the classes still landing on the hosts that answer, and because a
+	// WAF challenge is bound to the browser's IP and TLS fingerprint, refreshing the session cannot
+	// get past it: the honest next step is a browser, not more requests.
+	if rr.pace != nil && rr.pace.HostBlocked(host) {
+		obs.TransportErr = triage.TransportProto
+		obs.TransportMsg = "host_waf_abandoned: " + host + " was abandoned after a sustained WAF/bot-manager wall; not sent. Drive it in a browser."
+		return obs
+	}
 	if rr.pace != nil {
 		if err := rr.pace.Wait(ctx, host); err != nil {
 			obs.TransportErr = triage.TransportProto
@@ -6535,6 +6551,12 @@ func (rr *triageRunner) dispatch(ctx context.Context, u *triageUnitPlan, tmpl Re
 	}
 	if rr.pace != nil {
 		rr.pace.Observe(host, obs.Status, elapsed.Milliseconds(), false)
+		// Feed the per-host WAF breaker on a WAF/bot-manager response, so a sustained wall abandons the
+		// host. IsChallengeBody catches a 200/403 interstitial; the block statuses count too EXCEPT
+		// 401/403, which are ordinary auth the classes are here to probe (a plain app 403 is real
+		// surface, not a wall), so an auth-walled API never trips it.
+		rr.pace.NoteBlock(host, IsChallengeBody(string(obs.Body)) ||
+			(IsBlockStatus(obs.Status) && obs.Status != 401 && obs.Status != 403))
 	}
 	// WHAT THIS RESPONSE SAID ABOUT OUR OWN CREDENTIAL, recorded HERE because this is the one
 	// place a response arrives. Putting it at the call sites would mean four of them today and a

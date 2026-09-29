@@ -10,6 +10,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"sort"
 	"strings"
@@ -161,6 +162,14 @@ type FlowDetectionTarget struct {
 	Body        string `json:"body,omitempty"`
 	ContentType string `json:"content_type,omitempty"`
 	BodyBytes   int    `json:"body_bytes,omitempty"`
+
+	// The SAFE request headers this endpoint was recorded with (Accept, Accept-Language, Sec-Fetch-*,
+	// Referer, X-Requested-With and the like), so an active-detection request looks like the one that
+	// was actually observed rather than a bare Host+UA line that many apps answer with a 302 to a login
+	// or oauth page. Credentials (Cookie, Authorization) and client-managed names (Host, Content-Length,
+	// User-Agent, Accept-Encoding, Connection...) are already stripped in loadFlowDetectionHeaders, so
+	// this can never carry a session past the no-credentials rail.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // FlowDetectionSkip is one endpoint that will NOT be requested, and why.
@@ -459,6 +468,8 @@ type flowDetectionCandidate struct {
 	// loadFlowDetectionBodies for where it comes from and why most rows have none.
 	Body        string
 	ContentType string
+	// Safe recorded request headers for this endpoint (see loadFlowDetectionHeaders).
+	Headers map[string]string
 }
 
 // flowDetectVerbTakesBody reports whether sending a body with this verb is meaningful.
@@ -656,6 +667,121 @@ func loadFlowDetectionBodies(scopeTargetID string) (map[string]string, map[strin
 		types[key] = bodyType
 	}
 	return bodies, types, rows.Err()
+}
+
+// flowDetectionHeaderDenied is the set of recorded request-header names active detection must NOT
+// replay. It is the engagement denylist (cookie / authorization / user-agent / host / content-length)
+// plus:
+//   - proxy-authorization and the *-csrf / xsrf / api-key names: credentials or session tokens that
+//     would be stale, and must never cross the no-credentials rail;
+//   - accept-encoding: dropped so Go's transport chooses and then transparently decodes the encoding,
+//     otherwise a replayed "gzip" would make ReadBody store compressed bytes;
+//   - content-type: set from the recorded body's own type, not from a header;
+//   - the hop-by-hop names (connection, keep-alive, te, trailer, transfer-encoding, upgrade), which
+//     are meaningless replayed onto a new connection.
+var flowDetectionHeaderDenied = map[string]bool{
+	"cookie": true, "authorization": true, "proxy-authorization": true,
+	"user-agent": true, "host": true, "content-length": true, "content-type": true,
+	"accept-encoding": true, "connection": true, "keep-alive": true, "transfer-encoding": true,
+	"upgrade": true, "te": true, "trailer": true,
+	"x-csrf-token": true, "x-xsrf-token": true, "csrf-token": true, "x-api-key": true,
+}
+
+// parseFlowDetectionHeaders turns a stored request-headers JSONB blob into the safe subset active
+// detection may replay. Values may be a string or (for multi-value headers) an array; a value with a
+// CR or LF is dropped rather than allowed to split the request line.
+func parseFlowDetectionHeaders(raw []byte) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	safe := map[string]string{}
+	for k, v := range m {
+		if flowDetectionHeaderDenied[strings.ToLower(strings.TrimSpace(k))] {
+			continue
+		}
+		var val string
+		switch t := v.(type) {
+		case string:
+			val = t
+		case []interface{}:
+			if len(t) > 0 {
+				if s, ok := t[0].(string); ok {
+					val = s
+				}
+			}
+		}
+		if val == "" || strings.ContainsAny(val, "\r\n") {
+			continue
+		}
+		safe[k] = val
+	}
+	if len(safe) == 0 {
+		return nil
+	}
+	return safe
+}
+
+// loadFlowDetectionHeaders indexes the SAFE request headers each endpoint was recorded with, keyed on
+// NormalizeFlowTuple exactly like loadFlowDetectionBodies. It is what makes an active-detection request
+// resemble the request that was actually observed: without Accept / Accept-Language / Sec-Fetch-* many
+// applications answer a bare Host+User-Agent request with a 302 to a login or oauth page, while the
+// full recorded request returned a 200. consolidated is loaded first and the crawl overwrites it (the
+// crawl saw the real wire headers); the most recent capture wins within each source.
+func loadFlowDetectionHeaders(scopeTargetID string) (map[string]map[string]string, error) {
+	out := map[string]map[string]string{}
+
+	crows, err := dbPool.Query(context.Background(), `
+		SELECT COALESCE(NULLIF(method,''),'GET'), COALESCE(url,''), headers
+		  FROM consolidated_url_endpoints
+		 WHERE scope_target_id = $1 AND deleted_at IS NULL
+		 ORDER BY last_seen ASC`, scopeTargetID)
+	if err != nil {
+		return nil, fmt.Errorf("could not read consolidated request headers: %w", err)
+	}
+	for crows.Next() {
+		var method, rawURL string
+		var raw []byte
+		if err := crows.Scan(&method, &rawURL, &raw); err != nil {
+			continue
+		}
+		if h := parseFlowDetectionHeaders(raw); h != nil {
+			out[NormalizeFlowTuple(method, rawURL)] = h
+		}
+	}
+	crows.Close()
+	if err := crows.Err(); err != nil {
+		return nil, fmt.Errorf("could not read consolidated request headers: %w", err)
+	}
+
+	// PASSIVE captures only. Active-detection captures record the bare Host + programme header that
+	// active detection itself sent, and they are the MOST RECENT rows, so including them would let a
+	// previous run's sparse headers overwrite the browser's rich ones - the exact reason active
+	// detection kept getting a 302 where the crawl got a 200. The passive rows are the real client's
+	// headers (accept, sec-fetch-*, and the app's own routing headers like x-service / x-tenant-id).
+	rows, err := dbPool.Query(context.Background(), `
+		SELECT COALESCE(method,''), COALESCE(url,''), headers
+		  FROM manual_crawl_captures
+		 WHERE scope_target_id = $1 AND COALESCE(capture_source,'') <> 'active'
+		 ORDER BY timestamp ASC`, scopeTargetID)
+	if err != nil {
+		return nil, fmt.Errorf("could not read recorded request headers: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var method, rawURL string
+		var raw []byte
+		if err := rows.Scan(&method, &rawURL, &raw); err != nil {
+			continue
+		}
+		if h := parseFlowDetectionHeaders(raw); h != nil {
+			out[NormalizeFlowTuple(method, rawURL)] = h
+		}
+	}
+	return out, rows.Err()
 }
 
 // flowDetectionContentType maps a recorded body_type to a Content-Type header.
@@ -912,6 +1038,20 @@ func PlanFlowDetection(scopeTargetID string, cfg FlowDetectionConfig) (*FlowDete
 		}
 	}
 
+	// The recorded request headers, so a sent request resembles the observed one instead of a bare
+	// Host+UA line. Non-fatal like the bodies: a missing header index only makes requests barer, it can
+	// never reach an endpoint the rules exclude.
+	if headers, herr := loadFlowDetectionHeaders(scopeTargetID); herr != nil {
+		log.Printf("[FLOW-DETECT] Could not read recorded headers for %s: %v", scopeTargetID, herr)
+	} else {
+		for i := range candidates {
+			key := NormalizeFlowTuple(candidates[i].Method, candidates[i].URL)
+			if h, ok := headers[key]; ok {
+				candidates[i].Headers = h
+			}
+		}
+	}
+
 	// The operator's selection, applied BEFORE the plan is built rather than to the plan afterwards.
 	// See PartitionFlowCandidatesBySelection: the planner truncates at max_requests, so filtering
 	// later would let deselected endpoints consume the budget and push the wanted ones into
@@ -1051,6 +1191,9 @@ func buildFlowDetectionPlan(
 			target.Body = c.Body
 			target.ContentType = c.ContentType
 			target.BodyBytes = len(c.Body)
+		}
+		if len(c.Headers) > 0 {
+			target.Headers = c.Headers
 		}
 		plan.Targets = append(plan.Targets, target)
 	}
@@ -1568,17 +1711,27 @@ func runFlowDetectionChain(
 		// requests at the target and the cap counts requests, not endpoints.
 		flowDetectionJitter(ctx, interval, pacingDeficit)
 
-		// The programme's identifying header, and nothing else beyond the body's Content-Type.
-		// HeaderMap has already refused the credential-bearing names, so there is no path from this
-		// map to a request that acts as a logged-in user. Copied rather than mutated: engagementHeaders
-		// is shared across every request in the run, and writing a per-request Content-Type into it
-		// would leak that header onto every subsequent endpoint.
-		headers := engagementHeaders
+		// Build the header set for this hop, in three layers, lowest precedence first:
+		//   1. the endpoint's SAFE recorded headers (Accept, Accept-Language, Sec-Fetch-*, Referer...),
+		//      so the request resembles the one that was observed rather than a bare Host+UA line that
+		//      many apps answer with a 302 to a login page. Credentials were already stripped in
+		//      loadFlowDetectionHeaders, so nothing here can act as a logged-in user;
+		//   2. the programme's identifying header, which WINS over anything recorded of the same name;
+		//   3. the body's Content-Type, set from the recorded body's type rather than a header.
+		// Freshly allocated each hop, never mutating the shared engagementHeaders/target.Headers maps.
+		headers := make(map[string]string, len(target.Headers)+len(engagementHeaders)+2)
+		// A sensible default first so every request carries at least Accept, whose absence most often
+		// turns a 200 into a redirect; a recorded Accept overrides it below. Keys are canonicalised so a
+		// recorded "accept" and an engagement "X-BUG-BOUNTY" collapse onto one header rather than being
+		// sent twice with map-order-dependent precedence.
+		headers["Accept"] = "*/*"
+		for k, v := range target.Headers {
+			headers[textproto.CanonicalMIMEHeaderKey(k)] = v
+		}
+		for k, v := range engagementHeaders {
+			headers[textproto.CanonicalMIMEHeaderKey(k)] = v
+		}
 		if body != "" && contentType != "" {
-			headers = make(map[string]string, len(engagementHeaders)+1)
-			for k, v := range engagementHeaders {
-				headers[k] = v
-			}
 			headers["Content-Type"] = contentType
 		}
 
@@ -2120,7 +2273,7 @@ func FlowDetectionSources(scopeTargetID string) map[string]string {
 	}
 
 	inputs := []FlowDetectionInput{}
-	for _, flow := range segmentCaptureFlows(captures) {
+	for _, flow := range reportableCaptureFlows(captures) {
 		if len(flow.Captures) == 0 {
 			continue
 		}

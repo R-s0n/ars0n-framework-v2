@@ -1377,7 +1377,7 @@ function App() {
     { register: 0, login: 0, mfa_otp: 0, magic_link: 0, reset: 0, total: 0, recorded: 0 });
   // Session tokens the operator has saved, and how many are switched on. Active is the number that
   // decides whether every other scan runs authenticated or against a login wall.
-  const [sessionTokenCounts, setSessionTokenCounts] = useState({ total: 0, active: 0 });
+  const [sessionTokenCounts, setSessionTokenCounts] = useState({ total: 0, active: 0, expired: 0 });
   const [showRecordAuthFlowsModal, setShowRecordAuthFlowsModal] = useState(false);
   const [showManualAuthFlowModal, setShowManualAuthFlowModal] = useState(false);
   const [showManageSessionsModal, setShowManageSessionsModal] = useState(false);
@@ -6406,7 +6406,7 @@ function App() {
     if (s.status === 'starting' || detectRunLive) {
       const cancelling = s.status === 'cancelling';
       return (
-        <div className="small text-center mt-3">
+        <div className="small text-center w-100">
           <div className="text-white-50 mb-1">
             <Spinner animation="border" size="sm" className="me-2" />
             {s.status === 'starting'
@@ -6460,7 +6460,7 @@ function App() {
     }
 
     return (
-      <div className="small text-center mt-3" style={{ color }}>
+      <div className="small text-center w-100" style={{ color }}>
         {text}
         <Button
           variant="link"
@@ -7012,7 +7012,7 @@ function App() {
   const fetchSessionTokenCounts = async (targetId) => {
     const id = targetId || (activeTarget && activeTarget.id);
     if (!id) {
-      setSessionTokenCounts({ total: 0, active: 0 });
+      setSessionTokenCounts({ total: 0, active: 0, expired: 0 });
       setSessionTtl(summariseSessionTtl(null));
       return;
     }
@@ -7033,6 +7033,7 @@ function App() {
         setSessionTokenCounts({
           total: Number.isFinite(counts.total) ? counts.total : 0,
           active: Number.isFinite(counts.active) ? counts.active : 0,
+          expired: Number.isFinite(counts.expired) ? counts.expired : 0,
         });
         setSessionTtl(summariseSessionTtl(report));
       } else {
@@ -10715,6 +10716,16 @@ function App() {
                                 : null}
                             />
                           </Row>
+                          {/* Detect Flows run status sits ABOVE the buttons, in a FIXED-HEIGHT slot that
+                              is always present. Reserving the space means the card is the same height
+                              whether or not a run is going, so starting Detect Flows never makes the card
+                              jump taller. Empty (idle) it is invisible but still holds its height. */}
+                          <div
+                            className="mb-2 d-flex flex-column justify-content-center"
+                            style={{ minHeight: '40px' }}
+                          >
+                            {detectRun && renderDetectRunStatus()}
+                          </div>
                           <Row className="g-2">
                             {/* Replay Requests sits first: it is the workbench the rest of the card
                                 feeds into. Every other button exists to put a request in front of it -
@@ -10745,7 +10756,7 @@ function App() {
                               </Button>
                             </Col>
                             {/* Detect Flows no longer opens a modal: it RUNS, on the config saved in
-                                Configure, and the progress bar below the buttons reports it. Disabled
+                                Configure, and the progress bar above the buttons reports it. Disabled
                                 while a run is live so it cannot be double-started; the server also
                                 refuses a second concurrent run. */}
                             <Col>
@@ -10782,7 +10793,6 @@ function App() {
                               </Button>
                             </Col>
                           </Row>
-                          {detectRun && renderDetectRunStatus()}
                         </div>
                       </Card.Body>
                     </Card>
@@ -10799,7 +10809,7 @@ function App() {
                           Authentication
                         </Card.Title>
                         <Card.Text className="text-white small fst-italic">
-                          Record a real authentication against the target with the browser extension, or write the requests out by hand, then keep the session tokens those flows produce. Every token is tied to the flow that can mint another one, so when a session dies the framework can go and get a new one instead of quietly testing a login wall.
+                          Record a real authentication against the target with the browser extension, or write the requests out by hand, then keep the session tokens those flows produce. Link a token to the login flow that issues it and the framework can re-mint it when the session dies instead of quietly testing a login wall; for a session with no replayable flow, refresh it by pasting a fresh value.
                         </Card.Text>
                         <Row className="g-3 justify-content-center mt-1 mb-2">
                           <Col xs={6} md={2}>
@@ -10816,12 +10826,28 @@ function App() {
                           </Col>
                           <Col xs={6} md={2}>
                             {/* Active is the number that matters: it is what the other tools will
-                                actually send. Zero active tokens with a full list is the state that
-                                makes every scan report a login wall. */}
-                            <div className={`fs-3 fw-bold ${(sessionTokenCounts.active ?? 0) > 0 ? 'text-danger' : 'text-secondary'}`}>
+                                actually send. But an active token the operator validated as expired is
+                                still switched on, so a bare count reads as healthy when it is not.
+                                When every active token is dead the number goes grey and a red line
+                                says so; a mix stays accented with the expired tally beneath it. */}
+                            <div className={`fs-3 fw-bold ${
+                              (sessionTokenCounts.active ?? 0) === 0
+                                ? 'text-secondary'
+                                : (sessionTokenCounts.expired ?? 0) >= (sessionTokenCounts.active ?? 0)
+                                  ? 'text-secondary'
+                                  : 'text-danger'}`}>
                               {sessionTokenCounts.active ?? 0}
                             </div>
-                            <div className="text-white small pb-4">Active</div>
+                            <div className="text-white small">Active</div>
+                            {(sessionTokenCounts.expired ?? 0) > 0 ? (
+                              <div className="text-danger pb-4" style={{ fontSize: '0.7rem' }}>
+                                {(sessionTokenCounts.expired ?? 0) >= (sessionTokenCounts.active ?? 0)
+                                  ? 'all expired – refresh'
+                                  : `${sessionTokenCounts.expired} expired`}
+                              </div>
+                            ) : (
+                              <div className="pb-4" style={{ fontSize: '0.7rem' }}>&nbsp;</div>
+                            )}
                           </Col>
                           <Col xs={12} md={3}>
                             {/* HOW LONG THE SESSION LASTS, which is the number that decides whether
@@ -11663,14 +11689,9 @@ function App() {
                           )}
                           <Row className="g-2">
                             <Col xs={6} md={4} xxl>
-                              {/* Which endpoints Investigate covers, and how it probes them. */}
-                              <Button variant="outline-danger" className="w-100"
-                                onClick={handleOpenAttackVectorConfigureModal}
-                                disabled={!activeTarget}>
-                                Configure
-                              </Button>
-                            </Col>
-                            <Col xs={6} md={4} xxl>
+                              {/* Consolidate first: it rebuilds the vector list from what the crawl
+                                  saw and sends zero HTTP, so it is the natural first step before
+                                  configuring and running Investigate against that list. */}
                               <Button variant="outline-danger" className="w-100"
                                 onClick={handleConsolidateAttackVectors}
                                 disabled={!activeTarget || isConsolidatingAttackVectors}>
@@ -11679,6 +11700,14 @@ function App() {
                                     ? <Spinner animation="border" size="sm" />
                                     : 'Consolidate'}
                                 </div>
+                              </Button>
+                            </Col>
+                            <Col xs={6} md={4} xxl>
+                              {/* Which endpoints Investigate covers, and how it probes them. */}
+                              <Button variant="outline-danger" className="w-100"
+                                onClick={handleOpenAttackVectorConfigureModal}
+                                disabled={!activeTarget}>
+                                Configure
                               </Button>
                             </Col>
                             <Col xs={6} md={4} xxl>
@@ -11692,7 +11721,7 @@ function App() {
                                 onClick={handleProbeReflection}
                                 disabled={!activeTarget || isProbingReflection
                                   || isConsolidatingAttackVectors}
-                                title="Three passes. Passive reads the requests and responses the crawl already stored and records every input whose value comes back, sending nothing. Active sends one canary per input and records what survived. The classifier pass then probes each input for the attack classes enabled on the Configure tab. IT REPLAYS THE VERB IT CAPTURED, so POST, PATCH, PUT and DELETE do go out and do change data on the accounts you have authorised. Use the Configure tab to narrow which endpoints are in scope.">
+                                title="Three passes. Passive reads the requests and responses the crawl already stored and records every input whose value comes back, sending nothing. Active sends one canary per input on the SAFE verbs only; POST, PUT, PATCH and DELETE are never sent, and a body input is answered from the stored exchange instead. The classifier pass then probes each input for the attack classes enabled on the Configure tab, and it does not send a mutating (state-changing) request unless you raise the mutating allowance on the Configure tab, which is zero by default. Use the Configure tab to narrow which endpoints are in scope.">
                                 <div className="btn-content">
                                   {isProbingReflection
                                     ? <Spinner animation="border" size="sm" />
