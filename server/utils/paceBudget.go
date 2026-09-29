@@ -68,6 +68,10 @@ type hostState struct {
 	window    []observation
 	brakes    int
 	errStreak int
+	// blockStreak counts CONSECUTIVE WAF/bot-manager blocks against this host; hostBlocked latches
+	// once it crosses PacingBlockStreakAbandon. A reached response resets the streak. See NoteBlock.
+	blockStreak int
+	hostBlocked bool
 }
 
 type observation struct {
@@ -103,6 +107,18 @@ const (
 	// of the target, and a scan that stops because a 20ms shell became a 150ms API call has thrown
 	// the run away for nothing.
 	pacingLatencyFloorMS = 500
+
+	// A host answering a sustained run of WAF/bot-manager challenges will not start answering because
+	// the scan kept asking. Continuing spends the rate budget on signal-free traffic and, from a
+	// datacenter IP against a shared edge such as Cloudflare (which bans by IP across every zone it
+	// fronts), invites an IP ban that would blind the run to the hosts that DO answer. Past this many
+	// CONSECUTIVE block verdicts, with nothing reaching the application in between, the host is
+	// abandoned for the rest of the run. It is scoped per host, and any reached response resets the
+	// streak, so an application that merely auth-walls some paths (real 401/403 the classifier keeps
+	// as valid.auth_required, never a block verdict) never trips it. This is deliberately separate
+	// from the 429/503 rate brake: a WAF challenge is served fast and often as a 403, so it neither
+	// slows the latency ladder nor is a rate signal that backing off would clear.
+	PacingBlockStreakAbandon = 25
 )
 
 func NewHostBudget() *HostBudget {
@@ -366,6 +382,63 @@ func (b *HostBudget) WorkingBaseline(host string) int64 {
 		return st.workingMS
 	}
 	return 0
+}
+
+// NoteBlock records whether one response was a WAF/bot-manager block rather than reaching the
+// application. A sustained streak abandons the host (HostBlocked) for the rest of the run; any
+// reached response resets it. See PacingBlockStreakAbandon for why this is separate from the
+// 429/503 rate brake. The host is lazily registered so a caller that only consults the breaker
+// (Investigate's Tier 0 loop) does not have to Acquire it first.
+func (b *HostBudget) NoteBlock(host string, blocked bool) {
+	host = strings.ToLower(host)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	st, ok := b.hosts[host]
+	if !ok {
+		st = &hostState{rps: pacingMinRPS, concurrency: 1, tokens: make(chan struct{}, 1),
+			interval: time.Duration(float64(time.Second) / pacingMinRPS)}
+		b.hosts[host] = st
+	}
+	if !blocked {
+		st.blockStreak = 0
+		return
+	}
+	if st.hostBlocked {
+		return
+	}
+	st.blockStreak++
+	if st.blockStreak >= PacingBlockStreakAbandon {
+		st.hostBlocked = true
+		b.record(0, "waf_block_wall", fmt.Sprintf(
+			"%s returned %d consecutive WAF/bot-manager blocks; abandoning it for the rest of this run "+
+				"to avoid an IP ban. Its remaining endpoints are reported unverified, never ruled out.",
+			host, st.blockStreak), "abandon")
+	}
+}
+
+// HostBlocked reports whether a host has been abandoned after a sustained WAF-block wall.
+func (b *HostBudget) HostBlocked(host string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if st, ok := b.hosts[strings.ToLower(host)]; ok {
+		return st.hostBlocked
+	}
+	return false
+}
+
+// BlockedHosts names every host abandoned mid-run, for the assumptions the operator reads.
+func (b *HostBudget) BlockedHosts() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []string
+	for h, st := range b.hosts {
+		if st.hostBlocked {
+			out = append(out, h)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // AbortNow lets a caller stop the run for a reason the ladder cannot see, such as the health canary
