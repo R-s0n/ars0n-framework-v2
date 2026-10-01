@@ -297,6 +297,14 @@ func hostWithinDomain(host, domain string) bool {
 	return strings.HasSuffix(host, "."+domain)
 }
 
+// RefusesAll reports whether the boundary could not be established at all (no host determinable, or
+// rules that failed to compile), in which case Allows() is false for every host. A bulk action keyed
+// on "out of scope" - a purge, say - MUST check this first: against a refuse-all boundary, everything
+// reads as out of scope, so "delete what is out of scope" would delete everything.
+func (s *ScanScope) RefusesAll() bool {
+	return s == nil || s.refuseAll
+}
+
 // Refuse records a host that was turned away, so the run can report what it declined to touch
 // rather than leaving the operator to wonder why a quarter of the corpus has no verdict.
 func (s *ScanScope) Refuse(host string) {

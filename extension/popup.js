@@ -327,6 +327,31 @@ function fetchWithTimeout(url, options, timeoutMs) {
   return fetch(url, { ...(options || {}), signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
+// fetchWithTimeout clears its abort timer the instant fetch() resolves (headers), so a caller that
+// then awaited response.json() on a header-then-body stall hung FOREVER — and because loadURLTargets
+// is awaited inside the non-reentrant pollTick, that stranded pollInFlight and froze the dropdown on
+// "Loading targets…" with no recovery until the popup was reloaded. This keeps one AbortController
+// armed across the body read too, so a stall rejects (the caller's catch runs, the poll retries)
+// instead of hanging. Use it wherever a JSON body is awaited; the health check and DELETE read no
+// body and stay on fetchWithTimeout.
+async function fetchJSONWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs || 8000);
+  try {
+    const res = await fetch(url, { ...(options || {}), signal: controller.signal });
+    let body = null;
+    try {
+      body = await res.json();
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw error;
+      /* non-JSON body */
+    }
+    return { ok: res.ok, status: res.status, body };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /* ------------------------------------------------------------------ scope rendering */
 
 function chip(text, variant, onRemove) {
@@ -430,9 +455,9 @@ async function loadScopeRules() {
     return;
   }
   try {
-    const res = await fetchWithTimeout(`${frameworkUrl}/api/scope-rules/${targetId}`, {}, 8000);
+    const res = await fetchJSONWithTimeout(`${frameworkUrl}/api/scope-rules/${targetId}`, {}, 8000);
     if (!res.ok) throw new Error(`framework returned ${res.status}`);
-    const body = await res.json();
+    const body = res.body || {};
     scopeRules = body.rules || [];
     scopeRulesActive = !!body.rules_active;
   } catch (error) {
@@ -519,12 +544,12 @@ async function previewScopeRule(typed) {
     return;
   }
   try {
-    const res = await fetchWithTimeout(`${frameworkUrl}/api/scope-rules/preview`, {
+    const res = await fetchJSONWithTimeout(`${frameworkUrl}/api/scope-rules/preview`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ scope_target_id: currentScopeTargetId(), typed }),
     }, 8000);
-    const body = await res.json();
+    const body = res.body || {};
     if (!body.ok) {
       out.className = 'small mt-1 text-danger';
       out.textContent = body.error || 'not a valid rule';
@@ -949,10 +974,10 @@ async function loadURLTargets() {
   const targetSelect = document.getElementById('targetSelect');
 
   try {
-    const response = await fetchWithTimeout(`${frameworkUrl}/api/scopetarget/read`, {}, 8000);
+    const response = await fetchJSONWithTimeout(`${frameworkUrl}/api/scopetarget/read`, {}, 8000);
     if (!response.ok) throw new Error(`Failed to fetch targets: ${response.status}`);
 
-    const allTargets = await response.json();
+    const allTargets = response.body;
     availableTargets = (allTargets || []).filter((t) => t.type === 'URL');
 
     if (availableTargets.length === 0) {

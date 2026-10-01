@@ -103,6 +103,11 @@ export const EMPTY_STATE = {
   apiBase: 'http://localhost/api',
   startedAt: null,
   lastHeartbeatAt: null,
+  // When the last capture was enqueued. Read by the abandoned-session recovery to decide whether the
+  // operator is still actively recording (a spurious drop worth auto-resuming) or has moved on.
+  lastCaptureAt: null,
+  // Consecutive guarded auto-reopens since the last healthy flush/heartbeat. Bounds silent restarts.
+  reopenAttempts: 0,
   lastError: null,
   deepCapture: { enabled: false, attachedTabs: [], errors: [] },
   // Hosts seen but rejected by the scope filter, with a hit count. Surfaced in the popup so a
@@ -217,6 +222,21 @@ export function setState(next) {
     stateCache = mergeDefaults(next);
     await chrome.storage.session.set({ [STATE_KEY]: stateCache });
     return stateCache;
+  });
+}
+
+// Atomic compare-and-set for the abandoned-session reopen. Commits `patch` ONLY if the session being
+// reopened is STILL the current, active one. Runs inside the same write chain as clearState/updateState,
+// so a deliberate Stop (which sets active:false / sessionId:null) that lands during the reopen's awaits
+// is observed here and the reopen bails instead of clobbering it back to active - the silent-resurrection
+// guard. A superseding reopen (different sessionId) is caught the same way. Returns true if committed.
+export function commitReopenState(expectedSessionId, patch) {
+  return runExclusive(async () => {
+    const current = await getState();
+    if (!current.active || current.sessionId !== expectedSessionId) return false;
+    stateCache = { ...current, ...patch };
+    await chrome.storage.session.set({ [STATE_KEY]: stateCache });
+    return true;
   });
 }
 
@@ -373,6 +393,9 @@ export function enqueueOrMerge(capture, sourcePrecedence) {
     const state = await getState();
     stateCache = {
       ...state,
+      // Stamped on every captured request (merge or not) so the abandoned-session recovery can tell
+      // an actively-recording operator from one who has stopped browsing.
+      lastCaptureAt: now,
       stats: {
         ...state.stats,
         requestCount: merged ? state.stats.requestCount : state.stats.requestCount + 1,

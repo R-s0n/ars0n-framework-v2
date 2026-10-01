@@ -50,10 +50,21 @@ module.exports = {
     tool: 'Creates a scope target. Company is an org with on-prem infrastructure, Wildcard is '
       + '*.domain.com, URL is one application, and the type decides which workflow and which tables '
       + 'exist for it.',
+    rule: 'CONFIRM TESTABILITY FOR YOUR BUG CLASS BEFORE INVESTING IN A TARGET. Creating the target '
+      + 'is cheap; the mistake is picking one you cannot actually test. Each bug class has a '
+      + 'prerequisite - call get_methodology and read target_fit for your class (good_signals, '
+      + 'testability_prerequisite, recon_checks). For access-control/IDOR/BOLA (and stored-XSS, most '
+      + 'GraphQL): can you OBTAIN an account (open self-registration, provided creds, ideally two) OR '
+      + 'do object endpoints answer UNAUTHENTICATED? An exposed Swagger full of /{id} endpoints is NOT '
+      + 'testable if they all 401 and the token endpoint needs a provisioned secret with no signup. '
+      + 'And the prerequisites invert by class: cache poisoning REQUIRES a CDN/cache in front, the '
+      + 'opposite of what IDOR/SQLi want; reflected-XSS needs an HTML response, not a JSON API; DOM-XSS '
+      + 'needs a client source->sink and a real browser. Check the auth model and the prerequisite with '
+      + 'one or two requests now, and record it in the target notes.',
     lies: 'The wrong type is silent rather than refused: a URL target has no subdomain or target_urls '
       + 'tables at all, so every Wildcard tool run against it completes with nowhere to write. mode '
       + 'accepts only Passive or Active; the enum here once read bb/pentest and every call 500d.',
-    next: 'activate_target, run_wildcard_workflow, run_company_workflow, run_url_workflow',
+    next: 'get_methodology (read target_fit for your class), then activate_target, run_url_workflow',
     learn: 'kb://methodology/recon-methodology',
     derived: false,
   },

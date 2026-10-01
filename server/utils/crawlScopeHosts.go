@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -370,4 +371,137 @@ func nullIfEmpty(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+// PurgeOutOfScopeCaptures deletes the manual-crawl captures (and their consolidated endpoints) for
+// hosts the target's CURRENT scan boundary refuses. It is the non-destructive counterpart to deleting
+// the whole scope target: the target, its scope rules, its notes and every IN-scope capture survive,
+// and only what the boundary calls out of scope is removed. "Out of scope" is decided by the
+// framework's own LoadScanScope().Allows(), so it means exactly what the scanner would refuse - never
+// a guess and never a hand-written host list that could drift from the real boundary.
+//
+// dry_run (the DEFAULT when the field is omitted) reports what WOULD be deleted and touches nothing,
+// so the operator sees the hosts and row counts before committing. Two guards make a mistaken
+// delete-everything impossible: a target whose boundary could not be established is refused outright
+// (LoadScanScope refuses all, so every capture would read as out of scope), and a real delete is
+// refused when the boundary admits NONE of the captured hosts (all rules disabled, or all denies) -
+// a 100%-purge is a misconfigured boundary, not a legitimate cleanup.
+func PurgeOutOfScopeCaptures(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	scopeTargetID := mux.Vars(r)["scope_target_id"]
+	if scopeTargetID == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing_target", "scope_target_id is required")
+		return
+	}
+
+	var req struct {
+		DryRun *bool `json:"dry_run"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	dryRun := true
+	if req.DryRun != nil {
+		dryRun = *req.DryRun
+	}
+
+	scope := LoadScanScope(scopeTargetID)
+	if scope.RefusesAll() {
+		writeJSONError(w, http.StatusBadRequest, "no_boundary",
+			"This target has no usable scope boundary, so every capture would count as out of scope. "+
+				"Set the target's scope (its host, or scope rules) before purging.")
+		return
+	}
+
+	rows, err := dbPool.Query(context.Background(), `
+		SELECT capture_host(url) AS host, count(*) AS captures
+		FROM manual_crawl_captures
+		WHERE scope_target_id = $1 AND capture_host(url) <> ''
+		GROUP BY 1`, scopeTargetID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	type hostCount struct {
+		Host     string `json:"host"`
+		Captures int    `json:"captures"`
+	}
+	var outOfScope []hostCount
+	var outHosts []string
+	totalCaptures := 0
+	inScopeHosts := 0
+	for rows.Next() {
+		var h string
+		var c int
+		if rows.Scan(&h, &c) != nil {
+			continue
+		}
+		if scope.Allows(h) {
+			inScopeHosts++
+			continue
+		}
+		outOfScope = append(outOfScope, hostCount{Host: h, Captures: c})
+		outHosts = append(outHosts, strings.ToLower(h))
+		totalCaptures += c
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	sort.Slice(outOfScope, func(i, j int) bool { return outOfScope[i].Captures > outOfScope[j].Captures })
+
+	if dryRun || len(outHosts) == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"dry_run":            dryRun,
+			"boundary":           scope.Describe(),
+			"out_of_scope_hosts": outOfScope,
+			"host_count":         len(outOfScope),
+			"captures_to_delete": totalCaptures,
+			"deleted_captures":   0,
+			"deleted_endpoints":  0,
+		})
+		return
+	}
+
+	// Second guard: refuse a purge that would take every captured host. That is not a cleanup, it is
+	// a boundary that admits nothing (all rules disabled, or all denies), and deleting the whole
+	// corpus over a misconfiguration is exactly the destructive outcome this feature exists to avoid.
+	if inScopeHosts == 0 {
+		writeJSONError(w, http.StatusBadRequest, "boundary_admits_nothing",
+			fmt.Sprintf("The current boundary (%s) admits NONE of this target's captured hosts, so a "+
+				"purge would delete every capture. That usually means the scope rules are all disabled "+
+				"or all denies. Refusing; check the boundary first.", scope.Describe()))
+		return
+	}
+
+	capTag, err := dbPool.Exec(context.Background(), `
+		DELETE FROM manual_crawl_captures
+		WHERE scope_target_id = $1 AND lower(capture_host(url)) = ANY($2)`, scopeTargetID, outHosts)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	// The derived surface for the same hosts. Scope already keeps these out of every scan, so removing
+	// them changes nothing about what is tested; it only keeps the Endpoints view honest. Parameters
+	// cascade on endpoint_id. Matched by capture_host(url) so the predicate is identical to the one
+	// above rather than trusting the stored domain column.
+	epTag, epErr := dbPool.Exec(context.Background(), `
+		DELETE FROM consolidated_url_endpoints
+		WHERE scope_target_id = $1 AND lower(capture_host(url)) = ANY($2)`, scopeTargetID, outHosts)
+	if epErr != nil {
+		log.Printf("[SCOPE] target %s: purged captures but consolidated-endpoint cleanup failed: %v", scopeTargetID, epErr)
+	}
+
+	log.Printf("[SCOPE] target %s: purged %d out-of-scope capture(s) across %d host(s): %v",
+		scopeTargetID, capTag.RowsAffected(), len(outHosts), outHosts)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"dry_run":            false,
+		"boundary":           scope.Describe(),
+		"out_of_scope_hosts": outOfScope,
+		"host_count":         len(outOfScope),
+		"deleted_captures":   capTag.RowsAffected(),
+		"deleted_endpoints":  epTag.RowsAffected(),
+	})
 }

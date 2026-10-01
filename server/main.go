@@ -981,6 +981,7 @@ func main() {
 	r.HandleFunc("/param-enum/{scope_target_id}/selection", utils.SetParamEnumSelection).Methods("POST", "OPTIONS")
 
 	r.HandleFunc("/manual-crawl/hosts/{scope_target_id}/promote", utils.PromoteManualCrawlHosts).Methods("POST", "OPTIONS")
+	r.HandleFunc("/manual-crawl/hosts/{scope_target_id}/purge-out-of-scope", utils.PurgeOutOfScopeCaptures).Methods("POST", "OPTIONS")
 	r.HandleFunc("/manual-crawl/hosts/{scope_target_id}", utils.GetManualCrawlHosts).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/hosts/{scope_target_id}", utils.SetManualCrawlHostScope).Methods("POST", "OPTIONS")
 

@@ -79,6 +79,17 @@ def preflight_baseline(ctx):
         suppressed.append("p95")
 
     first = reachable[0]
+    # Publish the baseline response headers for every test that characterises the target from them:
+    # edge_origin_attribution, passive_header_intel, content_type_sanity, session_issuance/write_gate
+    # (CSRF cookie) and the WAF cookie arm all read ctx.state["baseline_headers"]. It was NEVER
+    # populated anywhere, so all of them silently read an empty dict. edge_origin_attribution in
+    # particular then always concluded "no edge detected / origin reachable directly" even behind an
+    # unmistakable Cloudflare edge (cf-ray, Server: cloudflare), which is the opposite of the truth
+    # and mislabels every blocking and rate-limit finding as describing the origin. Stored from the
+    # live lower-cased response headers; unredacted on purpose so the cookie arms see real names, and
+    # safe because ctx.state is in-memory scratch that is never serialised into the results or the
+    # checkpoint (only ctx.results/notes/budget are).
+    ctx.state["baseline_headers"] = dict(first.headers)
     final_host = urlparse(first.final_url or url).hostname
     origin_host = urlparse(url).hostname
     host_changed = bool(final_host and origin_host and final_host.lower() != origin_host.lower())

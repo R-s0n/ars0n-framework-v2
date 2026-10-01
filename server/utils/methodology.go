@@ -83,10 +83,66 @@ func GetMethodology(w http.ResponseWriter, r *http.Request) {
 		"note": "The URL workflow in the order it is meant to be run. A step whose prerequisites are " +
 			"empty will complete successfully and find nothing, which is the single most common way " +
 			"to waste an engagement.",
+		"target_fit": targetFitByClass,
+		"target_fit_note": "Per-bug-class TARGET SELECTION and TESTABILITY, for deciding whether a " +
+			"target is worth picking for a given class BEFORE crawling or scanning. 'Find me a good " +
+			"target for X' has a different answer for every X: each class has its own good_signals and, " +
+			"critically, a testability_prerequisite that decides whether the target can be tested at " +
+			"all - and some invert the others (cache-poisoning wants a CDN/cache in front; IDOR/SQLi " +
+			"want a plain origin). Check the prerequisite with the recon_checks FIRST; a perfect object " +
+			"surface behind auth you cannot obtain is not a target. See the target-selection step.",
 	})
 }
 
 var methodologySteps = map[string]MethodologyStep{
+	"target-selection": {
+		Key: "target-selection", Title: "Target selection & testability precheck", Stage: "Selection", Order: 5,
+		Why: "Before any crawling or scanning, decide whether this target can be tested for the bug " +
+			"class you actually want - because the rest of the methodology presupposes you can already " +
+			"reach the application as a real user, and that assumption is exactly what is skipped. Every " +
+			"class has a TESTABILITY PREREQUISITE (see the target_fit catalogue returned alongside " +
+			"these steps), and if it does not hold the target is a dead end no matter how good the " +
+			"surface looks. The prerequisites also differ by class and sometimes invert: IDOR and SQLi " +
+			"want a plain origin you can authenticate to; cache poisoning REQUIRES a cache/CDN in " +
+			"front; DOM-XSS needs a client source->sink and a real browser; reflected-XSS needs an HTML " +
+			"response, not a JSON API. 'Find me a good target for X' is answered here, per X.",
+		DoFirst: []string{
+			"State the bug class(es) you are hunting, then read that class in target_fit (good_signals, " +
+				"testability_prerequisite, anti_signals, recon_checks). The prerequisite is the gate.",
+			"CONFIRM THE PREREQUISITE with the cheap recon_checks BEFORE investing. For auth-bearing " +
+				"classes (IDOR/BOLA, access control, stored-XSS, most GraphQL), the first question is: " +
+				"can you OBTAIN a usable account (open self-registration? provided creds? two accounts " +
+				"for cross-user?) OR do the object endpoints answer UNAUTHENTICATED? If neither, it is " +
+				"not testable - pick another target.",
+			"Read the AUTH MODEL explicitly: hit an object/protected endpoint unauthenticated (401/403 " +
+				"vs 200), and look at what the login/token endpoint actually requires (a user signup vs " +
+				"a provisioned machine secret).",
+			"Record the auth model and the chosen class on the target's notes so the next step inherits " +
+				"a decision, not an assumption.",
+		},
+		HowHuntersWorkIt: []string{
+			"They treat an exposed API doc / object-id surface as necessary but NOT sufficient: the " +
+				"seductive part is the object map, the deciding part is whether auth can be obtained.",
+			"They pick the class to the target, not the target to a wish: a CDN-fronted site is wrong " +
+				"for IDOR and right for cache poisoning; a plain JSON API is wrong for reflected-XSS and " +
+				"right for IDOR/injection.",
+			"They prefer targets where two accounts are cheap, because the clean access-control PoC is " +
+				"account A reading account B's object.",
+		},
+		CommonMistakes: []string{
+			"Recommending an 'excellent IDOR target' off an exposed Swagger full of /api/users/{id} and " +
+				"/api/fund/{userId}, without checking auth: every endpoint returned 401 Bearer and the " +
+				"token endpoint required a provisioned appName+appToken with no self-registration, so " +
+				"nothing was testable. The object surface was perfect and useless. Checking the " +
+				"testability prerequisite FIRST would have caught it in one request.",
+			"Applying one class's heuristics to another: chasing a WAF-free plain origin for cache " +
+				"poisoning (which needs a cache in front), or dismissing a CDN target for IDOR because " +
+				"of the CDN (irrelevant - IDOR is legit-looking id swaps a WAF does not block).",
+			"Assuming self-registration exists because an app is consumer-facing. Many signups are " +
+				"sales-contact funnels or provisioned/invite-only; confirm an actual instant email+" +
+				"password account before planning authenticated testing.",
+		},
+	},
 	"manual-crawl": {
 		Key: "manual-crawl", Title: "Manual crawling", Stage: "Mapping", Order: 10,
 		Why: "Everything downstream inherits the gaps of this step, silently. A feature you never " +
