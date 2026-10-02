@@ -5,8 +5,9 @@ ENV GOTOOLCHAIN=auto
 
 WORKDIR /app
 
-RUN apk add --no-cache git && \
-    go install github.com/tomnomnom/waybackurls@v0.1.0
+RUN --mount=type=cache,target=/go/pkg/mod \
+    apk add --no-cache git && \
+    for i in 1 2 3 4 5; do GODEBUG=http2client=0 go install github.com/tomnomnom/waybackurls@v0.1.0 && break; [ "$i" = 5 ] && exit 1; echo "retry $i: transient Go module proxy error"; sleep $((i * 5)); done
 
 # archivefetch replaces waybackurls for the archive query, and waybackurls stays installed only so
 # anything still calling it by name keeps resolving.
@@ -17,9 +18,10 @@ RUN apk add --no-cache git && \
 # while wget against the identical CDX URL from the same container returns real data. See
 # archivefetch/main.go for the full measurement table.
 COPY archivefetch/ /src/archivefetch/
-RUN cd /src/archivefetch && \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    cd /src/archivefetch && \
     go mod init archivefetch && \
-    go build -o /go/bin/archivefetch .
+    for i in 1 2 3 4 5; do GODEBUG=http2client=0 go build -o /go/bin/archivefetch . && break; [ "$i" = 5 ] && exit 1; echo "go build retry $i: transient Go module proxy error"; sleep $((i * 5)); done
 
 ENV PATH="/root/go/bin:${PATH}"
 

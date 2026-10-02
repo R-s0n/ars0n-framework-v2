@@ -151,7 +151,7 @@ This framework consists of 50+ Docker containers along w/ a Docker Compose Manif
 1. Download the Zip File for the <a href="https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.0/ars0n-framework-v2-beta-0.1.0.zip">latest release</a>
 2. Unzip the files
 3. Navigate to the directory with the `docker-compose.yml` file
-4. Run `docker-compose up --build`
+4. Build and start it with `.\build.ps1` (Windows) or `./build.sh` (Mac/Linux) - a sequential build that avoids the parallel-build races on Docker's containerd image store (see the OS-specific steps below)
 5. Access the framework at `http://localhost` (or `http://<server-ip>` from other machines)
 
 *HINT: If you get a docker error, the problem is probably w/ docker, not my framework*
@@ -173,10 +173,11 @@ Expand-Archive -Path "ars0n-framework-v2-beta-0.1.0.zip" -DestinationPath "."
 cd ars0n-framework-v2
 ```
 
-**Step 4:** Start the framework
+**Step 4:** Build and start the framework
 ```powershell
-docker-compose up --build
+powershell -ExecutionPolicy Bypass -File build.ps1
 ```
+> This builds the tool images **one at a time**, then starts the stack. A plain `docker compose up -d --build` builds all ~17 source-compiled tools in parallel, which on Docker Desktop's containerd image store (the default since v29) can fail with `image "...": already exists` or a build timeout under the load. The script sidesteps both; cached images make re-runs fast. On a powerful machine you can still run `docker compose up -d --build` directly.
 
 **Step 5:** Access the framework at `http://localhost`
 
@@ -197,10 +198,11 @@ unzip ars0n-framework-v2-beta-0.1.0.zip
 cd ars0n-framework-v2
 ```
 
-**Step 4:** Start the framework
+**Step 4:** Build and start the framework
 ```bash
-docker-compose up --build
+chmod +x build.sh && ./build.sh
 ```
+> This builds the tool images **one at a time**, then starts the stack, avoiding the parallel-build failures (`image "...": already exists` or a build timeout) that Docker's containerd image store hits when ~17 source tools compile at once. Cached images make re-runs fast. On a powerful machine you can still run `docker compose up -d --build` directly.
 
 **Step 5:** Access the framework at `http://localhost`
 
@@ -221,10 +223,11 @@ unzip ars0n-framework-v2-beta-0.1.0.zip
 cd ars0n-framework-v2
 ```
 
-**Step 4:** Start the framework
+**Step 4:** Build and start the framework
 ```bash
-docker-compose up --build
+chmod +x build.sh && ./build.sh
 ```
+> This builds the tool images **one at a time**, then starts the stack, avoiding the parallel-build failures (`image "...": already exists` or a build timeout) that Docker's containerd image store hits when ~17 source tools compile at once. Cached images make re-runs fast. On a powerful machine you can still run `docker compose up -d --build` directly.
 
 **Step 5:** Access the framework at `http://localhost`
 

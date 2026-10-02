@@ -87,6 +87,12 @@ func main() {
 		log.Printf("[FLOW-NAME] Schema could not be applied, flows will show derived labels only: %v", err)
 	}
 
+	// The remaining per-feature tables that were created lazily on first use (replay request-version
+	// tree and variant metadata, session auto-refresh run log, flow-detection config). Applied at boot
+	// for the same reason as the two above, and because a .rs0n restore into a fresh framework used to
+	// silently skip these tables' rows when the table did not exist yet. Each is guarded by sync.Once.
+	utils.EnsureFeatureSchemas()
+
 	// Pick up any auto scan the previous process was running. Must come after createTables, whose
 	// sweep clears the scan rows belonging to whichever step was mid-flight.
 	utils.ResumeInterruptedAutoScans()

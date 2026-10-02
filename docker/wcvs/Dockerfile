@@ -1,7 +1,8 @@
 FROM golang:1.23-bookworm AS build
 RUN git clone --depth 1 https://github.com/Hackmanit/Web-Cache-Vulnerability-Scanner.git /src
 WORKDIR /src
-RUN go build -o /out/wcvs .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    for i in 1 2 3 4 5; do GODEBUG=http2client=0 go build -o /out/wcvs . && break; [ "$i" = 5 ] && exit 1; echo "go build retry $i: transient Go module proxy error"; sleep $((i * 5)); done
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
