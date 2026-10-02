@@ -507,6 +507,25 @@ func hhFloorRefusal(honest []faOwnObs, baseline []byte, header string, ann map[s
 	ords []uint64, skips []triage.ProbeSkip,
 	one func(triage.TriageState, string, string, triage.TriageGrade, []uint64) []triage.ClassVerdict,
 ) ([]triage.ClassVerdict, bool) {
+	// THE ALL-EMPTY-BODY BLOCK, which pxUniformBlock and hhBlockFloorOf both read as "floor met" and
+	// then neither names: pxUniformBlock skips empty bodies so it sees nothing to group, and the
+	// floor counts them so Unmet() is false and the arm below returns early. A 403 with no body to
+	// every value is the commonest block there is, and it was reaching the clean untouched.
+	if n, ok := pxEmptyBodyBlock(honest, baseline); ok {
+		ann["empty_body_block_distinct_payloads"] = n
+		ann["block_floor_required"] = faUniformBlockMin
+		v := one(triage.StateCannotDetermine,
+			"empty_body_block: all "+pxCount(n, "of this class's distinct values")+" for "+header+
+				" that this class delivered came back with an EMPTY body and a 4xx or 5xx status, while "+
+				"the unperturbed control carried a body. That is something in front answering instead of "+
+				"the application, and pxUniformBlock cannot name it because it groups responses by body "+
+				"and skips the empty ones. So what this application builds from "+header+" was NOT "+
+				"measured, and this row is that gap. IT IS NOT A CLEAN. The Untested rows on this verdict "+
+				"name every probe this class did not send on this slot",
+			"", triage.GradeUnrated, ords)
+		v[0].Untested = skips
+		return v, true
+	}
 	f := hhBlockFloorOf(honest, baseline)
 	if !f.Unmet() {
 		return nil, false

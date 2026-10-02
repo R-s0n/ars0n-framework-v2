@@ -5862,33 +5862,24 @@ function App() {
       if (!response.ok) throw new Error(await response.text() || 'Failed to start the endpoint scan');
 
       const { run_id: runId } = await response.json();
-
-      const poll = async () => {
-        try {
-          const statusResp = await fetch(`/api/endpoint-scan/${activeTarget.id}/status/${runId}`);
-          if (!statusResp.ok) throw new Error('Lost track of the endpoint scan');
-          const status = await statusResp.json();
-          setEndpointScanRun(status);
-
-          if (['success', 'partial', 'aborted', 'error'].includes(status.status)) {
-            setIsEndpointScanRunning(false);
-            if (status.status === 'error') {
-              setEndpointWorkflowError(status.error || 'The endpoint scan failed');
-            }
-            loadEndpointValidationSummary();
-            loadConsolidatedEndpointCount();
-          } else {
-            setTimeout(poll, 2000);
-          }
-        } catch (err) {
-          setEndpointWorkflowError(err.message);
-          setIsEndpointScanRunning(false);
-        }
-      };
-      poll();
+      // Shared poll loop, also used to resume tracking after a page refresh. It owns
+      // isEndpointScanRunning and the dedupe ref from here on.
+      pollEndpointScanRun(runId);
     } catch (err) {
       setEndpointWorkflowError(err.message);
       setIsEndpointScanRunning(false);
+    }
+  };
+
+  // Operator stop. The server flips the run and its active sub-scan to cancelled; the poll loop sees
+  // the terminal status and clears the running state, so there is no separate UI bookkeeping here.
+  const handleCancelEndpointScan = async () => {
+    const runId = endpointScanRun?.run_id;
+    if (!activeTarget || !runId) return;
+    try {
+      await fetch(`/api/endpoint-scan/${activeTarget.id}/cancel/${runId}`, { method: 'POST' });
+    } catch (err) {
+      setEndpointWorkflowError(err.message);
     }
   };
 
@@ -5957,6 +5948,21 @@ function App() {
     return 'Starting...';
   }, [isEndpointScanRunning, endpointScanRun]);
 
+  // Numeric progress for the card's progress bar. The current phase's own done/total: validate counts
+  // to the consolidated total, investigate to the eligible subset. `measured` is false until the phase
+  // reports a total, so the bar can show an indeterminate "working" state instead of a misleading 0.
+  const endpointScanProgress = useMemo(() => {
+    if (!isEndpointScanRunning) return null;
+    const phase = endpointScanRun?.phase;
+    const p = phase === 'investigate' ? endpointScanRun?.investigation
+      : phase === 'validate' ? endpointScanRun?.validation
+        : null;
+    const total = p?.total_endpoints || 0;
+    const done = p?.processed_endpoints || 0;
+    const pct = total > 0 ? Math.min(Math.round((done / total) * 100), 100) : 0;
+    return { pct, measured: total > 0, label: endpointScanProgressLabel };
+  }, [isEndpointScanRunning, endpointScanRun, endpointScanProgressLabel]);
+
   const loadEndpointValidationSummary = useCallback(async () => {
     if (!activeTarget) return;
     try {
@@ -5967,6 +5973,40 @@ function App() {
     }
   }, [activeTarget]);
 
+  // Guards against two poll loops running at once: a manual Investigate click plus a refresh-resume,
+  // or activeTarget re-firing the mount effect while a scan is already being tracked.
+  const endpointScanPollActiveRef = useRef(false);
+
+  const pollEndpointScanRun = useCallback((runId) => {
+    if (!activeTarget || !runId || endpointScanPollActiveRef.current) return;
+    endpointScanPollActiveRef.current = true;
+    setIsEndpointScanRunning(true);
+    const poll = async () => {
+      try {
+        const statusResp = await fetch(`/api/endpoint-scan/${activeTarget.id}/status/${runId}`);
+        if (!statusResp.ok) throw new Error('Lost track of the endpoint scan');
+        const status = await statusResp.json();
+        setEndpointScanRun(status);
+        if (['success', 'partial', 'aborted', 'error', 'cancelled'].includes(status.status)) {
+          endpointScanPollActiveRef.current = false;
+          setIsEndpointScanRunning(false);
+          if (status.status === 'error') {
+            setEndpointWorkflowError(status.error || 'The endpoint scan failed');
+          }
+          loadEndpointValidationSummary();
+          loadConsolidatedEndpointCount();
+        } else {
+          setTimeout(poll, 2000);
+        }
+      } catch (err) {
+        endpointScanPollActiveRef.current = false;
+        setIsEndpointScanRunning(false);
+        setEndpointWorkflowError(err.message);
+      }
+    };
+    poll();
+  }, [activeTarget, loadEndpointValidationSummary]);
+
   const loadEndpointScanRun = useCallback(async () => {
     if (!activeTarget) return;
     try {
@@ -5974,11 +6014,17 @@ function App() {
       if (resp.ok) {
         const run = await resp.json();
         setEndpointScanRun(run.status === 'not_run' ? null : run);
+        // Resume tracking a scan still running after a page refresh. Without this the card freezes on
+        // the last snapshot - isEndpointScanRunning is false, so no progress label and no polling -
+        // which reads as "the scan vanished", exactly what happened on a refresh mid-run.
+        if ((run.status === 'running' || run.status === 'pending') && run.run_id) {
+          pollEndpointScanRun(run.run_id);
+        }
       }
     } catch (err) {
       // A target that has never been scanned is the normal case, not an error.
     }
-  }, [activeTarget]);
+  }, [activeTarget, pollEndpointScanRun]);
 
   // Declared after loadEndpointValidationSummary and loadEndpointScanRun on purpose. A hook's
   // dependency array is evaluated while the component body runs, so referencing a callback above
@@ -11095,7 +11141,7 @@ function App() {
                 <HelpMeLearn section="urlTargetEndpoints" />
                 <Row className="mb-4">
                   <Col md={12}>
-                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '250px' }}>
+                    <Card className="shadow-sm h-100 text-center" style={{ minHeight: '200px' }}>
                       <Card.Body className="d-flex flex-column">
                         <Card.Title className="text-danger mb-3">
                           Consolidate Endpoints
@@ -11113,10 +11159,16 @@ function App() {
                           </Alert>
                         )}
 
-                        <div className="mt-auto pt-3 mb-3">
-                          <Row className="text-center align-items-start">
+                        {/* Metrics and buttons in one bottom-pinned block, the same shape the
+                            Consolidate Attack Vectors card uses, so the label row sits the same
+                            distance above the buttons and the buttons wrap as a responsive grid
+                            rather than cramming into a single flex row at narrow widths. */}
+                        <div className="mt-auto">
+                          <Row className="text-center align-items-center mb-3">
                             <Col>
-                              <div className="text-danger fw-bold fs-4">{consolidatedEndpointCount}</div>
+                              <div className={`fw-bold fs-4 ${consolidatedEndpointCount > 0 ? 'text-danger' : 'text-secondary'}`}>
+                                {consolidatedEndpointCount}
+                              </div>
                               <div className="text-muted small card-metric-label">Endpoints</div>
                             </Col>
                             <Col>
@@ -11138,55 +11190,76 @@ function App() {
                               <div className="text-muted small card-metric-label">Ruled Out</div>
                             </Col>
                           </Row>
-                        </div>
 
-                        <div className="card-actions">
-                          <div className="d-flex gap-2">
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
-                              onClick={handleConsolidateEndpoints}
-                              disabled={!activeTarget || isConsolidatingEndpoints || isEndpointScanRunning}
-                            >
-                              {isConsolidatingEndpoints ? (
-                                <><Spinner animation="border" size="sm" className="me-2" />Consolidating...</>
-                              ) : (
-                                'Consolidate'
-                              )}
-                            </Button>
+                          {/* A running scan reports through a progress bar with a cancel link, the same
+                              way the other scan cards do: the Investigate button only shows it is busy,
+                              the bar and its label carry the phase and the count, and cancel is a link
+                              rather than a separate button. */}
+                          {isEndpointScanRunning && (
+                            <div className="mb-3">
+                              <div className="d-flex justify-content-between align-items-center mb-1">
+                                <span className="text-white-50 small">
+                                  {endpointScanProgress?.label || 'Starting...'}
+                                </span>
+                                <Button variant="link"
+                                  className="p-0 text-danger small align-baseline"
+                                  onClick={handleCancelEndpointScan}>
+                                  cancel
+                                </Button>
+                              </div>
+                              <ProgressBar
+                                now={endpointScanProgress?.measured ? endpointScanProgress.pct : 8}
+                                variant="danger"
+                                className="bg-dark"
+                                style={{ height: '8px' }}
+                                animated
+                              />
+                            </div>
+                          )}
+
+                          <Row className="g-2">
+                            {/* Consolidate first: it folds the crawl/archive/manual lists into unique
+                                endpoints and sends zero HTTP, so it is the natural first step. */}
+                            <Col xs={6} md={4} xxl>
+                              <Button variant="outline-danger" className="w-100"
+                                onClick={handleConsolidateEndpoints}
+                                disabled={!activeTarget || isConsolidatingEndpoints || isEndpointScanRunning}>
+                                <div className="btn-content">
+                                  {isConsolidatingEndpoints
+                                    ? <Spinner animation="border" size="sm" />
+                                    : 'Consolidate'}
+                                </div>
+                              </Button>
+                            </Col>
                             {/* One button for both phases. Validate cannot be run out of order or
                                 skipped, because investigating an unvalidated target profiles its
                                 catch-all page once per endpoint and reports it as findings. */}
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
-                              onClick={() => handleInvestigateEndpoints()}
-                              disabled={!activeTarget || isEndpointScanRunning || isConsolidatingEndpoints || consolidatedEndpointCount === 0}
-                            >
-                              {isEndpointScanRunning ? (
-                                <><Spinner animation="border" size="sm" className="me-2" />
-                                  {endpointScanProgressLabel}</>
-                              ) : (
-                                'Investigate'
-                              )}
-                            </Button>
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
-                              onClick={handleOpenEndpointScanResultsModal}
-                              disabled={!activeTarget || !endpointScanRun}
-                            >
-                              Results
-                            </Button>
-                            <Button
-                              variant="outline-danger"
-                              className="flex-fill"
-                              onClick={handleOpenManageEndpointsModal}
-                              disabled={!activeTarget}
-                            >
-                              Manage Endpoints
-                            </Button>
-                          </div>
+                            <Col xs={6} md={4} xxl>
+                              <Button variant="outline-danger" className="w-100"
+                                onClick={() => handleInvestigateEndpoints()}
+                                disabled={!activeTarget || isEndpointScanRunning || isConsolidatingEndpoints || consolidatedEndpointCount === 0}>
+                                <div className="btn-content">
+                                  {isEndpointScanRunning
+                                    ? <Spinner animation="border" size="sm" />
+                                    : 'Investigate'}
+                                </div>
+                              </Button>
+                            </Col>
+                            <Col xs={6} md={4} xxl>
+                              <Button variant="outline-danger" className="w-100"
+                                onClick={handleOpenEndpointScanResultsModal}
+                                disabled={!activeTarget || !endpointScanRun}>
+                                <div className="btn-content">Results</div>
+                              </Button>
+                            </Col>
+                            <Col xs={6} md={4} xxl>
+                              <Button variant="outline-danger" className="w-100"
+                                onClick={handleOpenManageEndpointsModal}
+                                disabled={!activeTarget}>
+                                <div className="btn-content">Manage Endpoints</div>
+                              </Button>
+                            </Col>
+                          </Row>
                         </div>
                       </Card.Body>
                     </Card>

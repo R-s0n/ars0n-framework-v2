@@ -902,6 +902,37 @@ func TestAnEncodedReflectionIsCleanOnlyWhenEveryPromotedContextRanForXSSR(t *tes
 	}
 }
 
+// A promoted context probe that was SENT but never reached the application must not satisfy the
+// coverage check. Before the delivered() gate an undelivered RX-1 was an item in the run, so
+// sent() was true for it, and the slot read clean ("encoded_all_contexts") on the strength of a
+// request that never arrived. This is the same clean scenario as the test above, with the one
+// difference that the promoted payload's transport was refused.
+func TestAPromotedContextProbeThatFailedTransportIsNotCleanForXSSR(t *testing.T) {
+	m1, m2, m3 := string(xssrMarkOne), string(xssrMarkTwo), string(xssrMarkThree)
+	census := "<p>you searched for " + m1 + "-rx0r</p>"
+	run := xssrRunOf(
+		xssrShot(xssrP0r, xssrMarkOne, "text/html", census),
+		xssrShot(xssrP0a, xssrMarkTwo, "text/html", "<p>hello"+m2+"-rx0a</p>"),
+		xssrShot(xssrPDec, xssrMarkThree, "text/html", "decoded "+m3+"-rxdec"),
+	)
+	ctx := xssrTestCtx(xssrDecodedSlot())
+
+	// The promoted html_text payload RX-1 was sent but the transport refused it, so it reached
+	// nothing and measured nothing.
+	rx1 := xssrShot(xssrP1, xssrMarkThree, "text/html",
+		"<p>you searched for "+m3+"&lt;"+m3+"&gt;-rx1</p>")
+	rx1.Obs.TransportErr = triage.TransportTimeout
+	run.Items = append(run.Items, rx1)
+	run.Ordinals = append(run.Ordinals, 137)
+
+	vs := xssrClassifyEligible(ctx, run, xssrEligibility{OK: true})
+	for _, v := range vs {
+		if v.State.CountsAsClean() {
+			t.Errorf("clean was reported while the promoted html_text probe RX-1 was sent but never delivered: %s", v.Reason)
+		}
+	}
+}
+
 // TestAnAllowlistSanitizerIsSuspiciousAndNeverCleanForXSSR is FN-A6, the largest honest gap a
 // non-browser probe has, converted into a pointer at domdig rather than into a green tick.
 func TestAnAllowlistSanitizerIsSuspiciousAndNeverCleanForXSSR(t *testing.T) {

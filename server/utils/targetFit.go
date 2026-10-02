@@ -20,10 +20,16 @@ package utils
 //       client-side routes, not API routes), and the one real endpoint errored identically for an int,
 //       a GUID and a big number - so the id was almost certainly a random GUID, unguessable, with no
 //       leak source. Neither a boundary nor an obtainable identifier was ever shown.
+//   (3) A third was called testable because its login page LINKED to a "free trial" signup - but the
+//       trial could only be REQUESTED (the vendor provisions it), so no account was obtainable without
+//       the company acting. A sign-up LINK is not a self-serve account.
 //
-// Those two misses are the whole lesson of real-world IDOR, and it generalises: an endpoint answering
+// Those misses are the whole lesson of real-world IDOR, and it generalises: an endpoint answering
 // without auth is not a bug if the data is meant to be public, and "change the id" is not a bug if you
-// can neither guess the id (random GUID) nor find it leaked. A bug class has a PREREQUISITE that
+// can neither guess the id (random GUID) nor find it leaked. And for any class that needs a login, an
+// account you cannot get WITHOUT THE COMPANY ACTING - a requested/provisioned "trial", invite-only, a
+// sales-gated or admin-approved signup - is the same dead end as no account at all; what counts is
+// self-serve INSTANT signup you can repeat for a second account. A bug class has a PREREQUISITE that
 // decides testability, and some prerequisites INVERT the heuristics that are right for others: IDOR and
 // SQLi want a plain origin with no WAF in the way, but cache poisoning REQUIRES a cache/CDN in front -
 // the very thing you were avoiding. "Find me a good target for X" has a different answer for every X,
@@ -61,7 +67,7 @@ var targetFitByClass = []TargetFit{
 			"A list-then-detail pattern, or a list/search/autocomplete/export endpoint: it both proves other objects exist AND is where an otherwise-unguessable id tends to leak.",
 			"PREDICTABLE identifiers - sequential ints (/users/123 -> 124), short numbers, timestamps, base64/hex of an int, auto-increment ids echoed in Location/ETag - because you can enumerate those yourself, so impact scales to mass extraction.",
 		},
-		Prerequisite: "TWO things, and skipping either is the classic false IDOR. (1) You must be able to CROSS AN AUTHORIZATION BOUNDARY - reach an object you are not entitled to. An endpoint that returns data with no auth is NOT an IDOR if that data is intended to be public (a shared business card, a published profile, a directory); the boundary must be real - another tenant, a private record, fields the owner never exposes. (2) You must be able to OBTAIN the target object's IDENTIFIER: guess it (only if it is predictable) OR find it leaked in a response you can already reach. A random GUID/UUIDv4 (122 random bits) that you can neither see nor guess is NOT an exploitable IDOR - iterating it is computationally infeasible. Holding TWO obtainable accounts satisfies both at once (you have B's real id and A's session to test it with), which is why two cheap accounts is the ideal target.",
+		Prerequisite: "TWO things, and skipping either is the classic false IDOR. (1) You must be able to CROSS AN AUTHORIZATION BOUNDARY - reach an object you are not entitled to. An endpoint that returns data with no auth is NOT an IDOR if that data is intended to be public (a shared business card, a published profile, a directory); the boundary must be real - another tenant, a private record, fields the owner never exposes. (2) You must be able to OBTAIN the target object's IDENTIFIER: guess it (only if it is predictable) OR find it leaked in a response you can already reach. A random GUID/UUIDv4 (122 random bits) that you can neither see nor guess is NOT an exploitable IDOR - iterating it is computationally infeasible. Holding TWO obtainable accounts satisfies both at once (you have B's real id and A's session to test it with), which is why two cheap accounts is the ideal target. Those accounts must be SELF-SERVE: instant signup you complete with NO action by the company (a requested/provisioned 'trial', invite-only, or sales-gated flow does NOT count), repeatable for a second account.",
 		AntiSignals: []string{
 			"Object keyed ONLY by a random GUID/UUIDv4 that never appears in any response you can reach and cannot be guessed - there is nothing to enumerate, so no IDOR to prove by iteration (unless you first find the leak).",
 			"The data returned is INTENDED to be public (directory, business card, published listing) - no boundary is crossed, so an unauthenticated 200 is not a finding.",
@@ -71,7 +77,7 @@ var targetFitByClass = []TargetFit{
 		ReconChecks: []string{
 			"Read the BODY, never just the status. A 200 can be a soft auth failure (e.g. {\"error\":\"need authorization header\"}); a 404 'Cannot GET /x' is an Express no-such-route (often a client-side route mistaken for an API); a 500 can be a generic lookup error. Confirm the endpoint actually RETURNS AN OBJECT before calling it unauth-readable.",
 			"Classify the identifier: sequential/predictable (enumerable -> high impact) vs random GUID (needs a leak). If GUID, the real work is finding WHERE another principal's id leaks - a list/search endpoint, a profile, a share link, an error message, a JWT claim.",
-			"Establish how to obtain a context: open instant email/password signup? credentials provided? two accounts? a genuinely unauth-and-private object? If none of these, the target is not IDOR-testable, whatever the object surface looks like.",
+			"Establish how to obtain a context, and VALIDATE it by WALKING the flow to a live session - a /sign-up link is not proof of self-serve. It must be instant email/password (or Google/SSO) signup you complete with NO company action, repeatable for a SECOND account; a 'request a trial' / 'request access' / 'contact sales' / 'book a demo' / invite-only / vendor-approval flow FAILS. Otherwise: provided creds, or a genuinely unauth-and-private object. If none, the target is not IDOR-testable, whatever the object surface looks like.",
 			"Design the PoC as account A (session) requesting account B's object by B's real id - that proves the boundary AND the obtainability together. With one account, you still need a second principal's id from somewhere.",
 		},
 		Oracle: "Using principal A's context (or no auth) with principal B's identifier returns B's PRIVATE data - a boundary crossed, not public data re-fetched. Two accounts make it unambiguous: A's session, B's id, B's data back.",
@@ -85,7 +91,7 @@ var targetFitByClass = []TargetFit{
 			"The same action exposed at different privilege (GET allowed, DELETE/PUT maybe not; a low role can call a high-role mutation).",
 			"Multi-step flows where one step's authorization is checked but a later/direct step is not.",
 		},
-		Prerequisite: "You can occupy the LOWER side of a privilege boundary and there is a HIGHER-privilege function to reach. Unlike IDOR (object-level, needs the object's id), this is FUNCTION-level: you are testing whether a low role can invoke a high role's operation or a hidden endpoint at all. You need a low-priv account (or anon) you can obtain, and knowledge of the privileged endpoints (from JS bundles, docs, or a higher-priv account to compare against).",
+		Prerequisite: "You can occupy the LOWER side of a privilege boundary and there is a HIGHER-privilege function to reach. Unlike IDOR (object-level, needs the object's id), this is FUNCTION-level: you are testing whether a low role can invoke a high role's operation or a hidden endpoint at all. You need a low-priv account (or anon) you can obtain, and knowledge of the privileged endpoints (from JS bundles, docs, or a higher-priv account to compare against). Unless anonymous access alone reaches the boundary, the account(s) must be SELF-SERVE obtainable - instant signup with no company action, repeatable - validated by walking the flow, not inferred from a sign-up link.",
 		AntiSignals: []string{
 			"Flat authorization - everyone is the same role, so there is no vertical boundary to cross (object-level IDOR may still apply).",
 			"Privileged endpoints enforced server-side on every call with no client-trust (the hidden-button-live-endpoint pattern is absent).",

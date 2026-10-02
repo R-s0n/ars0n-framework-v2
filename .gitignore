@@ -50,3 +50,16 @@ yarn-debug.log*
 yarn-error.log*
 
 MANUAL_GUIDE.md
+
+# Build artifacts and crash dumps that were committed by accident and should never be versioned.
+# docker/oracle/oracle.exe was a compiled Windows binary of the oracle (the image builds it from
+# source); the __pycache__ trees are Python bytecode the waf-probe image regenerates; and a
+# *.stackdump is a MSYS/Cygwin crash dump of a tool that happened to die in the working directory.
+*.exe
+__pycache__/
+*.pyc
+*.stackdump
+
+# One-off crawl/scratch outputs written while working a target (lists of discovered JS URLs, etc.).
+# Meaningful for an afternoon and confusing forever after, like the /run*.json scratch above.
+*_html_js*.txt

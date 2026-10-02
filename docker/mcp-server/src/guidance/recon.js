@@ -54,10 +54,14 @@ module.exports = {
       + 'is cheap; the mistake is picking one you cannot actually test. Each bug class has a '
       + 'prerequisite - call get_methodology and read target_fit for your class (good_signals, '
       + 'testability_prerequisite, recon_checks). For access-control/IDOR/BOLA (and stored-XSS, most '
-      + 'GraphQL): can you OBTAIN an account (open self-registration, provided creds, ideally two) OR '
-      + 'do object endpoints answer UNAUTHENTICATED? An exposed Swagger full of /{id} endpoints is NOT '
-      + 'testable if they all 401 and the token endpoint needs a provisioned secret with no signup. '
-      + 'And the prerequisites invert by class: cache poisoning REQUIRES a CDN/cache in front, the '
+      + 'GraphQL): can you OBTAIN an account OR do object endpoints answer UNAUTHENTICATED? An exposed '
+      + 'Swagger full of /{id} endpoints is NOT testable if they all 401 and the token endpoint needs a '
+      + 'provisioned secret with no signup. VALIDATE SELF-SERVE SIGNUP by WALKING it to a live session - '
+      + 'a sign-up LINK is not an account, and a "request a trial" / "request access" / "contact sales" / '
+      + '"book a demo" / invite-only / vendor-provisioned / approval flow is NOT self-serve (the company '
+      + 'must act = fails). You must be able to create TWO accounts with no company action for the '
+      + 'cross-user PoC; consumer apps with instant email/password (or Google) signup are the reliable '
+      + 'source, B2B "free trials" usually are not. And the prerequisites invert by class: cache poisoning REQUIRES a CDN/cache in front, the '
       + 'opposite of what IDOR/SQLi want; reflected-XSS needs an HTML response, not a JSON API; DOM-XSS '
       + 'needs a client source->sink and a real browser. Check the auth model and the prerequisite with '
       + 'one or two requests now, and record it in the target notes.',
@@ -665,14 +669,24 @@ module.exports = {
       + 'collapse repeats by default, so unique_endpoints is not the request count.',
     next: 'capture_manual_crawl, consolidate_endpoints, manage_auth_flows',
     learn: 'kb://methodology/web-app-methodology',
+    rule: 'TWO CONCURRENT RECORDINGS (e.g. a cross-account IDOR with two logged-in test accounts) need '
+      + 'TWO SEPARATE CHROME PROFILES, each with the extension loaded - one account per profile. Do NOT '
+      + 'use a normal window plus an incognito window of the SAME profile: Chrome runs the extension as '
+      + 'one shared (spanning) worker across them, so the second recording collides with the first and '
+      + 'every capture queues with the popup stuck on "Loading targets". The server allows concurrent '
+      + 'sessions per target; the one-recording-per-profile limit is the browser\'s, not the framework\'s.',
     derived: false,
     actions: {
       start: {
         tool: 'Opens a capture session on a URL target and returns the session_id everything else '
           + 'writes into.',
-        lies: 'Starting one abandons any session still marked active on the same target, because a '
-          + 'target recording twice is always a stale row left by a dead service worker. Company and '
-          + 'Wildcard targets are rejected outright.',
+        lies: 'Starting one now abandons only a STALE session on the same target (its heartbeat went '
+          + 'quiet past the 90s window); a LIVE session is left alone, so two browsers CAN record the '
+          + 'same target at once. But two concurrent recordings require two SEPARATE Chrome PROFILES, '
+          + 'each with the extension loaded - a normal+incognito pair of ONE profile shares a single '
+          + 'spanning extension worker, so a second Start there collides with the live session and '
+          + 'stalls the capture queue (the extension now refuses that second Start with a clear '
+          + 'message). Company and Wildcard targets are rejected outright.',
         next: 'capture_manual_crawl, manage_manual_crawl action:\"heartbeat\"',
       },
       stop: {

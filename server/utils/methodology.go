@@ -110,10 +110,18 @@ var methodologySteps = map[string]MethodologyStep{
 			"State the bug class(es) you are hunting, then read that class in target_fit (good_signals, " +
 				"testability_prerequisite, anti_signals, recon_checks). The prerequisite is the gate.",
 			"CONFIRM THE PREREQUISITE with the cheap recon_checks BEFORE investing. For auth-bearing " +
-				"classes (IDOR/BOLA, access control, stored-XSS, most GraphQL), the first question is: " +
-				"can you OBTAIN a usable account (open self-registration? provided creds? two accounts " +
-				"for cross-user?) OR do the object endpoints answer UNAUTHENTICATED? If neither, it is " +
-				"not testable - pick another target.",
+				"classes (IDOR/BOLA, access control, stored-XSS, most GraphQL, auth, mass-assignment, " +
+				"business-logic, race-condition, file-upload): can you OBTAIN a usable account, OR do the " +
+				"object endpoints answer UNAUTHENTICATED? If neither, it is not testable - pick another target.",
+			"VALIDATE SELF-SERVE SIGNUP, never assume it. For any auth-requiring class the account must be " +
+				"obtainable with NO action by the company: instant email+password (or Google/SSO) " +
+				"registration that lands you in a working session, and you must be able to create a SECOND " +
+				"account the same way (cross-user is the whole game). A 'Start/Request free trial', " +
+				"'Request access', 'Contact sales' or 'Book a demo' flow, an invite-only or " +
+				"admin-provisioned account, a signup the vendor must approve, or a paid-only tier ALL FAIL " +
+				"this. A sign-up LINK existing is NOT proof - the flow must complete to a live session with " +
+				"no human at the company doing anything. The operator walks it to a session (or confirms a " +
+				"known-instant signup) BEFORE the target is committed.",
 			"Read the AUTH MODEL explicitly: hit an object/protected endpoint unauthenticated (401/403 " +
 				"vs 200), and look at what the login/token endpoint actually requires (a user signup vs " +
 				"a provisioned machine secret).",
@@ -138,9 +146,12 @@ var methodologySteps = map[string]MethodologyStep{
 			"Applying one class's heuristics to another: chasing a WAF-free plain origin for cache " +
 				"poisoning (which needs a cache in front), or dismissing a CDN target for IDOR because " +
 				"of the CDN (irrelevant - IDOR is legit-looking id swaps a WAF does not block).",
-			"Assuming self-registration exists because an app is consumer-facing. Many signups are " +
-				"sales-contact funnels or provisioned/invite-only; confirm an actual instant email+" +
-				"password account before planning authenticated testing.",
+			"Calling a target testable because a /sign-up link or a 'free trial' button exists, without " +
+				"walking the flow. This picked dead targets twice: a B2B SaaS whose 'free trial' is a " +
+				"REQUEST the vendor provisions (company must act = fails self-serve), and an enterprise " +
+				"app whose signup was a sales-contact funnel. A link is not an account. Most B2B 'trials' " +
+				"are vendor-provisioned; consumer apps with instant email+password (or Google) signup are " +
+				"the reliable source of the two accounts an access-control PoC needs.",
 		},
 	},
 	"manual-crawl": {

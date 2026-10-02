@@ -454,33 +454,38 @@ func collectSha256(v interface{}, out map[string]bool) {
 
 // importBundle loads a v2 snapshot. FK triggers are off for the load (the snapshot is consistent), so
 // table order does not matter and self-referential / cyclic tables load without a topological sort.
-func importBundle(ctx context.Context, bundle *bundleFile) (imported int, tables int, err error) {
+func importBundle(ctx context.Context, bundle *bundleFile) (imported int, tables int, failed int, err error) {
 	schema, err := collectBundleSchema(ctx)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	conn, err := dbPool.Acquire(ctx)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	defer conn.Release()
 
 	tx, err := conn.Begin(ctx)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	defer tx.Rollback(ctx)
 
 	// SET LOCAL: scoped to this transaction, so the pooled connection can never leak replica mode to a
 	// later query even if we forget to reset it.
 	if _, err := tx.Exec(ctx, "SET LOCAL session_replication_role = 'replica'"); err != nil {
-		return 0, 0, fmt.Errorf("disable fk triggers: %w", err)
+		return 0, 0, 0, fmt.Errorf("disable fk triggers: %w", err)
 	}
 
-	// scope_targets first is still nice for logs, but not required for correctness.
-	if n, terr := importBundleTable(ctx, tx, schema, "scope_targets", bundle.ScopeTargets); terr != nil {
-		return 0, 0, fmt.Errorf("import scope_targets: %w", terr)
+	// scope_targets first, and a failure here is FATAL. It is the parent every per-target table
+	// hangs off, so committing child rows against a scope_targets that only partly loaded would
+	// leave them orphaned; a root that did not fully land aborts the whole restore rather than
+	// commit an inconsistent graph.
+	if n, fail, terr := importBundleTable(ctx, tx, schema, "scope_targets", bundle.ScopeTargets); terr != nil {
+		return 0, 0, 0, fmt.Errorf("import scope_targets: %w", terr)
+	} else if fail > 0 {
+		return 0, 0, 0, fmt.Errorf("import scope_targets: %d row(s) could not be loaded, so the restore was aborted to avoid orphaned child rows", fail)
 	} else {
 		imported += n
 	}
@@ -489,38 +494,39 @@ func importBundle(ctx context.Context, bundle *bundleFile) (imported int, tables
 		if table == "scope_targets" {
 			continue
 		}
-		n, terr := importBundleTable(ctx, tx, schema, table, raws)
+		n, fail, terr := importBundleTable(ctx, tx, schema, table, raws)
+		imported += n
+		failed += fail
 		if terr != nil {
-			// One bad table must not sink the whole restore; log and continue, matching the resilience
-			// the operator expects from a merge.
-			log.Printf("[BUNDLE] import table %s failed: %v", table, terr)
-			continue
+			// A transaction-level failure means the transaction can no longer commit, so continuing
+			// to other tables would only pile up failures against a dead tx. Surface it instead of
+			// committing a half-restore as success.
+			return 0, 0, 0, fmt.Errorf("import %s: %w", table, terr)
 		}
 		if n > 0 {
 			tables++
-			imported += n
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return 0, 0, fmt.Errorf("commit: %w", err)
+		return 0, 0, 0, fmt.Errorf("commit: %w", err)
 	}
-	return imported, tables, nil
+	return imported, tables, failed, nil
 }
 
 // importBundleTable upserts every row of one table in a single statement, keyed on the table's real
 // primary key. Wrapped in a savepoint so a table that fails leaves the rest of the import intact.
-func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, table string, raws []json.RawMessage) (int, error) {
+func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, table string, raws []json.RawMessage) (imported int, failed int, err error) {
 	if len(raws) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 	if !schema.allTables[table] {
 		log.Printf("[BUNDLE] import: unknown table %s, skipping %d rows", table, len(raws))
-		return 0, nil
+		return 0, 0, nil
 	}
 	qt, err := quoteIdent(table)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	pkCols := schema.pk[table]
 
@@ -534,7 +540,7 @@ func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, tab
 		for _, c := range pkCols {
 			qc, qerr := quoteIdent(c)
 			if qerr != nil {
-				return 0, qerr
+				return 0, 0, qerr
 			}
 			quotedPK = append(quotedPK, qc)
 			pkSet[c] = true
@@ -546,7 +552,7 @@ func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, tab
 			}
 			qc, qerr := quoteIdent(c)
 			if qerr != nil {
-				return 0, qerr
+				return 0, 0, qerr
 			}
 			sets = append(sets, fmt.Sprintf("%s = EXCLUDED.%s", qc, qc))
 		}
@@ -563,57 +569,105 @@ func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, tab
 		"INSERT INTO %s SELECT (jsonb_populate_record(NULL::%s, elem)).* "+
 			"FROM jsonb_array_elements($1::jsonb) elem %s", qt, qt, conflict)
 
-	// BATCHED, because the whole table as one jsonb parameter blows past Postgres's 256 MB jsonb field
-	// limit on a big table (triage_verdicts, ~300k rows with bytea, hit exactly that). Each batch is its
-	// own savepoint so a single bad batch drops only itself, and the rest of the table still loads.
-	const batchSize = 1000
-	var total int64
-	var firstErr error
-	failedBatches := 0
-	for i := 0; i < len(raws); i += batchSize {
-		end := i + batchSize
-		if end > len(raws) {
-			end = len(raws)
-		}
-		arr, merr := json.Marshal(raws[i:end])
-		if merr != nil {
-			if firstErr == nil {
-				firstErr = merr
+	// BATCHED BY BOTH ROW COUNT AND SERIALISED BYTE SIZE. The whole table as one jsonb parameter
+	// blows past Postgres's 256 MB jsonb field limit on a big table, and a fixed 1000-row batch does
+	// the same on a bytea-heavy one (triage_bodies, manual_crawl_body_blobs, triage_verdicts) where
+	// to_jsonb renders each blob as a hex string twice its byte size. Capping the batch at a few MB
+	// of JSON keeps it under that limit; a batch that fails anyway (one row larger than the cap, or
+	// any other exec error) is retried ROW BY ROW so a single oversized row is isolated and the rest
+	// of the batch still loads. Rows that cannot be loaded even on their own are COUNTED into failed
+	// and surfaced, never silently dropped: that is the difference between a restore that lost data
+	// and one that reported success while losing it.
+	const maxBatchRows = 1000
+	const maxBatchBytes = 32 << 20 // 32 MB of serialised JSON, well under the 256 MB jsonb field limit
+	total := 0
+	for i := 0; i < len(raws); {
+		end := i
+		batchBytes := 0
+		for end < len(raws) && end-i < maxBatchRows {
+			rb := len(raws[end])
+			if end > i && batchBytes+rb > maxBatchBytes {
+				break
 			}
-			failedBatches++
-			continue
+			batchBytes += rb
+			end++
 		}
-		sp := "bundle_sp"
-		if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
-			return int(total), err
+		imp, fail, ferr := importBundleBatch(ctx, tx, sql, table, raws[i:end])
+		total += imp
+		failed += fail
+		if ferr != nil {
+			// A transaction-level failure (a savepoint the connection would not create or roll back)
+			// means the transaction can no longer commit, so there is nothing to gain by grinding on.
+			return total, failed, ferr
 		}
-		tag, execErr := tx.Exec(ctx, sql, arr)
-		if execErr != nil {
-			_, _ = tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
-			if firstErr == nil {
-				firstErr = execErr
-			}
-			failedBatches++
-			log.Printf("[BUNDLE] import %s batch [%d:%d] failed: %v", table, i, end, execErr)
-			continue
-		}
-		_, _ = tx.Exec(ctx, "RELEASE SAVEPOINT "+sp)
-		total += tag.RowsAffected()
+		i = end
 	}
-	if failedBatches > 0 {
-		// Some rows landed, some did not; surface it without discarding the successful ones.
-		log.Printf("[BUNDLE] imported %d/%d rows into %s (%d batch(es) failed: %v)",
-			total, len(raws), table, failedBatches, firstErr)
-		return int(total), nil
+	if failed > 0 {
+		log.Printf("[BUNDLE] imported %d/%d rows into %s (%d row(s) could not be loaded)", total, len(raws), table, failed)
+	} else {
+		log.Printf("[BUNDLE] imported %d rows into %s", total, table)
 	}
-	log.Printf("[BUNDLE] imported %d rows into %s", total, table)
-	return int(total), nil
+	return total, failed, nil
+}
+
+// importBundleBatch loads one batch as a single statement, and on any non-fatal failure retries the
+// batch ONE ROW AT A TIME so a single oversized or malformed row is isolated rather than taking the
+// other rows down with it. It returns how many rows loaded, how many could not be loaded at all,
+// and a fatal error only when the transaction itself became unusable.
+func importBundleBatch(ctx context.Context, tx pgx.Tx, sql, table string, batch []json.RawMessage) (imported int, failed int, fatal error) {
+	if len(batch) == 0 {
+		return 0, 0, nil
+	}
+	n, ok, ferr := tryBundleExec(ctx, tx, sql, batch)
+	if ferr != nil {
+		return 0, 0, ferr
+	}
+	if ok {
+		return n, 0, nil
+	}
+	if len(batch) == 1 {
+		log.Printf("[BUNDLE] import %s: a row could not be loaded even on its own (%d bytes); counting it as failed", table, len(batch[0]))
+		return 0, 1, nil
+	}
+	for _, raw := range batch {
+		imp, fail, ferr := importBundleBatch(ctx, tx, sql, table, []json.RawMessage{raw})
+		if ferr != nil {
+			return imported, failed, ferr
+		}
+		imported += imp
+		failed += fail
+	}
+	return imported, failed, nil
+}
+
+// tryBundleExec runs one jsonb-array insert inside its own savepoint so a failure rolls back only
+// this attempt and leaves the transaction usable for the next. ok is false for a failure that is
+// this batch's own (a marshal error, or a row the server rejected); fatal is set only when the
+// savepoint machinery itself failed, which means the connection or transaction is gone.
+func tryBundleExec(ctx context.Context, tx pgx.Tx, sql string, batch []json.RawMessage) (imported int, ok bool, fatal error) {
+	arr, merr := json.Marshal(batch)
+	if merr != nil {
+		return 0, false, nil
+	}
+	const sp = "bundle_sp"
+	if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
+		return 0, false, fmt.Errorf("savepoint: %w", err)
+	}
+	tag, execErr := tx.Exec(ctx, sql, arr)
+	if execErr != nil {
+		if _, rberr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp); rberr != nil {
+			return 0, false, fmt.Errorf("rollback to savepoint: %w", rberr)
+		}
+		return 0, false, nil
+	}
+	_, _ = tx.Exec(ctx, "RELEASE SAVEPOINT "+sp)
+	return int(tag.RowsAffected()), true, nil
 }
 
 // processBundleImportJSON is the single entry point both import handlers (file upload and URL) call. It
 // picks the engine by format version: v2 goes through the generic importBundle; anything older falls
 // back to the legacy importDatabaseData so bundles exported before this overhaul still import.
-func processBundleImportJSON(ctx context.Context, jsonData []byte) (scopeTargets, tables, records int, err error) {
+func processBundleImportJSON(ctx context.Context, jsonData []byte) (scopeTargets, tables, records, failed int, err error) {
 	var probe struct {
 		ExportMetadata ExportMetadata `json:"export_metadata"`
 	}
@@ -622,24 +676,24 @@ func processBundleImportJSON(ctx context.Context, jsonData []byte) (scopeTargets
 	if strings.HasPrefix(probe.ExportMetadata.Version, "2") {
 		var bundle bundleFile
 		if err := json.Unmarshal(jsonData, &bundle); err != nil {
-			return 0, 0, 0, fmt.Errorf("invalid v2 bundle: %w", err)
+			return 0, 0, 0, 0, fmt.Errorf("invalid v2 bundle: %w", err)
 		}
-		imp, tbl, err := importBundle(ctx, &bundle)
+		imp, tbl, fail, err := importBundle(ctx, &bundle)
 		if err != nil {
-			return 0, 0, 0, err
+			return 0, 0, 0, 0, err
 		}
-		return len(bundle.ScopeTargets), tbl, imp, nil
+		return len(bundle.ScopeTargets), tbl, imp, fail, nil
 	}
 
 	// Legacy v1 bundle (uuids stored as byte arrays, hand-maintained table set).
 	var ed ExportData
 	if err := json.Unmarshal(jsonData, &ed); err != nil {
-		return 0, 0, 0, fmt.Errorf("invalid v1 bundle: %w", err)
+		return 0, 0, 0, 0, fmt.Errorf("invalid v1 bundle: %w", err)
 	}
 	if err := importDatabaseData(&ed); err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
-	return len(ed.ScopeTargets), len(ed.TableData), ed.ExportMetadata.TotalRecords, nil
+	return len(ed.ScopeTargets), len(ed.TableData), ed.ExportMetadata.TotalRecords, 0, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -309,6 +309,17 @@ func ExecuteEndpointInvestigation(scanID, scopeTargetID string) {
 	// from validation but is re-derived from what this phase actually sees.
 	blockGuard := NewHostBudget()
 	for i, ep := range endpoints {
+		// Cooperative cancel, checked before each endpoint's work so a Stop takes effect within one
+		// endpoint and before any more traffic goes out. UpdateEndpointInvestigationProgress is guarded
+		// against resurrecting a cancelled row, so the flag the operator set survives to be seen here.
+		if investigationCancelled(scanID) {
+			partial, _ := json.Marshal(map[string]interface{}{"endpoints": results})
+			UpdateEndpointInvestigationStatus(scanID, "cancelled", len(endpoints), i, string(partial),
+				"Cancelled by operator; partial Tier 0 results saved.", time.Since(startTime).String())
+			log.Printf("[INFO] Investigation %s cancelled at %d/%d; partial results saved", scanID, i, len(endpoints))
+			return
+		}
+
 		epHost := hostOf(ep.URL)
 		if blockGuard.HostBlocked(epHost) {
 			results = append(results, EndpointInvestigationResult{
@@ -316,7 +327,7 @@ func ExecuteEndpointInvestigation(scanID, scopeTargetID string) {
 				NotInvestigated: epHost + " was abandoned after a sustained WAF/bot-manager wall; " +
 					"not investigated, to avoid an IP ban.",
 			})
-			UpdateEndpointInvestigationStatus(scanID, "running", len(endpoints), i+1, "", "", "")
+			UpdateEndpointInvestigationProgress(scanID, "running", len(endpoints), i+1)
 			continue
 		}
 
@@ -329,8 +340,25 @@ func ExecuteEndpointInvestigation(scanID, scopeTargetID string) {
 			perEndpoint[ep.ID] = result.Signals
 		}
 
-		UpdateEndpointInvestigationStatus(scanID, "running", len(endpoints), i+1, "", "", "")
+		UpdateEndpointInvestigationProgress(scanID, "running", len(endpoints), i+1)
+
+		// Checkpoint the Tier 0 results periodically. Without this, results are written only at the very
+		// end, so a run that is killed or stalls commits nothing and the operator sees "running" with no
+		// output. Progress above does not touch the result column, so this checkpoint survives between
+		// saves; the cancel flag is checked at the top of each iteration.
+		if (i+1)%25 == 0 {
+			if partial, err := json.Marshal(map[string]interface{}{"endpoints": results}); err == nil {
+				UpdateEndpointInvestigationStatus(scanID, "running", len(endpoints), i+1, string(partial), "", "")
+			}
+		}
 	}
+
+	// Save the full Tier 0 result set before Tier 1, which is paced and can run long: if Tier 1 is
+	// killed or times out, the Tier 0 investigation is preserved rather than lost.
+	if cp, err := json.Marshal(map[string]interface{}{"endpoints": results}); err == nil {
+		UpdateEndpointInvestigationStatus(scanID, "running", len(endpoints), len(endpoints), string(cp), "", "")
+	}
+	log.Printf("[INFO] Investigation %s Tier 0 complete (%d endpoints); starting Tier 1", scanID, len(endpoints))
 
 	// Tier 1: the probes that cost a request. Paced by the same budget the Routing & WAF Probe
 	// measured, ordered by what Tier 0 found, and stopped when the budget runs out.
@@ -870,6 +898,33 @@ func analyzeCORS(urlStr string, headers http.Header) *CORSInfo {
 	}
 
 	return cors
+}
+
+// UpdateEndpointInvestigationProgress advances the counter WITHOUT touching result/error/execution_time.
+// The per-endpoint loop calls this so it does not blank the periodic result checkpoint between saves,
+// which is what let a run commit nothing until the very end and lose everything if it was killed.
+func UpdateEndpointInvestigationProgress(scanID, status string, totalEndpoints, processedEndpoints int) {
+	// `AND status <> 'cancelled'` so a per-endpoint progress write cannot resurrect a row the operator
+	// just cancelled: without it, the cancel flag set between two 25-endpoint checkpoints would be
+	// overwritten back to 'running' on the very next endpoint and the loop would never see it.
+	_, err := dbPool.Exec(context.Background(),
+		`UPDATE endpoint_investigation_scans SET status = $1, total_endpoints = $2, processed_endpoints = $3 WHERE scan_id = $4 AND status <> 'cancelled'`,
+		status, totalEndpoints, processedEndpoints, scanID)
+	if err != nil {
+		log.Printf("[ERROR] Failed to update investigation progress: %v", err)
+	}
+}
+
+// investigationCancelled reports whether the scan row has been flipped to cancelled out from under the
+// run, which is the cooperative cancel the loop checks at each checkpoint (there is otherwise no way to
+// stop a running investigation - the dead-AbortNow defect).
+func investigationCancelled(scanID string) bool {
+	var status string
+	if err := dbPool.QueryRow(context.Background(),
+		`SELECT status FROM endpoint_investigation_scans WHERE scan_id = $1`, scanID).Scan(&status); err != nil {
+		return false
+	}
+	return status == "cancelled"
 }
 
 func UpdateEndpointInvestigationStatus(scanID, status string, totalEndpoints, processedEndpoints int, result, errorMsg, execTime string) {

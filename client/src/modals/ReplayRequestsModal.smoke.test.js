@@ -234,7 +234,6 @@ describe('the repeater versions column', () => {
   test('with versioning unavailable the unsaved-edit confirmation still guards the switch', async () => {
     versionsStatus = 404;
     await open();
-    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
     await act(async () => { typeInto(EDITED); });
 
     const OTHER = 'c1e1b0a2-1111-2222-3333-999999999999';
@@ -250,11 +249,22 @@ describe('the repeater versions column', () => {
     });
     await settle();
 
-    expect(confirmSpy).toHaveBeenCalled();
+    // Versioning is unavailable, so the edit cannot be saved as a version and the switch falls back
+    // to the in-pane askConfirm modal, never a window.confirm (a browser dialog would freeze the
+    // fullscreen pane). The modal's confirm action must be on screen.
+    const confirmBtn = Array.from(document.querySelectorAll('button'))
+      .find((b) => b.textContent.trim() === 'Discard & load');
+    expect(confirmBtn).toBeTruthy();
+
+    // Refuse it by clicking Cancel.
+    const cancelBtn = Array.from(document.querySelectorAll('button'))
+      .find((b) => b.textContent.trim() === 'Cancel');
+    await act(async () => { cancelBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await settle();
+
     // Refused, so the edit is still on screen and the other capture was never fetched.
     expect(area().value).toBe(asDom(EDITED));
     expect(calls.some((c) => c.url.includes(OTHER))).toBe(false);
-    confirmSpy.mockRestore();
   });
 
   test('bytes the server calls identical are reported as nothing to save, not as an error', async () => {

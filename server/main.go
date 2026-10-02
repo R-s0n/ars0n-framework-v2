@@ -1012,6 +1012,7 @@ func main() {
 	r.HandleFunc("/endpoint-scan/{scope_target_id}", utils.RunEndpointScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/endpoint-scan/{scope_target_id}/status/{run_id}", utils.GetEndpointScanStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/endpoint-scan/{scope_target_id}/latest", utils.GetEndpointScanLatest).Methods("GET", "OPTIONS")
+	r.HandleFunc("/endpoint-scan/{scope_target_id}/cancel/{run_id}", utils.CancelEndpointScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/endpoint-scan/{scope_target_id}/results", utils.GetEndpointScanResults).Methods("GET", "OPTIONS")
 
 	log.Println("API server started on :8443")

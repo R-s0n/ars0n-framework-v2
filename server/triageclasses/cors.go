@@ -545,6 +545,26 @@ func (c corsClassifier) Classify(ctx triage.ClassifyCtx) []triage.ClassVerdict {
 		return v
 	}
 
+	// The all-empty-body block pxUniformBlock cannot see: every delivered Origin probe came back with
+	// an EMPTY body and a 4xx/5xx status while the control carried one. faUniformBlock groups
+	// responses by body and skips the empty ones, so without this a WAF answering 403 with no body to
+	// every Origin read as clean here.
+	var corsBaseline []byte
+	if ctx.Route.Resolved() {
+		corsBaseline = ctx.Route.Obs().Body
+	}
+	if n, ok := pxEmptyBodyBlock(honest, corsBaseline); ok {
+		v := one(triage.StateCannotDetermine,
+			"empty_body_block: all "+pxCount(n, "of this class's distinct Origin values")+" delivered came "+
+				"back with an EMPTY body and a 4xx or 5xx status while the unperturbed control carried a "+
+				"body, so something in front answered and the application's CORS logic was never reached. "+
+				"pxUniformBlock cannot name this because it groups responses by body and skips the empty "+
+				"ones, so nothing was measured here. IT IS NOT A CLEAN",
+			"", triage.GradeUnrated, ords)
+		v[0].Untested = skips
+		return v
+	}
+
 	anyACAO := false
 	for _, r := range readings {
 		if r.acaoPresent {

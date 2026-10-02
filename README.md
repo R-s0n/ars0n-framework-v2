@@ -19,6 +19,20 @@ Ars0n Framework v2
     <em>🚨 Beta 0.1.0 Out Now!! 🚨</em>
 </p>
 
+<div align="center"><img src="ai-native.png" alt="three pillars of the framework" width="600"></div>
+
+<p align="center">If you haven't been keeping up with my progress on the tool, I just released a massive update that includes an MCP server that allows an AI Agent (or collection of agents) to do anything a user can through the UI.  I want to be super clear, though:  THIS TOOL IS NOT DESIGNED TO REPLACE MANUAL BUG BOUNTY HUNTING WITH AI!  Instead, my framework is designed to allow a human researcher to work seamlessly with both an AI system and a wide range of open-source tools, leveraging each for their specific advantages.</p>
+
+<p align="center">I've spent a lot of time meeting/chatting with successful bug hunters over the last six months now that AI has become a central part of everyone's workflow.  The consistent thread I saw was that the most successful hunters had a deep understanding of the strengths and weaknesses of AI, automated tools, and humans.  Using this deep understanding, those successful researchers broke down their bug hunting methodology into thousands of individual steps and, based on what was needed, identified whether it's best solved by a human, AI, or automted tool.</p>
+
+<p align="center">~ Human creativity will always be the key to success.  Humans have the unique ability to come up with ideas that have never been thought of before.  This is the "secret sauce", AI hunting hasn't changed that.  If you're doing the same thing everyone else is doing, you'll find the same bugs everyone else is finding.</p>
+
+<p align="center">~ AI, specifically LLMs, excel in two areas: Converting unstructured data to structured data and building dynamic automated workflows that include complex decision-making.  The framework's MCP server includes 150+ tools to facilitate that process, as well as an "Education Layer" that provides your AI system with the knowledge of an experienced hunter.</p>
+
+<p align="center">~ And finally, when you have a repetitive task that needs to be done fast, we pass those over to one of 50+ battle tested open-source scanning tools.</p>
+
+<p align="center">This combination is what successful bug bounty hunters are doing today.  My goal is to make a clear path for beginners to start hunting in the same way, as soon as possible!</p>
+
 <p align="center">My full bug bounty hunting methodology built into a single framework!  Automate the most common bug bounty hunting workflows and <em>Earn While You Learn</em>!</p>
 
 <div align="center">
@@ -33,8 +47,6 @@ Ars0n Framework v2
     <img src="update.png" width="250px" alt="Youtube Thumbnail" style="border-radius: 12px;">
   </a>
 </div><br>
-
-<p align="center"><small>This framework will help you grow as much as my hair did between these videos 😉</small></p>
 
 <p align="center">The goal of this tool is to eliminate the barrier of entry for bug bounty hunting.  My hope is that someone can pick up this tool and start hunting on day one of their AppSec journey 🚀</p>
 
@@ -96,6 +108,40 @@ My hope is that this modular framework will act as a canvas to help share what I
     <a href="https://securitytrails.com">SecurityTrails</a> - Comprehensive DNS, domain, and IP data provider for digital asset discovery<br>
     <a href="https://censys.io">Censys</a> - Internet-wide scanning platform for discovering and monitoring assets<br>
     <a href="https://shodan.io">Shodan</a> - Search engine for internet-connected devices and services<br>
+    <a href="https://github.com/tomnomnom/waybackurls">waybackurls</a> - Fetches historical URLs for a host from the Wayback Machine<br>
+    <a href="https://github.com/GerbenJavado/LinkFinder">LinkFinder</a> - Extracts endpoints and paths out of JavaScript files<br>
+    <a href="https://github.com/brosck/mantra">Mantra</a> - Hunts for API keys and credentials leaked in JavaScript and source<br>
+    <a href="https://github.com/trufflesecurity/trufflehog">TruffleHog</a> - Finds and verifies leaked secrets across code, git history and files<br>
+    <a href="https://github.com/hannob/snallygaster">Snallygaster</a> - Scans for sensitive files accidentally exposed on web servers<br>
+    <a href="https://github.com/arthaud/git-dumper">git-dumper</a> - Reconstructs a source tree from an exposed .git directory<br>
+    <a href="https://github.com/internetwache/GitTools">GitTools</a> - Finds, dumps and extracts exposed .git repositories<br>
+    <a href="https://github.com/s0md3v/Arjun">Arjun</a> - Discovers hidden HTTP parameters in the query, body and headers<br>
+    <a href="https://github.com/Sh1Yo/x8">x8</a> - Fast hidden-parameter discovery written in Rust<br>
+    <a href="https://github.com/hahwul/dalfox">Dalfox</a> - Fast parameter-aware XSS scanner and verifier<br>
+    <a href="https://github.com/Asperis-Security/xssFuzz">xssFuzz</a> - Reflected-XSS fuzzer for probing injection contexts<br>
+    <a href="https://github.com/fcavallarin/domdig">domdig</a> - Headless-Chrome DOM XSS scanner for client-side bugs<br>
+    <a href="https://github.com/sqlmapproject/sqlmap">sqlmap</a> - Automated SQL injection detection and database takeover<br>
+    <a href="https://github.com/r0oth3x49/ghauri">Ghauri</a> - Automated SQL injection detection and exploitation<br>
+    <a href="https://github.com/eslam3kl/SQLiDetector">SQLiDetector</a> - Lightweight SQL injection detector via error signatures<br>
+    <a href="https://github.com/commixproject/commix">Commix</a> - Automated command injection discovery and exploitation<br>
+    <a href="https://github.com/vladko312/SSTImap">SSTImap</a> - Server-side template injection detection and exploitation<br>
+    <a href="https://github.com/Hackmanit/TInjA">TInjA</a> - Template injection analyzer for server- and client-side engines<br>
+    <a href="https://github.com/hansmach1ne/LFImap">LFImap</a> - Local file inclusion discovery and exploitation<br>
+    <a href="https://github.com/Chocapikk/LFIHunt">LFIHunt</a> - Local file inclusion hunting and exploitation helper<br>
+    <a href="https://github.com/swisskyrepo/SSRFmap">SSRFmap</a> - Automated SSRF exploitation across known sinks<br>
+    <a href="https://github.com/0xacb/recollapse">REcollapse</a> - Input-normalization fuzzer for SSRF, open-redirect and bypass primitives<br>
+    <a href="https://github.com/sAjibuu/Upload_Bypass">Upload_Bypass</a> - File-upload restriction bypass testing<br>
+    <a href="https://github.com/edoardottt/pphack">pphack</a> - Client-side prototype pollution scanner<br>
+    <a href="https://github.com/ticarpi/jwt_tool">jwt_tool</a> - JWT analysis, tampering and attack toolkit<br>
+    <a href="https://github.com/devploit/nomore403">nomore403</a> - Bypasses 401/403 responses with header, path and method tricks<br>
+    <a href="https://github.com/ivan-sincek/forbidden">forbidden</a> - Access-control bypass tester for forbidden endpoints<br>
+    <a href="https://github.com/Hackmanit/Web-Cache-Vulnerability-Scanner">Web Cache Vulnerability Scanner</a> - Detects web cache poisoning and deception<br>
+    <a href="https://github.com/omranisecurity/CacheBoom">CacheBoom</a> - Web cache poisoning discovery and verification<br>
+    <a href="https://github.com/hahwul/smugglex">smugglex</a> - HTTP request smuggling detection<br>
+    <a href="https://github.com/neex/http2smugl">http2smugl</a> - HTTP/2 request smuggling detection<br>
+    <a href="https://github.com/dolevf/graphw00f">graphw00f</a> - Fingerprints the GraphQL engine behind an endpoint<br>
+    <a href="https://github.com/dolevf/graphql-cop">graphql-cop</a> - Audits GraphQL endpoints for common misconfigurations<br>
+    <a href="https://github.com/nikitastupin/clairvoyance">Clairvoyance</a> - Recovers a GraphQL schema when introspection is disabled<br>
 </p>
 
 ## Download And Install
@@ -427,19 +473,19 @@ The framework ships with a **Model Context Protocol (MCP) server** that exposes 
 
 ### What it exposes
 
-The server registers **142 tools** across twelve categories:
+The server registers **150 tools** across twelve categories:
 
 - **Scope and targets** (9): list, add, activate and delete scope targets, update ROI scores, manage scope rules, read scope overview and per-target statistics
 - **Scan execution and workflows** (11): run any individual tool (amass, subfinder, httpx, nuclei, katana, ffuf, arjun, etc.), check or cancel a running scan, read raw tool output, run the full Company / Wildcard / URL workflows or individual phases, drive auto-scan sessions
 - **Recon data queries** (21): subdomains, company domains, network ranges, live servers, target URLs, endpoints, parameters, DNS records, discovered IPs, technologies, cloud assets, Nuclei findings and the consolidated attack surface
 - **Bug bounty analysis** (13): subdomain-takeover candidates, exposed panels, API endpoints, sensitive files, interesting responses, unique hosts, queries by CIDR or tech stack, cross-target search and scan diffing
 - **Endpoints and attack surface** (12): consolidate discovered endpoints, run endpoint validation and investigation scans, read their results, manage attack vectors, capture and manage a manual crawl, manage client identifiers
-- **Request flow replay** (7): the repeater - search the capture corpus, edit raw HTTP bytes and send them at the live target, with a full version history that never overwrites the original; the flows reconstructed from captured traffic, read as a graph and re-run end to end; active flow detection with a dry run that sends nothing; the per-target engagement config (mandatory header, rate cap, timeout) and which endpoints detection may reach; and the builder for multi-step flows with values carried between steps and conditions that branch on the response
-- **Vulnerability scanning** (14): the per-vector scanners behind the URL workflow, covering XSS, SQL injection, command injection and SSTI, LFI, web cache, request smuggling, SSRF and open redirect, GraphQL, sensitive data leaks, access bypass, exposed git, fuzzing and hidden-parameter enumeration
-- **Authentication and authorization** (19): document and replay register/login/MFA/reset flows step by step, manage auth recordings and session tokens, check token validity, and manage identity patterns plus role, policy and discretionary access models
+- **Request flow replay** (8): the repeater - search the capture corpus, edit raw HTTP bytes and send them at the live target, with a full version history that never overwrites the original; the flows reconstructed from captured traffic, read as a graph and re-run end to end; active flow detection with a dry run that sends nothing; the per-target engagement config (mandatory header, rate cap, timeout) and which endpoints detection may reach; and the builder for multi-step flows with values carried between steps and conditions that branch on the response
+- **Vulnerability scanning** (15): the per-vector scanners behind the URL workflow, covering XSS, SQL injection, command injection and SSTI, LFI, web cache, request smuggling, SSRF and open redirect, GraphQL, sensitive data leaks, access bypass, exposed git, fuzzing and hidden-parameter enumeration
+- **Authentication and authorization** (23): document and replay register/login/MFA/reset flows step by step, manage auth recordings and session tokens, check token validity, and manage identity patterns plus role, policy and discretionary access models
 - **Target behaviour probe** (9): configure, dry run and execute the WAF and rate-limit probe, list its targets and read run status and results
 - **Threat model and notes** (3): create, read, update and delete STRIDE threat model entries and their notes
-- **Methodology and guidance** (4): the built-in methodology, "what should I do next" guidance, the attack vector model and per-tool guidance
+- **Methodology and guidance** (6): the built-in methodology, "what should I do next" guidance, the attack vector model and per-tool guidance, the vendored bug-bounty knowledge base (browse/read/search) and the per-class attack playbook
 - **Settings and configuration** (20): read all settings and modify rate limits, custom HTTP (user-agent/header), Burp Suite config, recon API keys and AI provider API keys (`get_settings`, `update_settings`, `set_api_key`/`delete_api_key`, `set_ai_api_key`/`delete_ai_api_key`), plus tool configs, wordlists, database bundles, HackerOne scope import, screenshots and scan exports. The MCP Server section itself is read-only via MCP.
 
 The count is not hardcoded: `/health` reports the number of tools actually registered at startup, so it cannot drift from the code.
@@ -449,7 +495,7 @@ The count is not hardcoded: `/health` reports the number of tools actually regis
 The MCP server **starts automatically** with `docker-compose up` and listens on **port 3001** using the SSE transport:
 
 - SSE endpoint: `http://localhost:3001/sse`
-- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.0.0","tools":142}`
+- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.0.0","tools":150}`
 
 Verify it's up:
 ```bash

@@ -103,6 +103,10 @@ const PENDING_TTL_MS = 120000;
 // small on purpose: a wrong reopen must be rare and self-limiting.
 const RECENT_ACTIVITY_MS = 60000;
 const MAX_REOPEN_ATTEMPTS = 2;
+// A session counts as a live concurrent recording (so a second Start is refused rather than left to
+// collide and wedge the shared worker) only while its heartbeat is recent. A stale one left by a dead
+// worker is not, so a normal restart still proceeds. Matches the server's own staleness window.
+const ALREADY_RECORDING_STALE_MS = 90000;
 // 2 MB per body. This used to be 128 KB, which is smaller than the JSON a paginated admin or
 // export endpoint answers with, so the single response most worth keeping was the one clipped.
 // chrome.storage.session is a ~10 MB budget shared by the whole queue, and that budget is still
@@ -402,9 +406,30 @@ function scheduleFlush(delayMs) {
 
 // Returns the in-flight flush when one is already running, so callers that need the queue drained
 // (Stop, in particular) actually wait for it instead of returning early and losing the tail.
+//
+// The single-flight is self-healing. flushInFlight is the one thing that, if it ever stops settling,
+// wedges the whole pipeline: every later flushQueue - including the 30s keepalive alarm's - returns
+// the stuck promise and ships nothing, while the separate heartbeat keeps the session "active" so the
+// queue just climbs (observed live: 0 captures flushed for minutes, heartbeat 6s, triggered by the
+// bfcache port churn closing the content-script channel mid-flush). runFlush already guards each POST
+// with an AbortController, but a hang anywhere else (a write-chain step that never resolves, a fetch
+// edge the abort misses) would still strand it. This hard ceiling guarantees flushInFlight clears so
+// the next tick starts a fresh attempt: a transient cause then recovers on its own, and a persistent
+// one at least keeps retrying and surfaces its error instead of silently stalling forever.
+const FLUSH_HARD_TIMEOUT_MS = 60000;
 function flushQueue(options) {
   if (flushInFlight) return flushInFlight;
-  flushInFlight = runFlush(options || {}).finally(() => {
+  let watchdog;
+  flushInFlight = Promise.race([
+    runFlush(options || {}),
+    new Promise((resolve) => {
+      watchdog = setTimeout(() => {
+        console.warn('[MANUAL-CRAWL] flush watchdog fired; clearing a stuck single-flight so the next tick retries');
+        resolve({ _flushTimedOut: true });
+      }, FLUSH_HARD_TIMEOUT_MS);
+    }),
+  ]).finally(() => {
+    clearTimeout(watchdog);
     flushInFlight = null;
   });
   return flushInFlight;
@@ -696,6 +721,32 @@ async function applyBadge() {
 
 async function startCaptureSession(settings, frameworkUrl) {
   try {
+    // One recording per browser PROFILE. Chrome runs the extension as a single shared (spanning)
+    // service worker across a profile's normal and incognito windows, so a second Start here is not an
+    // independent recorder: it collides with the live session in this one worker and wedges the flush
+    // (the queue climbs while nothing ships, and the popup can stall on "Loading targets"). A genuinely
+    // separate recorder lives in a DIFFERENT Chrome profile, which has its own worker and never reaches
+    // this instance, so this guard never blocks the supported two-profile setup. A normal restart has
+    // already Stopped (active=false) or the prior session has gone stale, so both of those still pass.
+    const existing = await getState();
+    const existingLive = existing && existing.active && existing.sessionId
+      && existing.lastHeartbeatAt
+      && (Date.now() - existing.lastHeartbeatAt) < ALREADY_RECORDING_STALE_MS;
+    if (existingLive) {
+      const where = existing.targetUrl ? ` for ${existing.targetUrl}` : '';
+      console.warn('[MANUAL-CRAWL] Refused a second concurrent Start; already recording', existing.sessionId);
+      return {
+        success: false,
+        alreadyRecording: true,
+        error: `A recording is already active in this Chrome profile${where}. Chrome shares one `
+          + `extension worker across a profile's normal and incognito windows, so only ONE recording `
+          + `per profile is possible - a second Start would collide with the live one and stall the `
+          + `capture queue. To record a SECOND account at the same time, open a separate Chrome profile `
+          + `(not an incognito window) and load the extension there. To switch this profile to the other `
+          + `account, click Stop first, then Start.`,
+      };
+    }
+
     const baseUrl = (frameworkUrl || DEFAULT_FRAMEWORK_URL).replace(/\/+$/, '');
     const apiBase = baseUrl + '/api';
 

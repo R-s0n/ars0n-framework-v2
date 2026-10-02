@@ -602,6 +602,18 @@ func processURLsWithParameters(urls []string, targetDomain, scanID, scanType, sc
 	return allEndpoints, nil
 }
 
+const (
+	// maxStatusFetch caps how many discovered endpoints one scan will HEAD inline for a status code.
+	// Beyond it the pass stops and the remaining endpoints are stored WITHOUT a status, which endpoint
+	// Validate fills per-endpoint on the consolidated set afterwards, so nothing is lost. This bounds a
+	// mega-domain archive dump: gau on one target returned ~38,000 URLs and this serial, rate-paced
+	// pass ran for hours, starving every other scan sharing the target's rate budget.
+	maxStatusFetch = 2000
+	// statusFetchBudget is a wall-clock ceiling on that pass, a second guard independent of the count
+	// so a slow target cannot stretch even a capped pass out indefinitely.
+	statusFetchBudget = 8 * time.Minute
+)
+
 func processURLGroup(urls []string, isDirect bool, scanID, scanType, scopeTargetID string) []DiscoveredEndpoint {
 	if len(urls) == 0 {
 		return nil
@@ -643,16 +655,30 @@ func processURLGroup(urls []string, isDirect bool, scanID, scanType, scopeTarget
 	// honour it, and this loop quietly ignores it.
 	ctx := context.Background()
 	delay := targetSafeDelay(ctx, scopeTargetID)
+	// Bounded by both a count cap and a wall clock. Endpoints past the bound keep StatusCode 0 and are
+	// returned anyway: they still consolidate, and Validate annotates the consolidated set per-endpoint.
+	fetchCtx, cancel := context.WithTimeout(ctx, statusFetchBudget)
+	defer cancel()
+	fetched, skipped := 0, 0
 	for i := range endpoints {
+		if fetched >= maxStatusFetch || fetchCtx.Err() != nil {
+			skipped = len(endpoints) - i
+			break
+		}
 		endpoints[i].StatusCode = fetchStatusCode(endpoints[i].URL)
 		// A 401 or 403 seen here is the framework being refused, which is exactly what the access
 		// bypass section needs and exactly what used to be discarded as just another status code.
 		RecordDeniedEndpoint(ctx, scopeTargetID, endpoints[i].URL, endpoints[i].StatusCode,
 			"endpoint-discovery")
-		if i > 0 && i%10 == 0 {
-			log.Printf("[INFO] Status code progress: %d/%d", i, len(endpoints))
+		fetched++
+		if fetched%10 == 0 {
+			log.Printf("[INFO] Status code progress: %d/%d", fetched, len(endpoints))
 		}
 		time.Sleep(delay)
+	}
+	if skipped > 0 {
+		log.Printf("[WARN] Status-code pass bounded (cap=%d, budget=%s): fetched %d, left %d endpoint(s) unannotated; Validate fills status on the consolidated set.",
+			maxStatusFetch, statusFetchBudget, fetched, skipped)
 	}
 
 	return endpoints
@@ -1104,6 +1130,7 @@ func buildKatanaCommand(crawlURL string, cfg KatanaURLConfig, auth crawlAuth) []
 
 func ExecuteAndParseKatanaURLScan(scanID, targetURL, scopeTargetID string) {
 	log.Printf("[INFO] Starting Katana scan for %s (scan ID: %s)", targetURL, scanID)
+	UpdateKatanaURLScanStatus(scanID, "running", "", "", "", "")
 
 	cfg := LoadKatanaURLConfig(scopeTargetID)
 	targets, err := ResolveScanHosts(scopeTargetID, cfg.HostMode, cfg.SelectedHosts)
@@ -1513,6 +1540,7 @@ func dedupeStrings(in []string) []string {
 
 func ExecuteAndParseLinkFinderURLScan(scanID, targetURL, scopeTargetID string) {
 	log.Printf("[INFO] Starting LinkFinder URL scan for %s (scan ID: %s)", targetURL, scanID)
+	UpdateLinkFinderURLScanStatus(scanID, "running", "", "", "", "")
 	startTime := time.Now()
 
 	targetDomain := extractDomain(targetURL)
@@ -1837,6 +1865,7 @@ func RunWaybackURLsScan(w http.ResponseWriter, r *http.Request) {
 
 func ExecuteAndParseWaybackURLsScan(scanID, targetURL, scopeTargetID string) {
 	log.Printf("[INFO] Starting WaybackURLs scan for %s (scan ID: %s)", targetURL, scanID)
+	UpdateWaybackURLsScanStatus(scanID, "running", "", "", "", "")
 
 	cfg := LoadWaybackURLsURLConfig(scopeTargetID)
 	targets, err := ResolveScanHosts(scopeTargetID, cfg.HostMode, cfg.SelectedHosts)
@@ -2004,6 +2033,7 @@ func RunGAUURLScan(w http.ResponseWriter, r *http.Request) {
 
 func ExecuteAndParseGAUURLScan(scanID, targetURL, scopeTargetID string) {
 	log.Printf("[INFO] Starting GAU scan for %s (scan ID: %s)", targetURL, scanID)
+	UpdateGAUURLScanStatus(scanID, "running", "", "", "", "")
 
 	cfg := LoadGAUURLConfig(scopeTargetID)
 	targets, err := ResolveScanHosts(scopeTargetID, cfg.HostMode, cfg.SelectedHosts)
@@ -2548,6 +2578,7 @@ func buildGoSpiderCommand(crawlURL string, cfg GoSpiderURLConfig, auth crawlAuth
 
 func ExecuteAndParseGoSpiderURLScan(scanID, targetURL, scopeTargetID string) {
 	log.Printf("[GOSPIDER-URL] Starting GoSpider scan for %s (scan ID: %s)", targetURL, scanID)
+	UpdateGoSpiderURLScanStatus(scanID, "running", "", "", "", "")
 
 	cfg := LoadGoSpiderURLConfig(scopeTargetID)
 	targets, err := ResolveScanHosts(scopeTargetID, cfg.HostMode, cfg.SelectedHosts)

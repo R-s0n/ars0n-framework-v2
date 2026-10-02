@@ -94,6 +94,15 @@ func executeEndpointScan(runID, scopeTargetID string, probe ProbeContext, total 
 	vStatus, vError, vAbort := readValidationOutcome(validationScanID)
 	log.Printf("[ENDPOINT-SCAN] %s validation finished: %s", runID, vStatus)
 
+	// Operator cancelled during validation: do not start investigation. (Validation itself is the fast
+	// phase and runs to completion; the cancel takes effect at this boundary.)
+	if endpointRunCancelled(runID) {
+		finishEndpointScan(runID, "aborted", "",
+			"The scan was cancelled by the operator during validation; investigation was not started.",
+			started)
+		return
+	}
+
 	// Nothing measured, so nothing to investigate against.
 	if vStatus == "error" || vStatus == "" {
 		msg := vError
@@ -159,6 +168,10 @@ func executeEndpointScan(runID, scopeTargetID string, probe ProbeContext, total 
 	note := ""
 	errMsg := ""
 	switch {
+	case iStatus == "cancelled":
+		status = "aborted"
+		note = "The scan was cancelled by the operator. The validation verdicts and every endpoint " +
+			"investigated before the stop are saved."
 	case iStatus == "error":
 		status = "partial"
 		errMsg = "Investigation failed: " + orDefault(iError, "no reason recorded")
@@ -261,6 +274,54 @@ func GetEndpointScanLatest(w http.ResponseWriter, r *http.Request) {
 	writeEndpointScanRun(w,
 		`WHERE scope_target_id = $1 ORDER BY created_at DESC LIMIT 1`,
 		mux.Vars(r)["scope_target_id"])
+}
+
+// CancelEndpointScan handles POST /endpoint-scan/{scope_target_id}/cancel/{run_id}. It flips the run
+// and its active validation/investigation sub-scan to cancelled. The investigation loop checks this
+// cooperatively at each checkpoint and stops with its partial Tier 0 results saved; the orchestrator
+// then finishes the run as aborted. This is the operator stop the card's Stop button had no server
+// side for (the dead-AbortNow defect).
+func CancelEndpointScan(w http.ResponseWriter, r *http.Request) {
+	runID := mux.Vars(r)["run_id"]
+	run, ok := loadEndpointScanRun(`WHERE run_id = $1`, runID)
+	if !ok {
+		http.Error(w, "No such endpoint scan run", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	// Already finished: nothing to stop, report where it landed.
+	switch run.Status {
+	case "success", "error", "aborted", "partial", "cancelled":
+		json.NewEncoder(w).Encode(map[string]string{"status": run.Status})
+		return
+	}
+
+	_, _ = dbPool.Exec(context.Background(),
+		`UPDATE endpoint_scan_runs SET status = 'cancelled', updated_at = NOW() WHERE run_id = $1`, runID)
+	if run.InvestigationID != "" {
+		_, _ = dbPool.Exec(context.Background(),
+			`UPDATE endpoint_investigation_scans SET status = 'cancelled' WHERE scan_id = $1 AND status IN ('pending','running')`,
+			run.InvestigationID)
+	}
+	if run.ValidationScanID != "" {
+		_, _ = dbPool.Exec(context.Background(),
+			`UPDATE endpoint_validation_scans SET status = 'cancelled' WHERE scan_id = $1 AND status IN ('pending','running')`,
+			run.ValidationScanID)
+	}
+	log.Printf("[ENDPOINT-SCAN] %s cancellation requested by operator", runID)
+	json.NewEncoder(w).Encode(map[string]string{"status": "cancelling"})
+}
+
+// endpointRunCancelled reports whether the run row has been flipped to cancelled, which the orchestrator
+// checks at the phase boundary so a cancel during validation stops the run before investigation starts.
+func endpointRunCancelled(runID string) bool {
+	var status string
+	if err := dbPool.QueryRow(context.Background(),
+		`SELECT status FROM endpoint_scan_runs WHERE run_id = $1`, runID).Scan(&status); err != nil {
+		return false
+	}
+	return status == "cancelled"
 }
 
 type endpointScanRun struct {
