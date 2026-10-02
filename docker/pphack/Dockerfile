@@ -11,7 +11,8 @@
 # Verified: the built image's binary reports mod github.com/edoardottt/pphack v0.1.5.
 # Do NOT roll back to v0.1.4 without re-checking those three field names.
 FROM golang:1.26-bookworm AS build
-RUN GOBIN=/out go install github.com/edoardottt/pphack/cmd/pphack@v0.1.5
+RUN --mount=type=cache,target=/go/pkg/mod \
+    for i in 1 2 3 4 5; do GODEBUG=http2client=0 GOBIN=/out go install github.com/edoardottt/pphack/cmd/pphack@v0.1.5 && break; [ "$i" = 5 ] && exit 1; echo "retry $i: transient Go module proxy error"; sleep $((i * 5)); done
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \

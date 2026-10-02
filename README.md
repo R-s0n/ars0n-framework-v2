@@ -151,7 +151,7 @@ This framework consists of 50+ Docker containers along w/ a Docker Compose Manif
 1. Download the Zip File for the <a href="https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.0/ars0n-framework-v2-beta-0.1.0.zip">latest release</a>
 2. Unzip the files
 3. Navigate to the directory with the `docker-compose.yml` file
-4. Run `docker-compose up --build`
+4. Build and start it with `.\build.ps1` (Windows) or `./build.sh` (Mac/Linux) - a sequential build that avoids the parallel-build races on Docker's containerd image store (see the OS-specific steps below)
 5. Access the framework at `http://localhost` (or `http://<server-ip>` from other machines)
 
 *HINT: If you get a docker error, the problem is probably w/ docker, not my framework*
@@ -173,10 +173,11 @@ Expand-Archive -Path "ars0n-framework-v2-beta-0.1.0.zip" -DestinationPath "."
 cd ars0n-framework-v2
 ```
 
-**Step 4:** Start the framework
+**Step 4:** Build and start the framework
 ```powershell
-docker-compose up --build
+powershell -ExecutionPolicy Bypass -File build.ps1
 ```
+> This builds the tool images **one at a time**, then starts the stack. A plain `docker compose up -d --build` builds all ~17 source-compiled tools in parallel, which on Docker Desktop's containerd image store (the default since v29) can fail with `image "...": already exists` or a build timeout under the load. The script sidesteps both; cached images make re-runs fast. On a powerful machine you can still run `docker compose up -d --build` directly.
 
 **Step 5:** Access the framework at `http://localhost`
 
@@ -197,10 +198,11 @@ unzip ars0n-framework-v2-beta-0.1.0.zip
 cd ars0n-framework-v2
 ```
 
-**Step 4:** Start the framework
+**Step 4:** Build and start the framework
 ```bash
-docker-compose up --build
+chmod +x build.sh && ./build.sh
 ```
+> This builds the tool images **one at a time**, then starts the stack, avoiding the parallel-build failures (`image "...": already exists` or a build timeout) that Docker's containerd image store hits when ~17 source tools compile at once. Cached images make re-runs fast. On a powerful machine you can still run `docker compose up -d --build` directly.
 
 **Step 5:** Access the framework at `http://localhost`
 
@@ -221,10 +223,11 @@ unzip ars0n-framework-v2-beta-0.1.0.zip
 cd ars0n-framework-v2
 ```
 
-**Step 4:** Start the framework
+**Step 4:** Build and start the framework
 ```bash
-docker-compose up --build
+chmod +x build.sh && ./build.sh
 ```
+> This builds the tool images **one at a time**, then starts the stack, avoiding the parallel-build failures (`image "...": already exists` or a build timeout) that Docker's containerd image store hits when ~17 source tools compile at once. Cached images make re-runs fast. On a powerful machine you can still run `docker compose up -d --build` directly.
 
 **Step 5:** Access the framework at `http://localhost`
 
@@ -473,7 +476,7 @@ The framework ships with a **Model Context Protocol (MCP) server** that exposes 
 
 ### What it exposes
 
-The server registers **150 tools** across twelve categories:
+The server registers **154 tools** across twelve categories:
 
 - **Scope and targets** (9): list, add, activate and delete scope targets, update ROI scores, manage scope rules, read scope overview and per-target statistics
 - **Scan execution and workflows** (11): run any individual tool (amass, subfinder, httpx, nuclei, katana, ffuf, arjun, etc.), check or cancel a running scan, read raw tool output, run the full Company / Wildcard / URL workflows or individual phases, drive auto-scan sessions
@@ -485,7 +488,7 @@ The server registers **150 tools** across twelve categories:
 - **Authentication and authorization** (23): document and replay register/login/MFA/reset flows step by step, manage auth recordings and session tokens, check token validity, and manage identity patterns plus role, policy and discretionary access models
 - **Target behaviour probe** (9): configure, dry run and execute the WAF and rate-limit probe, list its targets and read run status and results
 - **Threat model and notes** (3): create, read, update and delete STRIDE threat model entries and their notes
-- **Methodology and guidance** (6): the built-in methodology, "what should I do next" guidance, the attack vector model and per-tool guidance, the vendored bug-bounty knowledge base (browse/read/search) and the per-class attack playbook
+- **Methodology and guidance** (10): the built-in methodology, "what should I do next" guidance, the attack vector model and per-tool guidance, the vendored bug-bounty knowledge base (browse/read/search), the per-class attack playbook and the XSS/SQLi workflow runbooks
 - **Settings and configuration** (20): read all settings and modify rate limits, custom HTTP (user-agent/header), Burp Suite config, recon API keys and AI provider API keys (`get_settings`, `update_settings`, `set_api_key`/`delete_api_key`, `set_ai_api_key`/`delete_ai_api_key`), plus tool configs, wordlists, database bundles, HackerOne scope import, screenshots and scan exports. The MCP Server section itself is read-only via MCP.
 
 The count is not hardcoded: `/health` reports the number of tools actually registered at startup, so it cannot drift from the code.
@@ -495,7 +498,7 @@ The count is not hardcoded: `/health` reports the number of tools actually regis
 The MCP server **starts automatically** with `docker-compose up` and listens on **port 3001** using the SSE transport:
 
 - SSE endpoint: `http://localhost:3001/sse`
-- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.0.0","tools":150}`
+- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.0.0","tools":154}`
 
 Verify it's up:
 ```bash

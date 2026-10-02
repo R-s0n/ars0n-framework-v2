@@ -4,9 +4,10 @@
 # cloned and kept, and the working directory is set to it.
 # go.mod requires go >= 1.24.0; 1.23 fails with "GOTOOLCHAIN=local".
 FROM golang:1.24-bookworm AS build
-RUN git clone https://github.com/devploit/nomore403.git /src \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    git clone https://github.com/devploit/nomore403.git /src \
     && cd /src \
-    && go build -o /out/nomore403 .
+    && for i in 1 2 3 4 5; do GODEBUG=http2client=0 go build -o /out/nomore403 . && break; [ "$i" = 5 ] && exit 1; echo "go build retry $i: transient Go module proxy error"; sleep $((i * 5)); done
 
 FROM debian:bookworm-slim
 # curl is a RUNTIME DEPENDENCY, not a convenience. The http-versions and http-parser techniques shell

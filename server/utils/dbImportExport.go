@@ -562,14 +562,30 @@ func HandleDatabaseImport(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[INFO] Processing import file: %s", header.Filename)
 
-	compressedData, err := io.ReadAll(file)
+	// STREAM the import rather than buffering the whole file. ParseMultipartForm spills an upload past
+	// its in-memory threshold to a temp file, so `file` is seekable: we read the version from the
+	// front, rewind, then stream the rest. This keeps peak memory to one batch (tens of MB) instead of
+	// the ~5x-file-size the old buffer-everything path needed (read compressed, decompress whole,
+	// unmarshal whole), which is what lets a multi-gigabyte restore run without exhausting api RAM.
+	peekGz, err := gzip.NewReader(file)
 	if err != nil {
-		log.Printf("[ERROR] Failed to read file: %v", err)
+		log.Printf("[ERROR] Failed to create gzip reader: %v", err)
+		http.Error(w, "Invalid file format", http.StatusBadRequest)
+		return
+	}
+	version, verr := peekBundleVersion(peekGz)
+	peekGz.Close()
+	if verr != nil {
+		log.Printf("[ERROR] Failed to read bundle header: %v", verr)
+		http.Error(w, "Invalid or corrupt .rs0n file", http.StatusBadRequest)
+		return
+	}
+	if _, serr := file.Seek(0, io.SeekStart); serr != nil {
+		log.Printf("[ERROR] Failed to rewind upload: %v", serr)
 		http.Error(w, "Failed to read file", http.StatusInternalServerError)
 		return
 	}
-
-	gzipReader, err := gzip.NewReader(bytes.NewReader(compressedData))
+	gzipReader, err := gzip.NewReader(file)
 	if err != nil {
 		log.Printf("[ERROR] Failed to create gzip reader: %v", err)
 		http.Error(w, "Invalid file format", http.StatusBadRequest)
@@ -577,14 +593,20 @@ func HandleDatabaseImport(w http.ResponseWriter, r *http.Request) {
 	}
 	defer gzipReader.Close()
 
-	jsonData, err := io.ReadAll(gzipReader)
-	if err != nil {
-		log.Printf("[ERROR] Failed to decompress data: %v", err)
-		http.Error(w, "Failed to decompress data", http.StatusInternalServerError)
-		return
+	var scopeTargets, tables, records, failed, skipped int
+	if strings.HasPrefix(version, "2") {
+		scopeTargets, tables, records, failed, skipped, err = importBundleStreamV2(r.Context(), gzipReader)
+	} else {
+		// Legacy v1 bundle: buffer and use the original path. v1 exports predate the bytea-heavy
+		// tables and are small, so buffering them is fine.
+		jsonData, rerr := io.ReadAll(gzipReader)
+		if rerr != nil {
+			log.Printf("[ERROR] Failed to decompress data: %v", rerr)
+			http.Error(w, "Failed to decompress data", http.StatusInternalServerError)
+			return
+		}
+		scopeTargets, tables, records, failed, skipped, err = processBundleImportJSON(r.Context(), jsonData)
 	}
-
-	scopeTargets, tables, records, failed, err := processBundleImportJSON(r.Context(), jsonData)
 	if err != nil {
 		log.Printf("[ERROR] Failed to import database data: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to import data: %v", err), http.StatusInternalServerError)
@@ -592,8 +614,8 @@ func HandleDatabaseImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	message := "Database import completed successfully"
-	if failed > 0 {
-		message = fmt.Sprintf("Database import completed, but %d record(s) could not be loaded; see server logs", failed)
+	if failed > 0 || skipped > 0 {
+		message = fmt.Sprintf("Database import completed with %d record(s) not loaded: %d failed, %d skipped (tables not in this schema); see server logs", failed+skipped, failed, skipped)
 	}
 	response := map[string]interface{}{
 		"message":                message,
@@ -601,6 +623,7 @@ func HandleDatabaseImport(w http.ResponseWriter, r *http.Request) {
 		"imported_tables":        tables,
 		"total_records":          records,
 		"failed_records":         failed,
+		"skipped_records":        skipped,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -659,14 +682,14 @@ func HandleDatabaseImportURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check Content-Length if available (500MB limit)
-	if resp.ContentLength > 500*1024*1024 {
-		http.Error(w, "File is too large. Maximum size is 500MB", http.StatusBadRequest)
+	// Check Content-Length if available (2GB limit)
+	if resp.ContentLength > 2*1024*1024*1024 {
+		http.Error(w, "File is too large. Maximum size is 2GB", http.StatusBadRequest)
 		return
 	}
 
 	// Read file with size limit
-	limitedReader := io.LimitReader(resp.Body, 500*1024*1024+1) // 500MB + 1 byte
+	limitedReader := io.LimitReader(resp.Body, 2*1024*1024*1024+1) // 2GB + 1 byte
 	compressedData, err := io.ReadAll(limitedReader)
 	if err != nil {
 		log.Printf("[ERROR] Failed to read downloaded file: %v", err)
@@ -675,8 +698,8 @@ func HandleDatabaseImportURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if we hit the size limit
-	if len(compressedData) > 500*1024*1024 {
-		http.Error(w, "File is too large. Maximum size is 500MB", http.StatusBadRequest)
+	if len(compressedData) > 2*1024*1024*1024 {
+		http.Error(w, "File is too large. Maximum size is 2GB", http.StatusBadRequest)
 		return
 	}
 
@@ -704,7 +727,7 @@ func HandleDatabaseImportURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scopeTargets, tables, records, failed, err := processBundleImportJSON(r.Context(), jsonData)
+	scopeTargets, tables, records, failed, skipped, err := processBundleImportJSON(r.Context(), jsonData)
 	if err != nil {
 		log.Printf("[ERROR] Failed to import database data: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to import data: %v", err), http.StatusInternalServerError)
@@ -712,8 +735,8 @@ func HandleDatabaseImportURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	message := "Database import from URL completed successfully"
-	if failed > 0 {
-		message = fmt.Sprintf("Database import from URL completed, but %d record(s) could not be loaded; see server logs", failed)
+	if failed > 0 || skipped > 0 {
+		message = fmt.Sprintf("Database import from URL completed with %d record(s) not loaded: %d failed, %d skipped (tables not in this schema); see server logs", failed+skipped, failed, skipped)
 	}
 	response := map[string]interface{}{
 		"message":                message,
@@ -721,6 +744,7 @@ func HandleDatabaseImportURL(w http.ResponseWriter, r *http.Request) {
 		"imported_tables":        tables,
 		"total_records":          records,
 		"failed_records":         failed,
+		"skipped_records":        skipped,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -760,7 +784,7 @@ func HandleDatabaseImportBase64(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scopeTargets, tables, records, failed, err := processBundleImportJSON(r.Context(), jsonData)
+	scopeTargets, tables, records, failed, skipped, err := processBundleImportJSON(r.Context(), jsonData)
 	if err != nil {
 		log.Printf("[ERROR] Failed to import database data: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to import data: %v", err), http.StatusInternalServerError)
@@ -768,8 +792,8 @@ func HandleDatabaseImportBase64(w http.ResponseWriter, r *http.Request) {
 	}
 
 	message := "Database import completed successfully"
-	if failed > 0 {
-		message = fmt.Sprintf("Database import completed, but %d record(s) could not be loaded; see server logs", failed)
+	if failed > 0 || skipped > 0 {
+		message = fmt.Sprintf("Database import completed with %d record(s) not loaded: %d failed, %d skipped (tables not in this schema); see server logs", failed+skipped, failed, skipped)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -778,6 +802,7 @@ func HandleDatabaseImportBase64(w http.ResponseWriter, r *http.Request) {
 		"imported_tables":        tables,
 		"total_records":          records,
 		"failed_records":         failed,
+		"skipped_records":        skipped,
 	})
 	log.Printf("[INFO] Base64 database import finished. Imported %d scope targets, %d record(s) failed", scopeTargets, failed)
 }

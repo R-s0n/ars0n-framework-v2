@@ -1,7 +1,8 @@
 FROM golang:1.23-bookworm AS build
 RUN git clone --depth 1 https://github.com/Hackmanit/TInjA.git /src
 WORKDIR /src
-RUN go build -o /out/tinja .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    for i in 1 2 3 4 5; do GODEBUG=http2client=0 go build -o /out/tinja . && break; [ "$i" = 5 ] && exit 1; echo "go build retry $i: transient Go module proxy error"; sleep $((i * 5)); done
 
 FROM debian:bookworm-slim
 # TInjA's --csti mode drives a headless Chromium through rod, so the browser libraries have to be

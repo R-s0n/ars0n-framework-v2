@@ -108,3 +108,25 @@ func TestImportBundleBatchIsolatesFailuresAndCountsThem(t *testing.T) {
 		t.Error("a savepoint failure must surface as a fatal error, not a silent per-row failure")
 	}
 }
+
+// peekBundleVersion must read export_metadata.version from the front of a bundle stream regardless
+// of key order, and return "" (not an error) when there is no metadata, so the import handler can
+// pick the streaming v2 path vs the buffered v1 path without reading the whole file.
+func TestPeekBundleVersion(t *testing.T) {
+	cases := []struct{ body, want string }{
+		{`{"export_metadata":{"version":"2.0","total_records":5},"scope_targets":[],"table_data":{}}`, "2.0"},
+		{`{"export_metadata":{"version":"1.0"},"table_data":{}}`, "1.0"},
+		{`{"scope_targets":[],"export_metadata":{"version":"2.1"}}`, "2.1"}, // metadata not first
+		{`{"table_data":{}}`, ""},                                          // no metadata at all
+	}
+	for _, c := range cases {
+		got, err := peekBundleVersion(strings.NewReader(c.body))
+		if err != nil {
+			t.Errorf("peekBundleVersion(%q): unexpected error %v", c.body, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("peekBundleVersion(%q) = %q, want %q", c.body, got, c.want)
+		}
+	}
+}

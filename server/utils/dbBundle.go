@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"regexp"
 	"strings"
@@ -454,54 +455,56 @@ func collectSha256(v interface{}, out map[string]bool) {
 
 // importBundle loads a v2 snapshot. FK triggers are off for the load (the snapshot is consistent), so
 // table order does not matter and self-referential / cyclic tables load without a topological sort.
-func importBundle(ctx context.Context, bundle *bundleFile) (imported int, tables int, failed int, err error) {
+func importBundle(ctx context.Context, bundle *bundleFile) (imported int, tables int, failed int, skipped int, err error) {
 	schema, err := collectBundleSchema(ctx)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 
 	conn, err := dbPool.Acquire(ctx)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	defer conn.Release()
 
 	tx, err := conn.Begin(ctx)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	defer tx.Rollback(ctx)
 
 	// SET LOCAL: scoped to this transaction, so the pooled connection can never leak replica mode to a
 	// later query even if we forget to reset it.
 	if _, err := tx.Exec(ctx, "SET LOCAL session_replication_role = 'replica'"); err != nil {
-		return 0, 0, 0, fmt.Errorf("disable fk triggers: %w", err)
+		return 0, 0, 0, 0, fmt.Errorf("disable fk triggers: %w", err)
 	}
 
 	// scope_targets first, and a failure here is FATAL. It is the parent every per-target table
 	// hangs off, so committing child rows against a scope_targets that only partly loaded would
 	// leave them orphaned; a root that did not fully land aborts the whole restore rather than
 	// commit an inconsistent graph.
-	if n, fail, terr := importBundleTable(ctx, tx, schema, "scope_targets", bundle.ScopeTargets); terr != nil {
-		return 0, 0, 0, fmt.Errorf("import scope_targets: %w", terr)
+	if n, fail, skip, terr := importBundleTable(ctx, tx, schema, "scope_targets", bundle.ScopeTargets); terr != nil {
+		return 0, 0, 0, 0, fmt.Errorf("import scope_targets: %w", terr)
 	} else if fail > 0 {
-		return 0, 0, 0, fmt.Errorf("import scope_targets: %d row(s) could not be loaded, so the restore was aborted to avoid orphaned child rows", fail)
+		return 0, 0, 0, 0, fmt.Errorf("import scope_targets: %d row(s) could not be loaded, so the restore was aborted to avoid orphaned child rows", fail)
 	} else {
 		imported += n
+		skipped += skip
 	}
 
 	for table, raws := range bundle.TableData {
 		if table == "scope_targets" {
 			continue
 		}
-		n, fail, terr := importBundleTable(ctx, tx, schema, table, raws)
+		n, fail, skip, terr := importBundleTable(ctx, tx, schema, table, raws)
 		imported += n
 		failed += fail
+		skipped += skip
 		if terr != nil {
 			// A transaction-level failure means the transaction can no longer commit, so continuing
 			// to other tables would only pile up failures against a dead tx. Surface it instead of
 			// committing a half-restore as success.
-			return 0, 0, 0, fmt.Errorf("import %s: %w", table, terr)
+			return 0, 0, 0, 0, fmt.Errorf("import %s: %w", table, terr)
 		}
 		if n > 0 {
 			tables++
@@ -509,24 +512,30 @@ func importBundle(ctx context.Context, bundle *bundleFile) (imported int, tables
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return 0, 0, 0, fmt.Errorf("commit: %w", err)
+		return 0, 0, 0, 0, fmt.Errorf("commit: %w", err)
 	}
-	return imported, tables, failed, nil
+	return imported, tables, failed, skipped, nil
 }
 
-// importBundleTable upserts every row of one table in a single statement, keyed on the table's real
-// primary key. Wrapped in a savepoint so a table that fails leaves the rest of the import intact.
-func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, table string, raws []json.RawMessage) (imported int, failed int, err error) {
-	if len(raws) == 0 {
-		return 0, 0, nil
-	}
+// Batch bounds, shared by the buffered importBundleTable and the streaming importer. A batch is cut
+// at whichever limit comes first. 32 MB of serialised JSON stays well under Postgres's 256 MB jsonb
+// field limit even after to_jsonb doubles a bytea via hex.
+const (
+	bundleMaxBatchRows  = 1000
+	bundleMaxBatchBytes = 32 << 20
+)
+
+// buildBundleInsertSQL builds one table's upsert statement, keyed on its real primary key. It is
+// extracted so the buffered path (importBundleTable) and the streaming path (streamImportTable)
+// share exactly one statement shape and can never drift. known is false for a table that is not in
+// the live schema, which the caller skips rather than imports.
+func buildBundleInsertSQL(schema *bundleSchema, table string) (sqlText string, known bool, err error) {
 	if !schema.allTables[table] {
-		log.Printf("[BUNDLE] import: unknown table %s, skipping %d rows", table, len(raws))
-		return 0, 0, nil
+		return "", false, nil
 	}
 	qt, err := quoteIdent(table)
 	if err != nil {
-		return 0, 0, err
+		return "", false, err
 	}
 	pkCols := schema.pk[table]
 
@@ -540,7 +549,7 @@ func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, tab
 		for _, c := range pkCols {
 			qc, qerr := quoteIdent(c)
 			if qerr != nil {
-				return 0, 0, qerr
+				return "", false, qerr
 			}
 			quotedPK = append(quotedPK, qc)
 			pkSet[c] = true
@@ -552,7 +561,7 @@ func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, tab
 			}
 			qc, qerr := quoteIdent(c)
 			if qerr != nil {
-				return 0, 0, qerr
+				return "", false, qerr
 			}
 			sets = append(sets, fmt.Sprintf("%s = EXCLUDED.%s", qc, qc))
 		}
@@ -565,9 +574,28 @@ func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, tab
 		}
 	}
 
-	sql := fmt.Sprintf(
+	return fmt.Sprintf(
 		"INSERT INTO %s SELECT (jsonb_populate_record(NULL::%s, elem)).* "+
-			"FROM jsonb_array_elements($1::jsonb) elem %s", qt, qt, conflict)
+			"FROM jsonb_array_elements($1::jsonb) elem %s", qt, qt, conflict), true, nil
+}
+
+// importBundleTable upserts every row of one table in a single statement, keyed on the table's real
+// primary key. Wrapped in a savepoint so a table that fails leaves the rest of the import intact.
+func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, table string, raws []json.RawMessage) (imported int, failed int, skipped int, err error) {
+	if len(raws) == 0 {
+		return 0, 0, 0, nil
+	}
+	sql, known, err := buildBundleInsertSQL(schema, table)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if !known {
+		// The target does not have this table (an older schema, or a table a newer version removed).
+		// Its rows are COUNTED as skipped, not silently dropped: a caller that reports "0 failed" while
+		// quietly discarding rows is the lie this layer exists to stop.
+		log.Printf("[BUNDLE] import: unknown table %s, skipping %d rows", table, len(raws))
+		return 0, 0, len(raws), nil
+	}
 
 	// BATCHED BY BOTH ROW COUNT AND SERIALISED BYTE SIZE. The whole table as one jsonb parameter
 	// blows past Postgres's 256 MB jsonb field limit on a big table, and a fixed 1000-row batch does
@@ -578,15 +606,13 @@ func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, tab
 	// of the batch still loads. Rows that cannot be loaded even on their own are COUNTED into failed
 	// and surfaced, never silently dropped: that is the difference between a restore that lost data
 	// and one that reported success while losing it.
-	const maxBatchRows = 1000
-	const maxBatchBytes = 32 << 20 // 32 MB of serialised JSON, well under the 256 MB jsonb field limit
 	total := 0
 	for i := 0; i < len(raws); {
 		end := i
 		batchBytes := 0
-		for end < len(raws) && end-i < maxBatchRows {
+		for end < len(raws) && end-i < bundleMaxBatchRows {
 			rb := len(raws[end])
-			if end > i && batchBytes+rb > maxBatchBytes {
+			if end > i && batchBytes+rb > bundleMaxBatchBytes {
 				break
 			}
 			batchBytes += rb
@@ -598,7 +624,7 @@ func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, tab
 		if ferr != nil {
 			// A transaction-level failure (a savepoint the connection would not create or roll back)
 			// means the transaction can no longer commit, so there is nothing to gain by grinding on.
-			return total, failed, ferr
+			return total, failed, 0, ferr
 		}
 		i = end
 	}
@@ -607,7 +633,7 @@ func importBundleTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, tab
 	} else {
 		log.Printf("[BUNDLE] imported %d rows into %s", total, table)
 	}
-	return total, failed, nil
+	return total, failed, 0, nil
 }
 
 // importBundleBatch loads one batch as a single statement, and on any non-fatal failure retries the
@@ -664,10 +690,196 @@ func tryBundleExec(ctx context.Context, tx pgx.Tx, sql string, batch []json.RawM
 	return int(tag.RowsAffected()), true, nil
 }
 
+// importBundleStreamV2 restores a v2 bundle by STREAMING it: it walks the JSON with a decoder and
+// imports each table's rows in byte-bounded batches as they are read, so peak memory is one batch
+// (tens of MB) regardless of file size. The buffered importBundle holds the whole parsed bundle in
+// RAM at once (~5x the file size), which is what capped import size; this does not. jsonStream is
+// the DECOMPRESSED bundle (the caller owns the gzip reader). Its return shape matches
+// processBundleImportJSON (scopeTargets, tables, records, failed) so a handler can use either. The
+// transaction handling, FK-trigger disabling, the scope_targets-is-fatal rule, batching and
+// failed-row accounting reuse the same helpers as importBundle so behaviour cannot drift.
+func importBundleStreamV2(ctx context.Context, jsonStream io.Reader) (scopeTargets int, tables int, records int, failed int, skipped int, err error) {
+	schema, err := collectBundleSchema(ctx)
+	if err != nil {
+		return 0, 0, 0, 0, 0, err
+	}
+	conn, err := dbPool.Acquire(ctx)
+	if err != nil {
+		return 0, 0, 0, 0, 0, err
+	}
+	defer conn.Release()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return 0, 0, 0, 0, 0, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SET LOCAL session_replication_role = 'replica'"); err != nil {
+		return 0, 0, 0, 0, 0, fmt.Errorf("disable fk triggers: %w", err)
+	}
+
+	dec := json.NewDecoder(jsonStream)
+	if t, terr := dec.Token(); terr != nil || t != json.Delim('{') {
+		return 0, 0, 0, 0, 0, fmt.Errorf("bundle is not a JSON object")
+	}
+	for dec.More() {
+		keyTok, terr := dec.Token()
+		if terr != nil {
+			return 0, 0, 0, 0, 0, terr
+		}
+		key, _ := keyTok.(string)
+		switch key {
+		case "scope_targets":
+			var rows []json.RawMessage
+			if derr := dec.Decode(&rows); derr != nil {
+				return 0, 0, 0, 0, 0, fmt.Errorf("decode scope_targets: %w", derr)
+			}
+			n, fail, skip, ferr := importBundleTable(ctx, tx, schema, "scope_targets", rows)
+			if ferr != nil {
+				return 0, 0, 0, 0, 0, fmt.Errorf("import scope_targets: %w", ferr)
+			}
+			if fail > 0 {
+				return 0, 0, 0, 0, 0, fmt.Errorf("import scope_targets: %d row(s) could not be loaded, so the restore was aborted to avoid orphaned child rows", fail)
+			}
+			scopeTargets = n
+			records += n
+			skipped += skip
+		case "table_data":
+			if t, terr := dec.Token(); terr != nil || t != json.Delim('{') {
+				return 0, 0, 0, 0, 0, fmt.Errorf("table_data is not a JSON object")
+			}
+			for dec.More() {
+				tnTok, terr := dec.Token()
+				if terr != nil {
+					return 0, 0, 0, 0, 0, terr
+				}
+				table, _ := tnTok.(string)
+				n, fail, skip, ferr := streamImportTable(ctx, tx, schema, table, dec)
+				records += n
+				failed += fail
+				skipped += skip
+				if ferr != nil {
+					return 0, 0, 0, 0, 0, fmt.Errorf("import %s: %w", table, ferr)
+				}
+				if n > 0 {
+					tables++
+				}
+			}
+			if _, terr := dec.Token(); terr != nil { // closing } of table_data
+				return 0, 0, 0, 0, 0, terr
+			}
+		default:
+			// export_metadata, or any unknown top-level key: consume and discard.
+			var skip json.RawMessage
+			if derr := dec.Decode(&skip); derr != nil {
+				return 0, 0, 0, 0, 0, derr
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, 0, 0, 0, fmt.Errorf("commit: %w", err)
+	}
+	return scopeTargets, tables, records, failed, skipped, nil
+}
+
+// streamImportTable reads one table's JSON array element by element from the decoder and imports it
+// in byte-bounded batches, so a table of any size costs one batch of memory. The decoder is
+// positioned just after the table's key on entry and just after the array's closing ] on return.
+// It reuses importBundleBatch, so the oversized-row isolation and failed-row accounting match the
+// buffered path exactly.
+func streamImportTable(ctx context.Context, tx pgx.Tx, schema *bundleSchema, table string, dec *json.Decoder) (imported int, failed int, skipped int, fatal error) {
+	if t, terr := dec.Token(); terr != nil || t != json.Delim('[') {
+		return 0, 0, 0, fmt.Errorf("table %s is not a JSON array", table)
+	}
+	sqlText, known, berr := buildBundleInsertSQL(schema, table)
+	if berr != nil {
+		return 0, 0, 0, berr
+	}
+
+	batch := make([]json.RawMessage, 0, 256)
+	batchBytes := 0
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		imp, fail, ferr := importBundleBatch(ctx, tx, sqlText, table, batch)
+		imported += imp
+		failed += fail
+		batch = batch[:0]
+		batchBytes = 0
+		return ferr
+	}
+
+	for dec.More() {
+		var row json.RawMessage
+		if derr := dec.Decode(&row); derr != nil {
+			return imported, failed, skipped, derr
+		}
+		if !known {
+			// The target does not have this table: drain the array without importing and COUNT the
+			// rows as skipped, matching importBundleTable, so the restore never reports them as loaded.
+			skipped++
+			continue
+		}
+		batch = append(batch, row)
+		batchBytes += len(row)
+		if len(batch) >= bundleMaxBatchRows || batchBytes >= bundleMaxBatchBytes {
+			if ferr := flush(); ferr != nil {
+				return imported, failed, skipped, ferr
+			}
+		}
+	}
+	if ferr := flush(); ferr != nil {
+		return imported, failed, skipped, ferr
+	}
+	if _, terr := dec.Token(); terr != nil { // closing ] of the array
+		return imported, failed, skipped, terr
+	}
+
+	if !known {
+		log.Printf("[BUNDLE] import: unknown table %s, skipped %d rows", table, skipped)
+		return 0, 0, skipped, nil
+	}
+	if failed > 0 {
+		log.Printf("[BUNDLE] imported %d rows into %s (%d row(s) could not be loaded)", imported, table, failed)
+	} else {
+		log.Printf("[BUNDLE] imported %d rows into %s", imported, table)
+	}
+	return imported, failed, 0, nil
+}
+
+// peekBundleVersion reads only export_metadata.version from the front of a bundle stream, so a
+// handler can choose the streaming v2 path or the buffered v1 path without reading the whole file.
+func peekBundleVersion(r io.Reader) (string, error) {
+	dec := json.NewDecoder(r)
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return "", fmt.Errorf("bundle is not a JSON object")
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return "", err
+		}
+		key, _ := keyTok.(string)
+		if key == "export_metadata" {
+			var md ExportMetadata
+			if err := dec.Decode(&md); err != nil {
+				return "", err
+			}
+			return md.Version, nil
+		}
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return "", err
+		}
+	}
+	return "", nil
+}
+
 // processBundleImportJSON is the single entry point both import handlers (file upload and URL) call. It
 // picks the engine by format version: v2 goes through the generic importBundle; anything older falls
 // back to the legacy importDatabaseData so bundles exported before this overhaul still import.
-func processBundleImportJSON(ctx context.Context, jsonData []byte) (scopeTargets, tables, records, failed int, err error) {
+func processBundleImportJSON(ctx context.Context, jsonData []byte) (scopeTargets, tables, records, failed, skipped int, err error) {
 	var probe struct {
 		ExportMetadata ExportMetadata `json:"export_metadata"`
 	}
@@ -676,24 +888,24 @@ func processBundleImportJSON(ctx context.Context, jsonData []byte) (scopeTargets
 	if strings.HasPrefix(probe.ExportMetadata.Version, "2") {
 		var bundle bundleFile
 		if err := json.Unmarshal(jsonData, &bundle); err != nil {
-			return 0, 0, 0, 0, fmt.Errorf("invalid v2 bundle: %w", err)
+			return 0, 0, 0, 0, 0, fmt.Errorf("invalid v2 bundle: %w", err)
 		}
-		imp, tbl, fail, err := importBundle(ctx, &bundle)
+		imp, tbl, fail, skip, err := importBundle(ctx, &bundle)
 		if err != nil {
-			return 0, 0, 0, 0, err
+			return 0, 0, 0, 0, 0, err
 		}
-		return len(bundle.ScopeTargets), tbl, imp, fail, nil
+		return len(bundle.ScopeTargets), tbl, imp, fail, skip, nil
 	}
 
 	// Legacy v1 bundle (uuids stored as byte arrays, hand-maintained table set).
 	var ed ExportData
 	if err := json.Unmarshal(jsonData, &ed); err != nil {
-		return 0, 0, 0, 0, fmt.Errorf("invalid v1 bundle: %w", err)
+		return 0, 0, 0, 0, 0, fmt.Errorf("invalid v1 bundle: %w", err)
 	}
 	if err := importDatabaseData(&ed); err != nil {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, 0, 0, err
 	}
-	return len(ed.ScopeTargets), len(ed.TableData), ed.ExportMetadata.TotalRecords, 0, nil
+	return len(ed.ScopeTargets), len(ed.TableData), ed.ExportMetadata.TotalRecords, 0, 0, nil
 }
 
 // ---------------------------------------------------------------------------

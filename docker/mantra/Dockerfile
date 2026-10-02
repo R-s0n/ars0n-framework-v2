@@ -10,7 +10,8 @@ FROM golang:1.24-bookworm AS build
 # this is the exact commit the built image already contains, verified from the binary's own build
 # info (mod github.com/brosck/mantra v0.0.0-20260312130105-6026816210df). Do not "tidy" this into
 # a tag such as v3.1: Go declines to select it, most likely because it predates the module path move.
-RUN GOBIN=/out go install github.com/brosck/mantra@v0.0.0-20260312130105-6026816210df
+RUN --mount=type=cache,target=/go/pkg/mod \
+    for i in 1 2 3 4 5; do GODEBUG=http2client=0 GOBIN=/out go install github.com/brosck/mantra@v0.0.0-20260312130105-6026816210df && break; [ "$i" = 5 ] && exit 1; echo "retry $i: transient Go module proxy error"; sleep $((i * 5)); done
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \

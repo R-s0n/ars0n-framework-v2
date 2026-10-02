@@ -28,8 +28,8 @@ function ImportModal({ show, handleClose, onSuccess, showBackButton, onBackClick
         return;
       }
       
-      if (file.size > 500 * 1024 * 1024) { // 500MB limit
-        setError('File is too large. Maximum size is 500MB.');
+      if (file.size > 2 * 1024 * 1024 * 1024) { // 2GB limit
+        setError('File is too large. Maximum size is 2GB.');
         setSelectedFile(null);
         return;
       }
@@ -326,7 +326,7 @@ function ImportModal({ show, handleClose, onSuccess, showBackButton, onBackClick
             {importMethod === 'file' ? (
               <ul className="text-white-50 small mb-0">
                 <li>File must have .rs0n extension</li>
-                <li>Maximum file size: 500MB</li>
+                <li>Maximum file size: 2GB</li>
                 <li>Must be a valid exported database file from this framework</li>
                 <li>Import will merge data and update existing records</li>
               </ul>
@@ -334,7 +334,7 @@ function ImportModal({ show, handleClose, onSuccess, showBackButton, onBackClick
               <ul className="text-white-50 small mb-0">
                 <li>URL must point to a valid .rs0n file</li>
                 <li>URL must be publicly accessible</li>
-                <li>Maximum file size: 500MB</li>
+                <li>Maximum file size: 2GB</li>
                 <li>Must be a valid exported database file from this framework</li>
                 <li>Import will merge data and update existing records</li>
               </ul>
