@@ -3612,6 +3612,15 @@ func createTables() {
 	// above so the ALTERs land on tables that already exist.
 	queries = append(queries, utils.AuthSessionSchema...)
 
+	// The session-token PROFILE columns (credential_kind, kind_evidence, ttl_seconds, the provenance
+	// and refresh columns), defined in utils/sessionTokenProfile.go. Applied at boot rather than
+	// lazily from a profile handler because a boot-time reader needs them immediately: the
+	// session-autorefresh loop SELECTs credential_kind every minute from startup, and without this it
+	// logged "column t.credential_kind does not exist" on every fresh database until the first token
+	// was profiled. The utils test DB already provisions this slice, so applying it here also ends a
+	// production/test schema drift.
+	queries = append(queries, utils.SessionTokenProfileSchema...)
+
 	for _, query := range queries {
 		_, err := dbPool.Exec(context.Background(), query)
 		if err != nil {
