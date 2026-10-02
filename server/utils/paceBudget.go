@@ -508,6 +508,11 @@ func RequestIssuingScansRunning(scopeTargetID string) []string {
 		"katana_url_scans":             "Katana",
 		"gospider_url_scans":           "GoSpider",
 		"linkfinder_url_scans":         "LinkFinder",
+		// gau and waybackurls query archives off-target, but their processURLGroup pass then HEADs every
+		// discovered URL AT THE TARGET (bounded now, but still real target traffic that must not run
+		// beside a vector scan). Their omission is why an endpoint scan started beside a live gau run.
+		"gau_url_scans":                "GAU",
+		"waybackurls_scans":            "Wayback",
 		"nuclei_scans":                 "Nuclei",
 		"arjun_scans":                  "Arjun",
 		"x8_scans":                     "x8",

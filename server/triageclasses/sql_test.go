@@ -938,6 +938,57 @@ func TestASilentErrorArmDoesNotCoverABooleanArmThatCouldNotRun(t *testing.T) {
 	}
 }
 
+// A boolean arm whose probes ALL failed to deliver, or ALL came back 5xx, must not read as clean
+// on a stable baseline just because no pair separated. A pair that never arrived comparably, and a
+// pair the server answered with an error, each measure nothing, and reading their silence as a
+// pass is the fail-open this layer exists to stop. Before the per-arm usable-measurement gate this
+// fell straight through to a boolean_differential clean. The error arm here delivered 200s and
+// stays silent, so it may clean on its own row; the aggregate must still not render clean.
+func TestABooleanArmWithNoUsableMeasurementIsNotClean(t *testing.T) {
+	silent := sqlTestObs("ok")
+
+	// Case 1: every boolean probe failed transport. Delivered() is false and cmp is Unusable.
+	refused := sqlTestObs("")
+	refused.TransportErr = triage.TransportTimeout
+
+	// Case 2: every boolean probe came back 5xx, with DISTINCT bodies so the uniform-block detector
+	// does not fire first and the status<500 arm of the gate is exercised directly. A 5xx is the
+	// payload breaking the server, not a readable true/false answer.
+	err1 := sqlTestObs("upstream error 1")
+	err1.Status = 500
+	err2 := sqlTestObs("upstream error 2")
+	err2.Status = 502
+	err3 := sqlTestObs("upstream error 3")
+	err3.Status = 503
+
+	for name, boolObs := range map[string][3]triage.Observation{
+		"transport refusal": {refused, refused, refused},
+		"server 5xx":        {err1, err2, err3},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := sqlTestCtx() // baseline stable: before the fix this fell through to a boolean clean
+			ev := sqlTestEvidence(silent,
+				sqlTestProbe{id: sqlQ1, obs: silent}, sqlTestProbe{id: sqlQ2, obs: silent},
+				sqlTestProbe{id: sqlA1, obs: boolObs[0]}, sqlTestProbe{id: sqlA2, obs: boolObs[1]},
+				sqlTestProbe{id: sqlA3, obs: boolObs[2]},
+			)
+			vs := sqlDecide(ctx, ev, false)
+			cov := triage.SummariseVerdicts(vs)
+			if cov.RendersAsClean() {
+				t.Fatalf("aggregate rendered clean while no boolean probe produced a usable measurement: %s", sqlReasons(vs))
+			}
+			for _, v := range vs {
+				if v.Oracle == "boolean_differential" && v.State.CountsAsClean() {
+					t.Errorf("the boolean arm reported clean with no usable measurement behind it: %s", sqlReasons(vs))
+				}
+			}
+			if len(cov.Malformed) != 0 {
+				t.Errorf("malformed verdicts: %v", cov.Malformed)
+			}
+		})
+	}
+}
+
 // Every declared probe that was not sent appears in Untested with a reason. A class that quietly
 // plans fewer probes on one slot than another is the shape of a silent zero.
 func TestEveryProbeThisClassDidNotSendIsNamedWithAReason(t *testing.T) {

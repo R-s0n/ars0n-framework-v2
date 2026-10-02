@@ -2170,3 +2170,46 @@ func TestTheBlindArmsGapFlagDoesNotContradictItsUntestedRow(t *testing.T) {
 		}
 	}
 }
+
+// sstiDecodeDepthFrom must read the percent-literal before counting raw markers. The runner places
+// the raw marker for attribution, so an endpoint that reflects the value in two output locations
+// returns it twice with nothing decoded, and a bare count >= 2 used to read that as a decode
+// (depth 1). That skipped the decode_depth_0 rung and let a brace payload that arrived
+// percent-encoded as literal %7B read as clean, which is the fail-open this layer exists to stop.
+func TestSSTIDecodeDepthReadsThePercentLiteralBeforeCountingReflections(t *testing.T) {
+	m := triage.Marker("ssti0marker00042")
+	raw := []byte(m)
+	pct := sstiTestPctLiteral(m)
+	sep := []byte(" ... ")
+
+	// Does NOT decode, reflected in TWO locations: raw marker twice, percent literal present.
+	two := bytes.Join([][]byte{raw, pct, sep, raw, pct}, nil)
+	if got := sstiDecodeDepthFrom(two, m); got != 0 {
+		t.Errorf("two reflections with nothing decoded: decode depth = %d, want 0 (did not decode)", got)
+	}
+	// Does NOT decode, single reflection: raw marker once, percent literal present.
+	single := bytes.Join([][]byte{raw, sep, pct}, nil)
+	if got := sstiDecodeDepthFrom(single, m); got != 0 {
+		t.Errorf("single reflection with nothing decoded: decode depth = %d, want 0", got)
+	}
+	// DOES decode: the encoded copy came back as a second raw marker and the percent literal is gone.
+	decoded := bytes.Join([][]byte{raw, sep, raw}, nil)
+	if got := sstiDecodeDepthFrom(decoded, m); got != 1 {
+		t.Errorf("the encoded copy decoded: decode depth = %d, want 1 (decodes)", got)
+	}
+	// Neither form present: unknown, never a decode.
+	if got := sstiDecodeDepthFrom([]byte("nothing to see here"), m); got != -1 {
+		t.Errorf("neither form present: decode depth = %d, want -1 (unknown)", got)
+	}
+}
+
+// sstiTestPctLiteral mirrors the production percent-encoding (lowercase %XX per byte) without
+// pulling fmt into the test file.
+func sstiTestPctLiteral(m triage.Marker) []byte {
+	const hexd = "0123456789abcdef"
+	var b []byte
+	for i := 0; i < len(m); i++ {
+		b = append(b, '%', hexd[m[i]>>4], hexd[m[i]&0x0f])
+	}
+	return b
+}

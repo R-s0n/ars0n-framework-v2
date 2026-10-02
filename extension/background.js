@@ -37,6 +37,7 @@ import {
   persistQueue,
   getQueueOwner,
   setQueueOwner,
+  commitReopenState,
 } from './lib/state.js';
 
 import {
@@ -95,6 +96,17 @@ const FLUSH_DEBOUNCE_MS = 1200;
 const FLUSH_RETRY_MS = 10000;
 const HEARTBEAT_INTERVAL_MS = 20000;
 const PENDING_TTL_MS = 120000;
+// Guarded auto-resume of a session the framework abandoned (a 404/409 after a >=90s heartbeat gap).
+// A reopen fires only when a capture was recorded within this window (the operator is plainly still
+// recording, so the drop was spurious, not a deliberate stop via the results modal), and at most
+// this many times before an intervening healthy flush/heartbeat resets the budget. Kept short and
+// small on purpose: a wrong reopen must be rare and self-limiting.
+const RECENT_ACTIVITY_MS = 60000;
+const MAX_REOPEN_ATTEMPTS = 2;
+// A session counts as a live concurrent recording (so a second Start is refused rather than left to
+// collide and wedge the shared worker) only while its heartbeat is recent. A stale one left by a dead
+// worker is not, so a normal restart still proceeds. Matches the server's own staleness window.
+const ALREADY_RECORDING_STALE_MS = 90000;
 // 2 MB per body. This used to be 128 KB, which is smaller than the JSON a paginated admin or
 // export endpoint answers with, so the single response most worth keeping was the one clipped.
 // chrome.storage.session is a ~10 MB budget shared by the whole queue, and that budget is still
@@ -394,9 +406,30 @@ function scheduleFlush(delayMs) {
 
 // Returns the in-flight flush when one is already running, so callers that need the queue drained
 // (Stop, in particular) actually wait for it instead of returning early and losing the tail.
+//
+// The single-flight is self-healing. flushInFlight is the one thing that, if it ever stops settling,
+// wedges the whole pipeline: every later flushQueue - including the 30s keepalive alarm's - returns
+// the stuck promise and ships nothing, while the separate heartbeat keeps the session "active" so the
+// queue just climbs (observed live: 0 captures flushed for minutes, heartbeat 6s, triggered by the
+// bfcache port churn closing the content-script channel mid-flush). runFlush already guards each POST
+// with an AbortController, but a hang anywhere else (a write-chain step that never resolves, a fetch
+// edge the abort misses) would still strand it. This hard ceiling guarantees flushInFlight clears so
+// the next tick starts a fresh attempt: a transient cause then recovers on its own, and a persistent
+// one at least keeps retrying and surfaces its error instead of silently stalling forever.
+const FLUSH_HARD_TIMEOUT_MS = 60000;
 function flushQueue(options) {
   if (flushInFlight) return flushInFlight;
-  flushInFlight = runFlush(options || {}).finally(() => {
+  let watchdog;
+  flushInFlight = Promise.race([
+    runFlush(options || {}),
+    new Promise((resolve) => {
+      watchdog = setTimeout(() => {
+        console.warn('[MANUAL-CRAWL] flush watchdog fired; clearing a stuck single-flight so the next tick retries');
+        resolve({ _flushTimedOut: true });
+      }, FLUSH_HARD_TIMEOUT_MS);
+    }),
+  ]).finally(() => {
+    clearTimeout(watchdog);
     flushInFlight = null;
   });
   return flushInFlight;
@@ -462,6 +495,9 @@ async function runFlush(options) {
             ? `${rejected} capture(s) could not be stored by the framework`
             : null,
           lastHeartbeatAt: Date.now(),
+          // A healthy upload resets the auto-reopen budget: the streak that matters is CONSECUTIVE
+          // reopens with no good round in between.
+          reopenAttempts: 0,
         });
         continue;
       }
@@ -480,12 +516,10 @@ async function runFlush(options) {
         const kept = await loadQueue();
         console.warn(
           `[MANUAL-CRAWL] Keeping ${kept.length} unflushed capture(s); ` +
-          'they will be sent when a new recording session starts.');
-        await stopCaptureSession({
-          notifyFramework: false,
-          flushFirst: false,
-          reason: result.body.message || 'Capture session is no longer active on the framework',
-        });
+          'they will be sent on auto-resume or when a new recording session starts.');
+        // Guarded auto-resume, else manual-resume fallback. Never drops the queue. Passing the
+        // rejected sessionId lets a 409 for an already-superseded session skip a redundant reopen.
+        await handleSessionAbandoned(result.body.message || 'Capture session is no longer active on the framework', state.sessionId);
         break;
       }
 
@@ -560,28 +594,60 @@ async function postJSON(url, payload, timeoutMs) {
   // worker at its ~5-minute cap. The default is generous so a genuinely large-but-working localhost
   // batch is not aborted mid-upload; on abort the fetch rejects and the caller keeps the batch for
   // retry.
+  //
+  // The timer stays armed across the RESPONSE BODY read too. Clearing it the instant headers arrived
+  // left `await response.json()` unbounded, so a framework that returned 200 headers then stalled the
+  // body (backend busy mid-ingest, a half-open keep-alive socket after tab/window churn) hung the
+  // flush exactly as an unbounded connect would — the queue stopped draining and never recovered
+  // within the worker's lifetime. An abort during the body read rejects response.json(), and that
+  // AbortError MUST propagate to the caller's keep-and-retry path rather than be swallowed as an
+  // empty body (which would look like a successful upload and drop the batch).
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs || 20000);
-  let response;
   try {
-    response = await fetch(url, {
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
+
+    let body = {};
+    try {
+      body = await response.json();
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw error;
+      /* non-JSON error page */
+    }
+
+    return { ok: response.ok, status: response.status, body: body || {} };
   } finally {
     clearTimeout(timer);
   }
+}
 
-  let body = {};
+// A GET counterpart to postJSON's bounded body read: one AbortController armed across BOTH the
+// connect/headers wait AND response.json(). fetchWithTimeout clears its timer once headers arrive, so
+// a caller that then awaited res.json() on a header-then-body stall hung forever. Callers that read a
+// JSON body use this; callers that only check res.ok (health) or read no body (DELETE) can stay on
+// fetchWithTimeout. An abort during the body read propagates as AbortError, which every caller here
+// already treats as "framework unreachable, skip and retry next tick".
+async function getJSON(url, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs || 8000);
   try {
-    body = await response.json();
-  } catch (error) {
-    /* non-JSON error page */
+    const res = await fetch(url, { signal: controller.signal });
+    let body = {};
+    try {
+      body = await res.json();
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw error;
+      /* non-JSON error page */
+    }
+    return { ok: res.ok, status: res.status, body: body || {} };
+  } finally {
+    clearTimeout(timer);
   }
-
-  return { ok: response.ok, status: response.status, body: body || {} };
 }
 
 /* ------------------------------------------------------------------ heartbeat */
@@ -628,17 +694,15 @@ async function sendHeartbeat(force) {
       requestCount: result.body.requestCount ?? stats.requestCount,
       endpointCount: result.body.endpointCount ?? stats.endpointCount,
     }));
-    await updateState({ lastHeartbeatAt: Date.now(), lastError: null });
+    await updateState({ lastHeartbeatAt: Date.now(), lastError: null, reopenAttempts: 0 });
     void broadcastState();
     return;
   }
 
   if (result.status === 404 || result.status === 409) {
-    await stopCaptureSession({
-      notifyFramework: false,
-      flushFirst: false,
-      reason: result.body.message || 'Capture session is no longer active on the framework',
-    });
+    // Guarded auto-resume, else manual-resume fallback (keeps the queue). See handleSessionAbandoned.
+    // state.sessionId is the session the framework just rejected.
+    await handleSessionAbandoned(result.body.message || 'Capture session is no longer active on the framework', state.sessionId);
   }
 }
 
@@ -657,6 +721,32 @@ async function applyBadge() {
 
 async function startCaptureSession(settings, frameworkUrl) {
   try {
+    // One recording per browser PROFILE. Chrome runs the extension as a single shared (spanning)
+    // service worker across a profile's normal and incognito windows, so a second Start here is not an
+    // independent recorder: it collides with the live session in this one worker and wedges the flush
+    // (the queue climbs while nothing ships, and the popup can stall on "Loading targets"). A genuinely
+    // separate recorder lives in a DIFFERENT Chrome profile, which has its own worker and never reaches
+    // this instance, so this guard never blocks the supported two-profile setup. A normal restart has
+    // already Stopped (active=false) or the prior session has gone stale, so both of those still pass.
+    const existing = await getState();
+    const existingLive = existing && existing.active && existing.sessionId
+      && existing.lastHeartbeatAt
+      && (Date.now() - existing.lastHeartbeatAt) < ALREADY_RECORDING_STALE_MS;
+    if (existingLive) {
+      const where = existing.targetUrl ? ` for ${existing.targetUrl}` : '';
+      console.warn('[MANUAL-CRAWL] Refused a second concurrent Start; already recording', existing.sessionId);
+      return {
+        success: false,
+        alreadyRecording: true,
+        error: `A recording is already active in this Chrome profile${where}. Chrome shares one `
+          + `extension worker across a profile's normal and incognito windows, so only ONE recording `
+          + `per profile is possible - a second Start would collide with the live one and stall the `
+          + `capture queue. To record a SECOND account at the same time, open a separate Chrome profile `
+          + `(not an incognito window) and load the extension there. To switch this profile to the other `
+          + `account, click Stop first, then Start.`,
+      };
+    }
+
     const baseUrl = (frameworkUrl || DEFAULT_FRAMEWORK_URL).replace(/\/+$/, '');
     const apiBase = baseUrl + '/api';
 
@@ -782,6 +872,129 @@ async function stopCaptureSession(options) {
   return { success: true, stats, reason: opts.reason || null };
 }
 
+/* --------------------------------------------------------- abandoned-session recovery */
+
+// A 404/409 from a flush or heartbeat means the framework marked THIS session abandoned - the
+// heartbeat went quiet long enough (machine sleep, the MV3 worker suspended past its alarm, or the
+// results modal firing /manual-crawl/cleanup). This used to tear the session down unconditionally,
+// which then needed a manual Start to recover: the permanent-wedge half of the connection-loss bug.
+//
+// Recovery is GUARDED, not automatic-at-all-costs, because the opposite mistake is worse: silently
+// resuming a recording the operator MEANT to end. An auto-reopen fires only when the operator is
+// plainly still recording (a capture within RECENT_ACTIVITY_MS), the framework is actually reachable
+// (a real 409, not a localhost hiccup a health check would also fail), and we have not already
+// burned MAX_REOPEN_ATTEMPTS reopens without an intervening healthy flush/heartbeat. Anything short
+// of that falls back to manual resume: the session is stopped, the queue is KEPT, and lastError
+// tells the operator Start will resume and re-send it. A transient AbortError/unreachable never
+// reaches here - that is runFlush/sendHeartbeat's own catch, which keeps the batch and retries
+// without touching the session.
+let abandonInFlight = false;
+async function handleSessionAbandoned(reason, rejectedSessionId) {
+  // One at a time: a flush and a heartbeat can both get a 409 in the same tick, and without this
+  // they would race into two concurrent reopens (two new sessions).
+  if (abandonInFlight) return;
+  abandonInFlight = true;
+  try {
+    const state = await getState();
+    if (!state.active) return;
+
+    // A 409 for a session a PRIOR reopen already superseded: the current session is a different,
+    // live one, so do not fire a second reopen - just flush any held captures under it.
+    if (rejectedSessionId && state.sessionId !== rejectedSessionId) {
+      scheduleFlush(0);
+      return;
+    }
+
+    const recent = state.lastCaptureAt && Date.now() - state.lastCaptureAt < RECENT_ACTIVITY_MS;
+    const attempts = state.reopenAttempts || 0;
+
+    if (recent && attempts < MAX_REOPEN_ATTEMPTS && (await frameworkHealthy(state.apiBase))) {
+      if (await reopenCaptureSession(state, attempts + 1)) return;
+    }
+
+    // Manual-resume fallback. stopCaptureSession keeps the queue (clearState preserves it) and its
+    // owner, so a subsequent Start re-flushes it and the server dedupes by captureUid.
+    const held = (state.stats && state.stats.queuedCount) || 0;
+    const base = reason || 'Recording was dropped by the framework.';
+    const heldMsg = held ? ` ${held} unflushed capture(s) are held.` : '';
+    await stopCaptureSession({
+      notifyFramework: false,
+      flushFirst: false,
+      reason: `${base}${heldMsg} Click Start to resume; held captures are re-sent and deduplicated.`,
+    });
+  } finally {
+    abandonInFlight = false;
+  }
+}
+
+// A short, bounded health probe. A real abandonment answers /health 200 (the framework is up, it
+// just retired the session); a localhost stall or a down framework fails it, and then we do NOT
+// auto-restart - the operator resumes deliberately once the framework is reachable again.
+async function frameworkHealthy(apiBase) {
+  try {
+    const res = await fetchWithTimeout(`${apiBase}/health`, { method: 'GET' }, 5000);
+    return res.ok;
+  } catch (error) {
+    return false;
+  }
+}
+
+// Re-opens an abandoned session in place: a fresh sessionId for the SAME target, with the kept queue
+// re-flushed under it. Never wipes the queue. Returns false on any failure so the caller falls back
+// to manual resume.
+async function reopenCaptureSession(prevState, attemptNumber) {
+  try {
+    const result = await postJSON(`${prevState.apiBase}/manual-crawl/start`, {
+      targetUrl: prevState.targetUrl,
+      scopeTargetId: prevState.scopeTargetId,
+    });
+    if (!result.ok || !result.body.sessionId) return false;
+
+    const newSessionId = result.body.sessionId;
+    const newTarget = result.body.scopeTargetId || prevState.scopeTargetId;
+
+    // Commit ONLY if the abandoned session is still the current, active one. The health probe and the
+    // start POST above are awaits during which a deliberate Stop (or a superseding reopen) can land;
+    // this compare-and-set - serialised on the same write chain as clearState - then bails instead of
+    // silently reactivating a session the operator ended. The visible notice means even a CORRECT
+    // auto-resume is not signalled only by the REC badge.
+    const committed = await commitReopenState(prevState.sessionId, {
+      active: true,
+      sessionId: newSessionId,
+      scopeTargetId: newTarget,
+      reopenAttempts: attemptNumber,
+      lastHeartbeatAt: Date.now(),
+      lastError: 'Recording auto-resumed after a dropped connection. Click Stop if you meant to end it.',
+    });
+
+    if (!committed) {
+      // The operator stopped (or another reopen won) while we were awaiting. The session we just
+      // created on the framework is an orphan: end it best-effort so it is not left live (the server
+      // also reaps a session after ~90s without a heartbeat). Do NOT re-arm the alarm/badge/hooks.
+      try {
+        await postJSON(`${prevState.apiBase}/manual-crawl/stop`, { sessionId: newSessionId, stats: {} });
+      } catch (error) {
+        /* best effort */
+      }
+      console.log('[MANUAL-CRAWL] Reopen aborted: session was stopped or changed mid-reopen; orphan session ended.');
+      return false;
+    }
+
+    await setQueueOwner(newTarget);
+    await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+    await applyBadge();
+    await pushConfigToPages();
+    void broadcastState();
+    // Ship whatever the abandoned session left unflushed, now, under the new session.
+    scheduleFlush(0);
+    console.log(`[MANUAL-CRAWL] Auto-resumed abandoned session as ${newSessionId} (reopen attempt ${attemptNumber}).`);
+    return true;
+  } catch (error) {
+    console.warn('[MANUAL-CRAWL] Auto-resume failed:', error && error.message);
+    return false;
+  }
+}
+
 // Recomputes scope from current settings and pushes it everywhere it is enforced.
 // Extra scope hosts are stored against the target they were added for, so the next recording on a
 // different target starts from that target's own host alone. Writing a flat list here was what let
@@ -806,9 +1019,9 @@ async function persistExtraHostsForTarget(scopeTargetId, extraHosts) {
 async function fetchScopeRules(apiBase, scopeTargetId) {
   if (!scopeTargetId) return { rules: [], error: null };
   try {
-    const res = await fetchWithTimeout(`${apiBase}/scope-rules/${scopeTargetId}`, {}, 8000);
+    const res = await getJSON(`${apiBase}/scope-rules/${scopeTargetId}`, 8000);
     if (!res.ok) return { rules: [], error: null };
-    const body = await res.json();
+    const body = res.body;
     const serverCount = (body.rules || []).filter((row) => row.enabled !== false).length;
     const rules = [];
     for (const row of body.rules || []) {
@@ -893,7 +1106,33 @@ configureDeepCapture({
   },
 });
 
+// Single-flight with a trailing coalesce. chrome.tabs.onUpdated fires once per tab reaching
+// 'complete', so opening a window with N tabs (or churning many at once) would otherwise launch N
+// concurrent full attach sweeps, each iterating every tab: O(N*K) chrome.debugger work plus N
+// state writes serialised on the write chain, right when the heartbeat needs the worker. Concurrent
+// callers now share the in-flight run, and exactly one more sweep runs if a request arrived
+// mid-sweep, so a tab that navigated in-scope during the sweep is still picked up.
+let deepRefreshInFlight = null;
+let deepRefreshPending = false;
 async function refreshDeepCapture() {
+  if (deepRefreshInFlight) {
+    deepRefreshPending = true;
+    return deepRefreshInFlight;
+  }
+  deepRefreshInFlight = (async () => {
+    try {
+      do {
+        deepRefreshPending = false;
+        await runDeepCaptureSync();
+      } while (deepRefreshPending);
+    } finally {
+      deepRefreshInFlight = null;
+    }
+  })();
+  return deepRefreshInFlight;
+}
+
+async function runDeepCaptureSync() {
   const state = await getState();
   if (!state.active || !state.deepCapture.enabled) {
     await detachAll();
@@ -2187,9 +2426,9 @@ async function discoverAuthRecording() {
 
   let recording = null;
   try {
-    const res = await fetchWithTimeout(`${apiBase}/auth-recording/active/${scopeTargetId}`, {}, 8000);
+    const res = await getJSON(`${apiBase}/auth-recording/active/${scopeTargetId}`, 8000);
     if (!res.ok) return;
-    const body = await res.json();
+    const body = res.body;
     recording = body && body.recording;
   } catch (error) {
     return; // The framework being unreachable is not worth logging every thirty seconds.
@@ -2258,9 +2497,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // into a recording the operator considers finished.
     if (state.adopted) {
       try {
-        const res = await fetchWithTimeout(`${state.apiBase}/auth-recording/active/${state.scopeTargetId}`, {}, 8000);
+        const res = await getJSON(`${state.apiBase}/auth-recording/active/${state.scopeTargetId}`, 8000);
         if (res.ok) {
-          const body = await res.json();
+          const body = res.body;
           const live = body && body.recording;
           if (!live || live.id !== state.recordingId) {
             console.log('[AUTH-RECORDING] The adopted recording ended in the framework, stopping.');
@@ -2304,12 +2543,33 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'ars0n-keepalive') return;
 
+  // The port is torn down constantly during normal browsing: the content script cycles it every ~4
+  // min, and every new tab/window opens one and every closed/navigated tab drops one. A
+  // port.postMessage on a port that disconnected during an intervening await throws "Attempting to
+  // use a disconnected port object". Left bare (as it was at the ping-reply and needConfig sites) it
+  // surfaced as an Uncaught (in promise) AND aborted the rest of the handler — so the ping's reply
+  // throw skipped the crawl AND auth heartbeats for that tick, feeding the heartbeat gap that the
+  // abandonment latch downstream turns into a dropped session. safePost swallows the dead-port throw
+  // so delivery is best-effort and the heartbeats always run.
+  const safePost = (payload) => {
+    try {
+      port.postMessage(payload);
+    } catch (error) {
+      /* port already disconnected; the content script reconnects and re-pings */
+    }
+  };
+
+  // A disconnect mid-handler is ordinary churn, not an error worth logging. This no-op just keeps the
+  // event from being reported as unhandled; it must STAY a no-op and never touch session state or the
+  // queue (tearing down here would kill the session on every ordinary tab close).
+  port.onDisconnect.addListener(() => {});
+
   port.onMessage.addListener((message) => {
     void (async () => {
       const state = await getState();
 
       if (message && message.action === 'ping') {
-        port.postMessage({ action: 'state', state: publicState(state) });
+        safePost({ action: 'state', state: publicState(state) });
         if (state.active) await sendHeartbeat(false);
         // The two sessions heartbeat independently: a recording running without a crawl still has
         // to tell the framework it is alive.
@@ -2326,7 +2586,8 @@ chrome.runtime.onConnect.addListener((port) => {
       }
 
       if (message && message.action === 'needConfig') {
-        port.postMessage({ action: 'hookConfig', config: await buildHookConfig() });
+        const config = await buildHookConfig();
+        safePost({ action: 'hookConfig', config });
       }
     })();
   });

@@ -274,13 +274,22 @@ func StartManualCrawl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Close out any session still marked active for this target. Multiple targets can record
-	// concurrently, but a single target recording twice is always a stale row from a dead worker.
+	// Close out only the STALE active sessions for this target - those whose worker has gone quiet
+	// past the liveness window. Do NOT abandon a session that is still heartbeating: two browser
+	// instances (e.g. a normal and an incognito/second profile, each logged in as a different test
+	// account) can legitimately record the SAME target at once, and nuking a live peer here is the
+	// bug that produced the mutual-abandon ping-pong - each start/auto-resume abandoned the other's
+	// session, both sides then 409'd on every flush, and all captures queued with "extension can't
+	// connect". A genuinely dead prior worker is still cleaned up, just by staleness (the same
+	// predicate CleanupStaleSessions uses) rather than by merely existing. There is no uniqueness
+	// constraint on the table, so concurrent active sessions per target are fine.
+	staleBefore := time.Now().Add(-manualCrawlHeartbeatTimeout)
 	if _, err := dbPool.Exec(context.Background(), `
 		UPDATE manual_crawl_sessions
 		SET status = 'abandoned', ended_at = COALESCE(last_heartbeat_at, started_at)
-		WHERE scope_target_id = $1 AND status = 'active'`, req.ScopeTargetID); err != nil {
-		log.Printf("[MANUAL-CRAWL] Failed to close previous sessions for %s: %v", req.ScopeTargetID, err)
+		WHERE scope_target_id = $1 AND status = 'active'
+		  AND COALESCE(last_heartbeat_at, started_at) < $2`, req.ScopeTargetID, staleBefore); err != nil {
+		log.Printf("[MANUAL-CRAWL] Failed to close previous stale sessions for %s: %v", req.ScopeTargetID, err)
 	}
 
 	sessionID := uuid.New().String()

@@ -584,24 +584,29 @@ func HandleDatabaseImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scopeTargets, tables, records, err := processBundleImportJSON(r.Context(), jsonData)
+	scopeTargets, tables, records, failed, err := processBundleImportJSON(r.Context(), jsonData)
 	if err != nil {
 		log.Printf("[ERROR] Failed to import database data: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to import data: %v", err), http.StatusInternalServerError)
 		return
 	}
 
+	message := "Database import completed successfully"
+	if failed > 0 {
+		message = fmt.Sprintf("Database import completed, but %d record(s) could not be loaded; see server logs", failed)
+	}
 	response := map[string]interface{}{
-		"message":                "Database import completed successfully",
+		"message":                message,
 		"imported_scope_targets": scopeTargets,
 		"imported_tables":        tables,
 		"total_records":          records,
+		"failed_records":         failed,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 
-	log.Printf("[INFO] Database import completed successfully. Imported %d scope targets", scopeTargets)
+	log.Printf("[INFO] Database import finished. Imported %d scope targets, %d record(s) failed", scopeTargets, failed)
 }
 
 func HandleDatabaseImportURL(w http.ResponseWriter, r *http.Request) {
@@ -699,24 +704,29 @@ func HandleDatabaseImportURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scopeTargets, tables, records, err := processBundleImportJSON(r.Context(), jsonData)
+	scopeTargets, tables, records, failed, err := processBundleImportJSON(r.Context(), jsonData)
 	if err != nil {
 		log.Printf("[ERROR] Failed to import database data: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to import data: %v", err), http.StatusInternalServerError)
 		return
 	}
 
+	message := "Database import from URL completed successfully"
+	if failed > 0 {
+		message = fmt.Sprintf("Database import from URL completed, but %d record(s) could not be loaded; see server logs", failed)
+	}
 	response := map[string]interface{}{
-		"message":                "Database import from URL completed successfully",
+		"message":                message,
 		"imported_scope_targets": scopeTargets,
 		"imported_tables":        tables,
 		"total_records":          records,
+		"failed_records":         failed,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 
-	log.Printf("[INFO] Database import from URL completed successfully. Imported %d scope targets", scopeTargets)
+	log.Printf("[INFO] Database import from URL finished. Imported %d scope targets, %d record(s) failed", scopeTargets, failed)
 }
 
 // HandleDatabaseImportBase64 imports a bundle whose gzip bytes are delivered base64-encoded in a JSON
@@ -750,21 +760,26 @@ func HandleDatabaseImportBase64(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scopeTargets, tables, records, err := processBundleImportJSON(r.Context(), jsonData)
+	scopeTargets, tables, records, failed, err := processBundleImportJSON(r.Context(), jsonData)
 	if err != nil {
 		log.Printf("[ERROR] Failed to import database data: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to import data: %v", err), http.StatusInternalServerError)
 		return
 	}
 
+	message := "Database import completed successfully"
+	if failed > 0 {
+		message = fmt.Sprintf("Database import completed, but %d record(s) could not be loaded; see server logs", failed)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message":                "Database import completed successfully",
+		"message":                message,
 		"imported_scope_targets": scopeTargets,
 		"imported_tables":        tables,
 		"total_records":          records,
+		"failed_records":         failed,
 	})
-	log.Printf("[INFO] Base64 database import completed. Imported %d scope targets", scopeTargets)
+	log.Printf("[INFO] Base64 database import finished. Imported %d scope targets, %d record(s) failed", scopeTargets, failed)
 }
 
 func exportDatabaseData(scopeTargetIDs []string) (*ExportData, error) {

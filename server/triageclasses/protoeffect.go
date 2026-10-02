@@ -506,6 +506,41 @@ func pxUniformBlock(ctx triage.ClassifyCtx, honest []faOwnObs) bool {
 	return faUniformBlock(faObsOf(honest), baseline)
 }
 
+// pxEmptyBodyBlock names the one block shape faUniformBlock / pxUniformBlock cannot see: every one
+// of this class's delivered probes came back with an EMPTY body and a 4xx or 5xx status while the
+// unperturbed control carried a body. That is the commonest block there is, an edge or WAF
+// answering 403 with no body to every value, and because faUniformBlock groups responses by body
+// and skips the empty ones it reports "no block" and the slot is written CLEAN. This reads the
+// shape off the status instead. It is deliberately strict so it cannot convert an honest clean into
+// an unknown:
+//   - it needs a baseline that carried a body, because an endpoint that normally answers empty is
+//     not being blocked by answering empty;
+//   - it needs faUniformBlockMin distinct payloads, so one stray empty 404 is not a block;
+//   - it refuses the moment ANY delivered probe reached with a body or a sub-400 status, because
+//     then the application answered at least once and this is not an all-empty block.
+//
+// A class calls this where it would otherwise clean, after pxUniformBlock has already declined, and
+// treats a true result as a cannot_determine rather than a clean. It returns the count for the row.
+func pxEmptyBodyBlock(honest []faOwnObs, baseline []byte) (int, bool) {
+	if len(baseline) == 0 {
+		return 0, false
+	}
+	distinct := map[string]bool{}
+	for _, o := range honest {
+		if o.Err != nil || !o.Obs.Delivered() {
+			continue
+		}
+		if len(o.Obs.Body) != 0 || o.Obs.Status < 400 {
+			return 0, false
+		}
+		distinct[string(o.Obs.Payload.Wire)] = true
+	}
+	if len(distinct) >= faUniformBlockMin {
+		return len(distinct), true
+	}
+	return 0, false
+}
+
 // pxOneVerdict is the single-row constructor every class in this family builds its exits from, so
 // a row can never be emitted without its class, its slot and its annotations attached.
 func pxOneVerdict(class triage.ClassID, key triage.SlotKey, state triage.TriageState, reason, oracle string,

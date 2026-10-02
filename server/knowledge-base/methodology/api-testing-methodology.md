@@ -42,11 +42,34 @@
 3. As Account B, try to access/modify Account A's object
 4. Try with no authentication at all
 
-# Common ID patterns to test:
-- Sequential integers: /api/users/123 → /api/users/124
-- UUIDs: Try enumeration or leaked UUIDs
-- Encoded IDs: Base64 decode → modify → re-encode
-- Composite keys: /api/org/1/user/2 → /api/org/1/user/3
+# An IDOR is real only when BOTH hold:
+#   (1) BOUNDARY CROSSED: you reach an object you are not authorized to - the
+#       server failed to check that the caller owns / may access it. (Data that
+#       is INTENDED to be public - a shared business card, a public profile - is
+#       NOT an IDOR even if it answers with no auth. You must reach something meant
+#       to be private: another tenant's data, non-public fields, another user's record.)
+#   (2) IDENTIFIER OBTAINABLE: you can get the target object's id. This is the part
+#       most write-ups skip and it is what decides whether the finding is exploitable.
+
+# Is the identifier reachable? (the question that makes or breaks the IDOR)
+- PREDICTABLE  -> you enumerate it yourself -> high impact (mass extraction):
+    sequential ints (/api/users/123 -> 124), short numbers, timestamps,
+    base64/hex of an int (decode -> modify -> re-encode), composite keys
+    (/api/org/1/user/2 -> /user/3), auto-increment leaking in Location/ETag.
+- RANDOM GUID / UUIDv4 (122 random bits) -> NOT guessable. Iterating them is
+    computationally infeasible, so an endpoint keyed only by a random GUID the
+    attacker never sees is NOT an exploitable IDOR by guessing. Do not report
+    "change the UUID" with no way to obtain another user's UUID.
+- A GUID becomes an IDOR only if you can OBTAIN it. Hunt the LEAK, then replay it
+    across the boundary: a list/search/autocomplete endpoint, another user's
+    profile, a share/referral link, an error message, an email, a cached response,
+    a JWT/cookie you can read, or a less-protected endpoint that returns it.
+- PARTIALLY PREDICTABLE: UUIDv1 (MAC + timestamp), ULID/Snowflake (time-ordered) -
+    may be narrowable. Worth probing, not assuming.
+
+# So the two-account test (above) proves (1); obtaining B's id proves (2).
+# With two accounts you HAVE B's id, so you can prove a GUID-keyed IDOR even though
+# you could never have guessed it - that is the whole point of holding two identities.
 ```
 
 ### Broken Function-Level Authorization

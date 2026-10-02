@@ -2179,13 +2179,25 @@ func sqlNegativeVerdicts(v func(triage.TriageState, string) triage.ClassVerdict,
 	}
 
 	// The error oracle's own clean.
-	errorArmOrdinals := ev.arm(sqlU1, sqlQ1, sqlQ2, sqlD1P, sqlD2P, sqlB1, sqlB2, sqlK1, sqlK2, sqlP1, sqlP2, sqlP3, sqlP4, sqlC1, sqlC2, sqlC3, sqlC4, sqlC5, sqlNC1, sqlMP)
+	errorArmIDs := []triage.ProbeID{sqlU1, sqlQ1, sqlQ2, sqlD1P, sqlD2P, sqlB1, sqlB2, sqlK1, sqlK2, sqlP1, sqlP2, sqlP3, sqlP4, sqlC1, sqlC2, sqlC3, sqlC4, sqlC5, sqlNC1, sqlMP}
+	errorArmOrdinals := ev.arm(errorArmIDs...)
 	brokeProbe, brokeStatus, brokeWitness, brokeUnread := ev.unreadableBreak()
 	switch {
 	case len(errorArmOrdinals) == 0:
 		out = append(out, sqlFill(v(triage.StateNotRun,
 			"not_run: no break probe was sent on this slot, so the marker-in-parser-error oracle never ran here"),
 			ordinals, untested, anno, ev))
+	case ev.armDelivered(errorArmIDs...) == 0:
+		// Every break probe in this arm RAN but not one reached the application, so the
+		// marker-in-parser-error oracle had no reply to read on this slot. A silence with no
+		// delivered probe behind it is could-not-measure, never an absence of the vulnerability,
+		// and reading it as clean is the fail-open this layer exists to stop.
+		row := sqlFill(v(triage.StateCannotDetermine,
+			"no_usable_measurement (parser_error): this class's break probes were sent on this slot but not one of them reached the application, so the marker-in-parser-error oracle had nothing to read. The next move is a differential tool or a session that can actually deliver these payloads, not a louder one"),
+			ordinals, untested, anno, ev)
+		row.Oracle = "parser_error"
+		row.Ordinals = errorArmOrdinals
+		out = append(out, row)
 	case brokeUnread:
 		// The break broke something and the oracle could not read what. That is an UNREAD
 		// MEASUREMENT, and reporting it as an absence of the vulnerability is the failure this
@@ -2217,7 +2229,8 @@ func sqlNegativeVerdicts(v func(triage.TriageState, string) triage.ClassVerdict,
 	// The boolean arm's own row. It is separate because it is the ONLY detector that can see an
 	// endpoint which suppresses errors, so its absence is a real gap and must not hide inside a
 	// clean produced by the error oracle.
-	boolOrdinals := ev.arm(sqlA1, sqlA2, sqlA3, sqlA4, sqlA5, sqlA1w, sqlA2w)
+	boolArmIDs := []triage.ProbeID{sqlA1, sqlA2, sqlA3, sqlA4, sqlA5, sqlA1w, sqlA2w}
+	boolOrdinals := ev.arm(boolArmIDs...)
 	switch {
 	case len(boolOrdinals) == 0:
 		out = append(out, sqlFill(v(triage.StateNotRun,
@@ -2230,6 +2243,15 @@ func sqlNegativeVerdicts(v func(triage.TriageState, string) triage.ClassVerdict,
 		}
 		out = append(out, sqlFill(v(triage.StateCannotDetermine,
 			fmt.Sprintf("%s: the stability gate did not pass on this endpoint, so the boolean differential cannot be read. The error oracle still ran because it needs no baseline, and these two facts are reported separately because neither stands for the other", reason)),
+			ordinals, untested, anno, ev))
+	case ev.armComparable(boolArmIDs...) == 0:
+		// The arm ran against a stable baseline, but not one of its probes both reached the
+		// application and produced a readable comparison: every pair failed transport, was
+		// body-truncated, or the payload drove the endpoint to a status the differential cannot
+		// read. A pair that was never comparably answered separates no true arm from a false one,
+		// so its silence is undecided rather than clean.
+		out = append(out, sqlFill(v(triage.StateCannotDetermine,
+			"no_usable_measurement (boolean_differential): the boolean arm was sent on this slot but not one of its probes both reached the application and produced a readable comparison, so no pair could be read either way and the silence says nothing"),
 			ordinals, untested, anno, ev))
 	default:
 		cl := sqlFill(v(triage.StateClean, sqlBooleanArmCleanReason(ev, ctx, len(boolOrdinals))), ordinals, untested, anno, ev)
@@ -2360,6 +2382,42 @@ func (ev *sqlEvidence) arm(ids ...triage.ProbeID) []uint64 {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
+}
+
+// armDelivered counts the probes in one detector's arm that actually REACHED the application.
+// The global transport gate above only fires when NOTHING on the slot delivered; an arm whose
+// own probes all failed transport while some other arm got through would otherwise slip past it
+// and emit a clean resting on replies that never arrived, which is the fail-open this layer
+// exists to stop.
+func (ev *sqlEvidence) armDelivered(ids ...triage.ProbeID) int {
+	n := 0
+	for _, id := range ids {
+		for _, s := range ev.byProbe[id] {
+			if s.obs.Delivered() {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// armComparable counts the probes in one arm that produced a READABLE boolean measurement: the
+// probe reached the application (Delivered), the endpoint did not answer it with a 5xx (an error
+// is not a true/false answer, it is the payload breaking the server), and the comparison against
+// the control was usable (cmp is not sqlCmpUnusable, the unmeasured zero value, which a truncated
+// or empty body produces). The boolean differential needs this stronger test than armDelivered:
+// a pair that every one of these three disqualified separates no true arm from a false one, so a
+// clean resting on it would be resting on a measurement that never happened.
+func (ev *sqlEvidence) armComparable(ids ...triage.ProbeID) int {
+	n := 0
+	for _, id := range ids {
+		for _, s := range ev.byProbe[id] {
+			if s.obs.Delivered() && s.obs.Status < 500 && s.cmp != sqlCmpUnusable {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // ---------------------------------------------------------------------------------------------

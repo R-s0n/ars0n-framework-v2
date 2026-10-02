@@ -266,6 +266,31 @@ function initialize() {
     connectKeepalive();
   }, PORT_RECONNECT_MS);
 
+  // Back/forward cache. When this page is frozen into bfcache (a normal SPA/history navigation, which
+  // the dashboard does constantly), Chrome severs the keepalive port and its message channel - that is
+  // the "page keeping the extension port is moved into back/forward cache" runtime.lastError. While the
+  // page is frozen the onDisconnect reconnect timer does NOT run, so without this the port can stay
+  // dead after the page is restored: the worker loses its content-side keepalive and capture relay and
+  // the flush pipeline stalls with captures queued. On freeze, drop the dead port cleanly so the worker
+  // stops posting into a cached page; on restore, reconnect eagerly rather than waiting on a timer that
+  // was frozen, and re-sync config and state.
+  window.addEventListener('pagehide', (event) => {
+    if (!event.persisted) return; // a real unload tears everything down anyway
+    if (keepalivePort) {
+      try { keepalivePort.disconnect(); } catch (error) { /* already gone */ }
+      keepalivePort = null;
+    }
+  });
+  window.addEventListener('pageshow', (event) => {
+    if (!event.persisted) return; // only a bfcache restore needs the eager reconnect
+    if (!keepalivePort) connectKeepalive();
+    void requestConfig();
+    chrome.runtime
+      .sendMessage({ action: 'getSessionState' })
+      .then((response) => { if (response && response.success) renderState(response.state); })
+      .catch(() => {});
+  });
+
   chrome.runtime
     .sendMessage({ action: 'getSessionState' })
     .then((response) => {

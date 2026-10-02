@@ -981,6 +981,7 @@ func main() {
 	r.HandleFunc("/param-enum/{scope_target_id}/selection", utils.SetParamEnumSelection).Methods("POST", "OPTIONS")
 
 	r.HandleFunc("/manual-crawl/hosts/{scope_target_id}/promote", utils.PromoteManualCrawlHosts).Methods("POST", "OPTIONS")
+	r.HandleFunc("/manual-crawl/hosts/{scope_target_id}/purge-out-of-scope", utils.PurgeOutOfScopeCaptures).Methods("POST", "OPTIONS")
 	r.HandleFunc("/manual-crawl/hosts/{scope_target_id}", utils.GetManualCrawlHosts).Methods("GET", "OPTIONS")
 	r.HandleFunc("/manual-crawl/hosts/{scope_target_id}", utils.SetManualCrawlHostScope).Methods("POST", "OPTIONS")
 
@@ -1011,6 +1012,7 @@ func main() {
 	r.HandleFunc("/endpoint-scan/{scope_target_id}", utils.RunEndpointScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/endpoint-scan/{scope_target_id}/status/{run_id}", utils.GetEndpointScanStatus).Methods("GET", "OPTIONS")
 	r.HandleFunc("/endpoint-scan/{scope_target_id}/latest", utils.GetEndpointScanLatest).Methods("GET", "OPTIONS")
+	r.HandleFunc("/endpoint-scan/{scope_target_id}/cancel/{run_id}", utils.CancelEndpointScan).Methods("POST", "OPTIONS")
 	r.HandleFunc("/endpoint-scan/{scope_target_id}/results", utils.GetEndpointScanResults).Methods("GET", "OPTIONS")
 
 	log.Println("API server started on :8443")

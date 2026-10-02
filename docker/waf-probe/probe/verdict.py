@@ -188,6 +188,27 @@ def build_findings(ctx):
             matrix.get("note", ""), matrix.get("confidence", CONF_INFERRED),
             ["ffuf", "nuclei", "arjun", "x8"], "waf_class_matrix",
             "The same payloads passing while the control also passes.")
+        # An enforcing ruleset that terminates at a CDN EDGE applies to every host behind that edge,
+        # not just the one URL measured here. This was added after a live run measured the WAF on one
+        # API host and the reader treated the verdict as host-specific, while the same payload class
+        # was in fact 403-blocked identically on the www host and every sibling. When the block
+        # terminates at the edge the single-host verdict generalises to the whole fronted estate, and
+        # a raw-HTTP scanner's zero on ANY host behind it is WAF-blocked rather than clean. Gated on
+        # edge detection so it never fires on an origin-terminated app WAF, which really is per host.
+        edge = r.get("edge_origin_attribution") or {}
+        edge_info = edge.get("edge") or {}
+        if edge_info.get("detected") and edge.get("verdict") in ("edge_terminated", "edge_present"):
+            vendors = ", ".join(edge_info.get("vendors", [])) or "a CDN edge"
+            add("waf_enforcement_edge_level", P2,
+                "WAF enforcement is at the CDN edge, so it is domain-wide",
+                f"The enforcing ruleset sits at {vendors}, which fronts every host on this domain, so "
+                "this payload-class block is expected on sibling hosts too even though it was measured "
+                "on one URL. A raw-HTTP scanner will be walled on every host behind the edge, and the "
+                "zero it returns there is WAF-blocked, not clean. Characterising a sibling host "
+                "(for example the browser-facing www host) separately confirms the coverage.",
+                edge.get("attribution_confidence", CONF_INFERRED),
+                ["ffuf", "nuclei", "arjun", "x8"], "edge_origin_attribution",
+                "The block terminating at the origin rather than the edge would confine it to this host.")
 
     mode = r.get("waf_response_mode") or {}
     if mode.get("verdict") == "stealth_swap":

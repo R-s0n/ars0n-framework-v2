@@ -195,6 +195,11 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 	budgetAuth := LoadScopedAuthContext(scopeTargetID)
 	budgetPaced := map[string]bool{}
 	budgetUntested := 0
+	// The WAF differential is an edge/host property, taken at most once per host and reused for every
+	// vector on it. See vectorWafDetect.go: a false Probed is not stored, so a host whose first clean
+	// vector could not establish the baseline is retried on the next one.
+	wafByHost := map[string]WAFClassObservation{}
+	wafUntested := 0
 	// The MOST CONSERVATIVE rate any observation justified, not the best one. A window that was
 	// nearly spent when it was measured is the one whose number is safe to obey.
 	advisedRPS, advisedLimit, advisedWindow := 0.0, 0, 0
@@ -386,6 +391,31 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 			reason = strings.TrimSpace(reason + " " + BudgetCleanEvidence(before, after))
 		}
 
+		// A WAF-BLOCKED VECTOR IS UNTESTED, NOT CLEAN. The sibling of the rate-limit demotion above,
+		// closing the same fail-open from the 403 side instead of the 429 side: if the host cleanly
+		// refuses this tool's payload CLASS (a benign control passed, the same request carrying the
+		// payload drew a 403/406) then the payloads never reached the application and a surviving zero
+		// is inconclusive. Only a still-clean zero is demoted; findings are never touched, because a
+		// payload that fired reached a sink whatever the edge did to the others. The differential is
+		// taken at most once per host (see wafByHost), and its benign arm is the "before" control that
+		// was already sent, so the whole check costs one extra request per host per run.
+		if status == "clean" && len(findings) == 0 {
+			host := strings.ToLower(strings.TrimSpace(vector.Domain))
+			waf, seen := wafByHost[host]
+			if !seen {
+				waf = ProbeVectorWAFClass(ctx, budgetClient, budgetAuth, tool.Category,
+					vector.toInput().TargetURL(), host, before.Status)
+				if waf.Probed {
+					wafByHost[host] = waf
+				}
+			}
+			if waf.Blocked {
+				status = "error"
+				reason = strings.TrimSpace(waf.Reason + " " + reason)
+				wafUntested++
+			}
+		}
+
 		// Every vector behind this scan gets the same verdict, so none of them reads as untested.
 		for _, id := range siblings {
 			if dbErr := recordScanTargetIdentity(ctx, scanID,
@@ -458,6 +488,19 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 			UPDATE vector_scans SET error = COALESCE(NULLIF(error, ''), $2) WHERE id = $1`,
 			scanID, summary); dbErr != nil {
 			log.Printf("[VECTOR] recording budget exhaustion: %v", dbErr)
+		}
+	}
+	if wafUntested > 0 {
+		summary := fmt.Sprintf("UNTESTED (WAF): %d of %d vectors came back clean from a host that "+
+			"cleanly refused this tool's payload class at the edge (a benign control passed, the same "+
+			"request carrying the payload drew a 403/406). Those payloads were walled before reaching "+
+			"the application, so their zero is unknown rather than clean. A block page reflects no "+
+			"payload, which is why the scanner itself could not tell. Retest through a channel the edge "+
+			"does not wall.", wafUntested, len(order))
+		if _, dbErr := dbPool.Exec(ctx, `
+			UPDATE vector_scans SET error = COALESCE(NULLIF(error, ''), $2) WHERE id = $1`,
+			scanID, summary); dbErr != nil {
+			log.Printf("[VECTOR] recording waf block: %v", dbErr)
 		}
 	}
 

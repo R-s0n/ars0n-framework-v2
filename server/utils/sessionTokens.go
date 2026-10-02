@@ -1404,28 +1404,51 @@ func runSessionTokenValidation(token SessionToken) (string, string, map[string]i
 				"a browser (domdig / the extension) instead.", evidence
 	}
 
-	// Refused outright. The target read the credential and rejected it, which is a more useful
-	// answer than "the two responses matched", so it is checked first.
-	if authed.Status == 401 || authed.Status == 403 {
-		return tokenStatusExpired, fmt.Sprintf(
-			"The target answered %d to the authenticated request. It saw the credential and refused "+
-				"it, so the stored value is expired or wrong.", authed.Status), evidence
+	// Grade by COMPARING the two arms, never by the authenticated arm's status alone. The old code
+	// short-circuited to "expired" the moment the authenticated request was 401/403, without checking
+	// whether the anonymous control was refused the same way. That is the IDOR-protected-object trap:
+	// authRequiredProbeURL picks a route endpoint validation saw refuse an anonymous caller, but an
+	// object route like /api/carts.v2/{id} or /api/notificationPreferences.v2/{id} refuses the
+	// authenticated owner of a DIFFERENT account too, for ownership rather than authentication. A
+	// session proven live by a 200 on the owner's own object still read "expired" from such a probe.
+	authedRefused := authed.Status == 401 || authed.Status == 403 ||
+		(authed.IsRedirect() && LooksLikeAuthRedirect(authed.Location))
+	anonRefused := anon.Status == 401 || anon.Status == 403 ||
+		(anon.IsRedirect() && LooksLikeAuthRedirect(anon.Location))
+
+	// Both arms refused equivalently: the probe refuses everyone, so it says nothing about the
+	// session. Inconclusive (tokenStatusError, which SessionStillHonoured proceeds past), credential
+	// stays attached, the scan runs and reports what the target actually does.
+	if authedRefused && anonRefused && ResponsesEquivalent(authedFP, anonFP) {
+		return tokenStatusError, fmt.Sprintf(
+			"Could not confirm the session from here: %s refused BOTH the authenticated request and the "+
+				"anonymous control the same way (%s both ways). An endpoint that refuses everyone - an "+
+				"object owned by another account, or a route behind a second gate - cannot tell a live "+
+				"session from a dead one, so this is inconclusive rather than dead. The credential is "+
+				"still attached and the scan will proceed.", target, FingerprintSummary(authedFP)), evidence
 	}
-	if authed.IsRedirect() && LooksLikeAuthRedirect(authed.Location) {
+
+	// Authed refused while the anonymous control was NOT refused the same way: the refusal is specific
+	// to the credentialed arm, which is real evidence the stored value was rejected.
+	if authedRefused {
+		if authed.IsRedirect() {
+			return tokenStatusExpired, fmt.Sprintf(
+				"The authenticated request was redirected to %s, which is this target sending an "+
+					"unauthenticated caller to log in (the anonymous control was not: %s).",
+				authed.Location, FingerprintSummary(anonFP)), evidence
+		}
 		return tokenStatusExpired, fmt.Sprintf(
-			"The authenticated request was redirected to %s, which is this target sending an "+
-				"unauthenticated caller to log in.", authed.Location), evidence
+			"The target answered %d to the authenticated request while the anonymous control got %s, so "+
+				"the refusal is specific to the credential: the stored value is expired or wrong.",
+			authed.Status, FingerprintSummary(anonFP)), evidence
 	}
 
 	if ResponsesEquivalent(authedFP, anonFP) {
-		// The two arms matched. What that MEANS depends on where we asked. Against a discriminating
-		// probe (the auth flow's last step, or an endpoint validation proved answers 401/403 to an
-		// anonymous caller) a match is real evidence the credential is not honoured. Against the base
-		// URL it is not: a static landing page or an SPA shell answers identically signed in or out,
-		// so a token that works fine on the API measures the same way. Reporting not_honoured there is
-		// the false negative that killed session-gated scans on every SPA. Return inconclusive
-		// (tokenStatusError, which SessionStillHonoured proceeds past) so the credential is still
-		// attached and the scan runs and reports what the target actually does.
+		// The two arms matched and neither was refused. Against the base URL that is expected even for a
+		// live token (a static landing page or SPA shell answers identically signed in or out), so it is
+		// inconclusive rather than dead. Against a discriminating probe a match is real evidence the
+		// credential is not honoured. Return inconclusive for base_url (tokenStatusError, which
+		// SessionStillHonoured proceeds past) so the credential is still attached and the scan runs.
 		if probeSource == "base_url" {
 			return tokenStatusError, fmt.Sprintf(
 				"Could not confirm the session from here: the only probe available was the base URL, "+
@@ -2157,6 +2180,11 @@ func authRequiredProbeURL(scopeTargetID, host string) string {
 	if strings.TrimSpace(host) == "" {
 		return ""
 	}
+	// Prefer a route the AUTHENTICATED validation arm actually passed (2xx) over one it was refused on.
+	// A 2xx here means the session owns the object, so the probe discriminates: the owner gets 2xx and
+	// an anonymous control gets 401/403. A route whose authed arm was itself 403 is an object owned by
+	// someone else (the IDOR-protected-object trap) and refuses the owner too, so it cannot grade the
+	// session. http_status is the authenticated status, because validation runs with the active token.
 	var url string
 	err := dbPool.QueryRow(context.Background(), `
 		SELECT url FROM endpoint_validation_results
@@ -2165,7 +2193,7 @@ func authRequiredProbeURL(scopeTargetID, host string) string {
 		  AND reason_code = 'valid.auth_required'
 		  AND COALESCE(method,'GET') IN ('GET','HEAD')
 		  AND lower(split_part(url,'/',3)) = lower($2)
-		ORDER BY url
+		ORDER BY (CASE WHEN http_status BETWEEN 200 AND 299 THEN 0 ELSE 1 END), url
 		LIMIT 1`, scopeTargetID, host).Scan(&url)
 	if err != nil {
 		return ""

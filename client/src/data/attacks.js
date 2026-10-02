@@ -653,7 +653,7 @@ export const attacks = [
   {
     id: 'idor',
     name: 'Insecure Direct Object Reference (IDOR)',
-    summary: 'Access or change another user\'s object by changing an identifier in the request, because the server checks authentication but not ownership.',
+    summary: 'Access or change another user\'s object by changing an identifier in the request, because the server checks authentication but not ownership. Exploitable only when you can obtain that identifier: guess it when ids are sequential, or find it leaked elsewhere when they are random GUIDs.',
     tags: ['access-control'],
     executionContext: {
       where: "In the application's authorization logic on the server: this is a check the server fails to perform, not code the attacker runs.",

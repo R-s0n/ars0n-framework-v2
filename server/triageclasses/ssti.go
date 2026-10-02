@@ -2141,16 +2141,26 @@ func sstiDecodeDepthFrom(hay []byte, m triage.Marker) int {
 	if m == "" {
 		return -1
 	}
-	n := bytes.Count(hay, []byte(m))
-	if n >= 2 {
-		return 1
-	}
+	// THE PERCENT-LITERAL IS READ FIRST, because it is the only UNAMBIGUOUS outcome of the three.
+	// The runner places the raw marker for attribution, so an application that reflects the value in
+	// two output locations (an echoed field and an error message, say, or the body and a header)
+	// returns the raw marker twice with NOTHING decoded. Counting the raw marker first and reading
+	// count >= 2 as a decode therefore mistook a second reflection for a decoded copy, set
+	// decode_depth to 1, and skipped the decode_depth_0 cannot_determine rung; every brace payload
+	// then arrived percent-encoded as literal %7B, every oracle was silent against it, and the slot
+	// read CLEAN. If the literal percent form is anywhere in the response, the encoded copy did NOT
+	// decode, whatever the raw count is.
 	var pct strings.Builder
 	for i := 0; i < len(m); i++ {
 		pct.WriteString(fmt.Sprintf("%%%02x", m[i]))
 	}
 	if bytes.Contains(bytes.ToLower(hay), []byte(pct.String())) {
 		return 0
+	}
+	// The literal percent form is gone and the raw marker appears more than once, so the encoded
+	// copy came back decoded as a second marker alongside the attribution copy: the slot decodes.
+	if bytes.Count(hay, []byte(m)) >= 2 {
+		return 1
 	}
 	return -1
 }

@@ -2060,6 +2060,16 @@ func (r xssrRun) sent(id triage.ProbeID) bool {
 	return ok
 }
 
+// delivered reports whether a probe both ran AND reached the application. A probe recorded with a
+// transport failure is still an item in the run, so sent() is true for it, yet it measured
+// nothing: its context is untested, not covered. Every coverage check that decides whether a
+// context the census found was actually tested must use this and not sent(), or that context reads
+// as answered on the strength of a request that never arrived and the slot reads clean.
+func (r xssrRun) delivered(id triage.ProbeID) bool {
+	it, ok := r.item(id)
+	return ok && it.Obs.Delivered()
+}
+
 // CensusPlacements is the promotion input: every context the class's own bare-marker probes
 // landed in, deduplicated on the tuple that decides which payload answers it.
 //
@@ -3045,7 +3055,7 @@ func xssrUnprobedPlacementRows(ctx triage.ClassifyCtx, run xssrRun, ann map[stri
 		}
 		var missing []string
 		for _, id := range promoted {
-			if !run.sent(id) {
+			if !run.delivered(id) {
 				missing = append(missing, string(id))
 			}
 		}
@@ -3060,8 +3070,10 @@ func xssrUnprobedPlacementRows(ctx triage.ClassifyCtx, run xssrRun, ann map[stri
 			why = "probe_budget_exhausted: this class's own per-slot cap of " + strconv.Itoa(xssrPerSlotCap) +
 				" probes was reached, and the thirteenth is refused rather than sent"
 		}
-		if r := xssrProbeReachesSlot(triage.ProbeID(missing[0]), ctx.Slot); !r.OK {
-			state, why = r.State, r.Reason
+		if reach := xssrProbeReachesSlot(triage.ProbeID(missing[0]), ctx.Slot); !reach.OK {
+			state, why = reach.State, reach.Reason
+		} else if first := triage.ProbeID(missing[0]); run.sent(first) && !run.delivered(first) {
+			state, why = triage.StateCannotDetermine, "a probe for this context was sent but its transport failed, so the context was not actually measured and is unknown rather than tested"
 		}
 		v := xssrVerdict(ctx.Slot.Key, state,
 			"the census placed the marker in "+pl.Context+" and "+strings.Join(missing, ", ")+
@@ -3351,7 +3363,7 @@ func xssrUnansweredContexts(ctx triage.ClassifyCtx, run xssrRun) []string {
 	var missing []string
 	for _, pl := range run.CensusPlacements() {
 		for _, id := range xssrProbesForContext(pl.Context, ctx.Vector.RespMedia) {
-			if run.sent(id) {
+			if run.delivered(id) {
 				continue
 			}
 			if r := xssrProbeReachesSlot(id, ctx.Slot); !r.OK {

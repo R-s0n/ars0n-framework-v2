@@ -910,6 +910,64 @@ func TestAUniformlyBlockedRoutingHeaderIsRefusedRatherThanCleaned(t *testing.T) 
 	}
 }
 
+// THE EMPTY-BODY BLOCK. A WAF that answers every value with a bodyless 4xx is the commonest block
+// there is, and it is the one pxUniformBlock cannot see: it groups responses by body and skips the
+// empty ones, so three empty 403s read as "no block" while hhBlockFloorOf counts them and reads the
+// floor as MET, and the slot fell through to a clean. The floor refusal must name it.
+func TestAnEmptyBodyBlockIsRefusedRatherThanCleaned(t *testing.T) {
+	own := []faOwnObs{
+		hhObs(hhA1, hhTestHost(), 403, "", ""),
+		hhObs(hhNC1, "hh-"+string(hhTestMarker)+"-inert", 403, "", ""),
+		hhObs(hhA2, hhTestHost()+":8443", 403, "", ""),
+	}
+	base := []byte(hhTestBaselineBody)
+
+	// The premise, asserted: pxUniformBlock is blind to this because it skips empty bodies.
+	if faUniformBlock(faObsOf(own), base) {
+		t.Fatal("faUniformBlock answered on empty bodies, so this test's premise that it is blind to them is wrong")
+	}
+
+	v, fired := hhRunFloor(t, own, base)
+	if !fired {
+		t.Fatal("the floor refusal did not fire on three bodyless 4xx responses, so an all-empty-body block reaches a clean")
+	}
+	if v.State.CountsAsClean() {
+		t.Errorf("an all-empty-body block rendered as clean: %s", v.Reason)
+	}
+	if v.State != triage.StateCannotDetermine {
+		t.Errorf("state %q, want cannot_determine", v.State)
+	}
+	if !strings.Contains(v.Reason, "empty_body_block") {
+		t.Errorf("the refusal does not name itself: %s", v.Reason)
+	}
+}
+
+// AND IT DOES NOT OVER-FIRE. An endpoint that normally answers with an empty body is not being
+// blocked by answering empty, and a slot where even one probe reached with a body is the endpoint
+// telling our values apart, not an all-empty block.
+func TestTheEmptyBodyBlockDoesNotFireWhereItShouldNot(t *testing.T) {
+	// No baseline body: three empty 403s could be the endpoint's own shape, so no all-empty claim.
+	emptyBaseline := []faOwnObs{
+		hhObs(hhA1, hhTestHost(), 403, "", ""),
+		hhObs(hhNC1, "hh-"+string(hhTestMarker)+"-inert", 403, "", ""),
+		hhObs(hhA2, hhTestHost()+":8443", 403, "", ""),
+	}
+	if _, fired := hhRunFloor(t, emptyBaseline, nil); fired {
+		t.Error("the empty-body block fired with no baseline body, so an endpoint that normally answers empty is flagged a block")
+	}
+
+	// One probe reached with a body against a non-empty baseline: the application answered at least
+	// once, so neither the empty-body arm nor the floor should fire.
+	oneReached := []faOwnObs{
+		hhObs(hhA1, hhTestHost(), 403, "", ""),
+		hhObs(hhNC1, "hh-"+string(hhTestMarker)+"-inert", 403, "", ""),
+		hhObs(hhA2, hhTestHost()+":8443", 200, `{"debug":{"forwarded_host":"x"}}`, ""),
+	}
+	if _, fired := hhRunFloor(t, oneReached, []byte(hhTestBaselineBody)); fired {
+		t.Error("the floor fired where one probe reached with a body, so an endpoint that told our values apart is flagged a block")
+	}
+}
+
 // AND IT STANDS DOWN WHERE pxUniformBlock CAN SPEAK. Three identical non-baseline responses are
 // the gate's own case, and two arms answering one question is how a class contradicts itself.
 func TestTheFloorRefusalStandsDownWhereTheBlockGateCanSpeak(t *testing.T) {

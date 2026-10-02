@@ -54,18 +54,27 @@ export async function attachToTab(tabId) {
     await chrome.debugger.attach({ tabId }, DEBUGGER_VERSION);
   } catch (error) {
     const message = String(error && error.message ? error.message : error);
-    // Already attached by us in a previous worker lifetime: adopt it rather than reporting failure.
-    if (message.includes('Already attached')) {
-      attached.add(tabId);
+    // Chrome uses the SAME "Another debugger is already attached to the tab with id: N" message
+    // (lowercase "already attached") for two very different situations: a tab WE still hold from a
+    // previous worker lifetime (attached is in-memory and resets on SW restart), and a tab a FOREIGN
+    // debugger owns (the operator's DevTools panel, or another extension). Only the first is ours to
+    // adopt. Probe by trying Network.enable: it succeeds only for the client that is actually
+    // attached, so claim the tab ONLY when it succeeds. For a foreign owner it fails, and we must NOT
+    // add the tab to `attached` — otherwise attachToTab's has() short-circuit (above) marks it
+    // attached forever while capturing nothing, and syncAttachments never retries it even after the
+    // DevTools window closes. Returning the error keeps it retryable so it recovers when the conflict
+    // clears, which is the documented invariant that one open DevTools window must not stop recording.
+    if (/already attached/i.test(message)) {
       try {
         await chrome.debugger.sendCommand({ tabId }, 'Network.enable', {
           maxTotalBufferSize: 20000000,
           maxResourceBufferSize: 10000000,
         });
+        attached.add(tabId);
+        return { ok: true };
       } catch (enableError) {
-        /* best effort */
+        return { ok: false, error: message };
       }
-      return { ok: true };
     }
     return { ok: false, error: message };
   }

@@ -52,14 +52,14 @@ var scopeMetricDefinitions = map[string][]scopeMetricDef{
 		{Key: "findings", Label: "Findings", Hint: "Findings from the most recent successful Nuclei scan."},
 		{Key: "impactful", Label: "Impactful", Hint: "Those findings rated critical, high or medium.", Emphasis: true},
 	},
-	// The URL workflow works one host in depth: what it exposes, what it takes, and what answered
-	// differently. Session is here because whether a credential is loaded decides what the rest of
-	// the workflow can even reach.
+	// The URL workflow works one host in depth: the domains in its scope, the endpoints it exposes,
+	// the parameters it takes, the leads worth testing, and the attack-vector surface those add up to.
 	"URL": {
+		{Key: "domains", Label: "Domains", Hint: "The target's own domain (always 1) plus every adjacent host promoted into scope from the manual crawl."},
 		{Key: "endpoints", Label: "Endpoints", Hint: "Consolidated endpoints currently in scope, excluding deleted ones."},
 		{Key: "parameters", Label: "Parameters", Hint: "Hidden parameters found by Arjun and x8."},
-		{Key: "fuzz_findings", Label: "Fuzz Findings", Hint: "Stored ffuf findings, excluding dismissed ones.", Emphasis: true},
-		{Key: "session", Label: "Session", Hint: "Auth flows and session tokens configured for this target."},
+		{Key: "pointers", Label: "Pointers", Hint: "Prioritised leads from the Investigate Attack Vectors pass: the vectors the evidence says are worth testing, and which tool to aim at each.", Emphasis: true},
+		{Key: "attack_vectors", Label: "Attack Vectors", Hint: "Consolidated attack vectors, summed across every insertion point (query, body, path, header, cookie, fragment)."},
 	},
 }
 
@@ -115,19 +115,17 @@ func GetScopeTargetMetrics(w http.ResponseWriter, r *http.Request) {
 		 WHERE deleted_at IS NULL GROUP BY 1`)
 	countInto("parameters",
 		`SELECT scope_target_id::text, count(*) FROM parameter_enumeration_results GROUP BY 1`)
-	// Dismissed findings are excluded here for the same reason the findings list hides them: the
-	// operator has already said they are not worth looking at, and a count that ignores that is a
-	// count of work already done.
-	// Keyed apart from the Nuclei count deliberately. Both were once called "findings" and summed on
-	// any target that had run both, so a URL target with 66 ffuf findings and a Nuclei scan reported
-	// 138 of something that does not exist.
-	countInto("fuzz_findings",
-		`SELECT scope_target_id::text, count(*) FROM fuzz_findings
-		 WHERE triage <> 'dismissed' GROUP BY 1`)
-	countInto("session",
-		`SELECT scope_target_id::text, count(*) FROM auth_flows GROUP BY 1`)
-	countInto("session",
-		`SELECT scope_target_id::text, count(*) FROM session_tokens GROUP BY 1`)
+	// Attack vectors: one request carrying user-controlled input. Counting the rows is the sum across
+	// every insertion point (query, body, path, header, cookie, fragment), which is the one surface
+	// figure the Consolidate Attack Vectors card headlines.
+	countInto("attack_vectors",
+		`SELECT scope_target_id::text, count(*) FROM attack_vectors
+		 WHERE deleted_at IS NULL GROUP BY 1`)
+	// Adjacent hosts the operator promoted into scope from the manual crawl. The direct domain is
+	// added per URL target below, so the Domains column always starts at 1.
+	countInto("domains",
+		`SELECT scope_target_id::text, count(*) FROM scope_target_scope_hosts
+		 WHERE in_scope = true GROUP BY 1`)
 
 	// A Company target's live servers and cloud assets come from the consolidated attack surface
 	// rather than from target_urls, which is why one "Live Servers" column cannot be one query.
@@ -172,6 +170,34 @@ func GetScopeTargetMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		log.Printf("[WARN] scope target metrics (nuclei): %v", err)
+	}
+
+	// URL-target-only metrics, one pass over the URL targets.
+	//
+	// Domains always counts the direct domain itself, so every URL target starts at 1 and the adjacent
+	// in-scope hosts counted above add to it; a target with no adjacent hosts still reads 1 rather than
+	// a dash. Pointers are built the same way the Pointers modal builds them, per target, because they
+	// are derived and ranked from several sources (reflection probes, vector findings, triage) rather
+	// than stored in one table, so there is no grouped query for them.
+	if rows, err := dbPool.Query(ctx, `SELECT id::text FROM scope_targets WHERE type = 'URL'`); err == nil {
+		var urlIDs []string
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				urlIDs = append(urlIDs, id)
+			}
+		}
+		rows.Close()
+		for _, id := range urlIDs {
+			add(id, "domains", 1) // the target's own domain
+			if pointers, _, perr := buildPointers(ctx, id); perr == nil {
+				add(id, "pointers", len(pointers))
+			} else {
+				log.Printf("[WARN] scope target metrics (pointers %s): %v", id, perr)
+			}
+		}
+	} else {
+		log.Printf("[WARN] scope target metrics (url targets): %v", err)
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{

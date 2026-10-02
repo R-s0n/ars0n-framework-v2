@@ -188,7 +188,18 @@ func executeCrawlerScan(
 		if run.Err != nil {
 			res.Status = "error"
 			if run.TimedOut {
-				res.Error = fmt.Sprintf("crawl timed out after %s", perHostTimeout)
+				// Salvage what the crawler printed before the deadline. The stdout buffer holds every URL
+				// it emitted up to the kill; discarding them (the old behaviour) meant a 20-minute crawl of
+				// a large site consolidated ZERO endpoints despite thousands of URLs already in its output.
+				// The host still reports "error" because it genuinely did not finish - the status is honest
+				// and the partial discovery is kept.
+				salvaged := crawlerURLsFromOutput(tool, run.Stdout)
+				if len(salvaged) > 0 {
+					res.URLs = len(salvaged)
+					allURLs = append(allURLs, salvaged...)
+				}
+				res.Error = fmt.Sprintf("crawl timed out after %s (salvaged %d URL(s) collected before the deadline)",
+					perHostTimeout, len(salvaged))
 			} else {
 				res.Error = strings.TrimSpace(run.Stderr)
 				if res.Error == "" {

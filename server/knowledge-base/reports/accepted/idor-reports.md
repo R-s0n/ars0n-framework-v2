@@ -2,6 +2,20 @@
 
 > A collection of accepted/disclosed IDOR (Insecure Direct Object Reference) and Broken Access Control vulnerability reports from bug bounty programs.
 
+## How real-world IDOR actually works (read before the reports)
+
+An IDOR is NOT just "change an id and see another object." It is real only when BOTH of these hold, and every report below is an instance of both:
+
+1. **An authorization boundary is crossed.** The server fetches/modifies the object named by the identifier without confirming the caller is entitled to THAT object. You must reach data meant to be private - another user's record, another tenant's data, fields the owner never exposes. An endpoint that returns data with no auth is NOT an IDOR if that data is intended to be public (a shared business card, a published profile). No boundary, no bug.
+
+2. **You can OBTAIN the target identifier.** This is the half most write-ups skip, and it decides exploitability:
+   - **Predictable ids** (sequential ints, short numbers, timestamps, base64/hex of an int) are guessable - you enumerate them yourself, so impact scales to mass extraction. Highest risk.
+   - **Random GUID / UUIDv4** (122 random bits) are NOT guessable; iterating them is infeasible. An endpoint keyed only by a random GUID you can never see or guess is NOT an exploitable IDOR by guessing. Do not report "swap the UUID" with no way to get another user's UUID.
+   - **A GUID becomes an IDOR only if you can get it:** it leaks in a response you can reach (a list/search/autocomplete/export endpoint, another user's profile, a share/referral link, an error message, a notification email, a cached page, a JWT/cookie), or a less-protected endpoint returns it. The hunt is finding the leak, then replaying it across the boundary. "Unguessable is not the same as authorized."
+   - UUIDv1 (MAC+timestamp) and ULID/Snowflake (time-ordered) are partially predictable - probe, do not assume.
+
+**The clean proof** is two accounts: as A, capture a request and note the object id; replay it with B's session (or no auth) and B's id; if A's private data comes back, it is an IDOR. Two accounts give you a real second-principal id even when it is an unguessable GUID - which is the whole reason to hold two identities. The absence of an authorization error is itself the tell.
+
 ---
 
 ### 1. IDOR on /bugs.json Enables Viewing Private Report Details (HackerOne)

@@ -62,6 +62,11 @@ const EXEMPT = {
   search_knowledge_base: 'same reason as browse_knowledge_base. The warning that matters, that a ' +
     'hit proves the words are in the corpus and not that the finding applies to this target, is ' +
     'already on every response it returns.',
+  get_attack_playbook: 'the attack-playbook catalogue IS a teaching layer, the how-to-FIND companion ' +
+    'to get_methodology\'s target_fit. Its own description carries the whole lesson (call with no ' +
+    'attack for the index of all classes, then an id/name/alias for one playbook) and it reads the ' +
+    'same source of truth as the UI Possible Attacks modal, so a guidance block restating it would ' +
+    'only duplicate what the tool already says.',
 };
 
 // The fields that are attached to a tool result, in the order they are attached.

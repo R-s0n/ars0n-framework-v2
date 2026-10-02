@@ -59,6 +59,7 @@ const { replayRequestSchema, replayRequest, manageRequestVersionsSchema, manageR
 const { manageFlowDetectionSchema, manageFlowDetection, manageFlowConfigSchema, manageFlowConfig, getFlowMetricsSchema, getFlowMetrics } = require('./tools/flowdetection');
 const { manageFlowBuilderSchema, manageFlowBuilder } = require('./tools/flowbuilder');
 const { browseKnowledgeBaseSchema, browseKnowledgeBase, readKnowledgeFileSchema, readKnowledgeFile, searchKnowledgeBaseSchema, searchKnowledgeBase } = require('./tools/knowledgebase');
+const { getAttackPlaybookSchema, getAttackPlaybook } = require('./tools/attackplaybook');
 const { listWorkflowsSchema, listWorkflows, getWorkflowSchema, getWorkflow } = require('./tools/workflowbook');
 
 const guidance = require('./guidance');
@@ -554,6 +555,10 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
   server.tool('search_knowledge_base', 'Line-level search across the whole knowledge base, returning matching lines with their file, line number and nearest heading. This is the way into the report corpora: one 607 KB file is an index of disclosed reports, one per line with its link and bounty, so a query answers with exactly the lines that matched and nothing else. It is a case-insensitive SUBSTRING and not a regex and not a concept, so "IDOR" will not find a report titled "Broken Access Control"; search for both and prefer the words a report title would use. A hit proves the words appear in the corpus, not that the finding applies to your target.', searchKnowledgeBaseSchema.shape, async (params) => {
     const result = await searchKnowledgeBase(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('get_attack_playbook', 'The per-attack HUNTING PLAYBOOK for a bug class: where the flaw lives, how to actually find it, the concrete tests with example payloads, the edge cases and bypass tricks, and how each STRIDE impact is weaponized. This is the how-to-FIND companion to get_methodology\'s target_fit, which is how to SELECT a target: target_fit decides whether a target is worth picking for class X, this is how you then hunt X. Call with no `attack` for the index of all 37 classes, then pass an id/name/alias (idor, sql-injection, ssrf, "cache poisoning", nosqli, lfi, jwt, oauth) for one full playbook. Same source of truth as the UI Possible Attacks modal.', getAttackPlaybookSchema.shape, async (params) => {
+    return getAttackPlaybook(params);
   });
 
   // ============================================================
