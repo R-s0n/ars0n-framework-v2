@@ -47,6 +47,7 @@ const {
   BYPASS: S_BYPASS,
   THREAT: S_THREAT,
 } = require('./steps');
+const { SESSION_DECAY_RULE, GOAL_RULE } = require('./keepHunting');
 
 module.exports = {
 
@@ -152,6 +153,45 @@ module.exports = {
           'as deliberate blanking rather than as "not supplied". Passing target_id as well saves one ' +
           'request per target, because without it the note is found by asking every target.',
         next: 'manage_notes action:"get"',
+      },
+    },
+  },
+
+  manage_goals: {
+    step: S_CRAWL,
+    tool: 'The engagement GOAL for a scope target: the one specific, PoC-backed objective the hunt ' +
+      'converges on, and the one legitimate finish line. Set and ACTIVATE a goal before hunting; when ' +
+      'the goal gate is on, the scan and attack tools refuse to run until this target has an active one.',
+    rule: GOAL_RULE,
+    lies: 'A goal is reached only when captured artifacts prove its GIVEN/WHEN/THEN success_criteria ' +
+      'AND the operator signs off. The hunter can reach candidate and record a verify verdict, but ' +
+      '"verified" is a proposal, not a win, and the AI can never set "met". A failed verify closes the ' +
+      'attempt, not the goal.',
+    next: 'manage_goals action:"activate", then hunt; propose with artifacts once reached',
+    derived: false,
+    actions: {
+      create: {
+        tool: 'Add a goal (starts as draft). Give it a GIVEN/WHEN/THEN success_criteria that is binary ' +
+          'and checkable against captured artifacts, and name whose data or which resource it is about.',
+        next: 'manage_goals action:"activate"',
+      },
+      propose: {
+        tool: 'Claim the goal is reached. REQUIRES candidate_evidence: the captured artifact ids, the ' +
+          'matched value, the baseline/differential request, numbered repro steps. This is as far as ' +
+          'the hunter may move it.',
+        lies: 'A prose claim is not evidence: propose without the captured request/response artifacts ' +
+          'is rejected, and reaching candidate is not reaching the goal - verify and the operator ' +
+          'sign-off still stand between you and met.',
+        next: 'manage_goals action:"verify" in an isolated adversarial turn',
+      },
+      verify: {
+        tool: 'Record the verdict of an ISOLATED adversarial verify turn (fresh context, artifact-only, ' +
+          'assume the hunter is gaming it). pass sets verified (awaiting operator sign-off); fail sends ' +
+          'it back to active with the open criteria named.',
+        lies: 'verified is a PROPOSAL, not done: only the operator sets met. Do not run verify in the ' +
+          'same context as the hunt that produced the claim; a self-grading verifier is how fake ' +
+          'success gets through.',
+        next: 'surface the verified goal for operator sign-off',
       },
     },
   },
@@ -392,6 +432,12 @@ module.exports = {
     tool: 'Documents HOW the server decides who is asking, each pattern backed by one real request ' +
       'and the response it got, and replays them to check the mechanism is still the one in front ' +
       'of you.',
+    rule: 'Every object-reference endpoint is its own authorization test and must be confirmed on ' +
+      'its own. The check lives in each handler, not in shared middleware you can clear once, so an ' +
+      'application that enforces it on a hundred endpoints can still forget the hundred-and-first, ' +
+      'and that one is the finding. Never treat a run of correct checks as proof the rest are safe; ' +
+      'test each endpoint, each verb and each id namespace separately and in both directions. The ' +
+      'target is 100% certainty that no handler is missing the check, not one counter-example.',
     vuln: 'The category is the whole point because it says whether the endpoint is worth attacking. ' +
       'parameter means the caller sets the id directly and is the best IDOR target; signed_token ' +
       'needs a signature failure first; user_context_object leaves the attacker nothing to move.',
@@ -516,9 +562,23 @@ module.exports = {
       'policy entities and permissions, roles and actions and forbidden cells, discretionary ' +
       'objects and levels. The cheapest way to learn what has been modelled before spending calls ' +
       'on the four listing tools.',
-    lies: 'These are counts of what somebody WROTE DOWN, not of what the application has. A zero ' +
-      'anywhere means nobody modelled that section, and a section with rows but zero forbidden ' +
-      'cells or zero parameter-category patterns generates no tests at all.',
+    rule: 'Authorization is enforced per handler, not by one middleware you clear once, so coverage ' +
+      'is never transitive: that the modelled endpoints check the caller correctly is a fact about ' +
+      'those endpoints and says NOTHING about the one not yet tested. The job is not to find a ' +
+      'missing check, it is to PROVE every object-reference endpoint has one, in both directions and ' +
+      'on every verb and every id namespace, because a single handler that forgot is the finding and ' +
+      'it only takes one. Real systems almost never apply the check uniformly; a run of correct ' +
+      'checks across ten or a thousand endpoints is exactly what the application owner assumes holds ' +
+      'everywhere, and stopping on that pattern adopts their blind spot. Enumerate every endpoint and ' +
+      'confirm each on its own; never infer the untested rest from the tested many.',
+    lies: [
+      'These are counts of what somebody WROTE DOWN, not of what the application has. A zero ' +
+        'anywhere means nobody modelled that section, and a section with rows but zero forbidden ' +
+        'cells or zero parameter-category patterns generates no tests at all.',
+      'A high count reads as thorough coverage, but it is coverage of what was MODELLED, never of ' +
+        'what exists, and seeing many endpoints guarded correctly is not evidence the next one is. ' +
+        'The endpoints nobody listed are exactly where the one unchecked handler hides.',
+    ],
     next: 'manage_identity_patterns, manage_role_access, or manage_policy_access',
     derived: false,
   },
@@ -650,6 +710,7 @@ module.exports = {
         'get a genuinely unauthenticated arm rather than hoping the scanner ignores them.',
     ],
     next: 'check_session_tokens action:"validate", then run_endpoint_scan',
+    rule: SESSION_DECAY_RULE,
     derived: false,
     actions: {
       parse: {
@@ -699,6 +760,7 @@ module.exports = {
       'a perfectly valid session returns not_honoured purely because the routing cookie was missing ' +
       'from the request; look for a per-response backend header before touching the auth flow.',
     next: 'manage_session_tokens action:"create" for the companion cookie, then run_endpoint_scan',
+    rule: SESSION_DECAY_RULE,
     derived: false,
     actions: {
       validate: {

@@ -168,6 +168,70 @@ export function migrateExtraHostStorage(stored) {
   };
 }
 
+/* ------------------------------------------------------------------ auth-host hints */
+
+// Auth hosts are the third host class: a host the application contacts to ESTABLISH or REFRESH a
+// session (an OAuth/SSO/IdP/token-mint host) that must be RECORDED so the session can be renewed, but
+// never scanned. The capturer normally refuses an out-of-scope host; a host the operator has
+// classified as auth is rescued and recorded instead, tagged so nothing downstream treats it as an
+// attack target. The classification itself is owned by the server (a scope_target_scope_hosts row),
+// loaded into the worker's session state at start and updated live, so there is no per-target store
+// to keep here - only the suggestion patterns below.
+
+// Well-known third-party identity-provider host patterns, used ONLY to SUGGEST that an observed
+// out-of-scope host might be an auth host. This never auto-classifies and never sends traffic; it
+// only puts an "(IdP?)" hint on a row so the operator can confirm in one click. The list is a
+// convenience, not a boundary: an auth service not listed here still works, it just gets no hint.
+//
+// A "*." prefix means the domain and any subdomain. A "*" elsewhere matches exactly one DNS label,
+// which is what the regional AWS endpoints need (cognito-idp.<region>.amazonaws.com).
+export const AUTH_HOST_HINT_PATTERNS = [
+  // AWS Cognito
+  'cognito-idp.*.amazonaws.com', 'cognito-identity.*.amazonaws.com', '*.amazoncognito.com',
+  // Google / Firebase
+  'accounts.google.com', 'oauth2.googleapis.com', 'identitytoolkit.googleapis.com',
+  'securetoken.googleapis.com',
+  // Microsoft / Entra / Azure AD B2C
+  'login.microsoftonline.com', 'login.microsoft.com', 'login.live.com', '*.b2clogin.com',
+  // Okta
+  '*.okta.com', '*.oktapreview.com', '*.okta-emea.com',
+  // Auth0
+  '*.auth0.com',
+  // Ping, OneLogin
+  '*.pingone.com', '*.pingidentity.com', '*.onelogin.com',
+  // Apple
+  'appleid.apple.com',
+  // Social / developer OAuth
+  'www.facebook.com', 'graph.facebook.com', 'github.com', 'gitlab.com',
+  'login.salesforce.com', 'test.salesforce.com', '*.my.salesforce.com',
+  // Newer IdP-as-a-service
+  '*.clerk.accounts.dev', '*.supabase.co', '*.supabase.in', 'api.stytch.com', '*.stytch.com',
+  'api.workos.com', '*.frontegg.com', '*.fusionauth.io', '*.descope.com',
+  // MFA
+  '*.duosecurity.com',
+];
+
+function escapeAuthHintRegex(s) {
+  return String(s).replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Does the host match a seed IdP pattern? Suggestion only.
+export function looksLikeAuthHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/\.+$/, '').split(':')[0];
+  if (!host) return false;
+  return AUTH_HOST_HINT_PATTERNS.some((pattern) => {
+    if (pattern.startsWith('*.')) {
+      const base = pattern.slice(2);
+      return host === base || host.endsWith('.' + base);
+    }
+    if (pattern.includes('*')) {
+      const rx = new RegExp('^' + pattern.split('*').map(escapeAuthHintRegex).join('[^.]+') + '$');
+      return rx.test(host);
+    }
+    return host === pattern || host.endsWith('.' + pattern);
+  });
+}
+
 export function isStaticMedia(pathname) {
   const lower = String(pathname).toLowerCase();
   return STATIC_MEDIA_EXTENSIONS.some((ext) => lower.endsWith(ext));

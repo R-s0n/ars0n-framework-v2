@@ -322,6 +322,56 @@
       }
     },
     {
+      "typed": "@cognito-idp.us-east-1.amazonaws.com",
+      "expect": {
+        "effect": "auth",
+        "kind": "subtree",
+        "value": "cognito-idp.us-east-1.amazonaws.com",
+        "port": null,
+        "within": null,
+        "blast": "bounded"
+      }
+    },
+    {
+      "typed": "@=authx.staging-v2.tradetalk.us",
+      "expect": {
+        "effect": "auth",
+        "kind": "host",
+        "value": "authx.staging-v2.tradetalk.us",
+        "port": null,
+        "within": null,
+        "blast": "narrow"
+      }
+    },
+    {
+      "typed": "@*.okta.com",
+      "expect": {
+        "effect": "auth",
+        "kind": "subdomains",
+        "value": "okta.com",
+        "port": null,
+        "within": null,
+        "blast": "bounded"
+      }
+    },
+    {
+      "typed": "@~amazoncognito",
+      "expect": {
+        "effect": "auth",
+        "kind": "contains",
+        "value": "amazoncognito",
+        "port": null,
+        "within": null,
+        "blast": "wide"
+      }
+    },
+    {
+      "typed": "@",
+      "expect": {
+        "error": true
+      }
+    },
+    {
       "typed": "",
       "expect": {
         "error": true
@@ -422,7 +472,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "rule_deny"
+        "reason": "rule_deny",
+        "auth": false
       }
     },
     {
@@ -435,7 +486,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "rule_deny"
+        "reason": "rule_deny",
+        "auth": false
       }
     },
     {
@@ -448,7 +500,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "rule_deny"
+        "reason": "rule_deny",
+        "auth": false
       }
     },
     {
@@ -461,7 +514,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -474,7 +528,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "rule_deny"
+        "reason": "rule_deny",
+        "auth": false
       }
     },
     {
@@ -487,7 +542,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -499,7 +555,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -511,7 +568,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -523,7 +581,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -535,7 +594,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -547,7 +607,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -559,7 +620,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -571,7 +633,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -583,7 +646,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -595,7 +659,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -607,7 +672,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -619,7 +685,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -631,7 +698,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -643,7 +711,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -655,7 +724,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -667,7 +737,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -679,7 +750,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -691,7 +763,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -701,7 +774,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -713,7 +787,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "unnormalisable"
+        "reason": "unnormalisable",
+        "auth": false
       }
     },
     {
@@ -725,7 +800,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "unnormalisable"
+        "reason": "unnormalisable",
+        "auth": false
       }
     },
     {
@@ -739,7 +815,8 @@
       ],
       "expect": {
         "allowed": true,
-        "reason": "observed"
+        "reason": "observed",
+        "auth": false
       }
     },
     {
@@ -753,7 +830,8 @@
       ],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -767,7 +845,8 @@
       ],
       "expect": {
         "allowed": false,
-        "reason": "rule_deny"
+        "reason": "rule_deny",
+        "auth": false
       }
     },
     {
@@ -779,7 +858,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -791,7 +871,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -803,7 +884,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -815,7 +897,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -827,7 +910,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -840,7 +924,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -853,7 +938,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "rule_deny"
+        "reason": "rule_deny",
+        "auth": false
       }
     },
     {
@@ -865,7 +951,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -877,7 +964,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -889,7 +977,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -901,7 +990,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -913,7 +1003,8 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
       }
     },
     {
@@ -925,7 +1016,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -937,7 +1029,8 @@
       "observed": [],
       "expect": {
         "allowed": true,
-        "reason": "rule_allow"
+        "reason": "rule_allow",
+        "auth": false
       }
     },
     {
@@ -949,7 +1042,130 @@
       "observed": [],
       "expect": {
         "allowed": false,
-        "reason": "default_deny"
+        "reason": "default_deny",
+        "auth": false
+      }
+    },
+    {
+      "rules": [
+        "app.example.com",
+        "@cognito-idp.us-east-1.amazonaws.com"
+      ],
+      "subject": "https://cognito-idp.us-east-1.amazonaws.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "rule_auth",
+        "auth": true
+      }
+    },
+    {
+      "rules": [
+        "@cognito-idp.us-east-1.amazonaws.com"
+      ],
+      "subject": "https://x.cognito-idp.us-east-1.amazonaws.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "rule_auth",
+        "auth": true
+      }
+    },
+    {
+      "rules": [
+        "@*.okta.com"
+      ],
+      "subject": "https://login.okta.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "rule_auth",
+        "auth": true
+      }
+    },
+    {
+      "rules": [
+        "@*.okta.com"
+      ],
+      "subject": "https://okta.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny",
+        "auth": false
+      }
+    },
+    {
+      "rules": [
+        "@=authx.staging-v2.tradetalk.us"
+      ],
+      "subject": "https://authx.staging-v2.tradetalk.us/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "rule_auth",
+        "auth": true
+      }
+    },
+    {
+      "rules": [
+        "@cognito-idp.us-east-1.amazonaws.com",
+        "!cognito-idp.us-east-1.amazonaws.com"
+      ],
+      "subject": "https://cognito-idp.us-east-1.amazonaws.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "rule_deny",
+        "auth": false
+      }
+    },
+    {
+      "rules": [
+        "@idp.example.com",
+        "idp.example.com"
+      ],
+      "subject": "https://idp.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": true,
+        "reason": "rule_allow",
+        "auth": true
+      }
+    },
+    {
+      "rules": [
+        "@cognito-idp.us-east-1.amazonaws.com"
+      ],
+      "subject": "https://app.example.com/",
+      "admitObserved": false,
+      "observed": [],
+      "expect": {
+        "allowed": false,
+        "reason": "default_deny",
+        "auth": false
+      }
+    },
+    {
+      "rules": [
+        "@idp.example.com"
+      ],
+      "subject": "https://idp.example.com/",
+      "admitObserved": true,
+      "observed": [
+        "idp.example.com:443"
+      ],
+      "expect": {
+        "allowed": true,
+        "reason": "observed",
+        "auth": true
       }
     }
   ]

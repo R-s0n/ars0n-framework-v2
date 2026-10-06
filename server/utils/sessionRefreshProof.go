@@ -279,8 +279,28 @@ func proveSessionRefresh(ctx context.Context, tok SessionToken) SessionRefreshPr
 		return finishRefreshProof(out)
 	}
 	out.MintInScope = true
-	out.Evidence = append(out.Evidence, fmt.Sprintf(
-		"every host the flow %q would send to (%s) is inside this engagement's scope", flowName, strings.Join(hosts, ", ")))
+	// Partition the admitted hosts so the proof is auditable: a host admitted BECAUSE it is a
+	// classified auth host is called out by name rather than folded into "in scope", so the operator
+	// sees exactly why an OAuth/SSO host the scanners refuse was nonetheless a legitimate refresh
+	// destination.
+	var inScopeHosts, authAdmitted []string
+	for _, h := range hosts {
+		if scope.IsAuthHost(h) && !scope.Allows(h) {
+			authAdmitted = append(authAdmitted, h)
+		} else {
+			inScopeHosts = append(inScopeHosts, h)
+		}
+	}
+	if len(inScopeHosts) > 0 {
+		out.Evidence = append(out.Evidence, fmt.Sprintf(
+			"every in-scope host the flow %q would send to (%s) is inside this engagement's scope",
+			flowName, strings.Join(inScopeHosts, ", ")))
+	}
+	if len(authAdmitted) > 0 {
+		out.Evidence = append(out.Evidence, fmt.Sprintf(
+			"the flow %q also sends to %s, admitted as classified auth host(s): reachable to refresh the "+
+				"session but excluded from every scan", flowName, strings.Join(authAdmitted, ", ")))
+	}
 
 	// ---- From here on, requests go out.
 	out.Attempted = true
@@ -485,13 +505,18 @@ func sessionRefreshTargets(flowID string) (hosts []string, flowName string, refu
 
 // hostsOutsideScope returns the hosts the engagement does not allow, in the order given.
 //
+// It judges with AllowsForAuth, not Allows, because this is the REFRESH path: a host the operator
+// classified as an auth host (an OAuth/SSO/token-mint host, reachable to renew a session but never
+// scanned) is a legitimate destination for a refresh even though every scanner refuses it. Allows
+// still governs scanning; this one extra admission is confined to the refresh gate.
+//
 // A NIL SCOPE IS OUTSIDE. LoadScanScope never returns nil for a real target, so a nil here means
 // the boundary could not be constructed, and "we could not work out what is in scope" is not
 // permission to send. This is the same fail-closed reading DetectRefreshCapability applies.
 func hostsOutsideScope(scope *ScanScope, hosts []string) []string {
 	out := []string{}
 	for _, h := range hosts {
-		if scope == nil || !scope.Allows(h) {
+		if scope == nil || !scope.AllowsForAuth(h) {
 			out = append(out, h)
 		}
 	}

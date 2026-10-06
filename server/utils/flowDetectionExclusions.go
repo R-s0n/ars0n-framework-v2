@@ -477,6 +477,65 @@ func IsDeniedFlowHost(denied map[string]bool, host string) bool {
 	return false
 }
 
+// AuthHosts returns the hosts this target has classified as auth hosts: reachable to establish or
+// refresh a session, but never scanned. It is the permission counterpart to ExcludedScopeHosts.
+//
+// It reads the flag directly from the table rather than through ScanScope, for the same reason
+// ExcludedScopeHosts does: the classification must still apply when the target is driven by authored
+// scope rules, which REPLACE the legacy host list that ScanScope would otherwise consult.
+//
+// FAIL DIRECTION IS THE OPPOSITE of the deny lists, and deliberately so. A deny list that cannot be
+// read must fail CLOSED by refusing everything, because losing it sends traffic where it should not.
+// This is a PERMISSION list: losing it must fail closed by granting NOTHING, so a read error returns
+// the error and the caller then does not widen - an auth host simply stays refused and the refresh
+// fails visibly, which is the safe direction. The caller must never substitute an empty map for an
+// error and call that "no auth hosts" as though it were a successful read; it must propagate it.
+func AuthHosts(scopeTargetID string) (map[string]bool, error) {
+	rows, err := dbPool.Query(context.Background(),
+		`SELECT lower(host) FROM scope_target_scope_hosts
+		  WHERE scope_target_id = $1 AND auth_host = TRUE`, scopeTargetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string]bool{}
+	for rows.Next() {
+		var host string
+		if err := rows.Scan(&host); err != nil {
+			return nil, err
+		}
+		if host = strings.Trim(strings.TrimSpace(host), "."); host != "" {
+			out[host] = true
+		}
+	}
+	return out, rows.Err()
+}
+
+// IsAuthFlowHost reports whether a host, or any parent domain of it, was classified as an auth host.
+//
+// The parent walk mirrors IsDeniedFlowHost: classifying example.com as an auth host should admit
+// token.example.com for auth too, the same way excluding a parent excludes its children. Over-matching
+// here admits a host for AUTH (never for scanning), so the cost of the over-match is bounded to the
+// refresh path and never widens what a scanner may touch.
+func IsAuthFlowHost(authHosts map[string]bool, host string) bool {
+	host = strings.ToLower(strings.Trim(strings.TrimSpace(host), "."))
+	if host == "" || len(authHosts) == 0 {
+		return false
+	}
+	host = stripFlowHostPort(host)
+	if authHosts[host] {
+		return true
+	}
+	labels := strings.Split(host, ".")
+	for i := 1; i < len(labels); i++ {
+		if authHosts[strings.Join(labels[i:], ".")] {
+			return true
+		}
+	}
+	return false
+}
+
 // SortedFlowExclusionPatterns is used by the dry run's summary so the operator sees the whole list
 // they are running under, not only the rules that happened to fire.
 func SortedFlowExclusionPatterns(rules []FlowExclusion) []string {

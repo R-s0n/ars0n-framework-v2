@@ -34,7 +34,11 @@
 // scoped rather than over-scoped. The apex is one keystroke away: drop the `*.`.
 
 export const RULE_KINDS = ['host', 'subtree', 'subdomains', 'contains', 'regex'];
-export const RULE_EFFECTS = ['allow', 'deny'];
+// `auth` is the third effect: capture-but-never-scan. A host matched by an auth rule is RECORDED (so
+// the session it mints can be refreshed) and is reachable by the refresh path, but it is never put in
+// scan scope and never receives attack traffic. It is the pattern-based twin of the per-host
+// auth_host flag, so an operator can classify an IdP/token endpoint right where they author rules.
+export const RULE_EFFECTS = ['allow', 'deny', 'auth'];
 
 // A rule that can admit hosts nobody has seen yet is "wide" and is inert until confirmed.
 export const BLAST = { NARROW: 'narrow', BOUNDED: 'bounded', WIDE: 'wide' };
@@ -237,6 +241,10 @@ export function parseRule(line) {
     effect = 'deny';
     rest = rest.slice(1).trim();
     if (!rest) return { error: 'a deny needs something to deny' };
+  } else if (rest.startsWith('@')) {
+    effect = 'auth';
+    rest = rest.slice(1).trim();
+    if (!rest) return { error: 'an auth rule needs a host (the IdP or token endpoint to record for refresh)' };
   }
 
   // `within` binds a contains or regex rule to a subtree. Split it off before anything else so the
@@ -495,25 +503,37 @@ function pick(matching) {
 // already recorded, admitted only when admitObserved is on.
 export function decide(rules, subject, options) {
   const opts = options || {};
-  if (!subject) return { allowed: false, rule: null, reason: 'unnormalisable' };
+  if (!subject) return { allowed: false, rule: null, reason: 'unnormalisable', auth: false };
 
   const active = (rules || []).filter((r) => r && r.enabled !== false);
 
+  // Deny wins over everything, including auth: an explicit "never here" is a stronger statement than
+  // "record this for refresh", so a denied host is neither scanned, captured, nor auth-reachable.
   const denies = active.filter((r) => r.effect === 'deny' && ruleMatches(r, subject));
-  if (denies.length) return { allowed: false, rule: pick(denies), reason: 'rule_deny' };
+  if (denies.length) return { allowed: false, rule: pick(denies), reason: 'rule_deny', auth: false };
+
+  // auth is computed before the allow/observed branches so a host that is BOTH allowed and auth
+  // (a first-party SSO host you scan and also refresh through) reports auth:true alongside allowed.
+  const auths = active.filter((r) => r.effect === 'auth' && ruleMatches(r, subject));
+  const authMatched = auths.length > 0;
 
   const allows = active.filter((r) => r.effect === 'allow' && ruleMatches(r, subject));
-  if (allows.length) return { allowed: true, rule: pick(allows), reason: 'rule_allow' };
+  if (allows.length) return { allowed: true, rule: pick(allows), reason: 'rule_allow', auth: authMatched };
 
   if (opts.admitObserved && opts.observed) {
     const key = subject.host + ':' + (subject.port || 0);
     const seen = opts.observed instanceof Set
       ? opts.observed.has(key) || opts.observed.has(subject.host)
       : !!opts.observed[key] || !!opts.observed[subject.host];
-    if (seen) return { allowed: true, rule: null, reason: 'observed' };
+    if (seen) return { allowed: true, rule: null, reason: 'observed', auth: authMatched };
   }
 
-  return { allowed: false, rule: null, reason: 'default_deny' };
+  // An auth rule on its own does NOT put the host in scan scope: it stays out of scope for every
+  // scanner (allowed:false) while being marked an auth host, so it is captured for refresh and
+  // reachable by the refresh path but never attacked.
+  if (authMatched) return { allowed: false, rule: pick(auths), reason: 'rule_auth', auth: true };
+
+  return { allowed: false, rule: null, reason: 'default_deny', auth: false };
 }
 
 // Convenience for the capture path, which holds a URL rather than a parsed authority.
@@ -527,29 +547,40 @@ export function urlInScope(url, rules, options) {
 // thing an operator misreads at 2am. Every surface renders a sentence instead, from here.
 export function renderRule(rule) {
   if (!rule) return '';
-  const verb = rule.effect === 'deny' ? 'DENY' : 'Allow';
+  const verb = rule.effect === 'deny' ? 'DENY' : rule.effect === 'auth' ? 'AUTH' : 'Allow';
+  const note = rule.effect === 'auth' ? ' (recorded for session refresh, never scanned)' : '';
   const port = rule.port ? ` on port ${rule.port} only` : '';
   const within = rule.within ? ` under ${rule.within}` : '';
 
+  let base;
   switch (rule.kind) {
     case 'host':
-      return `${verb} ${rule.value} exactly, not its subdomains${port}`;
+      base = `${verb} ${rule.value} exactly, not its subdomains${port}`;
+      break;
     case 'subtree':
-      return `${verb} ${rule.value} and every subdomain of it${port}`;
+      base = `${verb} ${rule.value} and every subdomain of it${port}`;
+      break;
     case 'subdomains':
-      return `${verb} every subdomain of ${rule.value}, but not ${rule.value} itself${port}`;
+      base = `${verb} every subdomain of ${rule.value}, but not ${rule.value} itself${port}`;
+      break;
     case 'contains':
-      return `${verb} any host${within || ' anywhere'} whose name contains "${rule.value}"`;
+      base = `${verb} any host${within || ' anywhere'} whose name contains "${rule.value}"`;
+      break;
     case 'regex':
-      return `${verb} any host${within} matching /${rule.value}/`;
+      base = `${verb} any host${within} matching /${rule.value}/`;
+      break;
     default:
-      return `${verb} ${rule.value}`;
+      base = `${verb} ${rule.value}`;
   }
+  return base + note;
 }
 
 // The adjacent rule an operator probably also wants, offered next to the sentence. This is what
 // makes the narrower and wider forms discoverable without documentation.
 export function reciprocalSuggestion(rule) {
+  // An auth rule has no natural narrower/wider twin to offer: it is already the "capture, never scan"
+  // classification, and the apex/subdomain reciprocals would only confuse what it does.
+  if (rule && rule.effect === 'auth') return null;
   if (!rule || rule.effect === 'deny') {
     if (rule && rule.effect === 'deny' && rule.kind === 'subtree') {
       return { label: 'deny only this host, not the subtree', text: '!=' + rule.value };
@@ -572,15 +603,15 @@ export function reciprocalSuggestion(rule) {
 
 export function canonicalText(rule) {
   if (!rule) return '';
-  const bang = rule.effect === 'deny' ? '!' : '';
+  const prefix = rule.effect === 'deny' ? '!' : rule.effect === 'auth' ? '@' : '';
   const within = rule.within ? ` within ${rule.within}` : '';
   const port = rule.port ? ':' + rule.port : '';
   switch (rule.kind) {
-    case 'host':       return `${bang}=${rule.value}${port}`;
-    case 'subtree':    return `${bang}${rule.value}${port}`;
-    case 'subdomains': return `${bang}*.${rule.value}${port}`;
-    case 'contains':   return `${bang}~${rule.value}${within}`;
-    case 'regex':      return `${bang}re:${rule.value}${within}`;
-    default:           return `${bang}${rule.value}`;
+    case 'host':       return `${prefix}=${rule.value}${port}`;
+    case 'subtree':    return `${prefix}${rule.value}${port}`;
+    case 'subdomains': return `${prefix}*.${rule.value}${port}`;
+    case 'contains':   return `${prefix}~${rule.value}${within}`;
+    case 'regex':      return `${prefix}re:${rule.value}${within}`;
+    default:           return `${prefix}${rule.value}`;
   }
 }

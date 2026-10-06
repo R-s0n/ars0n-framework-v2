@@ -1241,7 +1241,7 @@ function App() {
   // Distinct non-target hosts seen. This is the number that matters most for what to test next:
   // each one is a separate application surface the target talks to.
   const [manualCrawlAdjacentHostCount, setManualCrawlAdjacentHostCount] = useState(0);
-  const [manualCrawlSessionCount, setManualCrawlSessionCount] = useState(0);
+  const [manualCrawlAuthHostCount, setManualCrawlAuthHostCount] = useState(0);
   const [showManageEndpointsModal, setShowManageEndpointsModal] = useState(false);
   const [consolidatedEndpointCount, setConsolidatedEndpointCount] = useState(0);
   const [isConsolidatingEndpoints, setIsConsolidatingEndpoints] = useState(false);
@@ -6071,26 +6071,26 @@ function App() {
 
   const loadManualCrawlMetrics = async () => {
     if (!activeTarget) {
-      setManualCrawlSessionCount(0);
+      setManualCrawlAuthHostCount(0);
       setManualCrawlDirectCount(0);
       setManualCrawlAdjacentCount(0);
       setManualCrawlAdjacentHostCount(0);
       return;
     }
-    
+
     try {
-      const [sessionsResponse, endpointsResponse] = await Promise.all([
-        fetch(`/api/manual-crawl/sessions/${activeTarget.id}`),
+      const [hostsResponse, endpointsResponse] = await Promise.all([
+        fetch(`/api/manual-crawl/hosts/${activeTarget.id}`),
         fetch(`/api/manual-crawl/endpoints/${activeTarget.id}`)
       ]);
-      
-      if (sessionsResponse.ok) {
-        const sessions = await sessionsResponse.json();
-        setManualCrawlSessionCount(sessions?.length || 0);
+
+      if (hostsResponse.ok) {
+        const hostsData = await hostsResponse.json();
+        setManualCrawlAuthHostCount(hostsData?.auth_host_count || 0);
       } else {
-        setManualCrawlSessionCount(0);
+        setManualCrawlAuthHostCount(0);
       }
-      
+
       if (endpointsResponse.ok) {
         const endpoints = await endpointsResponse.json();
         const list = Array.isArray(endpoints) ? endpoints : [];
@@ -6107,7 +6107,7 @@ function App() {
       }
     } catch (err) {
       console.error('Error loading manual crawl metrics:', err);
-      setManualCrawlSessionCount(0);
+      setManualCrawlAuthHostCount(0);
       setManualCrawlDirectCount(0);
       setManualCrawlAdjacentCount(0);
       setManualCrawlAdjacentHostCount(0);
@@ -6170,7 +6170,7 @@ function App() {
       setManualCrawlDirectCount(0);
       setManualCrawlAdjacentCount(0);
       setManualCrawlAdjacentHostCount(0);
-      setManualCrawlSessionCount(0);
+      setManualCrawlAuthHostCount(0);
     }
   }, [activeTarget]);
   const handleOpenApplicationQuestionsModal = () => setShowApplicationQuestionsModal(true);
@@ -10470,8 +10470,8 @@ function App() {
                               <div className="text-muted small card-metric-label">Adjacent Hosts</div>
                             </Col>
                             <Col>
-                              <div className="text-danger fw-bold fs-4">{manualCrawlSessionCount}</div>
-                              <div className="text-muted small card-metric-label">Crawl Sessions</div>
+                              <div className="text-danger fw-bold fs-4">{manualCrawlAuthHostCount}</div>
+                              <div className="text-muted small card-metric-label">Auth Hosts</div>
                             </Col>
                           </Row>
                         </div>

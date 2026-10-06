@@ -18,10 +18,47 @@ const AUTH_CATEGORY_LABELS = {
   reset: 'Reset',
 };
 
+// Mirror of lib/scope.js looksLikeAuthHost. popup.html loads popup.js as a classic script and cannot
+// import the ES module, so the seed identity-provider patterns are duplicated here exactly, the same
+// way extraHostsByTarget mirrors the worker's shape. Used ONLY to show a quiet "(IdP?)" hint on a
+// dropped host so the operator notices it might be an auth host; it never classifies or sends
+// anything. An auth service not on this list still works - it just gets no hint.
+const AUTH_HOST_HINT_PATTERNS = [
+  'cognito-idp.*.amazonaws.com', 'cognito-identity.*.amazonaws.com', '*.amazoncognito.com',
+  'accounts.google.com', 'oauth2.googleapis.com', 'identitytoolkit.googleapis.com',
+  'securetoken.googleapis.com',
+  'login.microsoftonline.com', 'login.microsoft.com', 'login.live.com', '*.b2clogin.com',
+  '*.okta.com', '*.oktapreview.com', '*.okta-emea.com',
+  '*.auth0.com',
+  '*.pingone.com', '*.pingidentity.com', '*.onelogin.com',
+  'appleid.apple.com',
+  'www.facebook.com', 'graph.facebook.com', 'github.com', 'gitlab.com',
+  'login.salesforce.com', 'test.salesforce.com', '*.my.salesforce.com',
+  '*.clerk.accounts.dev', '*.supabase.co', '*.supabase.in', 'api.stytch.com', '*.stytch.com',
+  'api.workos.com', '*.frontegg.com', '*.fusionauth.io', '*.descope.com',
+  '*.duosecurity.com',
+];
+function looksLikeAuthHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/\.+$/, '').split(':')[0];
+  if (!host) return false;
+  const esc = (s) => String(s).replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+  return AUTH_HOST_HINT_PATTERNS.some((pattern) => {
+    if (pattern.startsWith('*.')) {
+      const base = pattern.slice(2);
+      return host === base || host.endsWith('.' + base);
+    }
+    if (pattern.includes('*')) {
+      return new RegExp('^' + pattern.split('*').map(esc).join('[^.]+') + '$').test(host);
+    }
+    return host === pattern || host.endsWith('.' + pattern);
+  });
+}
+
 let sessionState = {
   active: false,
   scopeHosts: [],
   extraHosts: [],
+  authHosts: [],
   observedOutOfScope: {},
   deepCapture: { enabled: false, attachedTabs: [], errors: [] },
   stats: { requestCount: 0, endpointCount: 0, queuedCount: 0, failedCount: 0, withResponseBody: 0 },
@@ -72,6 +109,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await refreshAuthState();
   await checkFrameworkConnection();
   await loadScopeRules();
+  await loadAuthHosts();
 });
 
 // One poll tick. Non-reentrant, and it retries the TARGET load whenever we are connected but have
@@ -111,6 +149,7 @@ function initializeEventListeners() {
     updateUI();
     // Rules belong to a target too, so they are reloaded for the same reason the host list is.
     void loadScopeRules();
+    void loadAuthHosts();
   });
   wireScopeRules();
   document.getElementById('addHostBtn').addEventListener('click', () => {
@@ -123,6 +162,15 @@ function initializeEventListeners() {
     if (event.key !== 'Enter') return;
     const input = event.target;
     void addHost(input.value).then(() => {
+      input.value = '';
+    });
+  });
+  // The blue "Auth" button beside Add classifies a typed host as an auth host (recorded for refresh,
+  // never scanned) rather than bringing it into scope. It is for a custom auth host the capturer has
+  // not surfaced on its own, so the operator does not have to wait for it to appear in a list.
+  document.getElementById('addAuthHostBtn').addEventListener('click', () => {
+    const input = document.getElementById('addHostInput');
+    void addAuthHost(input.value).then(() => {
       input.value = '';
     });
   });
@@ -249,6 +297,117 @@ async function toggleDeepCapture() {
     localError = response.error || 'Could not change deep capture';
   }
   await refreshSessionState();
+}
+
+// Auth hosts the popup knows about for the selected target, used for the list it renders when no
+// recording is live. The server is the source of truth (an auth_host row), so this is refreshed from
+// it after any change; during a recording the list renders from the worker's live state instead.
+let authHostsForTarget = [];
+
+// Classifies a host as an AUTH HOST: recorded from now on so the session it mints can be refreshed,
+// and marked out of scope server-side (in_scope=false) so no scan ever touches it. Works whether or
+// not a recording is live: during a recording it goes through the worker so the live capture picks it
+// up immediately; otherwise it is persisted to the selected target for the next recording. This is
+// what the "Auth" button beside the host input calls for a CUSTOM auth host, and what the per-row
+// Auth button calls for one the capturer already observed.
+async function addAuthHost(host) {
+  const value = String(host || '').trim();
+  if (!value) return;
+
+  if (sessionState.active) {
+    const response = await sendToWorker({ action: 'addAuthHost', host: value });
+    if (response && response.success) localError = null;
+    else localError = (response && response.error) || 'Could not classify as an auth host';
+    await refreshSessionState();
+    await loadAuthHosts();
+    return;
+  }
+
+  const targetId = selectedTargetId();
+  if (!targetId) {
+    localError = 'Select a target first: an auth host belongs to one target.';
+    updateUI();
+    return;
+  }
+  try {
+    const res = await fetchJSONWithTimeout(
+      `${frameworkUrl}/api/manual-crawl/hosts/${targetId}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hosts: [value], auth_host: true, in_scope: false,
+          auth_reason: 'classified as an auth host from the popup' }) },
+      8000);
+    if (!res.ok) throw new Error((res.body && res.body.message) || `framework returned ${res.status}`);
+    localError = null;
+  } catch (error) {
+    localError = 'Could not classify as an auth host: ' + error.message;
+  }
+  await loadAuthHosts();
+  updateUI();
+}
+
+// Removes an auth-host classification, both the live boundary (during a recording) and the server row.
+async function removeAuthHost(host) {
+  const value = String(host || '').trim();
+  if (!value) return;
+
+  if (sessionState.active) {
+    await sendToWorker({ action: 'removeAuthHost', host: value });
+    await refreshSessionState();
+    await loadAuthHosts();
+    return;
+  }
+
+  const targetId = selectedTargetId();
+  if (targetId) {
+    try {
+      await fetchJSONWithTimeout(
+        `${frameworkUrl}/api/manual-crawl/hosts/${targetId}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hosts: [value], auth_host: false }) },
+        8000);
+    } catch (error) {
+      /* best effort; the list refresh below reflects the true state either way */
+    }
+  }
+  await loadAuthHosts();
+  updateUI();
+}
+
+// Loads the classified auth hosts for the selected target from the server (the source of truth) so
+// the list can be shown even before a recording starts. Called on target change and after a change.
+async function loadAuthHosts() {
+  const targetId = currentScopeTargetId();
+  if (!targetId) {
+    authHostsForTarget = [];
+    renderAuthHosts();
+    return;
+  }
+  try {
+    const res = await fetchJSONWithTimeout(`${frameworkUrl}/api/manual-crawl/hosts/${targetId}`, {}, 8000);
+    const hosts = (res.ok && res.body && Array.isArray(res.body.hosts)) ? res.body.hosts : [];
+    authHostsForTarget = hosts.filter((h) => h && h.auth_host && h.host).map((h) => h.host);
+  } catch (error) {
+    authHostsForTarget = [];
+  }
+  renderAuthHosts();
+}
+
+// Renders the auth-host chips. During a recording the worker's live list is authoritative (the 2s
+// poll keeps sessionState current); otherwise the server-loaded list is used. Each chip removes.
+function renderAuthHosts() {
+  const block = document.getElementById('authHostsBlock');
+  const list = document.getElementById('authHostList');
+  if (!block || !list) return;
+  const hosts = sessionState.active ? (sessionState.authHosts || []) : authHostsForTarget;
+  list.textContent = '';
+  if (!hosts.length) {
+    block.classList.add('d-none');
+    return;
+  }
+  block.classList.remove('d-none');
+  hosts.forEach((host) => {
+    list.appendChild(chip(host, 'info', () => void removeAuthHost(host)));
+  });
 }
 
 async function addHost(host) {
@@ -387,6 +546,7 @@ function chip(text, variant, onRemove) {
 const outOfScopeRows = new Map();
 // Adds in flight, so the two-second poll cannot re-enable a button the user just pressed.
 const pendingHostAdds = new Set();
+const pendingAuthAdds = new Set();
 let lastScopeSignature = null;
 
 function renderScope() {
@@ -419,6 +579,7 @@ function renderScope() {
   }
 
   renderOutOfScope();
+  renderAuthHosts();
 }
 
 /* ------------------------------------------------------------------ scope rules */
@@ -499,9 +660,10 @@ function renderScopeRules() {
     row.className = 'd-flex align-items-start gap-2 mb-1';
 
     const dot = document.createElement('span');
-    dot.className = `badge bg-${rule.effect === 'deny' ? 'danger' : 'secondary'} flex-shrink-0`;
+    const effectBadge = rule.effect === 'deny' ? 'danger' : rule.effect === 'auth' ? 'info' : 'secondary';
+    dot.className = `badge bg-${effectBadge} flex-shrink-0`;
     dot.style.fontSize = '9px';
-    dot.textContent = rule.effect === 'deny' ? 'DENY' : 'ALLOW';
+    dot.textContent = rule.effect === 'deny' ? 'DENY' : rule.effect === 'auth' ? 'AUTH' : 'ALLOW';
 
     const text = document.createElement('div');
     text.className = 'flex-grow-1';
@@ -778,12 +940,45 @@ function createOutOfScopeRow(host) {
   label.title = host;
   label.textContent = host;
 
+  // A quiet "(IdP?)" hint on a host that matches a known identity-provider pattern. Suggestion only:
+  // it never classifies or sends anything; the operator confirms with the Auth button.
+  const hint = document.createElement('span');
+  hint.className = 'text-info flex-shrink-0';
+  hint.style.fontSize = '9px';
+  if (looksLikeAuthHost(host)) {
+    hint.textContent = 'IdP?';
+    hint.title = 'Looks like an identity provider. Use "Auth" to record it for session refresh '
+      + 'without ever scanning it.';
+  }
+
   // The count lives in its own fixed-width cell. Inline in the label, it pushed the Add button
   // sideways every time it grew a digit.
   const count = document.createElement('span');
   count.className = 'text-muted text-end flex-shrink-0';
   count.style.fontSize = '10px';
   count.style.width = '38px';
+
+  // "Auth" classifies the host as an auth host: recorded so the session it mints can be refreshed,
+  // never scanned. "Add" brings it into scope for scanning. The two are distinct, and either removes
+  // the row.
+  const authButton = document.createElement('button');
+  authButton.type = 'button';
+  authButton.className = 'btn btn-outline-info btn-sm py-0 px-2 flex-shrink-0';
+  authButton.style.fontSize = '10px';
+  authButton.style.width = '46px';
+  authButton.textContent = 'Auth';
+  authButton.title = 'Classify as an auth host: recorded so the session can be refreshed, never scanned.';
+  authButton.addEventListener('click', async () => {
+    if (pendingAuthAdds.has(host)) return;
+    pendingAuthAdds.add(host);
+    renderOutOfScope();
+    try {
+      await addAuthHost(host);
+    } finally {
+      pendingAuthAdds.delete(host);
+      renderOutOfScope();
+    }
+  });
 
   const button = document.createElement('button');
   button.type = 'button';
@@ -804,10 +999,12 @@ function createOutOfScopeRow(host) {
   });
 
   row.appendChild(label);
+  row.appendChild(hint);
   row.appendChild(count);
+  row.appendChild(authButton);
   row.appendChild(button);
 
-  return { row, count, button };
+  return { row, count, button, authButton };
 }
 
 function renderOutOfScope() {
@@ -854,6 +1051,11 @@ function renderOutOfScope() {
     if (entry.button.disabled !== pending) {
       entry.button.disabled = pending;
       entry.button.textContent = pending ? '…' : 'Add';
+    }
+    const authPending = pendingAuthAdds.has(host);
+    if (entry.authButton && entry.authButton.disabled !== authPending) {
+      entry.authButton.disabled = authPending;
+      entry.authButton.textContent = authPending ? '…' : 'Auth';
     }
 
     // Alternating tint so a domain reads across to its own Add button on a long list.

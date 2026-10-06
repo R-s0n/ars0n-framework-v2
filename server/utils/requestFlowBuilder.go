@@ -597,11 +597,17 @@ func requestFlowScopeRefusal(rawRequest, baseURL string, rails flowSendRails) (h
 		return "", "not sent: this step has no Host header and the flow has no base URL, " +
 			"so there is no way to tell which server to send it to."
 	}
-	if IsDeniedFlowHost(rails.Denied, host) {
+	// A host the operator classified as an auth host (an OAuth/SSO/token-mint host, reachable to
+	// establish or refresh a session but never scanned) is admitted past the in_scope deny and the
+	// scope boundary, because a built refresh flow must be able to reach it. It is NOT admitted past
+	// an exclusion rule below: an exclusion is the operator's "this path texts a real customer", which
+	// is a stronger statement than "this host is for auth" and must still win.
+	authHost := rails.Scope.IsAuthHost(host)
+	if !authHost && IsDeniedFlowHost(rails.Denied, host) {
 		return host, fmt.Sprintf(
 			"not sent: %s is marked out of scope for this target.", host)
 	}
-	if !rails.Scope.Allows(host) {
+	if !authHost && !rails.Scope.Allows(host) {
 		return host, fmt.Sprintf("not sent: %s is outside this target's scope. In scope: %s. "+
 			"Add the host in the scope settings if the engagement covers it.", host,
 			rails.Scope.Describe())

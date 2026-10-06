@@ -1,3 +1,8 @@
+// The goal layer is OFF for this unit suite: teach()'s goal-fetch would otherwise hit a live API that
+// is not running under the unit tests. GATE_MODE is read once at index.js load, so this must be set
+// before the require below. The goal layer has its own test (goals.test.js).
+process.env.GOAL_GATE = 'off';
+
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -399,11 +404,58 @@ test('a result that already has a guidance key is left alone', async () => {
     'a brief consumed on a call that attached nothing is a lesson the agent never received');
 });
 
-test('a tool with no entry gets nothing attached, not an empty object', async () => {
+test('a tool with no entry gets no guidance key but still carries the keep_hunting heartbeat', async () => {
+  // The always-on keep_hunting reframe rides EVERY eligible result, including the entry-less and
+  // EXEMPT knowledge-base tools, because the entry-less set is exactly where a premature "nothing
+  // left" conclusion is as likely as anywhere. What it must NOT do is invent a per-tool guidance key
+  // for a tool that has none, and it must preserve the handler's own result verbatim.
   const wrapped = teach('browse_knowledge_base', handlerReturning({ files: [] }));
   const out = decode(await wrapped({}, { sessionId: 's' }));
-  assert.deepStrictEqual(out, { files: [] });
-  assert.ok(!('guidance' in out));
+  assert.ok(!('guidance' in out), 'no per-tool guidance for an entry-less tool');
+  assert.ok(typeof out.keep_hunting === 'string' && out.keep_hunting.length > 0,
+    'the keep_hunting heartbeat attaches even when there is no per-tool entry');
+  assert.deepStrictEqual(out.files, [], 'the handler result is preserved beside the heartbeat');
+});
+
+test('a terminal-prone tool with an empty body escalates to the LOUD block; a rich body stays a heartbeat line', async () => {
+  session.reset();
+  const rich = decode(await teach('get_scope_overview', handlerReturning({ targets: [{ id: 1 }], count: 5 }))({}, { sessionId: 'r' }));
+  assert.strictEqual(typeof rich.keep_hunting, 'string', 'a rich result carries the one-line heartbeat');
+  const empty = decode(await teach('get_scan_results', handlerReturning({ findings: [], count: 0 }))({ target_id: 'T1' }, { sessionId: 'e' }));
+  assert.strictEqual(typeof empty.keep_hunting, 'object', 'an empty terminal-prone result escalates to the loud block');
+  assert.ok(Array.isArray(empty.keep_hunting.you_have_not_tried) && empty.keep_hunting.you_have_not_tried.length === 3);
+  assert.ok(empty.keep_hunting.next_move && empty.keep_hunting.not_a_stop,
+    'the loud block carries the next move and the legitimate-pause carve-out');
+});
+
+test('a run of empty results is the quit signal (loud even on a non-terminal tool); a productive result clears it', async () => {
+  session.reset();
+  const first = decode(await teach('some_read', handlerReturning([]))({}, { sessionId: 'q' }));
+  assert.strictEqual(typeof first.keep_hunting, 'string', 'one quiet call is normal, still the heartbeat');
+  const second = decode(await teach('some_read', handlerReturning([]))({}, { sessionId: 'q' }));
+  assert.strictEqual(typeof second.keep_hunting, 'object', 'two consecutive empties is the quit signal');
+  const third = decode(await teach('some_read', handlerReturning({ data: [1, 2, 3] }))({}, { sessionId: 'q' }));
+  assert.strictEqual(typeof third.keep_hunting, 'string', 'a productive result resets the quit counter');
+});
+
+test('whats_next with blocked and gaps both zero is the SOFT-DONE signal and fires the loud block', async () => {
+  // The advisor never returns an empty body: its advice array always carries at least the terminal
+  // note, so the structural isEmptyResult sees a rich object and would leave only the heartbeat. But
+  // blocked:0 and gaps:0 is the exact semantic state where "this target is done" gets concluded, so
+  // it must escalate. A rich advisor body with a real gap must NOT, or the escalation is wallpaper.
+  session.reset();
+  const done = decode(await teach('whats_next', handlerReturning(
+    { state: { discovered_endpoints: 107 }, advice: [{ severity: 'note', title: 'floor' }], blocked: 0, gaps: 0 },
+  ))({ target_id: 'T1' }, { sessionId: 'sd' }));
+  assert.strictEqual(typeof done.keep_hunting, 'object', 'blocked:0 gaps:0 is soft-done and must go loud');
+  assert.ok(Array.isArray(done.keep_hunting.you_have_not_tried) && done.keep_hunting.you_have_not_tried.length === 3);
+  assert.ok(/T1/.test(done.keep_hunting.next_move), 'the next move carries the target id for a one-call follow up');
+
+  session.reset();
+  const working = decode(await teach('whats_next', handlerReturning(
+    { state: {}, advice: [{ severity: 'gap', title: 'empty insertion point' }], blocked: 0, gaps: 1 },
+  ))({ target_id: 'T1' }, { sessionId: 'sw' }));
+  assert.strictEqual(typeof working.keep_hunting, 'string', 'a real gap is ordinary work, not soft-done: heartbeat only');
 });
 
 test('an error envelope is not touched', async () => {

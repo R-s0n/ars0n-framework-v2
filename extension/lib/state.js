@@ -92,6 +92,11 @@ export const EMPTY_STATE = {
   scopeTargetId: null,
   targetUrl: null,
   scopeHosts: [],
+  // Hosts classified as auth hosts for this target: recorded so the session they mint can be
+  // refreshed, but never scanned. shouldCapture rescues a request to one of these even when it is
+  // out of scope. Loaded from the server at session start and updated live when the operator
+  // classifies one from the popup.
+  authHosts: [],
   // Authored scope rules for this target, parsed. When non-empty these are the WHOLE boundary and
   // scopeHosts is not consulted, so a deny cannot be overridden by the host list.
   scopeRules: [],

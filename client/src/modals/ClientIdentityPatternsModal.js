@@ -4,8 +4,14 @@ import { Modal, Row, Col, Button, Form, Spinner, Badge, ListGroup, Alert } from 
 // A client identity pattern is one answer to the question "how does this application decide who is
 // asking", pinned to a single real request and the response it produced. The category is the field
 // everything else hangs off, because it is what decides whether an IDOR attempt is a five second
-// edit or a signature attack, so it is ranked, colour coded and used to group the list rather than
-// being buried as one more select in the form.
+// edit or a signature attack, so it is ranked, colour coded and used to group the list.
+//
+// Layout is a plain master-detail, the same shape as the other authorization modals: a narrow list
+// of saved patterns on the left, and a wide detail panel on the right that edits the selected one
+// and carries the education for its category. "New pattern" adds an unsaved draft at the top of the
+// list and opens it in the detail panel; saving turns the draft into a real row. There is no
+// auto-detect column here on purpose: identifier detection belongs to the consolidated attack
+// vectors, not to this modal.
 
 const CATEGORIES = [
   {
@@ -35,6 +41,103 @@ const CATEGORIES = [
 ];
 
 const CATEGORY_META = CATEGORIES.reduce((acc, c) => { acc[c.value] = c; return acc; }, {});
+
+// The education layer the operator reads in the detail panel, one block per category: what it is,
+// how to spot it in a captured request, the shapes it takes across tech stacks, how to actually
+// test it for IDOR, and the single mistake that most often turns a non-finding into a false report.
+// This is kept in sync with the manage_identity_patterns guidance the MCP server pushes to the
+// model, so the human in the UI and the agent over MCP read the same thing.
+const GUIDANCE = {
+  parameter: {
+    summary: 'The object or user id is a client-controlled value carried in the request (URL path, '
+      + 'query string, body field, or GraphQL variable) and the server trusts it to choose the '
+      + 'object. This is the strongest IDOR shape: testing it is just changing the value and '
+      + 're-sending.',
+    recognize: 'An id visible in the request that changes when you open a different object: '
+      + '/accounts/8412/invoices, ?user_id=8412, {"orderId":"8412"}, or a GraphQL variable such as '
+      + '{"kaid":"..."}. If you can see it and edit it, it is a parameter.',
+    variants: [
+      'REST numeric auto-increment id (sequential, trivially enumerable - highest value).',
+      'UUID / GUID (not guessable; needs the id leaked elsewhere first).',
+      'Hashid / slug / short code (sometimes reversible; often leak-dependent).',
+      'GraphQL variable id, or a Relay global id (base64 of "Type:123" - decode, change, re-encode).',
+      'Composite key (tenantId + objectId) where the server checks only one half.',
+      'Mass assignment: an id in a write body (owner_id, account_id) that redirects the write to '
+        + 'another tenant.',
+    ],
+    how_to_test: [
+      'Capture the request as account A, swap the id to account B\'s object, resend, and READ THE '
+        + 'BODY - a 200 with B\'s data is the finding; a 200 of nulls/your-own-data is not.',
+      'Sequential ids: walk them (id-1, id+1) to confirm cross-account reach and scale.',
+      'High-entropy ids (UUID/40-hex): first prove the id is obtainable (leaked in another response, '
+        + 'a URL, a referrer, a log) - an unguessable id with no leak path is low severity.',
+      'Try deleting the param, sending an array, or type-juggling (string vs int) to slip the check.',
+    ],
+    trap: 'Read the body, never the status. The classic false hit is a 200 that returns YOUR OWN '
+      + 'data, an empty/placeholder object, or a soft-404 served as 200. A 403 is not always a miss, '
+      + 'and a UUID you had to supply yourself (with no leak path) is not a weaponizable IDOR.',
+  },
+  signed_token: {
+    summary: 'The identity is carried inside a token the client holds whose integrity is '
+      + '(supposedly) cryptographically protected: a JWT, a signed or encrypted cookie, an '
+      + 'HMAC-signed value, or a bearer/API key. The id cannot be moved until the token protection '
+      + 'is defeated - so the bug is in the token handling first, the id second.',
+    recognize: 'A JWT (three base64url segments split by dots), a framework session cookie carrying '
+      + 'value.signature (Rails, Django, Express cookie-session, Laravel, Flask, ASP.NET), an '
+      + 'Authorization: Bearer header, or a request parameter accompanied by a signature/HMAC.',
+    variants: [
+      'JWT alg:none (strip the signature) - the server accepts an unsigned token.',
+      'JWT algorithm confusion: re-sign an RS256 token as HS256 using the public key as the HMAC key.',
+      'Weak or leaked HMAC secret (brute/dictionary the JWT), or kid header path-traversal / SQLi.',
+      'Signature simply not verified by the backend (the classic).',
+      'Signed/encrypted cookie whose secret is disclosed (source leak, default key) - forge at will.',
+      'Opaque/bearer token that is predictable, long-lived, or replayable across accounts.',
+    ],
+    how_to_test: [
+      'Decode the token, change the identity claim (sub, user_id, tenant, kaid), and resend as-is - '
+        + 'if accepted, verification is broken.',
+      'Try alg:none and RS256->HS256 confusion; try a known/guessed secret.',
+      'Replay another account\'s captured token verbatim to test binding/expiry.',
+      'If the signature genuinely holds and no key is forgeable, the id is not movable here - pivot '
+        + 'to another identifier on the same endpoint.',
+    ],
+    trap: 'A token being decodable is not a vulnerability - you need the signature actually '
+      + 'unchecked, or a key you can forge with. And when you swap an external id, make sure the 200 '
+      + 'is not just your own data scoped from the token\'s own sub; diff the body, never trust the '
+      + 'status.',
+  },
+  user_context_object: {
+    summary: 'The identity is NOT in the request payload at all. The server derives the acting user '
+      + 'from ambient context (session cookie lookup, SSO / OAuth2 / OIDC claims, mTLS cert, '
+      + 'API-gateway-injected header, or tenant/org context) and uses that to scope the query. The '
+      + 'caller controls nothing, so there is nothing in the request to swap - the worst case for a '
+      + 'classic IDOR.',
+    recognize: 'The private read carries no id for its subject; the same bytes return different data '
+      + 'purely because of the session cookie; responses describe "you" (isSelf:true, /me). Record '
+      + 'this as server_side with no identifier value - that itself is evidence there is nothing to '
+      + 'move.',
+    variants: [
+      'Session cookie resolved server-side to the user (opaque session store).',
+      'OAuth2 / OIDC / SAML claims (sub, email) read from the validated token server-side.',
+      'mTLS client certificate mapped to an identity.',
+      'API-gateway-injected identity header (X-User-Id, X-Tenant-Id) the backend trusts.',
+      'Multi-tenant/org context derived from the host or the session.',
+    ],
+    how_to_test: [
+      'You cannot swap it in the request. Instead, look for a SIBLING op that does take a target id '
+        + '(a report, an admin view) and test that one.',
+      'If identity rides in a gateway-injected header, try setting that header yourself against the '
+        + 'backend directly (SSRF, split-horizon, a dev host) - the backend may trust it.',
+      'Test tenant/org scoping: change the org/tenant hint and see if the query crosses the boundary.',
+      'Session fixation / confusion and token-vs-targetKaid binding on token-scoped reads.',
+    ],
+    trap: 'It usually is unexploitable for direct IDOR - do not force it. The finding, if any, is '
+      + 'identity confusion (a trusted injected header, a sibling id-taking op), not an id edit. And '
+      + 'swapping to a credential you minted for your own second account only proves the mechanism - '
+      + 'it is not cross-account impact unless an attacker could actually obtain that artifact. '
+      + 'Record the dead end and spend the hour on a parameter.',
+  },
+};
 
 const LOCATIONS = [
   { value: '', label: 'Not recorded' },
@@ -104,56 +207,44 @@ function buildRawResponse(p) {
   return lines.join('\n');
 }
 
-function rawRequestFromCandidate(candidate, fallbackHost) {
-  let host = fallbackHost || '';
-  let pathQ = candidate.endpoint_url || '/';
-  try {
-    const u = new URL(candidate.endpoint_url);
-    host = u.host;
-    pathQ = (u.pathname || '/') + (u.search || '');
-  } catch (_) { /* keep the raw string, it is still better than an empty box */ }
-  return `${candidate.method || 'GET'} ${pathQ} HTTP/1.1\nHost: ${host}\n\n`;
-}
+// The detail panel's education block for whichever category is selected in the form. Rendered big
+// and readable, because on video this is what gets walked through, and in practice it is what keeps
+// an operator from logging a user_context_object endpoint as an IDOR lead it can never be.
+function CategoryGuidance({ category }) {
+  const g = GUIDANCE[category];
+  const meta = CATEGORY_META[category];
+  if (!g || !meta) return null;
+  return (
+    <div className="bg-black rounded p-3 mb-3" style={{ border: '1px solid #343a40' }}>
+      <div className="d-flex align-items-center gap-2 mb-2">
+        <Badge bg={meta.variant}>{meta.label}</Badge>
+        <span className="text-white-50 small text-uppercase" style={{ letterSpacing: '0.04em' }}>
+          How this identity shape is attacked
+        </span>
+      </div>
+      <div className="text-white small mb-2">{g.summary}</div>
 
-// Work out where an auto-detected value actually sat, so the prefilled form starts from a claim
-// rather than from blanks. The point of guessing at all is that location and category are the two
-// fields an operator is most likely to leave alone, and a wrong default that looks filled in is
-// worse than an empty one, so anything not positively found in the URL stays unset.
-function guessPlacement(candidate) {
-  const value = String(candidate.value || '');
-  if (!value) return { identifier_location: '', identifier_name: '', category: 'parameter' };
+      <div className="text-info text-uppercase mb-1" style={{ fontSize: '0.66rem' }}>Recognise it</div>
+      <div className="text-white-50 small mb-2">{g.recognize}</div>
 
-  try {
-    const u = new URL(candidate.endpoint_url);
-    let matchedParam = '';
-    u.searchParams.forEach((v, k) => { if (v === value && !matchedParam) matchedParam = k; });
-    if (matchedParam) {
-      return { identifier_location: 'query', identifier_name: matchedParam, category: 'parameter' };
-    }
-    const segments = (u.pathname || '').split('/').filter(Boolean);
-    const idx = segments.indexOf(value);
-    if (idx !== -1) {
-      // The segment before the id is what the id refers to, so it is the closest thing to a name
-      // this location has: /accounts/8412 makes the identifier "accounts".
-      return {
-        identifier_location: 'path',
-        identifier_name: idx > 0 ? segments[idx - 1] : '',
-        category: 'parameter',
-      };
-    }
-  } catch (_) { /* not a parseable URL, fall through to the source based guess */ }
+      <div className="text-info text-uppercase mb-1" style={{ fontSize: '0.66rem' }}>Variants across stacks</div>
+      <ul className="text-white-50 small mb-2 ps-3">
+        {g.variants.map((v, i) => <li key={i}>{v}</li>)}
+      </ul>
 
-  // "decoded" means the auto-detector lifted this out of a JWT or base64 blob rather than reading
-  // it off the request line, which is exactly the signed token case.
-  if (candidate.source === 'decoded') {
-    return { identifier_location: 'token_claim', identifier_name: '', category: 'signed_token' };
-  }
-  return { identifier_location: '', identifier_name: '', category: 'parameter' };
+      <div className="text-info text-uppercase mb-1" style={{ fontSize: '0.66rem' }}>How to test it for IDOR</div>
+      <ul className="text-white-50 small mb-2 ps-3">
+        {g.how_to_test.map((v, i) => <li key={i}>{v}</li>)}
+      </ul>
+
+      <div className="text-warning text-uppercase mb-1" style={{ fontSize: '0.66rem' }}>Biggest false-positive trap</div>
+      <div className="text-white-50 small">{g.trap}</div>
+    </div>
+  );
 }
 
 const ClientIdentityPatternsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl }) => {
   const [patterns, setPatterns] = useState([]);
-  const [candidates, setCandidates] = useState([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [replayingId, setReplayingId] = useState(null);
@@ -162,6 +253,10 @@ const ClientIdentityPatternsModal = ({ show, handleClose, scopeTargetId, scopeTa
 
   const [form, setForm] = useState(EMPTY_FORM);
   const [selectedId, setSelectedId] = useState(null);
+  // True while a brand-new, unsaved pattern is open in the detail panel. It is what puts the
+  // "New pattern (unsaved)" row at the top of the list and what makes the panel show instead of the
+  // empty-state placeholder before anything has been saved.
+  const [draftMode, setDraftMode] = useState(false);
   // Keyed by pattern id so switching rows does not carry another row's replay banner with it. Each
   // entry records what the status was before the replay, which is the whole reason this exists: a
   // pattern that used to answer 200 and now answers 403 is a session that died, not a finding.
@@ -190,31 +285,19 @@ const ClientIdentityPatternsModal = ({ show, handleClose, scopeTargetId, scopeTa
     }
   }, [scopeTargetId]);
 
-  const fetchCandidates = useCallback(async () => {
-    if (!scopeTargetId) return;
-    try {
-      const res = await fetch(`/api/authz/client-identifiers/${scopeTargetId}`);
-      const data = res.ok ? await res.json() : [];
-      setCandidates(Array.isArray(data) ? data : []);
-    } catch (e) {
-      console.error('[IdentityPatterns] fetchCandidates failed:', e);
-      setCandidates([]);
-    }
-  }, [scopeTargetId]);
-
   useEffect(() => {
     if (show && scopeTargetId) {
       fetchPatterns();
-      fetchCandidates();
     }
     if (!show) {
       setForm(EMPTY_FORM);
       setSelectedId(null);
+      setDraftMode(false);
       setReplayInfo({});
       setError('');
       setNotice('');
     }
-  }, [show, scopeTargetId, fetchPatterns, fetchCandidates]);
+  }, [show, scopeTargetId, fetchPatterns]);
 
   const grouped = useMemo(() => CATEGORIES.map((c) => ({
     ...c,
@@ -228,12 +311,14 @@ const ClientIdentityPatternsModal = ({ show, handleClose, scopeTargetId, scopeTa
   const newPattern = () => {
     setForm(EMPTY_FORM);
     setSelectedId(null);
+    setDraftMode(true);
     setError('');
     setNotice('');
   };
 
   const editPattern = (p) => {
     setSelectedId(p.id);
+    setDraftMode(false);
     setForm({
       id: p.id,
       name: p.name || '',
@@ -249,7 +334,16 @@ const ClientIdentityPatternsModal = ({ show, handleClose, scopeTargetId, scopeTa
     setNotice('');
   };
 
+  const clearSelection = () => {
+    setForm(EMPTY_FORM);
+    setSelectedId(null);
+    setDraftMode(false);
+    setError('');
+    setNotice('');
+  };
+
   const canSave = form.name.trim() !== '' && form.category !== '';
+  const panelOpen = draftMode || !!selectedId;
 
   const savePattern = async () => {
     if (!canSave || !scopeTargetId) return;
@@ -281,6 +375,7 @@ const ClientIdentityPatternsModal = ({ show, handleClose, scopeTargetId, scopeTa
       if (!form.id && created && created.id) {
         setForm((prev) => ({ ...prev, id: created.id }));
         setSelectedId(created.id);
+        setDraftMode(false);
         setNotice('Pattern saved. Replay it to attach the response the target gives right now.');
       } else {
         setNotice('Pattern updated.');
@@ -304,7 +399,7 @@ const ClientIdentityPatternsModal = ({ show, handleClose, scopeTargetId, scopeTa
         delete next[id];
         return next;
       });
-      if (selectedId === id) newPattern();
+      if (selectedId === id) clearSelection();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -335,6 +430,7 @@ const ClientIdentityPatternsModal = ({ show, handleClose, scopeTargetId, scopeTa
         },
       }));
       setSelectedId(p.id);
+      setDraftMode(false);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -342,28 +438,57 @@ const ClientIdentityPatternsModal = ({ show, handleClose, scopeTargetId, scopeTa
     }
   };
 
-  // Pull a detected identifier into the create form. The candidate already knows the endpoint, the
-  // verb and the value it was seen with, so the only thing left for the operator is the category
-  // call, which is the one judgement no detector can make for them.
-  const applyCandidate = (c) => {
-    const placement = guessPlacement(c);
-    setSelectedId(null);
-    setForm({
-      ...EMPTY_FORM,
-      name: `${c.method || 'GET'} ${c.label || c.value}`.slice(0, 120),
-      category: placement.category,
-      description: c.label ? `Auto-detected: ${c.label}` : 'Auto-detected identifier',
-      raw_request: rawRequestFromCandidate(c, targetHost),
-      identifier_location: placement.identifier_location,
-      identifier_name: placement.identifier_name,
-      identifier_value: c.value || '',
-    });
-    setNotice('Prefilled from a detected identifier. Confirm the category before saving, it is the '
-      + 'field that decides how this gets attacked.');
-  };
-
   const rawResponse = buildRawResponse(selectedPattern);
   const selectedReplay = selectedId ? replayInfo[selectedId] : null;
+
+  const renderRow = (p) => (
+    <ListGroup.Item
+      key={p.id}
+      action
+      active={p.id === selectedId}
+      onClick={() => editPattern(p)}
+      className="bg-dark text-white py-2"
+    >
+      <div className="d-flex justify-content-between align-items-center">
+        <span className="text-truncate me-2">{p.name}</span>
+        <span className="d-flex align-items-center gap-1 flex-shrink-0">
+          {p.response_status
+            ? <Badge bg={statusVariant(p.response_status)}>{p.response_status}</Badge>
+            : <Badge bg="secondary">not sent</Badge>}
+          <Button
+            size="sm"
+            variant="outline-danger"
+            className="py-0 px-1"
+            style={{ fontSize: '0.66rem' }}
+            disabled={replayingId === p.id || !p.raw_request}
+            title={p.raw_request
+              ? 'Send the stored request again and replace the stored response'
+              : 'No raw request stored, so there is nothing to send'}
+            onClick={(e) => { e.stopPropagation(); replayPattern(p); }}
+          >
+            {replayingId === p.id ? <Spinner size="sm" animation="border" /> : 'Replay'}
+          </Button>
+          <i
+            role="button"
+            className="bi bi-trash text-danger ms-1"
+            title="Delete pattern"
+            onClick={(e) => { e.stopPropagation(); deletePattern(p.id); }}
+          />
+        </span>
+      </div>
+      <div
+        className="text-info text-truncate"
+        style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}
+        title={p.identifier_value}
+      >
+        {p.identifier_name || p.identifier_value || '(no identifier recorded)'}
+      </div>
+      <div className="text-white-50" style={{ fontSize: '0.66rem' }}>
+        {LOCATION_LABEL[p.identifier_location] || 'location not recorded'}
+        {replayInfo[p.id] ? ' | refreshed just now' : ''}
+      </div>
+    </ListGroup.Item>
+  );
 
   return (
     <Modal data-bs-theme="dark" show={show} onHide={handleClose} size="xl" dialogClassName="modal-90w">
@@ -384,325 +509,250 @@ const ClientIdentityPatternsModal = ({ show, handleClose, scopeTargetId, scopeTa
               </Alert>
             )}
 
-            <div className="d-flex flex-wrap gap-2 align-items-center mb-3">
-              <Button size="sm" variant="outline-danger" onClick={newPattern} disabled={busy}>
-                <i className="bi bi-plus-lg me-1" />New pattern
-              </Button>
-              <Button size="sm" variant="outline-secondary" onClick={fetchPatterns} disabled={loading || busy}>
-                {loading ? <Spinner size="sm" animation="border" /> : 'Refresh list'}
-              </Button>
-              <span className="text-white-50 small ms-auto">
-                {patterns.length} pattern(s):{' '}
-                {grouped.map((g) => `${g.rows.length} ${g.label.toLowerCase()}`).join(', ')}
-              </span>
-            </div>
-
             <Row>
-              {/* LEFT: patterns, grouped by how much of the identity the caller controls */}
-              <Col md={4} className="border-end border-secondary" style={{ maxHeight: '66vh', overflowY: 'auto' }}>
+              {/* LEFT: the saved patterns, grouped by how much of the identity the caller controls */}
+              <Col md={4} className="border-end border-secondary" style={{ maxHeight: '68vh', overflowY: 'auto' }}>
+                <div className="d-flex align-items-center gap-2 mb-2">
+                  <Button size="sm" variant="danger" onClick={newPattern} disabled={busy}>
+                    <i className="bi bi-plus-lg me-1" />New pattern
+                  </Button>
+                  <Button size="sm" variant="outline-secondary" onClick={fetchPatterns} disabled={loading || busy}>
+                    {loading ? <Spinner size="sm" animation="border" /> : 'Refresh'}
+                  </Button>
+                </div>
+                <div className="text-white-50 small mb-2">
+                  {patterns.length} saved{patterns.length
+                    ? `: ${grouped.filter((g) => g.rows.length).map((g) => `${g.rows.length} ${g.label.toLowerCase()}`).join(', ')}`
+                    : ''}
+                </div>
+
+                {draftMode && (
+                  <ListGroup variant="flush" className="mb-2">
+                    <ListGroup.Item active className="bg-dark text-white py-2">
+                      <div className="d-flex justify-content-between align-items-center">
+                        <span className="fst-italic">{form.name.trim() || 'New pattern'}</span>
+                        <Badge bg="light" text="dark">unsaved</Badge>
+                      </div>
+                      <div className="text-white-50" style={{ fontSize: '0.66rem' }}>
+                        Fill in the detail on the right, then Create pattern.
+                      </div>
+                    </ListGroup.Item>
+                  </ListGroup>
+                )}
+
                 {loading ? (
                   <div className="text-center py-3"><Spinner size="sm" animation="border" variant="danger" /></div>
-                ) : patterns.length === 0 ? (
+                ) : patterns.length === 0 && !draftMode ? (
                   <div className="text-white-50 small fst-italic">
                     Nothing modelled yet. Record one request per way this application works out who is
-                    asking, then say which of the three shapes it is.
+                    asking, then say which of the three shapes it is. New pattern to start.
                   </div>
                 ) : (
                   grouped.map((group) => (
-                    <div key={group.value} className="mb-3">
-                      <div className="d-flex align-items-center gap-2">
-                        <Badge bg={group.variant}>{group.label}</Badge>
-                        <span className="text-white-50 small">{group.rows.length}</span>
-                      </div>
-                      <div className="text-white-50 mb-1" style={{ fontSize: '0.68rem' }}>
-                        {group.blurb}
-                      </div>
-                      {group.rows.length === 0 ? (
-                        <div className="text-white-50 fst-italic" style={{ fontSize: '0.68rem' }}>
-                          None recorded.
+                    group.rows.length > 0 && (
+                      <div key={group.value} className="mb-3">
+                        <div className="d-flex align-items-center gap-2">
+                          <Badge bg={group.variant}>{group.label}</Badge>
+                          <span className="text-white-50 small">{group.rows.length}</span>
                         </div>
-                      ) : (
                         <ListGroup variant="flush">
-                          {group.rows.map((p) => (
-                            <ListGroup.Item
-                              key={p.id}
-                              action
-                              active={p.id === selectedId}
-                              onClick={() => editPattern(p)}
-                              className="bg-dark text-white py-2"
-                            >
-                              <div className="d-flex justify-content-between align-items-center">
-                                <span className="text-truncate me-2">{p.name}</span>
-                                <span className="d-flex align-items-center gap-1 flex-shrink-0">
-                                  {p.response_status
-                                    ? <Badge bg={statusVariant(p.response_status)}>{p.response_status}</Badge>
-                                    : <Badge bg="secondary">not sent</Badge>}
-                                  <Button
-                                    size="sm"
-                                    variant="outline-danger"
-                                    className="py-0 px-1"
-                                    style={{ fontSize: '0.66rem' }}
-                                    disabled={replayingId === p.id || !p.raw_request}
-                                    title={p.raw_request
-                                      ? 'Send the stored request again and replace the stored response'
-                                      : 'No raw request stored, so there is nothing to send'}
-                                    onClick={(e) => { e.stopPropagation(); replayPattern(p); }}
-                                  >
-                                    {replayingId === p.id
-                                      ? <Spinner size="sm" animation="border" />
-                                      : 'Replay'}
-                                  </Button>
-                                  <i
-                                    role="button"
-                                    className="bi bi-trash text-danger ms-1"
-                                    title="Delete pattern"
-                                    onClick={(e) => { e.stopPropagation(); deletePattern(p.id); }}
-                                  />
-                                </span>
-                              </div>
-                              <div
-                                className="text-info text-truncate"
-                                style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}
-                                title={p.identifier_value}
-                              >
-                                {p.identifier_name || p.identifier_value || '(no identifier recorded)'}
-                              </div>
-                              <div className="text-white-50" style={{ fontSize: '0.66rem' }}>
-                                {LOCATION_LABEL[p.identifier_location] || 'location not recorded'}
-                                {replayInfo[p.id] ? ' | refreshed just now' : ''}
-                              </div>
-                            </ListGroup.Item>
-                          ))}
+                          {group.rows.map(renderRow)}
                         </ListGroup>
-                      )}
-                    </div>
+                      </div>
+                    )
                   ))
                 )}
               </Col>
 
-              {/* MIDDLE: the editor plus whatever the target last answered */}
-              <Col md={5} className="border-end border-secondary" style={{ maxHeight: '66vh', overflowY: 'auto' }}>
-                <div className="text-white-50 small text-uppercase mb-2">
-                  {form.id ? 'Edit pattern' : 'New pattern'}
-                </div>
-
-                <Row className="g-2">
-                  <Col md={7}>
-                    <Form.Label className="text-white small mb-1">Name</Form.Label>
-                    <Form.Control
-                      size="sm"
-                      placeholder="e.g. Invoice fetch by account id"
-                      value={form.name}
-                      onChange={(e) => setField({ name: e.target.value })}
-                    />
-                  </Col>
-                  <Col md={5}>
-                    <Form.Label className="text-white small mb-1">Category</Form.Label>
-                    <Form.Select
-                      size="sm"
-                      value={form.category}
-                      onChange={(e) => setField({ category: e.target.value })}
-                    >
-                      {CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-                    </Form.Select>
-                  </Col>
-                  <Col md={12}>
-                    <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
-                      {CATEGORY_META[form.category] ? CATEGORY_META[form.category].blurb : ''}
-                    </div>
-                  </Col>
-
-                  <Col md={12}>
-                    <Form.Label className="text-white small mb-1">Description</Form.Label>
-                    <Form.Control
-                      size="sm"
-                      placeholder="What the server does with this to decide the caller is who they say"
-                      value={form.description}
-                      onChange={(e) => setField({ description: e.target.value })}
-                    />
-                  </Col>
-
-                  <Col md={12}>
-                    <Form.Label className="text-white small mb-1">Raw HTTP request</Form.Label>
-                    <Form.Control
-                      as="textarea"
-                      rows={8}
-                      style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}
-                      placeholder={RAW_REQUEST_PLACEHOLDER}
-                      value={form.raw_request}
-                      onChange={(e) => setField({ raw_request: e.target.value })}
-                    />
-                    <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
-                      One real request, exactly as it went out. Replay sends these bytes back, so a
-                      hand-edited header here changes what gets measured.
-                    </div>
-                  </Col>
-
-                  <Col md={4}>
-                    <Form.Label className="text-white small mb-1">Identifier location</Form.Label>
-                    <Form.Select
-                      size="sm"
-                      value={form.identifier_location}
-                      onChange={(e) => setField({ identifier_location: e.target.value })}
-                    >
-                      {LOCATIONS.map((l) => <option key={l.value || 'blank'} value={l.value}>{l.label}</option>)}
-                    </Form.Select>
-                  </Col>
-                  <Col md={4}>
-                    <Form.Label className="text-white small mb-1">Identifier name</Form.Label>
-                    <Form.Control
-                      size="sm"
-                      placeholder="account_id, sub, X-User-Id"
-                      value={form.identifier_name}
-                      onChange={(e) => setField({ identifier_name: e.target.value })}
-                    />
-                  </Col>
-                  <Col md={4}>
-                    <Form.Label className="text-white small mb-1">Identifier value</Form.Label>
-                    <Form.Control
-                      size="sm"
-                      style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}
-                      placeholder="8412"
-                      value={form.identifier_value}
-                      onChange={(e) => setField({ identifier_value: e.target.value })}
-                    />
-                  </Col>
-                  <Col md={12}>
-                    <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
-                      Server side means the value never appears in the request at all. Recording that is
-                      worth as much as recording a value: it says there is nothing here to swap.
-                    </div>
-                  </Col>
-
-                  <Col md={12}>
-                    <Form.Label className="text-white small mb-1">Notes</Form.Label>
-                    <Form.Control
-                      size="sm"
-                      placeholder="Which account this was captured as, what happened when the value was moved"
-                      value={form.notes}
-                      onChange={(e) => setField({ notes: e.target.value })}
-                    />
-                  </Col>
-
-                  <Col md={12} className="d-flex align-items-center gap-2 mt-2">
-                    <Button variant="danger" size="sm" onClick={savePattern} disabled={busy || !canSave}>
-                      {busy ? <Spinner size="sm" animation="border" /> : (form.id ? 'Save changes' : 'Create pattern')}
-                    </Button>
-                    {form.id && (
-                      <>
-                        <Button
-                          variant="outline-danger"
-                          size="sm"
-                          disabled={replayingId === form.id || !form.raw_request}
-                          onClick={() => selectedPattern && replayPattern(selectedPattern)}
-                        >
-                          {replayingId === form.id ? <Spinner size="sm" animation="border" /> : 'Replay'}
-                        </Button>
-                        <Button variant="outline-secondary" size="sm" onClick={newPattern} disabled={busy}>
-                          Cancel edit
-                        </Button>
-                      </>
-                    )}
-                    {!canSave && (
-                      <span className="text-white-50 small">A name and a category are required.</span>
-                    )}
-                  </Col>
-                </Row>
-
-                {selectedPattern && (
-                  <div className="mt-3">
-                    <div className="d-flex justify-content-between align-items-center mb-1">
-                      <span className="text-white-50 small text-uppercase">Stored response</span>
-                      <span className="d-flex align-items-center gap-2">
-                        {selectedPattern.response_time_ms
-                          ? <span className="text-white-50" style={{ fontSize: '0.68rem' }}>
-                              {selectedPattern.response_time_ms} ms
-                            </span>
-                          : null}
-                        {selectedPattern.response_status
-                          ? <Badge bg={statusVariant(selectedPattern.response_status)}>
-                              {selectedPattern.response_status}
-                            </Badge>
-                          : <Badge bg="secondary">not sent</Badge>}
-                      </span>
-                    </div>
-                    {selectedReplay && (
-                      <Alert
-                        variant={selectedReplay.changed ? 'warning' : 'success'}
-                        className="py-2 small mb-2"
-                      >
-                        Replayed at {selectedReplay.at.toLocaleTimeString()}, {selectedReplay.timeMs} ms.
-                        The response below is what the target answered just now and it has replaced what
-                        was stored on this pattern.
-                        {selectedReplay.changed
-                          ? ` The status moved from ${selectedReplay.previousStatus} to ${selectedReplay.status}, so either the session behind this request has changed or the endpoint has.`
-                          : ' The status is unchanged.'}
-                      </Alert>
-                    )}
-                    <pre
-                      className="bg-black text-white p-2 rounded"
-                      style={{
-                        fontSize: '0.72rem', maxHeight: '260px', overflowY: 'auto',
-                        whiteSpace: 'pre-wrap', userSelect: 'text',
-                      }}
-                    >
-                      {rawResponse || '(nothing captured yet, click Replay)'}
-                    </pre>
-                  </div>
-                )}
-              </Col>
-
-              {/* RIGHT: the detector's output, waiting to be promoted into a modelled pattern */}
-              <Col md={3} style={{ maxHeight: '66vh', overflowY: 'auto' }}>
-                <div className="d-flex justify-content-between align-items-center mb-1">
-                  <span className="text-white-50 small text-uppercase">Detected identifiers</span>
-                  <Button size="sm" variant="outline-secondary" className="py-0 px-1"
-                    style={{ fontSize: '0.66rem' }} onClick={fetchCandidates}>
-                    Reload
-                  </Button>
-                </div>
-                <div className="text-white-50 mb-2" style={{ fontSize: '0.68rem' }}>
-                  Values the auto-detector pulled out of recorded traffic. Each one already carries an
-                  endpoint, a verb and the value it was seen with, so promoting one leaves only the
-                  category to decide.
-                </div>
-                {candidates.length === 0 ? (
-                  <div className="text-white-50 small fst-italic">
-                    None yet. Run Auto-detect IDs in Client Identity first.
+              {/* RIGHT: the detail panel - editor, per-category education, and the stored response */}
+              <Col md={8} style={{ maxHeight: '68vh', overflowY: 'auto' }}>
+                {!panelOpen ? (
+                  <div className="text-white-50 text-center py-5">
+                    <i className="bi bi-arrow-left me-2" />
+                    Select a pattern on the left to see and edit its detail, or
+                    <Button variant="link" className="p-0 ms-1 align-baseline text-danger" onClick={newPattern}>
+                      add a new one
+                    </Button>.
                   </div>
                 ) : (
-                  <ListGroup variant="flush">
-                    {candidates.map((c) => (
-                      <ListGroup.Item key={c.id} className="bg-dark text-white py-2">
-                        <div className="d-flex justify-content-between align-items-center">
-                          <Badge bg="secondary">{c.method || 'GET'}</Badge>
+                  <>
+                    <div className="d-flex justify-content-between align-items-center mb-2">
+                      <span className="text-white-50 small text-uppercase">
+                        {form.id ? 'Edit pattern' : 'New pattern'}
+                      </span>
+                      <Button variant="outline-secondary" size="sm" className="py-0 px-2"
+                        style={{ fontSize: '0.7rem' }} onClick={clearSelection} disabled={busy}>
+                        Close
+                      </Button>
+                    </div>
+
+                    <Row className="g-2">
+                      <Col md={7}>
+                        <Form.Label className="text-white small mb-1">Name</Form.Label>
+                        <Form.Control
+                          size="sm"
+                          placeholder="e.g. Invoice fetch by account id"
+                          value={form.name}
+                          onChange={(e) => setField({ name: e.target.value })}
+                        />
+                      </Col>
+                      <Col md={5}>
+                        <Form.Label className="text-white small mb-1">Category</Form.Label>
+                        <Form.Select
+                          size="sm"
+                          value={form.category}
+                          onChange={(e) => setField({ category: e.target.value })}
+                        >
+                          {CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                        </Form.Select>
+                      </Col>
+                    </Row>
+
+                    {/* The education block for the chosen category - the detail the operator reads */}
+                    <div className="mt-3">
+                      <CategoryGuidance category={form.category} />
+                    </div>
+
+                    <Row className="g-2">
+                      <Col md={12}>
+                        <Form.Label className="text-white small mb-1">Description</Form.Label>
+                        <Form.Control
+                          size="sm"
+                          placeholder="What the server does with this to decide the caller is who they say"
+                          value={form.description}
+                          onChange={(e) => setField({ description: e.target.value })}
+                        />
+                      </Col>
+
+                      <Col md={12}>
+                        <Form.Label className="text-white small mb-1">Raw HTTP request</Form.Label>
+                        <Form.Control
+                          as="textarea"
+                          rows={8}
+                          style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}
+                          placeholder={RAW_REQUEST_PLACEHOLDER}
+                          value={form.raw_request}
+                          onChange={(e) => setField({ raw_request: e.target.value })}
+                        />
+                        <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
+                          One real request, exactly as it went out. Replay sends these bytes back, so a
+                          hand-edited header here changes what gets measured.
+                        </div>
+                      </Col>
+
+                      <Col md={4}>
+                        <Form.Label className="text-white small mb-1">Identifier location</Form.Label>
+                        <Form.Select
+                          size="sm"
+                          value={form.identifier_location}
+                          onChange={(e) => setField({ identifier_location: e.target.value })}
+                        >
+                          {LOCATIONS.map((l) => <option key={l.value || 'blank'} value={l.value}>{l.label}</option>)}
+                        </Form.Select>
+                      </Col>
+                      <Col md={4}>
+                        <Form.Label className="text-white small mb-1">Identifier name</Form.Label>
+                        <Form.Control
+                          size="sm"
+                          placeholder="account_id, sub, X-User-Id"
+                          value={form.identifier_name}
+                          onChange={(e) => setField({ identifier_name: e.target.value })}
+                        />
+                      </Col>
+                      <Col md={4}>
+                        <Form.Label className="text-white small mb-1">Identifier value</Form.Label>
+                        <Form.Control
+                          size="sm"
+                          style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}
+                          placeholder="8412"
+                          value={form.identifier_value}
+                          onChange={(e) => setField({ identifier_value: e.target.value })}
+                        />
+                      </Col>
+                      <Col md={12}>
+                        <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
+                          Server side means the value never appears in the request at all. Recording that is
+                          worth as much as recording a value: it says there is nothing here to swap.
+                        </div>
+                      </Col>
+
+                      <Col md={12}>
+                        <Form.Label className="text-white small mb-1">Notes</Form.Label>
+                        <Form.Control
+                          size="sm"
+                          placeholder="Which account this was captured as, what happened when the value was moved"
+                          value={form.notes}
+                          onChange={(e) => setField({ notes: e.target.value })}
+                        />
+                      </Col>
+
+                      <Col md={12} className="d-flex align-items-center gap-2 mt-2">
+                        <Button variant="danger" size="sm" onClick={savePattern} disabled={busy || !canSave}>
+                          {busy ? <Spinner size="sm" animation="border" /> : (form.id ? 'Save changes' : 'Create pattern')}
+                        </Button>
+                        {form.id && (
                           <Button
-                            size="sm"
                             variant="outline-danger"
-                            className="py-0 px-1"
-                            style={{ fontSize: '0.66rem' }}
-                            onClick={() => applyCandidate(c)}
+                            size="sm"
+                            disabled={replayingId === form.id || !form.raw_request}
+                            onClick={() => selectedPattern && replayPattern(selectedPattern)}
                           >
-                            Use as pattern
+                            {replayingId === form.id ? <Spinner size="sm" animation="border" /> : 'Replay'}
                           </Button>
+                        )}
+                        {form.id && (
+                          <Button variant="outline-danger" size="sm" onClick={() => deletePattern(form.id)} disabled={busy}>
+                            Delete
+                          </Button>
+                        )}
+                        {!canSave && (
+                          <span className="text-white-50 small">A name and a category are required.</span>
+                        )}
+                      </Col>
+                    </Row>
+
+                    {selectedPattern && (
+                      <div className="mt-3">
+                        <div className="d-flex justify-content-between align-items-center mb-1">
+                          <span className="text-white-50 small text-uppercase">Stored response</span>
+                          <span className="d-flex align-items-center gap-2">
+                            {selectedPattern.response_time_ms
+                              ? <span className="text-white-50" style={{ fontSize: '0.68rem' }}>
+                                  {selectedPattern.response_time_ms} ms
+                                </span>
+                              : null}
+                            {selectedPattern.response_status
+                              ? <Badge bg={statusVariant(selectedPattern.response_status)}>
+                                  {selectedPattern.response_status}
+                                </Badge>
+                              : <Badge bg="secondary">not sent</Badge>}
+                          </span>
                         </div>
-                        <div
-                          className="text-info text-truncate"
-                          style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}
-                          title={c.value}
+                        {selectedReplay && (
+                          <Alert
+                            variant={selectedReplay.changed ? 'warning' : 'success'}
+                            className="py-2 small mb-2"
+                          >
+                            Replayed at {selectedReplay.at.toLocaleTimeString()}, {selectedReplay.timeMs} ms.
+                            The response below is what the target answered just now and it has replaced what
+                            was stored on this pattern.
+                            {selectedReplay.changed
+                              ? ` The status moved from ${selectedReplay.previousStatus} to ${selectedReplay.status}, so either the session behind this request has changed or the endpoint has.`
+                              : ' The status is unchanged.'}
+                          </Alert>
+                        )}
+                        <pre
+                          className="bg-black text-white p-2 rounded"
+                          style={{
+                            fontSize: '0.72rem', maxHeight: '260px', overflowY: 'auto',
+                            whiteSpace: 'pre-wrap', userSelect: 'text',
+                          }}
                         >
-                          {c.value}
-                        </div>
-                        <div
-                          className="text-white-50 text-truncate"
-                          style={{ fontSize: '0.66rem' }}
-                          title={c.endpoint_url}
-                        >
-                          {c.label ? `${c.label} | ` : ''}{c.endpoint_url}
-                        </div>
-                      </ListGroup.Item>
-                    ))}
-                  </ListGroup>
+                          {rawResponse || '(nothing captured yet, click Replay)'}
+                        </pre>
+                      </div>
+                    )}
+                  </>
                 )}
               </Col>
             </Row>

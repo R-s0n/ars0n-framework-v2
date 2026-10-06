@@ -98,6 +98,11 @@
             <div id="scopeHostList" class="d-flex flex-wrap gap-1"></div>
           </div>
 
+          <div id="authHostsBlock" class="mb-2 d-none">
+            <div class="text-muted small mb-1">Auth hosts <span class="text-info">(recorded for refresh, never scanned)</span>:</div>
+            <div id="authHostList" class="d-flex flex-wrap gap-1"></div>
+          </div>
+
           <!-- Rules. When any exist they are the WHOLE boundary and the host list above is not
                consulted, which the banner says out loud rather than leaving the two lists looking
                like they add together. -->
@@ -117,7 +122,8 @@
               <div><code>re:prod-[0-9]+\.acme\.io</code> full-match regex</div>
               <div><code>!cdn.example.com</code> <strong>deny</strong> that subtree</div>
               <div><code>!=cdn.example.com</code> <strong>deny</strong> that exact host</div>
-              <div class="mt-1">A deny always wins, whatever else matches.</div>
+              <div><code>@cognito-idp.us-east-1.amazonaws.com</code> <strong class="text-info">auth</strong>: record for session refresh, never scanned</div>
+              <div class="mt-1">A deny always wins, whatever else matches; a deny beats an auth too.</div>
               <div>Add many at once: one rule per line, or comma-separated.</div>
             </div>
 
@@ -160,6 +166,7 @@
           <div class="input-group input-group-sm mt-2">
             <input type="text" class="form-control form-control-sm" id="addHostInput" placeholder="api.example.com">
             <button class="btn btn-outline-danger btn-sm" id="addHostBtn" type="button">Add</button>
+            <button class="btn btn-outline-info btn-sm" id="addAuthHostBtn" type="button" title="Add as an auth host: recorded for session refresh, never scanned">Auth</button>
           </div>
         </div>
       </div>

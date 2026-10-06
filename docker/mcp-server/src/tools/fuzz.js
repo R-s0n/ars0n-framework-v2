@@ -350,7 +350,11 @@ async function manageFuzz(params) {
         // Merge, for the same reason manage_tool_config merges: the handler full-replaces the
         // options object, so a bare {"filterStatus":"401"} would drop the threads and rate an
         // operator had already set.
-        const flow = await apiGet(`/fuzz/${needTarget()}/flow?tool=ffuf`);
+        // flow_id is forwarded for the same reason the steps action forwards it: without it the
+        // existence check reads the target's DEFAULT flow, so a step living in a named flow is
+        // invisible and every merge into one fails with "not in this target's flow".
+        const fq = params.flow_id ? `&flow_id=${encodeURIComponent(params.flow_id)}` : '';
+        const flow = await apiGet(`/fuzz/${needTarget()}/flow?tool=ffuf${fq}`);
         const current = (flow.steps || []).find((s) => s.id === stepID);
         if (!current) throw new Error(`step ${stepID} is not in this target's flow`);
         if (params.options) {
@@ -379,7 +383,8 @@ async function manageFuzz(params) {
       // renumbers only the ids it is handed, so a partial list can collide with the unique
       // (flow_id, ordinal) index and fail part way through, leaving the steps it already moved
       // parked on their temporary high ordinals. Refusing costs one GET the flow already makes.
-      const flow = await apiGet(`/fuzz/${needTarget()}/flow?tool=ffuf`);
+      const fq = params.flow_id ? `&flow_id=${encodeURIComponent(params.flow_id)}` : '';
+      const flow = await apiGet(`/fuzz/${needTarget()}/flow?tool=ffuf${fq}`);
       const known = (flow.steps || []).map((s) => s.id);
       const given = params.step_ids;
       const missing = known.filter((id) => !given.includes(id));

@@ -69,6 +69,11 @@ type ScanScope struct {
 	// rather than adding to them, so a deny cannot be overridden by a legacy list.
 	rules []ScopeRule
 
+	// Hosts the operator classified as auth hosts: reachable to establish or refresh a session, never
+	// scanned. Consulted ONLY by AllowsForAuth, never by Allows, so it can never widen the scan
+	// boundary - it can only add these hosts to what the automated refresh guards may reach.
+	authHosts map[string]bool
+
 	mu      sync.Mutex
 	refused map[string]int
 }
@@ -99,7 +104,19 @@ func LoadScanScope(scopeTargetID string) *ScanScope {
 			refuseAll: true,
 		}
 	}
-	return newScanScope(host, crawled, rules)
+	s := newScanScope(host, crawled, rules)
+
+	// Auth hosts are a permission list, so they load fail-closed to granting NOTHING: a read error
+	// leaves the set empty and AllowsForAuth collapses to Allows, which refuses an out-of-scope auth
+	// host rather than admitting one the read could not confirm. This is the opposite fail direction
+	// from the deny lists, and that asymmetry is deliberate (see AuthHosts).
+	if authHosts, aerr := AuthHosts(scopeTargetID); aerr != nil {
+		log.Printf("[SCOPE] target %s: auth-host list unreadable, no host will be admitted for auth: %v",
+			scopeTargetID, aerr)
+	} else {
+		s.authHosts = authHosts
+	}
+	return s
 }
 
 // newScanScope assembles the boundary from inputs already read, and is where the ORDER of assembly
@@ -286,6 +303,46 @@ func (s *ScanScope) AllowsURL(rawURL string) bool {
 		return false
 	}
 	return s.Allows(u.Hostname())
+}
+
+// AllowsForAuth is Allows widened by the auth-host classification: it ALSO admits a host the operator
+// classified as an auth host (reachable to establish or refresh a session). It exists so the
+// AUTOMATED refresh guards can reach an auth host while every scanner keeps calling Allows() and
+// refuses it.
+//
+// This can only ever ADD the operator's auth hosts to what Allows already permits. Allows() never
+// consults authHosts, so an auth classification cannot remove anything from the scan boundary or
+// widen what a scanner may touch; the only thing it changes is what the refresh path may reach. A nil
+// receiver matches Allows (true), the opt-out behaviour its callers rely on.
+func (s *ScanScope) AllowsForAuth(host string) bool {
+	if s == nil {
+		return true
+	}
+	if s.IsAuthHost(host) {
+		return true
+	}
+	return s.Allows(host)
+}
+
+// IsAuthHost reports whether this host (or a parent domain of it) was classified as an auth host.
+// It is for rendering and for the refresh evidence line, so the operator can see a host was admitted
+// BECAUSE it is a classified auth host rather than because it is in scope. It never governs scanning.
+func (s *ScanScope) IsAuthHost(host string) bool {
+	if s == nil {
+		return false
+	}
+	// The per-host auth_host flag (set from the popup) and an auth-effect scope rule are the two ways
+	// a host becomes an auth host; either one admits it for refresh. Authored rules are consulted the
+	// same way Allows consults them, so the two answers come from the same evaluator on the same rules.
+	if IsAuthFlowHost(s.authHosts, host) {
+		return true
+	}
+	if len(s.rules) > 0 {
+		if auth, ok := NormalizeAuthority(host, ""); ok {
+			return DecideScope(s.rules, auth, ok, ScopeDecisionInput{}).Auth
+		}
+	}
+	return false
 }
 
 // hostWithinDomain is a label-boundary check, never a suffix match. "notcountr.one" must not be

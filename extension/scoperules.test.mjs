@@ -53,24 +53,28 @@ function rule(typed, want) {
   vectors.rules.push({ typed, expect: slim });
 }
 
-// Asserts the full verdict for a subject against a set of typed rules.
+// Asserts the full verdict for a subject against a set of typed rules. opts.expectAuth is the
+// expected auth flag (an auth-effect rule matched and the host was not denied); it defaults to false
+// so every pre-existing decision keeps asserting auth:false, which is what allow/deny-only rules give.
 function verdict(typedRules, subjectUrl, wantAllowed, wantReason, opts) {
+  const o = opts || {};
   const parsed = typedRules.map((t) => {
     const r = parseRule(t);
     if (r.error) throw new Error(`test bug: rule ${JSON.stringify(t)} did not parse: ${r.error}`);
     return r;
   });
   const subject = normalizeAuthority(subjectUrl);
-  const got = decide(parsed, subject, opts || {});
+  const got = decide(parsed, subject, o);
+  const wantAuth = !!o.expectAuth;
   check(`decide(${JSON.stringify(typedRules)}, ${JSON.stringify(subjectUrl)})`,
-    { allowed: got.allowed, reason: got.reason },
-    { allowed: wantAllowed, reason: wantReason });
+    { allowed: got.allowed, reason: got.reason, auth: !!got.auth },
+    { allowed: wantAllowed, reason: wantReason, auth: wantAuth });
   vectors.decisions.push({
     rules: typedRules,
     subject: subjectUrl,
-    admitObserved: !!(opts && opts.admitObserved),
-    observed: opts && opts.observed ? Array.from(opts.observed) : [],
-    expect: { allowed: wantAllowed, reason: wantReason },
+    admitObserved: !!o.admitObserved,
+    observed: o.observed ? Array.from(o.observed) : [],
+    expect: { allowed: wantAllowed, reason: wantReason, auth: wantAuth },
   });
 }
 
@@ -125,6 +129,14 @@ rule('!=cdn.example.com', { effect: 'deny', kind: 'host', value: 'cdn.example.co
 rule('!*.cdn.example.com', { effect: 'deny', kind: 'subdomains', value: 'cdn.example.com', port: null, within: null, blast: BLAST.NARROW });
 rule('=10.0.0.18', { effect: 'allow', kind: 'host', value: '10.0.0.18', port: null, within: null, blast: BLAST.NARROW });
 rule('  example.com  ', { effect: 'allow', kind: 'subtree', value: 'example.com', port: null, within: null, blast: BLAST.BOUNDED });
+
+// auth effect: the @ prefix combines with every kind, and blast is classified exactly as an allow of
+// the same kind (auth never widens the scan boundary, but a wide auth pattern still records broadly).
+rule('@cognito-idp.us-east-1.amazonaws.com', { effect: 'auth', kind: 'subtree', value: 'cognito-idp.us-east-1.amazonaws.com', port: null, within: null, blast: BLAST.BOUNDED });
+rule('@=authx.staging-v2.tradetalk.us', { effect: 'auth', kind: 'host', value: 'authx.staging-v2.tradetalk.us', port: null, within: null, blast: BLAST.NARROW });
+rule('@*.okta.com', { effect: 'auth', kind: 'subdomains', value: 'okta.com', port: null, within: null, blast: BLAST.BOUNDED });
+rule('@~amazoncognito', { effect: 'auth', kind: 'contains', value: 'amazoncognito', port: null, within: null, blast: BLAST.WIDE });
+rule('@', { error: true });
 
 // Rejected input.
 rule('', { error: true });
@@ -229,6 +241,31 @@ verdict(['=[2001:db8::5]'], 'https://[2001:0db8::0005]/', true, 'rule_allow');
 verdict(['=[2001:db8::5]:9443'], 'https://[2001:db8::5]:9443/', true, 'rule_allow');
 verdict(['=[2001:db8::5]:9443'], 'https://[2001:db8::5]/', false, 'default_deny');
 rule('=2001:db8::5', { error: true });
+
+/* ================================================================= INV-8: the auth effect */
+
+// An auth rule records a host for refresh but never scans it: out of scope for every scanner
+// (allowed:false) yet marked an auth host (auth:true, reason rule_auth).
+verdict(['app.example.com', '@cognito-idp.us-east-1.amazonaws.com'], 'https://cognito-idp.us-east-1.amazonaws.com/', false, 'rule_auth', { expectAuth: true });
+verdict(['@cognito-idp.us-east-1.amazonaws.com'], 'https://x.cognito-idp.us-east-1.amazonaws.com/', false, 'rule_auth', { expectAuth: true });
+verdict(['@*.okta.com'], 'https://login.okta.com/', false, 'rule_auth', { expectAuth: true });
+verdict(['@*.okta.com'], 'https://okta.com/', false, 'default_deny');          // subdomains-only, not the apex
+verdict(['@=authx.staging-v2.tradetalk.us'], 'https://authx.staging-v2.tradetalk.us/', false, 'rule_auth', { expectAuth: true });
+
+// Deny beats auth: an explicit "never here" is stronger than "record for refresh", so the host is
+// neither scanned nor auth-reachable.
+verdict(['@cognito-idp.us-east-1.amazonaws.com', '!cognito-idp.us-east-1.amazonaws.com'], 'https://cognito-idp.us-east-1.amazonaws.com/', false, 'rule_deny');
+
+// Allow and auth together: a first-party SSO host that is both scanned and refreshed through is
+// allowed AND auth at once.
+verdict(['@idp.example.com', 'idp.example.com'], 'https://idp.example.com/', true, 'rule_allow', { expectAuth: true });
+
+// An auth rule does not admit a host it does not match.
+verdict(['@cognito-idp.us-east-1.amazonaws.com'], 'https://app.example.com/', false, 'default_deny');
+
+// auth + observed: the host was seen by the crawl so it is admitted for scan as observed, and it is
+// also an auth host.
+verdict(['@idp.example.com'], 'https://idp.example.com/', true, 'observed', { admitObserved: true, observed: new Set(['idp.example.com:443']), expectAuth: true });
 
 /* ================================================================= INV-7: regex guards */
 

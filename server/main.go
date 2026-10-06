@@ -925,6 +925,14 @@ func main() {
 	r.HandleFunc("/notes/{note_id}", utils.UpdateNote).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/notes/{note_id}", utils.DeleteNote).Methods("DELETE", "OPTIONS")
 
+	// Engagement goals on a scope target. Same shape-collision note as notes: GET keys on the target,
+	// PUT/DELETE on the goal id, disambiguated by method. /activate is its own shape.
+	r.HandleFunc("/goals/{scope_target_id}", utils.GetGoals).Methods("GET", "OPTIONS")
+	r.HandleFunc("/goals", utils.CreateGoal).Methods("POST", "OPTIONS")
+	r.HandleFunc("/goals/{goal_id}", utils.UpdateGoal).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/goals/{goal_id}", utils.DeleteGoal).Methods("DELETE", "OPTIONS")
+	r.HandleFunc("/goals/{goal_id}/activate", utils.ActivateGoal).Methods("PATCH", "OPTIONS")
+
 	// Notes on a single threat, which are a different thing from the scope target notes above and are
 	// stored in their own table. Same shape ambiguity, same reason: the path variable is named for what
 	// it holds on each route, because gorilla matches on shape alone and /threat-notes/{x} is the same

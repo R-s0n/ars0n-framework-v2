@@ -52,7 +52,7 @@ function stateFor(sessionId, now) {
   }
   if (!state) {
     if (sessions.size >= SWEEP_AT) sweep(now);
-    state = { briefed: new Set(), lastSeen: now };
+    state = { briefed: new Set(), heartbeatIdx: 0, consecutiveEmpty: 0, lastSeen: now };
     sessions.set(key, state);
   }
   state.lastSeen = now;
@@ -67,6 +67,28 @@ function firstBrief(sessionId, toolName, now = Date.now()) {
   if (state.briefed.has(toolName)) return false;
   state.briefed.add(toolName);
   return true;
+}
+
+// The next rotation index for the keep-hunting heartbeat, per session. Rotates so two consecutive
+// tool results never show the same reframe line (a repeated line reads as wallpaper and is scrolled
+// past). Keyed and expired exactly like the briefed-set, so it survives a session the same way and a
+// forgotten or changed session restarts the rotation rather than inheriting someone else's position.
+function nextHeartbeat(sessionId, now = Date.now()) {
+  const state = stateFor(sessionId, now);
+  state.heartbeatIdx = (state.heartbeatIdx || 0) + 1;
+  return state.heartbeatIdx;
+}
+
+// Track the run of consecutive empty/clean tool results, which is the pattern that precedes giving
+// up (hit nothing, hit nothing again, conclude the target is dead). isEmpty=true increments the run,
+// a productive result resets it to zero. Returns the current run length. This is deliberately a
+// CONSECUTIVE counter, not a total: one quiet call is normal, a run of them is the quit signal, and a
+// single productive result clears it. Conservative on purpose (the operator's alert-rarity rule): the
+// loud block should be rare enough to still mean something.
+function recordEmpty(sessionId, isEmpty, now = Date.now()) {
+  const state = stateFor(sessionId, now);
+  state.consecutiveEmpty = isEmpty ? (state.consecutiveEmpty || 0) + 1 : 0;
+  return state.consecutiveEmpty;
 }
 
 // True if this session has seen this tool, without recording anything. For tests and diagnostics.
@@ -89,6 +111,8 @@ function reset() {
 
 module.exports = {
   firstBrief,
+  nextHeartbeat,
+  recordEmpty,
   hasBriefed,
   forget,
   reset,

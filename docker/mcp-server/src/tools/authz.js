@@ -51,6 +51,67 @@ const ERROR_CHARS = 600;
 // the rows worth testing first arrive first, because the list is read to pick a target.
 const IDOR_RANK = { parameter: 0, signed_token: 1, user_context_object: 2 };
 
+// Per-category education, returned on create (the moment a pattern is added), and kept in sync with
+// the Client Identity Patterns UI modal so the agent over MCP and the human in the UI read the same
+// thing. Compact on purpose: definition, how to recognise it in a captured request, its variants
+// across tech stacks, how to actually test it for IDOR, and the single biggest false positive.
+const PATTERN_GUIDANCE = {
+  parameter:
+    'DEF: the object/identity is a client-controlled value carried IN the request (path segment, ' +
+    'query param, body field, GraphQL var/arg, gRPC field, or header) the server trusts to select ' +
+    'the object. The strongest IDOR shape. ' +
+    'RECOGNIZE: a client-set token mapping 1:1 to the resource - /users/1053, params like ' +
+    'id/uid/account/order/file/org/tenant, an id hidden in a JSON/form body, a GraphQL id variable ' +
+    'or base64 node(id:), a gRPC id field, X-User-Id. Decode base64/hashids first (a raw int often ' +
+    'hides inside). Split the WHICH-object value from the WHO credential in Cookie/Authorization. ' +
+    'VARIANTS: sequential int (trivial enum); numeric query id; UUID/ObjectId (leaked != safe, ' +
+    'partly predictable); hashid/Sqids (default salt decodes to int); body id; mass-assigned ' +
+    'owner/tenant field; GraphQL arg / Relay node / batch nodes(); gRPC field; identity header; ' +
+    'tenant/org scope; file/storage key; email selector. ' +
+    'TEST: with two accounts, replay A\'s request with B\'s id, A\'s session unchanged; diff the ' +
+    'BODY for B\'s private data; enumerate +/-N; cover every verb and sibling path (update, delete, ' +
+    'export, batch); relocate the id into body/header. ' +
+    'TOP FALSE POSITIVE: a 200 returning YOUR OWN data, an empty/placeholder object, or a ' +
+    'soft-404-as-200. Read the body, never the status.',
+  signed_token:
+    'DEF: identity rides in a crypto-protected token the client holds - JWT, signed/encrypted ' +
+    'session cookie, HMAC-signed id, bearer/API key, or opaque server session ref. The IDOR is ' +
+    'either breaking/confusing the crypto to forge identity, or (more common) the token proves WHO ' +
+    'while an unprotected id elsewhere picks WHICH, unchecked. ' +
+    'RECOGNIZE: Authorization: Bearer eyJ... (3 dot-parts = JWT); a signed/encrypted cookie (Rails, ' +
+    'Flask/Django sig, Laravel eyJpdiI, .AspNet); a long API key (sk_live_); or HMAC headers ' +
+    '(X-Signature, AWS4-HMAC). Decode it; note sub/uid/email/role/tenant/aud. Decide: is the attack ' +
+    'id ONLY in the token (forge it) or also in path/body/header (plain swap)? ' +
+    'VARIANTS: claim swap; alg:none; RS256->HS256 confusion; weak/leaked HMAC secret; kid/jku/x5u ' +
+    'key injection; readable cookie re-signed if the secret leaks; encrypted cookie forged if ' +
+    'APP_KEY/secret_key_base/machineKey leaks; opaque session fixation/theft; API key scoped to one ' +
+    'account; HMAC/SigV4 not covering the id; OIDC aud/iss gaps; SAML XSW; gateway X-User-Id. ' +
+    'TEST (cheapest first): keep your valid token, swap an external id; else attack the token ' +
+    '(alg:none, confusion, weak key); else forge the gateway header AND hit the origin directly. ' +
+    'Confirm B\'s distinct data in the BODY. ' +
+    'TOP FALSE POSITIVE: you swapped the external id but the server silently scoped to the token\'s ' +
+    'own sub, so the 200 is YOUR data, not IDOR. Diff bodies, never trust status. A decodable token ' +
+    'is not a bug on its own.',
+  user_context_object:
+    'DEF: the principal is named NOWHERE in the payload; the server derives it from ambient auth ' +
+    '(opaque/signed/encrypted cookie, JWT, OIDC claim, SAML assertion, gateway-injected header, TLS ' +
+    'cert, or tenant context). IDOR-resistant by design, so the surface IS the derivation. ' +
+    'RECOGNIZE: NO account/owner id in path/query/body, yet the response is personalized - ' +
+    '/api/me, /account, /profile. Only credential-bearing artifacts can change who is returned: ' +
+    'Cookie, Bearer/JWT, an upstream header (X-User-Id, X-Forwarded-User, X-Amzn-Oidc-Identity), ' +
+    'Host/subdomain, X-Tenant-ID, client cert. ' +
+    'VARIANTS: opaque session + server lookup (fixation/theft); signed stateless cookie (re-sign if ' +
+    'secret leaks); JWT claim (alg:none/confusion/weak key); OIDC sub/email (email collision, aud ' +
+    'reuse); gateway header (strip failure / direct-to-backend); tenant from Host/subdomain/' +
+    'X-Tenant-ID; mTLS CN/SAN; SAML NameID. ' +
+    'TEST: you cannot swap it in the request. Enumerate every identity artifact; swap B\'s whole ' +
+    'credential; forge the JWT/cookie; inject X-User-Id at the edge AND direct to the backend; ' +
+    'pivot tenant via Host/X-Tenant-ID; or find a SIBLING op that does take a target id. ' +
+    'TOP FALSE POSITIVE: swapping to a token YOU minted (your own second account) proves the ' +
+    'mechanism but is NOT cross-account impact unless an attacker could actually obtain that ' +
+    'artifact - a lookup that honours only a legitimately issued session works as designed.',
+};
+
 // === Client identity patterns ==================================================================
 
 const manageIdentityPatternsSchema = z.object({
@@ -75,16 +136,26 @@ const manageIdentityPatternsSchema = z.object({
     'Short label for the pattern, e.g. "GET /api/v2/invoices/{id} as tenant admin". Required on ' +
     'create.'),
   category: IDENTITY_CATEGORY.optional().describe(
-    'How the server decides who is asking, and the most important field on the record because it ' +
-    'is what says whether the endpoint is worth attacking at all. ' +
-    'parameter: the id sits in a query, path or body parameter and the caller sets it directly. ' +
-    'This is the BEST IDOR target, because testing it is just changing the value and re-sending. ' +
-    'signed_token: the id lives inside a signed token, usually a JWT, so the signature has to be ' +
-    'broken, stripped or confused before the id can be moved. Worth testing, but the bug has to ' +
-    'be in the token handling first. ' +
-    'user_context_object: the server validates the session and builds the identity itself, then ' +
-    'passes it to downstream services. The attacker controls nothing in the request, so this is ' +
-    'the WORST case for IDOR and the endpoint is better attacked another way. ' +
+    'How the server decides WHO is asking / WHICH object is selected, and the field everything ' +
+    'hangs off because it says whether the endpoint is worth attacking. An app usually asserts ' +
+    'identity in SEVERAL places at once (a url id AND a JWT claim AND a tenant from the subdomain); ' +
+    'model each one, because the IDOR lives at whichever identifier the server trusts without an ' +
+    'object-level ownership check, and that is often not the obvious one. The three shapes: ' +
+    'parameter: a client-set value in the request (path/query/body param, GraphQL variable or ' +
+    'base64 node id, gRPC field, or an X-User-Id-style header) selects the object. BEST IDOR ' +
+    'target: with two accounts, replay A\'s request with B\'s id (A\'s session unchanged) and diff ' +
+    'the BODY for B\'s data; enumerate sequential ids; UUIDs/hashids are not authorization (a ' +
+    'leaked UUID is reusable, a default-salt hashid decodes to an int). ' +
+    'signed_token: the id is inside a crypto-protected token (JWT, signed/encrypted cookie, ' +
+    'bearer/API key, HMAC). Either forge/confuse the crypto (alg:none, RS256->HS256, weak/leaked ' +
+    'key, kid/jku) or - more common - the token proves WHO while an unprotected id elsewhere picks ' +
+    'WHICH, so test the plain id-swap first. A decodable token is not a bug on its own. ' +
+    'user_context_object: identity is derived server-side from ambient auth (session/OIDC/SAML/' +
+    'mTLS/gateway header/tenant) and named nowhere in the payload (/api/me). WORST case for direct ' +
+    'IDOR, nothing in the request to swap; pivot to forging/replaying the credential, injecting a ' +
+    'trusted gateway header straight at the backend, or confusing tenant via Host/X-Tenant-ID, ' +
+    'else record it server_side and move on. ' +
+    'On create, the full per-category testing guidance comes back in the response note. ' +
     'Filters the list, and is required on create.'),
   description: z.string().optional().describe(
     'What this request does and which account it was sent as. The context a later reader needs to ' +
@@ -181,15 +252,10 @@ async function manageIdentityPatterns(params) {
         id: out.id,
         created: true,
         category: params.category,
-        // Said on the call where the caller can still act on it. A parameter pattern is the one
-        // worth queueing IDOR work against, and the category is exactly the judgement this record
-        // exists to capture.
-        note: params.category === 'parameter'
-          ? 'Caller controlled identifier, so this is a direct IDOR candidate.'
-          : (params.category === 'user_context_object'
-            ? 'The identity is built server side, so there is nothing in the request to move. IDOR ' +
-              'testing here needs a different way in.'
-            : undefined),
+        // The full per-category education, pushed at exactly the moment a pattern is added. This is
+        // the judgement the record exists to capture, and the guidance says how to turn the
+        // category into a concrete test (and how not to misread the result).
+        note: PATTERN_GUIDANCE[params.category],
       });
     }
 

@@ -46,6 +46,11 @@ const {
   SCANNING: S_SCANNING,
 } = require('./steps');
 
+// The standing "there is no exhausted" constraint, applied to the decide tools where a premature
+// "nothing left" conclusion is born. Delivered in full once per session (rule never hits the compact
+// line); the repeating pressure is the keep_hunting heartbeat attached to every result in index.js.
+const { NO_EXHAUSTED_RULE } = require('./keepHunting');
+
 module.exports = {
 
   // === Workflows ===============================================================================
@@ -246,6 +251,7 @@ module.exports = {
     tool: 'The eight-step workflow this framework implements, in order, with why each step exists, ' +
       'the opening moves, and the mistakes actually made on real engagements. Read it before ' +
       'planning work on a target.',
+    rule: NO_EXHAUSTED_RULE,
     lies: 'It describes the workflow, not this target: it cannot tell you that content discovery ' +
       'never ran here, which is the question you usually have.',
     next: 'whats_next, then get_attack_vector_model',
@@ -258,6 +264,7 @@ module.exports = {
     tool: 'What to do next on THIS target, decided from its stored data rather than from a ' +
       'checklist, ordered blockers then gaps then notes. Call it when picking up a target and ' +
       'whenever a section reports nothing.',
+    rule: NO_EXHAUSTED_RULE,
     lies: 'It reports what the database can see, so work done outside the framework looks undone, ' +
       'and a step whose rows were written by a tool that tested nothing looks done.',
     next: 'get_methodology, then run_url_workflow',
@@ -270,6 +277,7 @@ module.exports = {
     tool: 'The taxonomy the whole framework keys on: an injection vector is verb plus domain:port ' +
       'plus endpoint plus insertion point, and a logic vector is one of four shapes no scanner can ' +
       'find. Read it before deciding what to test.',
+    rule: NO_EXHAUSTED_RULE,
     lies: 'Two requests differing only in the VALUE sent are the SAME vector, so a crawl of forty ' +
       'search terms is one thing to test and not forty. An insertion point with zero vectors will ' +
       'be reported clean by every tool in every section.',

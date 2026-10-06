@@ -32,6 +32,11 @@ type ScopeBlast string
 const (
 	EffectAllow ScopeEffect = "allow"
 	EffectDeny  ScopeEffect = "deny"
+	// EffectAuth is capture-but-never-scan. A host matched by an auth rule is RECORDED (so the
+	// session it mints can be refreshed) and is reachable by the refresh path, but it is never put in
+	// scan scope and never receives attack traffic. It is the pattern twin of the per-host auth_host
+	// flag, so an operator can classify an IdP or token endpoint right where they author rules.
+	EffectAuth ScopeEffect = "auth"
 
 	KindHost       ScopeKind = "host"
 	KindSubtree    ScopeKind = "subtree"
@@ -68,8 +73,14 @@ type ScopeAuthority struct {
 }
 
 // ScopeVerdict is the answer, with the rule that produced it so the UI can explain itself.
+//
+// Auth is orthogonal to Allowed: it reports whether the host is an auth host (matched by an auth
+// rule and not denied), which the refresh path and the capturer read. A host can be Allowed and Auth
+// at once (a first-party SSO host that is both scanned and refreshed through), or Auth and not
+// Allowed (the common IdP case: captured for refresh, refused by every scanner).
 type ScopeVerdict struct {
 	Allowed bool       `json:"allowed"`
+	Auth    bool       `json:"auth,omitempty"`
 	Rule    *ScopeRule `json:"rule,omitempty"`
 	Reason  string     `json:"reason"`
 }
@@ -307,6 +318,12 @@ func ParseScopeRule(line string) (ScopeRule, error) {
 		rest = strings.TrimSpace(rest[1:])
 		if rest == "" {
 			return zero, fmt.Errorf("a deny needs something to deny")
+		}
+	} else if strings.HasPrefix(rest, "@") {
+		effect = EffectAuth
+		rest = strings.TrimSpace(rest[1:])
+		if rest == "" {
+			return zero, fmt.Errorf("an auth rule needs a host (the IdP or token endpoint to record for refresh)")
 		}
 	}
 
@@ -675,31 +692,48 @@ func DecideScope(rules []ScopeRule, subject ScopeAuthority, ok bool, in ScopeDec
 		return ScopeVerdict{Allowed: false, Reason: "unnormalisable"}
 	}
 
-	var denies, allows []*ScopeRule
+	var denies, allows, auths []*ScopeRule
 	for i := range rules {
 		r := &rules[i]
 		if !r.Enabled || !r.Matches(subject) {
 			continue
 		}
-		if r.Effect == EffectDeny {
+		switch r.Effect {
+		case EffectDeny:
 			denies = append(denies, r)
-		} else {
+		case EffectAuth:
+			auths = append(auths, r)
+		default:
 			allows = append(allows, r)
 		}
 	}
 
+	// Deny wins over everything, including auth: an explicit "never here" is a stronger statement
+	// than "record this for refresh", so a denied host is neither scanned, captured, nor reachable.
 	if len(denies) > 0 {
 		return ScopeVerdict{Allowed: false, Rule: pickScopeRule(denies), Reason: "rule_deny"}
 	}
+
+	// auth is computed before the allow/observed branches so a host that is BOTH allowed and auth
+	// reports Auth:true alongside Allowed.
+	authMatched := len(auths) > 0
+
 	if len(allows) > 0 {
-		return ScopeVerdict{Allowed: true, Rule: pickScopeRule(allows), Reason: "rule_allow"}
+		return ScopeVerdict{Allowed: true, Auth: authMatched, Rule: pickScopeRule(allows), Reason: "rule_allow"}
 	}
 
 	if in.AdmitObserved && in.Observed != nil {
 		key := subject.Host + ":" + strconv.Itoa(subject.Port)
 		if in.Observed[key] || in.Observed[subject.Host] {
-			return ScopeVerdict{Allowed: true, Reason: "observed"}
+			return ScopeVerdict{Allowed: true, Auth: authMatched, Reason: "observed"}
 		}
+	}
+
+	// An auth rule on its own does NOT put the host in scan scope: it stays out of scope for every
+	// scanner (Allowed:false) while being marked an auth host, so it is captured for refresh and
+	// reachable by the refresh path but never attacked.
+	if authMatched {
+		return ScopeVerdict{Allowed: false, Auth: true, Rule: pickScopeRule(auths), Reason: "rule_auth"}
 	}
 
 	return ScopeVerdict{Allowed: false, Reason: "default_deny"}
@@ -740,8 +774,13 @@ func CompileScopeRules(rules []ScopeRule) ([]ScopeRule, error) {
 // operator misreads. No surface renders a bare pattern as the boundary.
 func RenderScopeRule(r ScopeRule) string {
 	verb := "Allow"
-	if r.Effect == EffectDeny {
+	note := ""
+	switch r.Effect {
+	case EffectDeny:
 		verb = "DENY"
+	case EffectAuth:
+		verb = "AUTH"
+		note = " (recorded for session refresh, never scanned)"
 	}
 	port := ""
 	if r.Port != 0 {
@@ -752,29 +791,35 @@ func RenderScopeRule(r ScopeRule) string {
 		within = " under " + r.Within
 	}
 
+	var base string
 	switch r.Kind {
 	case KindHost:
-		return fmt.Sprintf("%s %s exactly, not its subdomains%s", verb, r.Value, port)
+		base = fmt.Sprintf("%s %s exactly, not its subdomains%s", verb, r.Value, port)
 	case KindSubtree:
-		return fmt.Sprintf("%s %s and every subdomain of it%s", verb, r.Value, port)
+		base = fmt.Sprintf("%s %s and every subdomain of it%s", verb, r.Value, port)
 	case KindSubdomains:
-		return fmt.Sprintf("%s every subdomain of %s, but not %s itself%s", verb, r.Value, r.Value, port)
+		base = fmt.Sprintf("%s every subdomain of %s, but not %s itself%s", verb, r.Value, r.Value, port)
 	case KindContains:
 		if within == "" {
 			within = " anywhere"
 		}
-		return fmt.Sprintf("%s any host%s whose name contains %q", verb, within, r.Value)
+		base = fmt.Sprintf("%s any host%s whose name contains %q", verb, within, r.Value)
 	case KindRegex:
-		return fmt.Sprintf("%s any host%s matching /%s/", verb, within, r.Value)
+		base = fmt.Sprintf("%s any host%s matching /%s/", verb, within, r.Value)
+	default:
+		base = fmt.Sprintf("%s %s", verb, r.Value)
 	}
-	return fmt.Sprintf("%s %s", verb, r.Value)
+	return base + note
 }
 
 // CanonicalScopeText is the stored form, and must re-parse to itself.
 func CanonicalScopeText(r ScopeRule) string {
-	bang := ""
-	if r.Effect == EffectDeny {
-		bang = "!"
+	prefix := ""
+	switch r.Effect {
+	case EffectDeny:
+		prefix = "!"
+	case EffectAuth:
+		prefix = "@"
 	}
 	within := ""
 	if r.Within != "" {
@@ -791,15 +836,15 @@ func CanonicalScopeText(r ScopeRule) string {
 
 	switch r.Kind {
 	case KindHost:
-		return bang + "=" + host + port
+		return prefix + "=" + host + port
 	case KindSubtree:
-		return bang + host + port
+		return prefix + host + port
 	case KindSubdomains:
-		return bang + "*." + host + port
+		return prefix + "*." + host + port
 	case KindContains:
-		return bang + "~" + r.Value + within
+		return prefix + "~" + r.Value + within
 	case KindRegex:
-		return bang + "re:" + r.Value + within
+		return prefix + "re:" + r.Value + within
 	}
-	return bang + r.Value
+	return prefix + r.Value
 }

@@ -20,6 +20,8 @@ const { getAttackSurfaceSchema, getAttackSurface, queryCloudAssetsSchema, queryC
 const { manageManualCrawlSchema, manageManualCrawl, captureManualCrawlSchema, captureManualCrawl } = require('./tools/manualcrawl');
 const { manageScopeRulesSchema, manageScopeRules } = require('./tools/scoperules');
 const { manageNotesSchema, manageNotes } = require('./tools/notes');
+const { manageGoalsSchema, manageGoals } = require('./tools/goals');
+const { apiGet } = require('./api');
 const { manageParamEnumSchema, manageParamEnum } = require('./tools/paramenum');
 const { manageVectorSelectionSchema, manageVectorSelection } = require('./tools/vectorselection');
 const { manageXSSSchema, manageXSS, manageSQLiSchema, manageSQLi, manageCacheSchema, manageCache, manageCmdiSchema, manageCmdi, manageRedirectSchema, manageRedirect, manageLfiSchema, manageLfi, manageSmugglingSchema, manageSmuggling, manageBypassSchema, manageBypass, manageGraphqlSchema, manageGraphql, manageLeakSchema, manageLeak, manageGitSchema, manageGit, manageMiscSchema, manageMisc } = require('./tools/vectortools');
@@ -60,10 +62,12 @@ const { manageFlowDetectionSchema, manageFlowDetection, manageFlowConfigSchema, 
 const { manageFlowBuilderSchema, manageFlowBuilder } = require('./tools/flowbuilder');
 const { browseKnowledgeBaseSchema, browseKnowledgeBase, readKnowledgeFileSchema, readKnowledgeFile, searchKnowledgeBaseSchema, searchKnowledgeBase } = require('./tools/knowledgebase');
 const { getAttackPlaybookSchema, getAttackPlaybook } = require('./tools/attackplaybook');
+const { getSessionRefreshPlaybookSchema, getSessionRefreshPlaybook } = require('./tools/sessionrefresh');
 const { listWorkflowsSchema, listWorkflows, getWorkflowSchema, getWorkflow } = require('./tools/workflowbook');
 
 const guidance = require('./guidance');
 const guidanceSession = require('./guidance/session');
+const keepHunting = require('./guidance/keepHunting');
 
 const pkg = require('../package.json');
 
@@ -74,6 +78,32 @@ const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
 // Real registered-tool count, set by createServer() (see the server.tool wrapper below) so /health
 // can't drift from the actual number the way a hardcoded constant did.
 let toolCount = 0;
+
+// Does this handler body read as "nothing found"? This is the quit signal: a run of these is the
+// pattern that precedes giving up. CONSERVATIVE on purpose (the loud block must stay rare to mean
+// anything): it fires only on clear emptiness, never on a rich read that merely contains one empty
+// list. Operates on the handler's own parsed output, before any guidance is merged.
+function isEmptyResult(parsed) {
+  if (parsed === null) return true;
+  if (Array.isArray(parsed)) return parsed.length === 0;
+  if (typeof parsed !== 'object') return false;
+  if (parsed.count === 0 || parsed.total === 0 || parsed.clean === true) return true;
+  // A results-like array that is empty counts as empty ONLY when nothing else in the body carries
+  // content, so get_scope_overview (targets[] plus rich counts) and get_target_summary (rich count
+  // objects) are never mistaken for dead ends.
+  const RESULT_ARRAYS = ['results', 'findings', 'rows', 'endpoints', 'vectors', 'data', 'targets',
+    'hits', 'items', 'threats', 'issues', 'matches'];
+  for (const k of RESULT_ARRAYS) {
+    if (Array.isArray(parsed[k]) && parsed[k].length === 0) {
+      const richElsewhere = Object.keys(parsed).some((kk) => kk !== k && (
+        (Array.isArray(parsed[kk]) && parsed[kk].length > 0) ||
+        (parsed[kk] && typeof parsed[kk] === 'object' && !Array.isArray(parsed[kk]) &&
+          Object.keys(parsed[kk]).length > 0)));
+      if (!richElsewhere) return true;
+    }
+  }
+  return false;
+}
 
 // Merge guidance into one tool result. Returns the envelope UNCHANGED whenever it cannot do this
 // safely, which is most of the interesting cases.
@@ -87,10 +117,13 @@ let toolCount = 0;
 // would be re-emitted as 12345678901234567000. Nothing served here produces one (ids are UUID
 // strings and the only bigint column is content_length), which is why the simpler code won, but a
 // future route returning epoch nanoseconds or a snowflake id would need the splice.
-function attachGuidance(toolName, params, extra, envelope) {
-  const entry = guidance.lookup(toolName, params && params.action);
-  if (!entry) return envelope;  // no entry means say nothing, not say nothing loudly
-
+function attachGuidance(toolName, params, extra, envelope, goalInfo) {
+  // Envelope eligibility is checked BEFORE the per-tool lookup now, because two things ride this
+  // hook: the per-tool guidance (entry, may be absent) and the always-on keep_hunting heartbeat
+  // (never absent). The old code returned early when there was no entry, which is exactly the set of
+  // tools - the entry-less ones and the EXEMPT knowledge-base reads - that still need the anti-quit
+  // reframe. So the shape guards run first and the entry is optional.
+  //
   // Only the single-text envelope every handler in this file returns is touched. isError is left
   // alone on purpose: the client reads that flag, and teaching over a failure is noise on top of a
   // problem the caller is already dealing with.
@@ -109,31 +142,166 @@ function attachGuidance(toolName, params, extra, envelope) {
   }
 
   const isPlainObject = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
+  // A handler that already speaks for itself with a guidance key keeps all of its own words, and we
+  // do not even add the heartbeat: the few tools that do this are the teaching tools themselves, and
+  // a reframe stapled onto a lesson about not stopping would be noise.
   if (isPlainObject && Object.prototype.hasOwnProperty.call(parsed, 'guidance')) return envelope;
 
-  // The brief is consumed only now, once it is certain something is going to be attached. Consuming
-  // it earlier would mark a tool as taught on a call that taught nothing.
   const sessionId = extra && typeof extra === 'object' ? extra.sessionId : undefined;
-  const first = guidanceSession.firstBrief(sessionId, toolName);
-  const payload = first ? entry : guidance.compactLine(entry);
 
-  // Guidance goes FIRST. A caller that reads the head of a five hundred line result should still see
-  // it; appended, it is the thing most likely to be scrolled past or clipped.
+  // Per-tool guidance (optional). The brief is consumed only now, once it is certain something is
+  // going to be attached. Consuming it earlier would mark a tool as taught on a call that taught
+  // nothing.
+  const entry = guidance.lookup(toolName, params && params.action);
+  let payload;
+  if (entry) {
+    const first = guidanceSession.firstBrief(sessionId, toolName);
+    payload = first ? entry : guidance.compactLine(entry);
+  }
+
+  // The always-on keep-hunting reframe (never absent). This is the anti-premature-termination layer:
+  // an engagement-scope reframe that every tool result carries, so it reaches the model unbidden on
+  // the call where it is about to conclude a target is done. It is a SEPARATE field: it never
+  // rewrites the handler's own result or the per-scan verdict (honesty-layer guard, keepHunting.js).
+  //
+  // Two tiers. The heartbeat is one rotating line on every result (constant low pressure). The LOUD
+  // block (an object: reframe + verify-the-negative + three untried axes + next move + the
+  // legitimate-pause carve-out) replaces it exactly when a "nothing left" conclusion is forming: a
+  // terminal-prone summary/results tool returned an empty or clean body, OR this session has hit a
+  // run of empty results (consecutiveEmpty >= 2). Conservative: one quiet call is normal, a run is
+  // the signal, and a single productive result clears it.
+  const rot = guidanceSession.nextHeartbeat(sessionId);
+  const empty = isEmptyResult(parsed);
+  const quit = guidanceSession.recordEmpty(sessionId, empty);
+  // THE SOFT-DONE CASE, which structural emptiness cannot catch. whats_next (the advisor) never
+  // returns an empty body: its advice array always carries at least the terminal note, so
+  // isEmptyResult sees a rich object and stays quiet. But blocked and gaps both zero is the exact
+  // SEMANTIC state in which "I am done on this target" gets concluded - every finite check the
+  // advisor runs is satisfied. That is a floor, not a finish (the search space is unbounded), so it
+  // has to trigger the loud block just as an empty scan does. Narrowed to this one tool because
+  // blocked/gaps are its response shape and no other handler returns them; not fed into recordEmpty
+  // because that counter means "a scan found nothing", a different thing from "the advisor is quiet".
+  const softDone = toolName === 'whats_next' && isPlainObject &&
+    parsed.blocked === 0 && parsed.gaps === 0;
+  const loud = (keepHunting.TERMINAL_PRONE.has(toolName) && (empty || softDone)) || quit >= 2;
+  const targetId = params && (params.target_id || params.targetId || params.scope_target_id);
+  const heartbeat = loud
+    ? keepHunting.loudBlock(targetId, rot, goalInfo && goalInfo.active)
+    : keepHunting.heartbeat(rot);
+
+  // Guidance and the heartbeat go FIRST. A caller that reads the head of a five hundred line result
+  // should still see them; appended, they are the thing most likely to be scrolled past or clipped.
+  const head = {};
+  if (payload) head.guidance = payload;
+  if (heartbeat) head.keep_hunting = heartbeat;
+  // The goal line rides every result once the layer is on (goalInfo defined): the loop's north star,
+  // or the NO GOAL SET reminder. A result that already speaks with its own guidance key returned
+  // early above, so this only lands on ordinary results.
+  if (goalInfo) head.goal = goalLine(goalInfo.active, targetId);
+
   const merged = isPlainObject
-    ? { guidance: payload, ...parsed }
-    : { result: parsed, guidance: payload };
+    ? { ...head, ...parsed }
+    : { ...head, result: parsed };
 
   return { ...envelope, content: [{ ...item, text: JSON.stringify(merged, null, 2) }] };
 }
 
-// Wrap one handler so its result carries guidance. Nothing here is allowed to change whether the
-// tool works: a throw from the guidance layer returns the untouched envelope, and a throw from the
-// tool itself propagates exactly as it did before.
+// === the per-target GOAL gate =====================================================================
+// A goal is the sanctioned objective a hunt converges on, and the one legitimate finish line the
+// never-give-up layer otherwise lacks. GOAL_GATE decides enforcement: 'hard' (default) refuses
+// hunt-initiating tools until the target has an active goal, 'soft' only reminds, 'off' disables the
+// whole goal layer. It is read from the ENVIRONMENT on purpose: the gate must be operator-controlled,
+// so the AI driving this server cannot turn it off to bypass itself.
+const GATE_MODE = (() => {
+  const m = String(process.env.GOAL_GATE || 'hard').toLowerCase();
+  return (m === 'soft' || m === 'off') ? m : 'hard';
+})();
+
+// Tools that SEND offensive traffic at the target. ALWAYS_HUNT are hunt-starts whatever the action;
+// ACTION_HUNT only send on action 'run', so their list/results/status/settings reads stay open (the
+// gate must never block reading a scan you already ran). Everything not listed - recon, reads,
+// replay_request, manage_goals, the session tools - is never gated.
+const ALWAYS_HUNT = new Set(['run_scan', 'run_url_workflow', 'run_wildcard_workflow',
+  'run_company_workflow', 'start_auto_scan', 'run_endpoint_scan', 'run_waf_probe']);
+const ACTION_HUNT = new Set(['manage_fuzz', 'manage_param_enum', 'manage_xss', 'manage_sqli',
+  'manage_cmdi', 'manage_redirect', 'manage_lfi', 'manage_cache', 'manage_smuggling',
+  'manage_access_bypass', 'manage_graphql', 'manage_sensitive_leak', 'manage_exposed_git',
+  'manage_misc']);
+
+function isHuntAction(toolName, params) {
+  if (ALWAYS_HUNT.has(toolName)) return true;
+  return ACTION_HUNT.has(toolName) && params && params.action === 'run';
+}
+
+// The refusal a hard gate returns INSTEAD of running the tool. NON-isError on purpose: it is not a
+// crash, it is actionable data (go set a goal), so the client does not flag it red and the guidance
+// layer still rides it. The handler never runs, so no traffic leaves.
+function goalGateRefusal(toolName, targetId) {
+  return { content: [{ type: 'text', text: JSON.stringify({
+    error: 'NO_ACTIVE_GOAL',
+    refusal: `${toolName} sends live traffic at the target, but no goal is active for it. Hunting is `
+      + 'gated until the engagement has a defined, PoC-backed objective to converge on.',
+    target_id: targetId,
+    next: 'manage_goals action:"create" with a GIVEN/WHEN/THEN success_criteria, then manage_goals '
+      + 'action:"activate". Then re-run this tool.',
+    gate: 'GOAL_GATE=hard (operator-controlled; soft only reminds, off disables).',
+  }, null, 2) }] };
+}
+
+// The goal line that rides every result once the layer is on: the loop's north star. A null active
+// goal is the NO GOAL SET reminder. Kept short; the full goal is read with manage_goals.
+function goalLine(active, targetId) {
+  if (!active) {
+    return { status: 'NO GOAL SET', target_id: targetId,
+      message: 'No active goal on this target. Set one with manage_goals before hunting; the loop '
+        + 'needs an objective to converge on, and it is the one legitimate finish line.' };
+  }
+  const crit = typeof active.success_criteria === 'string' ? active.success_criteria : '';
+  return {
+    status: active.status,
+    title: active.title,
+    vuln_class: active.vuln_class || undefined,
+    asset_scope: active.asset_scope || undefined,
+    success_criteria: crit.length > 300 ? `${crit.slice(0, 300)} ...` : crit,
+    requires_poc: active.requires_poc,
+    note: 'The loop converges on THIS. It is reached only when captured artifacts prove the '
+      + 'success_criteria (propose then verify) AND the operator signs off to met; you can never set '
+      + 'met yourself. blocked==0 && gaps==0, or any "nothing left" feeling, is NOT done while this is '
+      + 'unmet.',
+  };
+}
+
+// Wrap one handler so its result carries guidance, enforces the goal gate, and carries the goal line.
+// Nothing here is allowed to change whether the tool WORKS: a throw from the guidance layer returns
+// the untouched envelope, and a throw from the tool itself propagates exactly as it did before. The
+// one new behaviour that CAN stop a tool is the hard goal gate, and only for hunt-initiating tools
+// with no active goal, and only by returning a non-error pointer instead of running them.
 function teach(toolName, handler) {
   return async (params, extra) => {
+    // The per-target goal layer. Fetch the active goal once (reused by the gate and the goal line).
+    // Fail-open on a read error: a goals-check glitch must not block real testing, and the soft
+    // reminder still rides. undefined goalInfo means the layer is off or there is no target in scope.
+    const targetId = params && (params.target_id || params.targetId || params.scope_target_id);
+    let goalInfo;
+    if (GATE_MODE !== 'off' && targetId) {
+      let active = null;
+      try {
+        const body = await apiGet(`/goals/${targetId}`);
+        active = body && body.active_goal ? body.active_goal : null;
+      } catch (err) { active = null; }
+      goalInfo = { active };
+      // HARD gate: a hunt-initiating tool with no active goal is refused WITHOUT running the handler,
+      // so no traffic leaves. The refusal still rides the guidance + goal line (hence attachGuidance).
+      if (GATE_MODE === 'hard' && !active && isHuntAction(toolName, params)) {
+        const refusal = goalGateRefusal(toolName, targetId);
+        try { return attachGuidance(toolName, params, extra, refusal, goalInfo); }
+        catch (err) { return refusal; }
+      }
+    }
+
     const envelope = await handler(params, extra);
     try {
-      return attachGuidance(toolName, params, extra, envelope);
+      return attachGuidance(toolName, params, extra, envelope, goalInfo);
     } catch (err) {
       console.error(`[MCP] guidance failed for ${toolName}, returning result unchanged:`, err && err.message);
       return envelope;
@@ -561,6 +729,10 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return getAttackPlaybook(params);
   });
 
+  server.tool('get_session_refresh_playbook', 'HOW TO KEEP A SESSION ALIVE for authenticated testing, per authentication type. A session is a depreciating asset: a scan on an expired token fingerprints the login wall as the app, and cross-account IDOR silently collapses to 401s the moment the second account dies. Tell it the auth type (password, password-mfa, magic-link, oauth-oidc, saml, jwt-bearer, session-cookie, api-key, fingerprint-bound, or a shorthand like oauth/cognito/2fa/cloudflare) and it returns the EXACT framework action to refresh or re-capture (check_session_tokens refresh / provide_refresh_input / recapture / capture_oauth, auth-flow recording), the steps, and whether that is headless, semi-automated, or needs a real browser. Call with NO auth_type for the index plus the standing principles and the signals to identify the type from the recorded login. Carries the hard rule that a live browser session is bridged through the crawl corpus, never by reading the token in JavaScript (the extension redacts it). The session-equivalent of get_attack_playbook.', getSessionRefreshPlaybookSchema.shape, async (params) => {
+    return getSessionRefreshPlaybook(params);
+  });
+
   // ============================================================
   // WORKFLOW BOOK
   // ============================================================
@@ -665,6 +837,11 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
 
   server.tool('manage_notes', 'Create, read, update and delete free-text notes on a scope target: working theories, what has already been tried, what to come back to. Reach for it when something you worked out needs to outlive the conversation, or to catch up on a target somebody else was on. Nothing scans these and no other tool reads them, which is what makes them the place for reasoning that has no schema. list previews the bodies rather than returning them, so find the note there and then get it by id.', manageNotesSchema.shape, async (params) => {
     const result = await manageNotes(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_goals', 'The engagement GOAL for a scope target: the one specific, PoC-backed objective the hunt converges on, and the one legitimate finish line. SET AND ACTIVATE A GOAL BEFORE HUNTING - when the goal gate is on (default), the scan and attack tools refuse to run until this target has an active goal. A goal is a red-team "flag": a human objective plus a GIVEN/WHEN/THEN success_criteria that is binary and checkable against captured artifacts. State machine: create (draft) -> activate (the single active goal, opens the gate) -> propose (the hunter claims it, attaching the captured artifacts) -> verify (an ISOLATED adversarial turn records the verdict) -> met (the OPERATOR signs off, and only the operator). The hunter can reach candidate; it can never mark its own goal met, and a failed verify means keep hunting, not stop. Every goal requires a PoC unless the operator sets requires_poc false.', manageGoalsSchema.shape, async (params) => {
+    const result = await manageGoals(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 

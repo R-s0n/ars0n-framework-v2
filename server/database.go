@@ -1823,6 +1823,19 @@ func createTables() {
 		`CREATE INDEX IF NOT EXISTS idx_scope_target_scope_hosts_target
 		   ON scope_target_scope_hosts(scope_target_id);`,
 
+		// Auth-host classification. A host reachable to ESTABLISH or REFRESH a session (an OAuth/SSO/
+		// IdP/token-mint host) that must NEVER be scanned or attacked. This is a SEPARATE flag from
+		// in_scope, so the four states are all expressible: (in_scope,auth_host) = (T,F) a normal
+		// scanned host, (F,T) an auth-only host that scanners refuse for free but refresh may reach,
+		// (T,T) a first-party SSO host that is both scanned and reachable for auth, (F,F) out of scope.
+		// auth_host is never read by ScanScope.Allows(), so it can never widen the scan boundary; it is
+		// consulted ONLY by the automated refresh guards (AllowsForAuth / IsAuthFlowHost).
+		`ALTER TABLE scope_target_scope_hosts ADD COLUMN IF NOT EXISTS auth_host BOOLEAN NOT NULL DEFAULT FALSE;`,
+		// Why this host was classified for auth, mirroring the NOT-blank discipline exclusions use: an
+		// auth classification with no explanation is one the next operator deletes or keeps for the
+		// wrong reason. Nullable at the column level for the migration; the write path requires it.
+		`ALTER TABLE scope_target_scope_hosts ADD COLUMN IF NOT EXISTS auth_reason TEXT;`,
+
 		// Scope RULES: the pattern-capable boundary that supersedes the exact-host list above.
 		//
 		// scope_target_scope_hosts is deliberately left untouched rather than migrated. It keeps
@@ -1836,7 +1849,7 @@ func createTables() {
 		`CREATE TABLE IF NOT EXISTS scope_rules (
 		    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 		    scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
-		    effect TEXT NOT NULL CHECK (effect IN ('allow','deny')),
+		    effect TEXT NOT NULL CHECK (effect IN ('allow','deny','auth')),
 		    kind TEXT NOT NULL CHECK (kind IN ('host','subtree','subdomains','contains','regex')),
 		    value TEXT NOT NULL,
 		    port INTEGER CHECK (port IS NULL OR (port > 0 AND port < 65536)),
@@ -1856,6 +1869,13 @@ func createTables() {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_scope_rules_canonical
 		   ON scope_rules(scope_target_id, canonical);`,
 
+		// The effect CHECK predates the "auth" effect (capture-but-never-scan), so a database created
+		// before it would reject an auth rule at INSERT. Drop and re-add the inline-named constraint so
+		// both fresh and existing installs accept all three effects. Idempotent: the DROP IF EXISTS
+		// clears whichever version is present each boot, and the ADD then re-creates it.
+		`ALTER TABLE scope_rules DROP CONSTRAINT IF EXISTS scope_rules_effect_check;`,
+		`ALTER TABLE scope_rules ADD CONSTRAINT scope_rules_effect_check CHECK (effect IN ('allow','deny','auth'));`,
+
 		// Free-text notes on a scope target. Nothing reads these except the notes screen and the MCP
 		// tool, so there are no constraints beyond "belongs to a target and has a title".
 		//
@@ -1873,6 +1893,42 @@ func createTables() {
 		// Matches the only query that runs: notes for one target, most recently edited first.
 		`CREATE INDEX IF NOT EXISTS idx_scope_target_notes_target
 		   ON scope_target_notes(scope_target_id, updated_at DESC);`,
+
+		// The engagement GOAL for a scope target: the one specific, PoC-backed objective the hunter is
+		// trying to reach, and the finish line the never-give-up layer otherwise lacks. Modelled as a
+		// red-team "flag" (PTES/MITRE Engage): a human-readable objective plus a GIVEN/WHEN/THEN
+		// success_criteria that is binary and artifact-checkable. requires_poc defaults TRUE because a
+		// goal is not met by a mechanism being present, only by a proof of attacker gain (the
+		// validated-needs-a-PoC rule). status is a state machine the hunter may advance only as far as
+		// 'candidate'; 'verified' records the isolated adversarial verify turn, and 'met' is the
+		// operator's sign-off alone. is_active gates hunting, and the partial unique index below makes
+		// "exactly one active goal per target" a database fact rather than a convention.
+		`CREATE TABLE IF NOT EXISTS target_goals (
+		    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		    scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+		    title TEXT NOT NULL,
+		    description TEXT NOT NULL DEFAULT '',
+		    vuln_class TEXT NOT NULL DEFAULT '',
+		    asset_scope TEXT NOT NULL DEFAULT '',
+		    success_criteria TEXT NOT NULL DEFAULT '',
+		    requires_poc BOOLEAN NOT NULL DEFAULT TRUE,
+		    min_severity TEXT NOT NULL DEFAULT '',
+		    status TEXT NOT NULL DEFAULT 'draft'
+		        CHECK (status IN ('draft','active','candidate','verified','met','rejected','abandoned')),
+		    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+		    candidate_evidence TEXT NOT NULL DEFAULT '',
+		    verifier_verdict TEXT NOT NULL DEFAULT '',
+		    verifier_notes TEXT NOT NULL DEFAULT '',
+		    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+		    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		);`,
+		// One target, its goals, most recently edited first (matches the only list query that runs).
+		`CREATE INDEX IF NOT EXISTS idx_target_goals_target
+		   ON target_goals(scope_target_id, updated_at DESC);`,
+		// Exactly one active goal per target, enforced by the database so activation cannot race into
+		// two. ActivateGoal flips the flag atomically; this backstops it.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_target_goals_one_active
+		   ON target_goals(scope_target_id) WHERE is_active;`,
 
 		// Capture provenance and the richer fields the multi-source extension produces.
 		// `sources` records which of webrequest/hook/debugger contributed, which is how you tell a

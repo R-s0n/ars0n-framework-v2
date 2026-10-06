@@ -45,6 +45,7 @@ type vectorFile struct {
 		Observed      []string `json:"observed"`
 		Expect        struct {
 			Allowed bool   `json:"allowed"`
+			Auth    bool   `json:"auth"`
 			Reason  string `json:"reason"`
 		} `json:"expect"`
 	} `json:"decisions"`
@@ -156,9 +157,9 @@ func TestScopeVectorsDecisions(t *testing.T) {
 
 		auth, ok := NormalizeAuthority(v.Subject, "")
 		got := DecideScope(rules, auth, ok, in)
-		if got.Allowed != v.Expect.Allowed || got.Reason != v.Expect.Reason {
-			t.Errorf("DecideScope(%v, %q) = {allowed=%v reason=%s}, want {allowed=%v reason=%s}",
-				v.Rules, v.Subject, got.Allowed, got.Reason, v.Expect.Allowed, v.Expect.Reason)
+		if got.Allowed != v.Expect.Allowed || got.Reason != v.Expect.Reason || got.Auth != v.Expect.Auth {
+			t.Errorf("DecideScope(%v, %q) = {allowed=%v auth=%v reason=%s}, want {allowed=%v auth=%v reason=%s}",
+				v.Rules, v.Subject, got.Allowed, got.Auth, got.Reason, v.Expect.Allowed, v.Expect.Auth, v.Expect.Reason)
 		}
 	}
 }

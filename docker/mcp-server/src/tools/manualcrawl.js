@@ -104,12 +104,14 @@ const manageManualCrawlSchema = z.object({
       'with the reason it was picked and a suggested flow category. This is the input to building ' +
       'an auth flow. ' +
       'hosts: every host the crawl observed, with request and endpoint counts, whether it is the ' +
-      'target\'s own host or adjacent, and whether the scanner may contact it. Adjacent hosts are ' +
-      'where an application\'s API usually lives, and they are in scope by DEFAULT because the ' +
+      'target\'s own host or adjacent, whether the scanner may contact it (in_scope), and whether it ' +
+      'is an auth host (auth_host: reachable to refresh a session but never scanned). Adjacent hosts ' +
+      'are where an application\'s API usually lives, and they are in scope by DEFAULT because the ' +
       'capturer refuses to record a host nobody authorized, so a recorded host already implies ' +
       'consent. Read this before an endpoint scan to see the boundary that will be enforced. ' +
-      'set_host_scope: include or exclude specific hosts. Excluding writes a decision rather than ' +
-      'deleting a row, so the host stays excluded on the next run instead of silently returning. ' +
+      'set_host_scope: include or exclude specific hosts (in_scope), and/or classify them as auth ' +
+      'hosts (auth_host). Excluding writes a decision rather than deleting a row, so the host stays ' +
+      'excluded on the next run instead of silently returning. ' +
       'promote_hosts: create a URL scope target for each host so it can be worked in its own ' +
       'right. Hosts that already have a target are skipped rather than duplicated.'),
 
@@ -148,7 +150,19 @@ const manageManualCrawlSchema = z.object({
     'wildcard are all accepted and normalised to a bare host.'),
   in_scope: z.boolean().optional().describe(
     'set_host_scope: true to let the scanner contact these hosts, false to refuse them. ' +
-    'Default true.'),
+    'Default true when auth_host is not given. When auth_host IS given, in_scope is left unchanged ' +
+    'unless you name it here, so classifying a host as auth never alters the scan decision.'),
+  auth_host: z.boolean().optional().describe(
+    'set_host_scope: true to classify these hosts as AUTH HOSTS - reachable to establish or refresh ' +
+    'a session (an OAuth/SSO/IdP/token-mint host) but NEVER scanned or attacked. The scanners keep ' +
+    'refusing an auth host (that is governed by in_scope), while the session-refresh path is allowed ' +
+    'to reach it. For a third-party IdP you only authenticate through (Cognito, Okta, Auth0, Google), ' +
+    'pass auth_host:true AND in_scope:false so it is auth-only. For a first-party SSO host you also ' +
+    'test, pass auth_host:true alone and leave it in scope. false clears the classification.'),
+  auth_reason: z.string().optional().describe(
+    'set_host_scope: why these hosts are auth hosts, for the handover (e.g. "AWS Cognito identity ' +
+    'provider"). Stored with the classification so a later operator can see why refresh may reach a ' +
+    'host every scanner refuses. A sensible default is stored if omitted.'),
 
   method: z.string().optional().describe('Only this HTTP verb, e.g. POST'),
   host: z.string().optional().describe(
@@ -320,10 +334,20 @@ async function manageManualCrawl(params) {
     case 'set_host_scope': {
       if (!params.target_id) return { error: 'set_host_scope needs target_id' };
       if (!params.hosts || !params.hosts.length) return { error: 'set_host_scope needs hosts' };
-      return apiPost(`/manual-crawl/hosts/${params.target_id}`, {
-        hosts: params.hosts,
-        in_scope: params.in_scope !== false,
-      });
+      const body = { hosts: params.hosts };
+      if (params.auth_host !== undefined) {
+        // Classifying (or un-classifying) an auth host: a host reachable to refresh a session but
+        // never scanned. in_scope is left as-is unless the caller names it, so marking a host auth
+        // never changes the scan decision. For an auth-ONLY third-party IdP (Cognito, Okta, ...),
+        // pass in_scope:false too; a first-party SSO host you also test is auth_host:true alone.
+        body.auth_host = params.auth_host === true;
+        if (params.auth_reason) body.auth_reason = params.auth_reason;
+        if (params.in_scope !== undefined) body.in_scope = params.in_scope !== false;
+      } else {
+        // Historical scope call: include unless explicitly excluded.
+        body.in_scope = params.in_scope !== false;
+      }
+      return apiPost(`/manual-crawl/hosts/${params.target_id}`, body);
     }
 
     case 'promote_hosts': {

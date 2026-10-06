@@ -31,6 +31,18 @@ const MODE_HELP = {
 
 const BLANK_REQUEST = 'GET / HTTP/1.1\nHost: example.com\nAccept: */*\n\n';
 
+// The jobs ffuf does are not one thing, so a target can hold several named flows. These are the
+// purposes the server understands; the label is what a human picks from when creating one.
+const FLOW_PURPOSES = [
+  ['content-discovery', 'Content discovery (path)'],
+  ['name-enumeration', 'Hidden name enumeration'],
+  ['value-fuzzing', 'Value fuzzing'],
+  ['identifier-enumeration', 'Identifier enumeration'],
+  ['auth-bruteforce', 'Credential / token attacks'],
+  ['vhost-discovery', 'Virtual host discovery'],
+  ['custom', 'Custom'],
+];
+
 export const FuzzComposer = ({ tool, targetId, onRunStateChange }) => {
   const [endpoints, setEndpoints] = useState([]);
   const [steps, setSteps] = useState([]);
@@ -42,14 +54,39 @@ export const FuzzComposer = ({ tool, targetId, onRunStateChange }) => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [run, setRun] = useState(null);
+  const [flows, setFlows] = useState([]);
+  const [flowId, setFlowId] = useState('');
+  const [creatingFlow, setCreatingFlow] = useState(false);
+  const [newFlowName, setNewFlowName] = useState('');
+  const [newFlowPurpose, setNewFlowPurpose] = useState('content-discovery');
   const rawRef = useRef(null);
 
   const selected = steps.find((s) => s.id === selectedId) || null;
+  const selectedFlow = flows.find((f) => f.id === flowId) || null;
 
-  const loadFlow = useCallback(async () => {
-    if (!targetId) return;
+  const loadFlows = useCallback(async () => {
+    if (!targetId) return [];
     try {
-      const res = await fetch(`/api/fuzz/${targetId}/flow?tool=${tool}`);
+      const res = await fetch(`/api/fuzz/${targetId}/flows`);
+      if (res.ok) {
+        const list = (await res.json()).flows || [];
+        setFlows(list);
+        return list;
+      }
+    } catch (err) {
+      setError('Could not load the flows: ' + err.message);
+    }
+    return [];
+  }, [targetId]);
+
+  // fid overrides the selected flow, which the initial load needs because it reads the flow before
+  // the flowId state has settled. Without a flow id the server falls back to the default flow.
+  const loadFlow = useCallback(async (fid) => {
+    if (!targetId) return [];
+    const useFid = fid !== undefined ? fid : flowId;
+    try {
+      const q = useFid ? `&flow_id=${encodeURIComponent(useFid)}` : '';
+      const res = await fetch(`/api/fuzz/${targetId}/flow?tool=${tool}${q}`);
       if (res.ok) {
         const data = await res.json();
         setSteps(data.steps || []);
@@ -59,16 +96,17 @@ export const FuzzComposer = ({ tool, targetId, onRunStateChange }) => {
       setError('Could not load the flow: ' + err.message);
     }
     return [];
-  }, [targetId, tool]);
+  }, [targetId, tool, flowId]);
 
   useEffect(() => {
     if (!targetId) return;
     (async () => {
       setLoading(true);
       try {
-        const [epRes, wlRes] = await Promise.all([
+        const [epRes, wlRes, flowList] = await Promise.all([
           fetch(`/api/fuzz/${targetId}/endpoints`),
           fetch('/api/ffuf-wordlists'),
+          loadFlows(),
         ]);
         if (epRes.ok) setEndpoints((await epRes.json()).endpoints || []);
         if (wlRes.ok) {
@@ -77,12 +115,15 @@ export const FuzzComposer = ({ tool, targetId, onRunStateChange }) => {
           setWordlists([...BUILTIN_WORDLISTS,
             ...list.map((w) => ({ id: w.id, label: w.name || w.id }))]);
         }
-        await loadFlow();
+        const def = flowList.find((f) => f.is_default) || flowList[0];
+        const initialFid = def ? def.id : '';
+        setFlowId(initialFid);
+        await loadFlow(initialFid);
       } finally {
         setLoading(false);
       }
     })();
-  }, [targetId, loadFlow]);
+  }, [targetId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the editor in sync when a different step is selected, but never clobber what the operator
   // is currently typing.
@@ -134,7 +175,7 @@ export const FuzzComposer = ({ tool, targetId, onRunStateChange }) => {
       const res = await fetch(`/api/fuzz/${targetId}/steps`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool, ...body }),
+        body: JSON.stringify({ tool, flow_id: flowId, ...body }),
       });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
@@ -143,6 +184,7 @@ export const FuzzComposer = ({ tool, targetId, onRunStateChange }) => {
       }
       const step = await res.json();
       await loadFlow();
+      await loadFlows();
       setSelectedId(step.id);
       setDraft(step.raw_request || '');
     } catch (err) {
@@ -155,7 +197,44 @@ export const FuzzComposer = ({ tool, targetId, onRunStateChange }) => {
   const removeStep = async (id) => {
     await fetch(`/api/fuzz/steps/${id}`, { method: 'DELETE' });
     const remaining = await loadFlow();
+    await loadFlows();
     if (selectedId === id) setSelectedId(remaining.length ? remaining[0].id : null);
+  };
+
+  const switchFlow = async (fid) => {
+    if (!fid || fid === flowId) return;
+    setFlowId(fid);
+    setSelectedId(null);
+    setPreview(null);
+    setError('');
+    await loadFlow(fid);
+  };
+
+  const createFlow = async () => {
+    const name = newFlowName.trim();
+    if (!name) return;
+    setBusy(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/fuzz/${targetId}/flows`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, purpose: newFlowPurpose }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.message || 'Could not create that flow');
+        return;
+      }
+      setCreatingFlow(false);
+      setNewFlowName('');
+      await loadFlows();
+      await switchFlow(data.id);
+    } catch (err) {
+      setError('Could not create that flow: ' + err.message);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const move = async (id, delta) => {
@@ -211,7 +290,7 @@ export const FuzzComposer = ({ tool, targetId, onRunStateChange }) => {
       const res = await fetch(`/api/fuzz/${targetId}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool, acknowledge }),
+        body: JSON.stringify({ tool, flow_id: flowId, acknowledge }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.status === 409 && data.acknowledgeable) {
@@ -262,6 +341,53 @@ export const FuzzComposer = ({ tool, targetId, onRunStateChange }) => {
         <Alert variant="dark" className="border border-danger text-danger py-2"
                onClose={() => setError('')} dismissible>{error}</Alert>
       )}
+
+      {/* Flow selector: the composer acts on ONE flow at a time, and a target can hold several. */}
+      <div className="d-flex align-items-center gap-2 mb-2 flex-wrap">
+        <span className="text-light small">Flow</span>
+        {!creatingFlow ? (
+          <>
+            <Form.Select size="sm" style={{ maxWidth: '340px' }} value={flowId} disabled={busy}
+              onChange={(e) => switchFlow(e.target.value)} data-bs-theme="dark">
+              {flows.length === 0 && <option value="">no flows yet</option>}
+              {flows.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.name}{f.is_default ? ' (default)' : ''} &middot; {f.step_count} step{f.step_count === 1 ? '' : 's'}
+                </option>
+              ))}
+            </Form.Select>
+            {selectedFlow && selectedFlow.purpose && (
+              <Badge bg="dark" className="border border-secondary text-white-50"
+                     style={{ fontSize: '0.65rem' }}>{selectedFlow.purpose}</Badge>
+            )}
+            <Button size="sm" variant="outline-danger" disabled={busy}
+              onClick={() => { setCreatingFlow(true); setNewFlowName(''); }}>
+              New flow
+            </Button>
+          </>
+        ) : (
+          <>
+            <Form.Control size="sm" style={{ maxWidth: '220px' }} autoFocus placeholder="new flow name"
+              value={newFlowName} onChange={(e) => setNewFlowName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') createFlow();
+                if (e.key === 'Escape') { setCreatingFlow(false); setNewFlowName(''); }
+              }}
+              data-bs-theme="dark" />
+            <Form.Select size="sm" style={{ maxWidth: '300px' }} value={newFlowPurpose}
+              onChange={(e) => setNewFlowPurpose(e.target.value)} data-bs-theme="dark">
+              {FLOW_PURPOSES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </Form.Select>
+            <Button size="sm" variant="danger" disabled={busy || !newFlowName.trim()} onClick={createFlow}>
+              Create
+            </Button>
+            <Button size="sm" variant="link" className="text-white-50 p-0 ms-1"
+              onClick={() => { setCreatingFlow(false); setNewFlowName(''); }}>
+              cancel
+            </Button>
+          </>
+        )}
+      </div>
 
       <div className="d-flex flex-grow-1" style={{ minHeight: 0, gap: '0.5rem' }}>
         {/* LEFT: what you can start a round from. */}

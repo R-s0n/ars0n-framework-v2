@@ -1437,6 +1437,28 @@ func runSessionTokenValidation(token SessionToken) (string, string, map[string]i
 					"unauthenticated caller to log in (the anonymous control was not: %s).",
 				authed.Location, FingerprintSummary(anonFP)), evidence
 		}
+		// AUTHN ACCEPTED, AUTHZ DENIED is not an expired session. A 403 on the authenticated arm while
+		// the anonymous control drew an authentication challenge (401, or a login redirect) means the
+		// token was PROMOTED from "who are you" to "you may not": the server recognised it as an identity
+		// and then refused this resource. An expired or garbage token cannot earn a 403, because a server
+		// cannot authorize an identity it never authenticated; it draws the same 401 or login bounce the
+		// anonymous arm got. So the credential is live and this probe is an AUTHORIZATION boundary - a
+		// feature-gated route or another account's object - not a login wall.
+		//   Measured: a bearer whose exp was 7.5 minutes in the future read "expired" here only because
+		//   authRequiredProbeURL picked /v1beta1/acats/assets/validate, which 403s an account that lacks
+		//   ACATS access while the anonymous control gets 401. That is the same IDOR-protected-object trap
+		//   the equivalent-refusal branch above already catches, in its asymmetric 403-vs-401 form.
+		anonAuthChallenge := anon.Status == 401 ||
+			(anon.IsRedirect() && LooksLikeAuthRedirect(anon.Location))
+		if authed.Status == 403 && anonAuthChallenge {
+			return tokenStatusActive, fmt.Sprintf(
+				"The authenticated request got 403 (forbidden) while the anonymous control got %s. A 403 is "+
+					"an authorization verdict, so the credential was ACCEPTED as an identity and then denied "+
+					"for this resource (a feature gate or a foreign object); an expired token would draw the "+
+					"same refusal as the anonymous control instead. The session is being honoured, and this "+
+					"probe is an authorization boundary rather than a login wall.",
+				FingerprintSummary(anonFP)), evidence
+		}
 		return tokenStatusExpired, fmt.Sprintf(
 			"The target answered %d to the authenticated request while the anonymous control got %s, so "+
 				"the refusal is specific to the credential: the stored value is expired or wrong.",

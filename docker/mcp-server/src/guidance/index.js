@@ -67,6 +67,11 @@ const EXEMPT = {
     'attack for the index of all classes, then an id/name/alias for one playbook) and it reads the ' +
     'same source of truth as the UI Possible Attacks modal, so a guidance block restating it would ' +
     'only duplicate what the tool already says.',
+  get_session_refresh_playbook: 'the session-refresh catalogue IS a teaching layer, the ' +
+    'session-equivalent of get_attack_playbook. Its own description and its principles block carry ' +
+    'the whole lesson (call with no auth_type for the index plus the standing principles and the ' +
+    'how-to-identify signals, then an id/alias for one refresh playbook), so a guidance block ' +
+    'restating it would only duplicate what the tool already returns.',
 };
 
 // The fields that are attached to a tool result, in the order they are attached.

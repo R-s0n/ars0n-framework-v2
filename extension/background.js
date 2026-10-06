@@ -186,8 +186,9 @@ function maxMediaBytes(state) {
 // server then discards.
 function shouldCapture(url, state) {
   const rules = state.scopeRules || [];
+  const authHosts = state.authHosts || [];
   if (!state.active) return { capture: false };
-  if (!rules.length && !state.scopeHosts.length) return { capture: false };
+  if (!rules.length && !state.scopeHosts.length && !authHosts.length) return { capture: false };
 
   let parsed;
   try {
@@ -217,9 +218,22 @@ function shouldCapture(url, state) {
     // out-of-scope tally the popup shows.
     const verdict = decideScope(rules, subject, {});
     if (!verdict.allowed) {
+      // An auth host is RECORDED even when out of scope, so the session it mints can be refreshed.
+      // This is passive capture, never attack traffic, and the server keeps it out of every scan.
+      // Two ways a host is an auth host: an auth-effect scope RULE (verdict.auth) or the per-host
+      // auth_host flag (the authHosts list). A deny is never rescued: verdict.auth is false under a
+      // deny, and the authHosts branch guards on reason !== 'rule_deny'.
+      if (verdict.auth || (verdict.reason !== 'rule_deny' && hostInScope(parsed.hostname, authHosts))) {
+        return { capture: true, authHost: true };
+      }
       return { capture: false, outOfScopeHost: (subject ? subject.host : parsed.hostname).toLowerCase() };
     }
   } else if (!hostInScope(parsed.hostname, state.scopeHosts)) {
+    // Same auth-host rescue on the host-list path: there is no explicit-deny concept here (a host is
+    // simply not in the list), so a classified auth host is recorded.
+    if (hostInScope(parsed.hostname, authHosts)) {
+      return { capture: true, authHost: true };
+    }
     return { capture: false, outOfScopeHost: parsed.hostname.toLowerCase() };
   }
 
@@ -764,6 +778,14 @@ async function startCaptureSession(settings, frameworkUrl) {
     const ruleLoad = await fetchScopeRules(apiBase, settings.scopeTargetId);
     const scopeRules = ruleLoad.rules;
     if (ruleLoad.error) console.error('[MANUAL-CRAWL]', ruleLoad.error);
+
+    // Auth hosts the operator classified for this target, so the first request to one is rescued and
+    // recorded rather than dropped. Fetched before the session opens, like the scope rules, so the
+    // capturer starts enforcing the right boundary on request one.
+    const authHosts = await fetchAuthHosts(apiBase, settings.scopeTargetId);
+    if (authHosts.length) {
+      console.log('[MANUAL-CRAWL] Auth hosts (recorded for refresh, never scanned):', authHosts);
+    }
     if (scopeRules.length) {
       console.log('[MANUAL-CRAWL] Starting session. Scope RULES in force (host list not consulted):',
         scopeRules.map((r) => r.kind + ':' + r.value));
@@ -805,6 +827,7 @@ async function startCaptureSession(settings, frameworkUrl) {
       scopeHosts,
       scopeRules,
       scopeRulesError: ruleLoad.error,
+      authHosts,
       settings,
       apiBase,
       startedAt: Date.now(),
@@ -1053,6 +1076,26 @@ async function fetchScopeRules(apiBase, scopeTargetId) {
     // is the correct fallback. Reported at a lower key than a parse divergence.
     console.warn('[MANUAL-CRAWL] could not load scope rules:', error.message);
     return { rules: [], error: null };
+  }
+}
+
+// Loads the hosts classified as AUTH HOSTS for a target: reachable to refresh a session but never
+// scanned. Read from the server, which is authoritative (the operator's classification is persisted
+// as an auth_host row). A failure returns an empty list rather than throwing: an auth host that did
+// not load is simply not rescued by shouldCapture, which fails to the safe side (the host stays
+// refused) rather than widening anything.
+async function fetchAuthHosts(apiBase, scopeTargetId) {
+  if (!scopeTargetId) return [];
+  try {
+    const res = await getJSON(`${apiBase}/manual-crawl/hosts/${scopeTargetId}`, 8000);
+    if (!res.ok || !res.body || !Array.isArray(res.body.hosts)) return [];
+    return res.body.hosts
+      .filter((h) => h && h.auth_host && h.host)
+      .map((h) => normalizeHostEntry(h.host))
+      .filter(Boolean);
+  } catch (error) {
+    console.warn('[MANUAL-CRAWL] could not load auth hosts:', error.message);
+    return [];
   }
 }
 
@@ -1337,12 +1380,21 @@ function toRawRecord(record) {
 function hookScopeHosts(state) {
   const base = state.scopeHosts || [];
   const rules = state.scopeRules || [];
-  if (!rules.length) return base;
+  // Auth hosts are unioned in regardless of rules: the page hook must read the OAuth/token request
+  // and response bodies on an auth host (that is where the refreshable credential is), even though
+  // that host is out of the scan boundary. shouldCapture rescues the same host on the webRequest
+  // path; this keeps the hook path in step so a body-bearing token exchange is not half-captured.
+  const authHosts = state.authHosts || [];
+  if (!rules.length) {
+    return authHosts.length ? Array.from(new Set([...base, ...authHosts])) : base;
+  }
+  // Allow AND auth rules both need the page hook reading bodies on their hosts: allow so the in-scope
+  // app is captured in full, auth so the token exchange body on an IdP host is captured for refresh.
   const ruleHosts = rules
-    .filter((r) => r && r.enabled !== false && r.effect === 'allow' && r.value
+    .filter((r) => r && r.enabled !== false && (r.effect === 'allow' || r.effect === 'auth') && r.value
       && (r.kind === 'host' || r.kind === 'subtree' || r.kind === 'subdomains'))
     .map((r) => r.value);
-  return ruleHosts.length ? Array.from(new Set([...base, ...ruleHosts])) : base;
+  return Array.from(new Set([...base, ...ruleHosts, ...authHosts]));
 }
 
 async function buildHookConfig() {
@@ -2610,6 +2662,7 @@ function publicState(state) {
     deepCapture: state.deepCapture,
     observedOutOfScope: state.observedOutOfScope,
     extraHosts: (state.settings && state.settings.extraHosts) || [],
+    authHosts: state.authHosts || [],
   };
 }
 
@@ -2737,6 +2790,71 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await persistExtraHostsForTarget(state.scopeTargetId, extraHosts);
         const scopeHosts = await applyScopeChange({ extraHosts });
         sendResponse({ success: true, scopeHosts });
+      })
+      .catch((error) => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
+  // Classifies a host as an AUTH HOST without interrupting the recording: it is recorded from now on
+  // so the session it mints can be refreshed, while the server marks it in_scope=false so no scan
+  // ever touches it. Both the server row and the live capture boundary are updated, and the page hook
+  // is re-pushed so response bodies on the host are read from the next request onward.
+  if (message.action === 'addAuthHost') {
+    getState()
+      .then(async (state) => {
+        const host = normalizeHostEntry(message.host);
+        if (!host) {
+          sendResponse({ success: false, error: 'Not a usable hostname' });
+          return;
+        }
+        const targetId = state.scopeTargetId || (state.settings && state.settings.scopeTargetId);
+        if (!targetId) {
+          sendResponse({ success: false, error: 'No scope target for this recording' });
+          return;
+        }
+        // auth_host=true, in_scope=false: recorded for refresh, never scanned. The popup only offers
+        // this on hosts already observed out of scope, so in_scope=false is the right classification.
+        const res = await postJSON(`${state.apiBase}/manual-crawl/hosts/${targetId}`, {
+          hosts: [host],
+          auth_host: true,
+          in_scope: false,
+          auth_reason: message.reason || 'classified as an auth host from the manual-crawl popup',
+        });
+        if (!res.ok) {
+          sendResponse({ success: false, error: (res.body && res.body.message) || `Framework returned ${res.status}` });
+          return;
+        }
+        const existing = state.authHosts || [];
+        const authHosts = existing.includes(host) ? existing : [...existing, host];
+        // The host is being recorded now, so it is no longer "observed but dropped".
+        const observed = { ...state.observedOutOfScope };
+        delete observed[host];
+        await updateState({ authHosts, observedOutOfScope: observed });
+        await pushConfigToPages();
+        void broadcastState();
+        sendResponse({ success: true, authHosts });
+      })
+      .catch((error) => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
+  // Removes an auth-host classification, both server-side and in the live boundary.
+  if (message.action === 'removeAuthHost') {
+    getState()
+      .then(async (state) => {
+        const host = normalizeHostEntry(message.host) || String(message.host || '').trim().toLowerCase();
+        const targetId = state.scopeTargetId || (state.settings && state.settings.scopeTargetId);
+        if (targetId && host) {
+          await postJSON(`${state.apiBase}/manual-crawl/hosts/${targetId}`, {
+            hosts: [host],
+            auth_host: false,
+          }).catch(() => {});
+        }
+        const authHosts = (state.authHosts || []).filter((h) => h !== host);
+        await updateState({ authHosts });
+        await pushConfigToPages();
+        void broadcastState();
+        sendResponse({ success: true, authHosts });
       })
       .catch((error) => sendResponse({ success: false, error: error.message }));
     return true;

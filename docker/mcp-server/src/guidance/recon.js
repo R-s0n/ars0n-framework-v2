@@ -32,6 +32,10 @@ const {
   CONSOLIDATE: S_CONSOLIDATE,
 } = require('./steps');
 
+// The "there is no exhausted" constraint, applied to the target-level summary reads where a premature
+// "this target is done" conclusion forms. See guidance/keepHunting.js.
+const { NO_EXHAUSTED_RULE } = require('./keepHunting');
+
 module.exports = {
   // === Scope targets ===========================================================================
 
@@ -126,6 +130,7 @@ module.exports = {
     step: S_PRE,
     tool: 'Counts every asset store and scan table the target\'s type can actually hold, and marks the '
       + 'stores belonging to the other two workflows not_applicable instead of reporting them as 0.',
+    rule: NO_EXHAUSTED_RULE,
     lies: 'The counts cover ONE workflow, so an absent table means wrong workflow, not nothing found. '
       + 'Check unreadable_scan_tables: a table that could not be read is reported there rather than '
       + 'folded into a zero, which is how seventeen finished URL scans once reported as {}.',
@@ -242,6 +247,7 @@ module.exports = {
     step: S_PRE,
     tool: 'Every scope target in the install with global asset totals and how many scans are running '
       + 'right now.',
+    rule: NO_EXHAUSTED_RULE,
     lies: 'running_scans polls five tables only (amass, subfinder, httpx, nuclei, metadata), so a '
       + 'running katana, arjun, fuzz or vector scan counts as zero. The totals are across ALL targets, '
       + 'not the active one.',

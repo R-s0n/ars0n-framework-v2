@@ -38,6 +38,14 @@ type CrawlHost struct {
 	InScope bool `json:"in_scope"`
 	Decided bool `json:"decided"`
 
+	// AuthHost marks a host classified as an auth host: reachable to establish or refresh a session
+	// (an OAuth/SSO/token-mint host) but NEVER scanned. It is independent of InScope, so the UI can
+	// render all four states: a normal scanned host (in_scope, not auth), an auth-only host
+	// (auth, not in_scope: the scanner refuses it, refresh may reach it), a dual-role first-party SSO
+	// host (both), and an out-of-scope host (neither). AuthReason records why, for the handover.
+	AuthHost   bool   `json:"auth_host"`
+	AuthReason string `json:"auth_reason,omitempty"`
+
 	// WithinTargetDomain marks hosts that are in scope regardless of any decision here, because
 	// they sit inside the scope target's own registrable domain.
 	WithinTargetDomain bool `json:"within_target_domain"`
@@ -64,6 +72,7 @@ func GetManualCrawlHosts(w http.ResponseWriter, r *http.Request) {
 
 	adjacent := 0
 	inScope := 0
+	authHosts := 0
 	for _, h := range hosts {
 		if !h.IsDirect {
 			adjacent++
@@ -71,14 +80,18 @@ func GetManualCrawlHosts(w http.ResponseWriter, r *http.Request) {
 		if h.InScope || h.WithinTargetDomain {
 			inScope++
 		}
+		if h.AuthHost {
+			authHosts++
+		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"hosts":          hosts,
-		"total":          len(hosts),
-		"adjacent_count": adjacent,
-		"in_scope_count": inScope,
-		"scope":          LoadScanScope(scopeTargetID).Describe(),
+		"hosts":           hosts,
+		"total":           len(hosts),
+		"adjacent_count":  adjacent,
+		"in_scope_count":  inScope,
+		"auth_host_count": authHosts,
+		"scope":           LoadScanScope(scopeTargetID).Describe(),
 	})
 }
 
@@ -117,30 +130,39 @@ func loadCrawlHosts(scopeTargetID string) ([]CrawlHost, error) {
 		return nil, err
 	}
 
-	// Explicit decisions override the default in either direction.
+	// Explicit decisions override the default in either direction. auth_host and auth_reason are read
+	// alongside in_scope so the modal can render the auth classification next to the scan decision.
 	decided := map[string]bool{}
+	authHostOf := map[string]bool{}
+	authReasonOf := map[string]string{}
 	if dr, err := dbPool.Query(ctx,
-		`SELECT lower(host), in_scope FROM scope_target_scope_hosts WHERE scope_target_id = $1`,
+		`SELECT lower(host), in_scope, COALESCE(auth_host, false), COALESCE(auth_reason, '')
+		   FROM scope_target_scope_hosts WHERE scope_target_id = $1`,
 		scopeTargetID); err == nil {
 		for dr.Next() {
-			var host string
-			var in bool
-			if dr.Scan(&host, &in) == nil {
+			var host, reason string
+			var in, auth bool
+			if dr.Scan(&host, &in, &auth, &reason) == nil {
 				decided[host] = in
+				authHostOf[host] = auth
+				authReasonOf[host] = reason
 			}
 		}
 		dr.Close()
 	}
 
 	// Hosts the operator named that the crawl never saw still belong in the list, otherwise the
-	// modal would show a boundary narrower than the one the scanner enforces.
+	// modal would show a boundary narrower than the one the scanner enforces. An auth-only host (an
+	// OAuth/SSO host the extension observed but did not capture) lives here: it has a decision row but
+	// no capture, so it is added from the decided set rather than from the crawl.
 	seen := map[string]bool{}
 	for _, h := range out {
 		seen[h.Host] = true
 	}
 	for host, in := range decided {
 		if !seen[host] {
-			out = append(out, CrawlHost{Host: host, Scheme: "https", InScope: in})
+			out = append(out, CrawlHost{Host: host, Scheme: "https", InScope: in,
+				AuthHost: authHostOf[host], AuthReason: authReasonOf[host]})
 		}
 	}
 
@@ -156,6 +178,14 @@ func loadCrawlHosts(scopeTargetID string) ([]CrawlHost, error) {
 			// Observed means admitted. The extension never uploads a host that was not already in
 			// its own capture scope, so a row being here is itself the operator's authorization.
 			h.InScope = true
+		}
+		// The auth classification is independent of the scan decision, so it is applied for every
+		// host that has a decision row, including a dual-role host that is both in scope and auth.
+		if authHostOf[h.Host] {
+			h.AuthHost = true
+		}
+		if r := authReasonOf[h.Host]; r != "" {
+			h.AuthReason = r
 		}
 		h.WithinTargetDomain = h.Host == primary ||
 			(primaryDomain != "" && hostWithinDomain(h.Host, primaryDomain))
@@ -208,16 +238,27 @@ func hostFromScopeTarget(raw string) string {
 }
 
 type crawlHostScopeRequest struct {
-	Hosts   []string `json:"hosts"`
-	InScope *bool    `json:"in_scope"`
-	Note    string   `json:"note"`
+	Hosts      []string `json:"hosts"`
+	InScope    *bool    `json:"in_scope"`
+	Note       string   `json:"note"`
+	AuthHost   *bool    `json:"auth_host"`
+	AuthReason string   `json:"auth_reason"`
 }
 
-// SetManualCrawlHostScope records whether the framework may send requests to these hosts.
+// SetManualCrawlHostScope records whether the framework may send requests to these hosts (in_scope)
+// and/or whether they are auth hosts (auth_host): reachable to establish or refresh a session but
+// never scanned. The two flags are independent and set independently, so "add as auth host" never
+// changes in_scope and an in-scope/out-of-scope decision never changes the auth classification.
 //
 // Writes a row either way rather than deleting on exclude, so "the operator decided no" and "the
 // operator has not looked at it" stay distinguishable. Deleting would silently re-admit the host on
 // the next run, which is the failure mode that matters here.
+//
+// PARTIAL UPDATE: an unspecified field is left as it was (COALESCE over the existing row), so a call
+// that sets only auth_host cannot wipe a prior in_scope decision and a call that sets only in_scope
+// cannot wipe an auth classification. A brand-new row takes the column defaults (in scope, not auth)
+// for anything not named, so the caller must send in_scope=false explicitly to make a never-seen host
+// auth-only rather than dual-role.
 func SetManualCrawlHostScope(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	scopeTargetID := mux.Vars(r)["scope_target_id"]
@@ -231,9 +272,33 @@ func SetManualCrawlHostScope(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "missing_hosts", "`hosts` is required")
 		return
 	}
-	inScope := true
+	if req.InScope == nil && req.AuthHost == nil {
+		writeJSONError(w, http.StatusBadRequest, "nothing_to_set",
+			"Provide in_scope and/or auth_host. A call that sets neither would change nothing.")
+		return
+	}
+
+	// Insert defaults for a brand-new row. An unspecified flag takes the column default.
+	inScopeInsert := true
 	if req.InScope != nil {
-		inScope = *req.InScope
+		inScopeInsert = *req.InScope
+	}
+	authHostInsert := false
+	if req.AuthHost != nil {
+		authHostInsert = *req.AuthHost
+	}
+
+	// A reason travels with an auth classification so a later operator can see why refresh may reach a
+	// host every scanner refuses. It is NOT hard-refused when blank, because that would break the
+	// one-click classify the UI is built around; a sensible default is stored instead. The reason is
+	// only written when the host is being marked an auth host, so toggling scope never disturbs it.
+	var authReasonArg interface{}
+	if req.AuthHost != nil && *req.AuthHost {
+		reason := strings.TrimSpace(req.AuthReason)
+		if reason == "" {
+			reason = "classified as an auth host by the operator"
+		}
+		authReasonArg = reason
 	}
 
 	updated := 0
@@ -243,22 +308,33 @@ func SetManualCrawlHostScope(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if _, err := dbPool.Exec(context.Background(), `
-			INSERT INTO scope_target_scope_hosts (scope_target_id, host, in_scope, source, note)
-			VALUES ($1, $2, $3, 'manual_crawl', $4)
+			INSERT INTO scope_target_scope_hosts (scope_target_id, host, in_scope, auth_host, source, note, auth_reason)
+			VALUES ($1, $2, $3, $4, 'manual_crawl', $5, $6)
 			ON CONFLICT (scope_target_id, host)
-			DO UPDATE SET in_scope = EXCLUDED.in_scope, note = EXCLUDED.note`,
-			scopeTargetID, host, inScope, nullIfEmpty(req.Note)); err != nil {
+			DO UPDATE SET
+			  in_scope    = COALESCE($7, scope_target_scope_hosts.in_scope),
+			  auth_host   = COALESCE($8, scope_target_scope_hosts.auth_host),
+			  note        = COALESCE($9, scope_target_scope_hosts.note),
+			  auth_reason = COALESCE($10, scope_target_scope_hosts.auth_reason)`,
+			scopeTargetID, host, inScopeInsert, authHostInsert, nullIfEmpty(req.Note), authReasonArg,
+			req.InScope, req.AuthHost, nullIfEmpty(req.Note), authReasonArg); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "internal_error", err.Error())
 			return
 		}
 		updated++
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"updated":  updated,
-		"in_scope": inScope,
-		"scope":    LoadScanScope(scopeTargetID).Describe(),
-	})
+	resp := map[string]interface{}{
+		"updated": updated,
+		"scope":   LoadScanScope(scopeTargetID).Describe(),
+	}
+	if req.InScope != nil {
+		resp["in_scope"] = *req.InScope
+	}
+	if req.AuthHost != nil {
+		resp["auth_host"] = *req.AuthHost
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 // PromoteManualCrawlHosts creates a URL scope target for each host so it can be worked in its own

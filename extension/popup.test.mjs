@@ -182,13 +182,18 @@ const hostsOf = (context) =>
   rowsOf(context).map((row) => row.children[0].textContent);
 
 const countsOf = (context) =>
-  rowsOf(context).map((row) => row.children[1].textContent);
+  rowsOf(context).map((row) => row.children[2].textContent);
+
+// Row layout is [label, idp-hint, count, Auth button, Add button].
+const addButtonOf = (row) => row.children[4];
+const authButtonOf = (row) => row.children[3];
 
 function baseState(observed) {
   return {
     active: true,
     scopeHosts: ['app.example.com'],
     extraHosts: [],
+    authHosts: [],
     observedOutOfScope: observed,
     deepCapture: { enabled: false, attachedTabs: [], errors: [] },
     stats: { requestCount: 1, endpointCount: 1, queuedCount: 0, failedCount: 0, withResponseBody: 0 },
@@ -208,7 +213,7 @@ section('out-of-scope rows keep their order as counts change');
   check('initial order is first-seen order', hostsOf(context), ['api.example.com', 'cdn.example.com', 'analytics.io']);
 
   const firstRow = rowsOf(context)[0];
-  const firstButton = firstRow.children[2];
+  const firstButton = addButtonOf(firstRow);
 
   // Counts diverge hard: analytics is now by far the busiest.
   await withState(context, baseState({ 'api.example.com': 3, 'cdn.example.com': 47, 'analytics.io': 512 }));
@@ -217,7 +222,7 @@ section('out-of-scope rows keep their order as counts change');
 
   // Identity, not just position: a recreated node is a button that vanishes mid-click.
   check('row DOM node is reused', rowsOf(context)[0] === firstRow, true);
-  check('Add button DOM node is reused', rowsOf(context)[0].children[2] === firstButton, true);
+  check('Add button DOM node is reused', addButtonOf(rowsOf(context)[0]) === firstButton, true);
 }
 
 section('a newly seen host appends without disturbing existing rows');
@@ -263,12 +268,12 @@ section('the count sits in its own cell so the button never shifts');
   await withState(context, baseState({ 'api.example.com': 1 }));
   const row = rowsOf(context)[0];
   check('host label holds only the host', row.children[0].textContent, 'api.example.com');
-  check('count is a separate fixed-width cell', row.children[1].style.width, '38px');
-  check('button is fixed width', row.children[2].style.width, '46px');
+  check('count is a separate fixed-width cell', row.children[2].style.width, '38px');
+  check('button is fixed width', addButtonOf(row).style.width, '46px');
 
   await withState(context, baseState({ 'api.example.com': 999999 }));
   check('a much larger count does not touch the label', row.children[0].textContent, 'api.example.com');
-  check('button width is still fixed', row.children[2].style.width, '46px');
+  check('button width is still fixed', addButtonOf(row).style.width, '46px');
 }
 
 section('adding a host removes only its own row');
@@ -294,13 +299,49 @@ section('adding a host removes only its own row');
   const [, , rowC] = rowsOf(context);
 
   // Click the middle row's Add button.
-  rowsOf(context)[1].children[2].click();
+  addButtonOf(rowsOf(context)[1]).click();
   await tick();
   await tick();
 
   check('only the added host left the list', hostsOf(context), ['api.example.com', 'analytics.io']);
   check('the untouched row kept its DOM node', rowsOf(context)[1] === rowC, true);
   check('tint recalculated for the new positions', rowsOf(context)[1].style.backgroundColor, 'rgba(220, 53, 69, 0.14)');
+}
+
+section('the Auth button classifies a host as an auth host and drops its row');
+{
+  const context = buildContext(async (msg) => {
+    if (msg.action === 'getSessionState') return { success: true, state: context.__state };
+    if (msg.action === 'addAuthHost') {
+      // The worker records the host as an auth host (recorded for refresh, never scanned) and drops
+      // it from the observed-out-of-scope list, exactly as the real addAuthHost handler does.
+      const next = { ...context.__state.observedOutOfScope };
+      delete next[msg.host];
+      context.__state = {
+        ...context.__state,
+        observedOutOfScope: next,
+        authHosts: [...(context.__state.authHosts || []), msg.host],
+      };
+      return { success: true, authHosts: context.__state.authHosts };
+    }
+    return { success: true };
+  });
+
+  await withState(context, baseState({
+    'cognito-idp.us-east-1.amazonaws.com': 4,
+    'analytics.io': 2,
+  }));
+
+  // The IdP pattern hint appears on the Cognito host and not on the plain third-party host.
+  check('a known IdP host is hinted', rowsOf(context)[0].children[1].textContent, 'IdP?');
+  check('a non-IdP host is not hinted', rowsOf(context)[1].children[1].textContent, '');
+
+  // Clicking Auth classifies it; the worker then drops it from the observed list.
+  authButtonOf(rowsOf(context)[0]).click();
+  await tick();
+  await tick();
+
+  check('the classified auth host left the out-of-scope list', hostsOf(context), ['analytics.io']);
 }
 
 section('the list is hidden when there is nothing out of scope');

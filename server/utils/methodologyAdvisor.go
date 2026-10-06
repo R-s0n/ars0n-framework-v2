@@ -385,11 +385,28 @@ func adviseOnState(s TargetState) []AdvisorFinding {
 	}
 
 	if len(out) == 0 {
-		add("note", "", "No blockers or gaps detected",
-			"Every step this advisor checks has produced something. That is not the same as being "+
-				"finished: it means nothing is obviously missing.",
-			"Go back to recon and expand the attack surface, then pick three to five new attack "+
-				"vectors. Ebb and flow.",
+		// THE FLOOR, NOT THE FINISH. The advisor runs about ten finite checks; satisfying all of them
+		// means nothing obviously missing, which is the exact state in which an operator concludes the
+		// target is done and stops. It is not done. The checks are a tiny subset of the search space,
+		// which is unbounded: another wordlist, path depth, header, parameter, value, encoding, verb,
+		// auth state, host or chain always exists. So this is still advice to keep going, phrased as the
+		// concrete next moves rather than a congratulation. It stays a NOTE, not a gap, on purpose: it
+		// reports no MEASURED hole, and the blocked and gaps counts must stay zero so a caller (and the
+		// MCP education layer) can read this floor state from them. The engagement-scope anti-quit push
+		// is carried as a separate field, never by inflating these measured counts.
+		add("note", "", "The checklist is satisfied, which is a floor and not a finish",
+			"Every finite step this advisor checks has produced something. That is the floor, not the "+
+				"finish line: these ten checks are a tiny subset of the search space, and passing them "+
+				"says nothing about the endpoint, parameter or value you have not tried yet. A live "+
+				"target is never done, and concluding it is clean here is the single most common mistake "+
+				"on a real engagement.",
+			"Go back to enumeration and expand the attack surface, then pick three to five new vectors. "+
+				"Moves that are always available: run content discovery again, recursively and with a "+
+				"different wordlist (raft, assetnote, or one built from the target's own JS); mine hidden "+
+				"parameters per endpoint with a fresh list; try the header, cookie and path insertion "+
+				"points with encodings and an out of band canary; replay with HEAD, OPTIONS, PUT, PATCH "+
+				"and X-HTTP-Method-Override; re-read the JS for lazy-loaded and feature-flagged routes; "+
+				"and re-test everything after the next redeploy. Ebb and flow.",
 			"recon")
 	}
 	return out

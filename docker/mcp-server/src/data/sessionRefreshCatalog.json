@@ -1,0 +1,162 @@
+{
+  "principles": [
+    "A session is a depreciating asset, not a fact you establish once. Validate it before every authenticated sweep (check_session_tokens validate), because an expired token turns every endpoint into a login wall and a scan will happily fingerprint that wall as the application.",
+    "Short-TTL bearers (OAuth access tokens are often 5 to 15 minutes) must be RE-CAPTURED proactively, not only when something fails. If the live browser tab stays logged in and the manual crawl is recording, the credential is being refreshed in the browser continuously; re-run the capture action to pull the current one.",
+    "Keep a SECOND account current at all times. Cross-account authorization testing (IDOR/BOLA) needs account A and account B both live in the same window; a dead B silently turns every id-swap into a 401 that reads as 'protected'.",
+    "BRIDGE THROUGH THE CORPUS, NEVER THROUGH THE BROWSER JAVASCRIPT. The Claude-in-Chrome extension redacts JWTs and sensitive values from javascript_tool results, so you cannot read a token out of the page and paste it in. The framework captures the full value server-side: get it with check_session_tokens capture_oauth or recapture, which read the recorded crawl, and read the stored value from the session_tokens row if you need it. This is a property of the extension, not the framework.",
+    "A 403 on the authenticated arm while an anonymous control gets 401 means the token was ACCEPTED and then denied authorization for that one resource (a feature gate or a foreign object). That is a LIVE session hitting an authorization boundary, not an expired one. Do not refresh on it.",
+    "not_honoured on a load-balanced target is frequently a missing routing cookie, not a dead credential. Look for a per-response backend header before touching the auth flow."
+  ],
+  "how_to_identify": {
+    "note": "Read the recorded login from the manual-crawl corpus (replay_request search_captures, or query manual_crawl_captures) and match these signals to pick the auth_type, then call this tool with it.",
+    "signals": [
+      "A POST to an /oauth2/token or /token endpoint that returns access_token/id_token JSON -> oauth-oidc (and jwt-bearer transport).",
+      "Authorization: Bearer <JWT> on the API calls, with a short exp claim -> jwt-bearer / oauth-oidc.",
+      "A form POST of username+password that sets a session cookie and nothing else -> session-cookie (classic) or password.",
+      "A SAMLResponse form field or a POST to an ACS/assertion-consumer URL -> saml.",
+      "A login that only asks for an email, then a link clicked from email, no password -> magic-link.",
+      "A static key sent in a header like X-Api-Key or Authorization: Bearer <non-JWT opaque> that never changes between captures -> api-key.",
+      "A second factor prompt (6-digit code, push approval, SMS) after the password -> add the mfa overlay to whichever primary type applies.",
+      "A uniform 403/challenge page from every automated request regardless of a valid session -> fingerprint-bound (Cloudflare and similar)."
+    ]
+  },
+  "entries": [
+    {
+      "id": "password",
+      "name": "Username / password, no MFA",
+      "aliases": ["email password", "basic login", "form login", "credentials", "login form"],
+      "transport": "Usually a session cookie, sometimes a bearer minted from the credentials.",
+      "automatable": "headless",
+      "ttl": "Server session; often hours. Validate before each sweep rather than on a timer.",
+      "framework_actions": ["manage_auth_flows (record the login once)", "check_session_tokens refresh", "check_session_tokens validate"],
+      "steps": [
+        "Record the login sequence once as an auth flow (manage_auth_flows / the auth recording), so the framework can replay it.",
+        "check_session_tokens refresh replays that flow headlessly and stores the new token it issues.",
+        "check_session_tokens validate to confirm, before scanning."
+      ],
+      "gotchas": ["A refresh can report success without setting a value: the flow ran and minted nothing. Always validate after.", "Replaying the full login in a loop can trip rate limiting or an account lockout."]
+    },
+    {
+      "id": "password-mfa",
+      "name": "Username / password WITH MFA (TOTP, SMS, email OTP, push)",
+      "aliases": ["mfa", "2fa", "totp", "otp login", "two factor"],
+      "transport": "Session cookie or bearer, after a second-factor step.",
+      "automatable": "semi (operator supplies the code)",
+      "ttl": "As the primary type; the MFA step only gates minting.",
+      "framework_actions": ["check_session_tokens refresh", "check_session_tokens provide_refresh_input", "check_session_tokens refresh_status"],
+      "steps": [
+        "check_session_tokens refresh starts the flow; at the MFA step it returns status needs_input with a run_id and an input_request.",
+        "Ask the operator for the code delivered out of band (never invent one). For a push 'approve' the input_request has no_value true, so it is just a Continue.",
+        "check_session_tokens provide_refresh_input with the run_id, step_id and value; it resumes and may complete or ask for the next value.",
+        "Validate after it completes."
+      ],
+      "gotchas": ["A TOTP code is valid for ~30s; ask for it just before answering.", "SMS/email OTP can be rate limited; do not loop refreshes."]
+    },
+    {
+      "id": "magic-link",
+      "name": "Magic link / passwordless email",
+      "aliases": ["passwordless", "email link", "login link", "otp link"],
+      "transport": "Session cookie or bearer set when the link lands.",
+      "automatable": "manual (AI-browser then corpus recapture)",
+      "ttl": "As the issued session.",
+      "framework_actions": ["check_session_tokens recapture", "check_session_tokens provide_refresh_input (for the landed URL)"],
+      "steps": [
+        "The link is delivered out of band and cannot be replayed headlessly. The operator (or the AI driving the browser) clicks it in the recording browser.",
+        "If a refresh flow is modelled with a magic-link step, it returns needs_input asking for the URL the link landed on; answer with provide_refresh_input value set to that URL.",
+        "Otherwise, after the browser is logged in and the crawl recorded it, check_session_tokens recapture reads the freshest session for the host from the corpus."
+      ],
+      "gotchas": ["Magic links are usually single-use and short-lived; capture immediately after clicking."]
+    },
+    {
+      "id": "oauth-oidc",
+      "name": "OAuth2 / OIDC (hosted IdP: Cognito, Auth0, Okta, custom)",
+      "aliases": ["oauth", "oidc", "openid", "cognito", "auth0", "okta", "sso bearer", "token exchange"],
+      "transport": "Bearer in Authorization on the API; the IdP session lives in cookies at the IdP.",
+      "automatable": "headless IF a refresh_token is present; otherwise re-capture from the recording browser",
+      "ttl": "Access token typically 5 to 15 minutes. Re-capture proactively.",
+      "framework_actions": ["check_session_tokens capture_oauth", "check_session_tokens recapture", "check_session_tokens refresh (if a refresh_token/flow exists)"],
+      "steps": [
+        "check_session_tokens capture_oauth scans the manual-crawl corpus for this target and promotes the freshest OAuth token-endpoint response into a credential (and the refresh token if one was captured).",
+        "If it reports has_refresh false (no refresh_token in the exchange, common when the IdP refreshes via its own cookies), there is NO headless renewal: keep the browser tab logged in with recording on and RE-RUN capture_oauth whenever the bearer is near expiry.",
+        "If a refresh_token was captured, the session can be renewed headlessly via the modelled refresh flow.",
+        "Validate after each capture. Note the token mint host can be out of scope while the bearer is still in-scope-usable; capturing and using it is fine, probing the mint host is not."
+      ],
+      "gotchas": ["The bearer is held in SPA memory, not localStorage, and the extension redacts it from JS; capture_oauth from the corpus is the only reliable bridge.", "Measured on Alpaca: authx bearer ~15 min, no refresh_token in the exchange, Cognito renews via browser cookies."]
+    },
+    {
+      "id": "saml",
+      "name": "SAML single sign-on",
+      "aliases": ["saml2", "sso", "assertion", "shibboleth", "adfs"],
+      "transport": "App session cookie set after the IdP POSTs a signed assertion to the ACS.",
+      "automatable": "manual (AI-browser then corpus recapture)",
+      "ttl": "As the issued app session; the assertion itself is one-time.",
+      "framework_actions": ["check_session_tokens recapture"],
+      "steps": [
+        "The assertion is minted by the IdP and is not replayable headlessly. Log in through the browser with recording on.",
+        "check_session_tokens recapture reads the freshest app session cookie for the host from the corpus.",
+        "Validate before scanning."
+      ],
+      "gotchas": ["Do not try to replay the SAMLResponse; it is signed and single-use.", "The IdP is frequently a different, out-of-scope host."]
+    },
+    {
+      "id": "jwt-bearer",
+      "name": "JWT bearer in Authorization (possibly with a refresh cookie)",
+      "aliases": ["bearer", "jwt", "access token", "authorization header"],
+      "transport": "Authorization: Bearer <JWT>, sometimes paired with an httpOnly refresh cookie.",
+      "automatable": "headless if a refresh endpoint/cookie is replayable; otherwise re-capture",
+      "ttl": "Read the exp claim. Short (minutes) means re-capture often.",
+      "framework_actions": ["check_session_tokens capture_oauth", "check_session_tokens recapture", "manage_session_tokens (store/activate the companion refresh cookie)"],
+      "steps": [
+        "Decode the exp claim to learn the TTL (the framework profiles this).",
+        "If a refresh cookie + refresh endpoint exist and are in scope, model them so refresh can renew headlessly.",
+        "Otherwise capture_oauth/recapture from the recording browser, same as oauth-oidc.",
+        "Store the companion refresh cookie with manage_session_tokens so it rides with the bearer."
+      ],
+      "gotchas": ["A bearer with no refresh material and a short exp is a re-capture loop, not a one-time add."]
+    },
+    {
+      "id": "session-cookie",
+      "name": "Classic server session cookie",
+      "aliases": ["cookie session", "php session", "jsessionid", "rails session", "connect.sid"],
+      "transport": "One or more session cookies.",
+      "automatable": "headless (record the login) or re-capture",
+      "ttl": "Server-defined, often idle-timeout based; long.",
+      "framework_actions": ["manage_auth_flows (record login)", "check_session_tokens refresh", "check_session_tokens recapture", "manage_session_tokens (companion cookies)"],
+      "steps": [
+        "Record the login as an auth flow for headless refresh, or recapture from the browser.",
+        "Store every companion cookie the session needs with manage_session_tokens, or the scan sends half the jar.",
+        "Validate against a route that refuses anonymous callers."
+      ],
+      "gotchas": ["Missing a companion/routing cookie reads as not_honoured on a load-balanced target; attach all of them."]
+    },
+    {
+      "id": "api-key",
+      "name": "Static API key / long-lived token",
+      "aliases": ["api key", "static token", "personal access token", "pat", "x-api-key"],
+      "transport": "A fixed header (X-Api-Key, Authorization) that does not change.",
+      "automatable": "n/a (does not expire)",
+      "ttl": "Effectively indefinite until rotated.",
+      "framework_actions": ["manage_session_tokens (create once)"],
+      "steps": [
+        "Add it once with manage_session_tokens and activate it. No refresh is needed.",
+        "Re-validate only if the owner rotates it."
+      ],
+      "gotchas": ["Do not grade a static key with the honoured/not-honoured comparison expecting it to expire; it will not."]
+    },
+    {
+      "id": "fingerprint-bound",
+      "name": "Fingerprint/IP-bound session (Cloudflare and similar)",
+      "aliases": ["cloudflare", "bot wall", "tls fingerprint", "edge challenge", "clearance"],
+      "transport": "A clearance cookie bound to the real browser's IP and TLS fingerprint.",
+      "automatable": "manual (real browser only)",
+      "ttl": "As the clearance; but it will not travel to an automated client at all.",
+      "framework_actions": ["check_session_tokens recapture"],
+      "steps": [
+        "The clearance is bound to the browser's IP and TLS fingerprint, so no captured session an automated client replays will be honoured.",
+        "Drive the crafted requests in the real browser (Claude in Chrome, or domdig for DOM sinks) and use its network panel as the repeater.",
+        "recapture keeps the framework's copy current, but expect the framework's own egress to be challenged; the win here is manual testing through the browser."
+      ],
+      "gotchas": ["A target that blocks your automated egress blocks every other automated attacker too, so the easy scanner wins are gone and the bug is waiting for whoever tests by hand."]
+    }
+  ]
+}
