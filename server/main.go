@@ -108,6 +108,12 @@ func main() {
 	// opted in it is a no-op. Started here, after the DB is up, because it queries session_tokens.
 	utils.StartSessionAutoRefreshLoop(time.Minute)
 
+	// Durable headless session keepers. The sweep reconciles each enabled keeper's desired state onto
+	// the shared temp_data volume, stores the bearers the keeper container harvests, and folds the
+	// keeper's self-reported health back into the row. A no-op when no keeper rows exist. See
+	// sessionKeeper.go.
+	utils.StartSessionKeeperLoop(15 * time.Second)
+
 	// Hand the embedded knowledge base to the handlers, rooted so their paths start at methodology/
 	// rather than at knowledge-base/. Logged with a count because a zero means the embed stopped
 	// matching and every /knowledge-base route is about to answer 503, which is worth one line here
@@ -685,6 +691,16 @@ func main() {
 	r.HandleFunc("/session-refresh-runs/{run_id}/input", utils.ProvideSessionRefreshInput).Methods("POST", "OPTIONS")
 	r.HandleFunc("/session-refresh-runs/{run_id}/cancel", utils.CancelSessionRefreshRun).Methods("POST", "OPTIONS")
 	r.HandleFunc("/session-refresh-runs/{run_id}", utils.GetSessionRefreshRun).Methods("GET", "OPTIONS")
+
+	// Durable session keepers. /session-keepers/target/... is a literal segment and has to beat
+	// /session-keepers/{id}, same ordering rule as the session-tokens routes above.
+	r.HandleFunc("/session-keepers/target/{scope_target_id}", utils.GetSessionKeepersHandler).Methods("GET", "OPTIONS")
+	r.HandleFunc("/session-keepers/target/{scope_target_id}", utils.CreateSessionKeeperHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-keepers/{id}/adopt-cookies", utils.AdoptKeeperCookiesHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-keepers/{id}/start", utils.SetSessionKeeperEnabledHandler(true)).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-keepers/{id}/stop", utils.SetSessionKeeperEnabledHandler(false)).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-keepers/{id}", utils.UpdateSessionKeeperHandler).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/session-keepers/{id}", utils.DeleteSessionKeeperHandler).Methods("DELETE", "OPTIONS")
 
 	r.HandleFunc("/auth-flows/{scope_target_id}", utils.GetAuthFlows).Methods("GET", "OPTIONS")
 	r.HandleFunc("/auth-flows/{scope_target_id}", utils.CreateAuthFlow).Methods("POST", "OPTIONS")

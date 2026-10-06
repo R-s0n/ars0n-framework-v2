@@ -222,6 +222,24 @@ services:
     networks:
       - ars0n-network
 
+  # Durable headless session keeper. Unlike the one-shot tools, this is a LONG-LIVED manager (its
+  # entrypoint is keeper.mjs, not sleep-infinity): it holds a persistent Chromium profile per keeper,
+  # reloads the unmodified SPA so the app re-mints its bearer, and harvests it. It talks to the api
+  # only over the shared temp_data volume (a desired/harvest/status file reconciliation), so there is
+  # no new network port. restart: unless-stopped because its whole job is to stay up and keep the
+  # session warm; shm_size so Chromium does not die as "target closed".
+  session-keeper:
+    container_name: ars0n-framework-v2-session-keeper-1
+    build: ./docker/session-keeper
+    depends_on:
+      - api
+    volumes:
+      - temp_data:/tmp
+    shm_size: '1gb'
+    restart: unless-stopped
+    networks:
+      - ars0n-network
+
   katana:
     container_name: ars0n-framework-v2-katana-1
     build:

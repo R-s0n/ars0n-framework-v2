@@ -50,7 +50,7 @@ const {
 const { manageThreatModelSchema, manageThreatModel, manageThreatModelNotesSchema, manageThreatModelNotes } = require('./tools/threatmodel');
 const { getDiscoveredEndpointsSchema, getDiscoveredEndpoints, manageAttackSurfaceAssetsSchema, manageAttackSurfaceAssets, manageClientIdentifiersSchema, manageClientIdentifiers } = require('./tools/urlresults');
 const { manageIdentityPatternsSchema, manageIdentityPatterns, managePolicyAccessSchema, managePolicyAccess, manageRoleAccessSchema, manageRoleAccess, manageDiscretionaryAccessSchema, manageDiscretionaryAccess, getAuthzSummarySchema, getAuthzSummary } = require('./tools/authz');
-const { manageAuthFlowsSchema, manageAuthFlows, manageAuthRecordingSchema, manageAuthRecording, manageSessionTokensSchema, manageSessionTokens, checkSessionTokensSchema, checkSessionTokens } = require('./tools/authsessions');
+const { manageAuthFlowsSchema, manageAuthFlows, manageAuthRecordingSchema, manageAuthRecording, manageSessionTokensSchema, manageSessionTokens, checkSessionTokensSchema, checkSessionTokens, manageSessionKeeperSchema, manageSessionKeeper } = require('./tools/authsessions');
 const { getWafProbeSchemaSchema, getWafProbeSchema, configureWafProbeSchema, configureWafProbe, dryRunWafProbeSchema, dryRunWafProbe, runWafProbeSchema, runWafProbe, listWafProbeTargetsSchema, listWafProbeTargets, getWafProbeRunSchema, getWafProbeRun, getWafProbeStatusSchema, getWafProbeStatus, getWafProbeResultsSchema, getWafProbeResults, manageWafProbeSchema, manageWafProbe } = require('./tools/wafprobe');
 const { consolidateEndpointsSchema, consolidateEndpoints, runEndpointScanSchema, runEndpointScan, getEndpointScanStatusSchema, getEndpointScanStatus, getEndpointScanResultsSchema, getEndpointScanResults, manageEndpointsSchema, manageEndpoints, queryConsolidatedEndpointsSchema, queryConsolidatedEndpoints } = require('./tools/endpoints');
 const { manageAttackVectorsSchema, manageAttackVectors } = require('./tools/attackvectors');
@@ -910,6 +910,11 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
 
   server.tool('check_session_tokens', 'Test whether session tokens are still honoured by the target, and refresh the dead ones by replaying the auth flow they are tied to. Refresh is interactive: a flow with an MFA/OTP step returns status "needs_input" with a run_id, answered by action:"provide_refresh_input". Separate from the CRUD tool because these send real traffic.', checkSessionTokensSchema.shape, async (params) => {
     const result = await checkSessionTokens(params);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  server.tool('manage_session_keeper', 'Durable headless session keeper: a framework-run headless browser that holds the IdP session, reloads the UNMODIFIED SPA so the app re-mints its own short-lived bearer, and harvests it into the session-token store on a loop - so a 5-15 minute bearer stops forcing a token paste every few minutes and refresh is hands-free without your browser open. It only ever runs the app\'s own traffic and is egress-locked to {in-scope} UNION {classified auth hosts} (it never scans). Precondition: capture the session cookies first (the keeper seeds from them, via manage_session_tokens/recapture); when the long-lived IdP cookie finally dies the keeper parks as needs_recapture and you re-capture. For two accounts on one target (A and B for a cross-account IDOR), capture A, create keeper A, call adopt_cookies, then do the same for B - each keeper then seeds only its own account and the two sessions never collide. Actions: list/create/start/stop/update/delete/adopt_cookies.', manageSessionKeeperSchema.shape, async (params) => {
+    const result = await manageSessionKeeper(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 

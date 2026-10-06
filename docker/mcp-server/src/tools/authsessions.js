@@ -608,6 +608,11 @@ const manageSessionTokensSchema = z.object({
 
   name: z.string().optional().describe(
     'What this token is, e.g. "admin session cookie". Required on create.'),
+  keeper_name: z.string().optional().describe(
+    'parse: tag the parsed COOKIE rows with this session-keeper account (session_keepers.name) so the ' +
+    'keeper of that name seeds exactly these cookies. Use it when capturing a specific account for a ' +
+    'multi-account (A/B) keeper setup; omit for single-account (the keeper picks up untagged cookies). ' +
+    'Equivalent to the keeper\'s adopt_cookies action, but applied at capture time.'),
   token_type: TOKEN_TYPE.optional().describe(
     'How it goes on the wire. header: an arbitrary header, set header_name. bearer: an ' +
     'Authorization header, usually with value_prefix "Bearer ". cookie: set cookie_name and the ' +
@@ -743,6 +748,7 @@ async function manageSessionTokens(params) {
         raw: params.raw,
         auth_flow_id: params.auth_flow_id,
         name: params.name || '',
+        keeper_name: params.keeper_name || '',
       });
       const tokens = Array.isArray(out.tokens) ? out.tokens : [];
       return {
@@ -1213,9 +1219,77 @@ function apiError(err) {
   return (m ? m[2] : raw).trim();
 }
 
+// --- durable session keeper ---------------------------------------------------------------------
+//
+// A headless-browser keeper holds the IdP session, reloads the unmodified SPA so the app re-mints its
+// own short-lived bearer, and harvests it into the session-token store on a loop - so a short bearer
+// does not force the operator to paste a token every few minutes. The keeper only ever runs the app's
+// own traffic and is egress-locked to {in-scope} UNION {classified auth hosts}; it never scans. The
+// operator must have captured the session cookies first (the keeper seeds from them); when the
+// long-lived IdP cookie finally dies, the keeper parks as needs_recapture and the operator re-captures.
+const manageSessionKeeperSchema = z.object({
+  action: z.enum(['list', 'create', 'start', 'stop', 'update', 'delete', 'adopt_cookies']).describe(
+    'list: the keepers for a target, with status/last_harvest. create: start keeping a (target, ' +
+    'account) session warm. start/stop: enable or disable one keeper. update: change ' +
+    'target_url/cadence/enabled. delete: remove it and tear down its browser. adopt_cookies: claim the ' +
+    "target's currently-untagged cookies for this keeper's account so it seeds ONLY them - the " +
+    'multi-account step (A and B for one target): capture A, create keeper A, adopt_cookies; then B.'),
+  target_id: z.string().uuid().optional().describe('Scope target UUID. Required for list and create.'),
+  keeper_id: z.string().uuid().optional().describe('Keeper UUID. Required for start, stop, update, delete.'),
+  name: z.string().optional().describe(
+    'create: the account label (e.g. "account-A"), which is the row identity so two accounts for one ' +
+    'target do not upsert over each other. Defaults to "default".'),
+  target_url: z.string().optional().describe(
+    'create/update: the SPA origin the headless browser loads (e.g. https://app.example.com). Defaults ' +
+    'to the scope target\'s own host.'),
+  cadence_seconds: z.number().int().optional().describe(
+    'create/update: how often to reload the SPA to force a re-mint. Default 600 (10 min), minimum 120; ' +
+    'keep it inside the bearer lifetime (e.g. 600 for a 15-minute bearer).'),
+  enabled: z.boolean().optional().describe('update: enable or disable the keeper.'),
+});
+
+async function manageSessionKeeper(params) {
+  switch (params.action) {
+    case 'list':
+      if (!params.target_id) return { error: 'list needs target_id' };
+      return apiGet(`/session-keepers/target/${params.target_id}`);
+    case 'create':
+      if (!params.target_id) return { error: 'create needs target_id' };
+      return apiPost(`/session-keepers/target/${params.target_id}`, {
+        name: params.name || '',
+        target_url: params.target_url || '',
+        cadence_seconds: params.cadence_seconds || 0,
+      });
+    case 'start':
+      if (!params.keeper_id) return { error: 'start needs keeper_id' };
+      return apiPost(`/session-keepers/${params.keeper_id}/start`, {});
+    case 'stop':
+      if (!params.keeper_id) return { error: 'stop needs keeper_id' };
+      return apiPost(`/session-keepers/${params.keeper_id}/stop`, {});
+    case 'update': {
+      if (!params.keeper_id) return { error: 'update needs keeper_id' };
+      const body = {};
+      if (params.enabled !== undefined) body.enabled = params.enabled;
+      if (params.target_url !== undefined) body.target_url = params.target_url;
+      if (params.cadence_seconds !== undefined) body.cadence_seconds = params.cadence_seconds;
+      if (Object.keys(body).length === 0) return { error: 'update needs at least one of enabled/target_url/cadence_seconds' };
+      return apiPut(`/session-keepers/${params.keeper_id}`, body);
+    }
+    case 'delete':
+      if (!params.keeper_id) return { error: 'delete needs keeper_id' };
+      return apiDelete(`/session-keepers/${params.keeper_id}`);
+    case 'adopt_cookies':
+      if (!params.keeper_id) return { error: 'adopt_cookies needs keeper_id' };
+      return apiPost(`/session-keepers/${params.keeper_id}/adopt-cookies`, {});
+    default:
+      return { error: `unknown action: ${params.action}` };
+  }
+}
+
 module.exports = {
   manageAuthFlowsSchema, manageAuthFlows,
   manageAuthRecordingSchema, manageAuthRecording,
   manageSessionTokensSchema, manageSessionTokens,
   checkSessionTokensSchema, checkSessionTokens,
+  manageSessionKeeperSchema, manageSessionKeeper,
 };

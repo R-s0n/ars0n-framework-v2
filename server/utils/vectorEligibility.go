@@ -364,7 +364,8 @@ func loadVectorRows(ctx context.Context, scopeTargetID string) ([]vectorRow, err
 		          WHERE r.scope_target_id = av.scope_target_id AND e2.path = av.path
 		            AND COALESCE(r.content_type,'') <> ''
 		          ORDER BY r.id DESC LIMIT 1),
-		         '')
+		         ''),
+		       COALESCE(av.signals, '{}')
 		FROM attack_vectors av
 		WHERE av.scope_target_id = $1 AND av.deleted_at IS NULL
 		ORDER BY av.insertion_point, av.domain, av.path`, scopeTargetID)
@@ -379,7 +380,7 @@ func loadVectorRows(ctx context.Context, scopeTargetID string) ([]vectorRow, err
 		if err := rows.Scan(&v.ID, &v.Method, &v.Scheme, &v.Domain, &v.Port, &v.Path,
 			&v.InsertionPoint, &v.Parameters, &v.EvidenceURL, &v.RawRequest,
 			&v.Fragment, &v.ReflectionStatus, &v.ReflectionContentType, &v.ReflectionSurvived,
-			&v.ResponseContentType); err != nil {
+			&v.ResponseContentType, &v.Signals); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -397,8 +398,12 @@ type vectorRow struct {
 	Path           string
 	InsertionPoint string
 	Parameters     []string
-	EvidenceURL    string
-	RawRequest     string
+	// Signals names why a span is worth testing: jwt, uuid, numeric_id, high_entropy,
+	// custom_header, server_set. Carried on the vector at consolidation and read here so the IDOR
+	// collector can tell an id-bearing path from an ordinary one without re-deriving it.
+	Signals     []string
+	EvidenceURL string
+	RawRequest  string
 	// Fragment is the client-side route or anchor, without its leading hash. Only a fragment vector
 	// carries one, and without it a browser-driven tool would be pointed at the page rather than at
 	// the view the payload has to be read in.
@@ -520,4 +525,37 @@ func loadFoundVectorIDs(ctx context.Context, scopeTargetID, category string) map
 		}
 	}
 	return found
+}
+
+// loadSSRFFetchConfirmed reports whether any non-dismissed finding on this vector, in the category
+// that gates SSRFmap, proved a SERVER-SIDE FETCH rather than only an open redirect. It is what turns
+// "something was found here" into "the thing found here was a fetch", which is the difference between
+// pointing SSRFmap at portscan and pointing it at the cloud metadata readers.
+//
+// Fails closed in every direction: a query error, a scan error, or a vector whose only findings are
+// open redirects all return false, and false means the caller keeps the conservative portscan
+// default. It mirrors loadFoundVectorIDs' JOIN and triage filter so the two cannot drift: a finding
+// that is dismissed neither gates nor escalates.
+func loadSSRFFetchConfirmed(ctx context.Context, scopeTargetID, vectorID, category string) bool {
+	rows, err := dbPool.Query(ctx, `
+		SELECT COALESCE(f.kind,''), COALESCE(f.inject_type,''), COALESCE(f.detection_method,'')
+		FROM vector_findings f
+		JOIN vector_scans s ON s.id = f.scan_id
+		WHERE s.scope_target_id = $1 AND s.category = $2
+		  AND f.vector_id::text = $3
+		  AND f.triage <> 'dismissed'`, scopeTargetID, category, vectorID)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind, injectType, detection string
+		if rows.Scan(&kind, &injectType, &detection) != nil {
+			continue
+		}
+		if ssrfFindingIsFetchClass(kind, injectType, detection) {
+			return true
+		}
+	}
+	return false
 }

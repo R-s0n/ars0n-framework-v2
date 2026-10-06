@@ -223,7 +223,8 @@ func GetAttackVectors(w http.ResponseWriter, r *http.Request) {
 		                 ORDER BY p.probed_at DESC LIMIT 1), ''),
 		       COALESCE((SELECT p.survived FROM vector_reflection_probes p
 		                 WHERE p.vector_id = attack_vectors.id AND p.status = attack_vectors.reflection_status
-		                 ORDER BY p.probed_at DESC LIMIT 1), ARRAY[]::text[])
+		                 ORDER BY p.probed_at DESC LIMIT 1), ARRAY[]::text[]),
+		       COALESCE(signals, '{}')
 		FROM attack_vectors WHERE `+where+`
 		ORDER BY domain, path, method, insertion_point`, args...)
 	if err != nil {
@@ -244,23 +245,28 @@ func GetAttackVectors(w http.ResponseWriter, r *http.Request) {
 		// The reflection probe's verdict and the grade derived from it. reflection_grade is computed
 		// HERE rather than by each client, because the client and the MCP layer had already drifted
 		// apart on the content type rule: XML graded high on screen and low in the filter.
-		ReflectionStatus      string     `json:"reflection_status,omitempty"`
-		ReflectionContentType string     `json:"reflection_content_type,omitempty"`
-		ReflectionSurvived    []string   `json:"reflection_survived,omitempty"`
-		ReflectionGrade       string     `json:"reflection_grade,omitempty"`
-		InsertionPoint        string     `json:"insertion_point"`
-		InsertionConfidence   string     `json:"insertion_confidence"`
-		Parameters            []string   `json:"parameters"`
-		ParametersOrigin      string     `json:"parameters_origin"`
-		Sources               []string   `json:"sources"`
-		EvidenceURL           string     `json:"evidence_url,omitempty"`
-		RawRequest            string     `json:"raw_request,omitempty"`
-		Notes                 string     `json:"notes,omitempty"`
-		ManualAdded           bool       `json:"manual_added"`
-		EditedAt              *time.Time `json:"edited_at,omitempty"`
-		FirstSeen             time.Time  `json:"first_seen"`
-		LastSeen              time.Time  `json:"last_seen"`
-		TimesSeen             int        `json:"times_seen"`
+		ReflectionStatus      string   `json:"reflection_status,omitempty"`
+		ReflectionContentType string   `json:"reflection_content_type,omitempty"`
+		ReflectionSurvived    []string `json:"reflection_survived,omitempty"`
+		ReflectionGrade       string   `json:"reflection_grade,omitempty"`
+		InsertionPoint        string   `json:"insertion_point"`
+		InsertionConfidence   string   `json:"insertion_confidence"`
+		Parameters            []string `json:"parameters"`
+		ParametersOrigin      string   `json:"parameters_origin"`
+		// Signals names why a span is worth testing: jwt, uuid, numeric_id, high_entropy,
+		// custom_header, server_set. Written on every consolidation (attackVectors.go upsert) and
+		// until now never selected back out, so the column was write-only. The IDOR consolidation
+		// reads it to tell an id-bearing path (uuid/numeric_id) from an ordinary one.
+		Signals     []string   `json:"signals"`
+		Sources     []string   `json:"sources"`
+		EvidenceURL string     `json:"evidence_url,omitempty"`
+		RawRequest  string     `json:"raw_request,omitempty"`
+		Notes       string     `json:"notes,omitempty"`
+		ManualAdded bool       `json:"manual_added"`
+		EditedAt    *time.Time `json:"edited_at,omitempty"`
+		FirstSeen   time.Time  `json:"first_seen"`
+		LastSeen    time.Time  `json:"last_seen"`
+		TimesSeen   int        `json:"times_seen"`
 		// The probe's own rows for this vector, one per input.
 		//
 		// IT WAS ALREADY BEING RENDERED AND NEVER SENT. AttackVectorsModal has drawn a per-input
@@ -278,7 +284,7 @@ func GetAttackVectors(w http.ResponseWriter, r *http.Request) {
 			&v.InsertionPoint, &v.InsertionConfidence, &v.Parameters, &v.ParametersOrigin,
 			&v.Sources, &v.EvidenceURL, &v.RawRequest, &v.Notes, &v.ManualAdded, &v.EditedAt,
 			&v.FirstSeen, &v.LastSeen, &v.TimesSeen, &v.Fragment,
-			&v.ReflectionStatus, &v.ReflectionContentType, &v.ReflectionSurvived) == nil {
+			&v.ReflectionStatus, &v.ReflectionContentType, &v.ReflectionSurvived, &v.Signals) == nil {
 			v.ReflectionGrade = XSSCandidateGrade(v.ReflectionStatus, v.ReflectionContentType, v.ReflectionSurvived,
 				v.InsertionPoint)
 			out = append(out, v)

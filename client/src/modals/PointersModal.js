@@ -430,6 +430,75 @@ const Blob = ({ title, blob, terms, emptyNote }) => {
   );
 };
 
+// --- the object reference (IDOR) ------------------------------------------------------------
+//
+// Rendered ONLY when the server attached an identity block, which it does for an IDOR pointer and
+// for nothing else, so every other class (RBAC-VIOLATION included) renders through the generic
+// sections above and this draws nothing. Nothing here is re-derived: the tier, the id to swap and
+// the leak source are computed in CollectIDORCandidates and this file only arranges what it sent.
+//
+// THE TWO SENTENCES THAT NEVER MOVE are the caveat and the action. The one way this screen could
+// mislead is by letting "auth-gated" read as "authorization enforced", and it is not: the corpus
+// shows a client SENT credentials on this endpoint, never that the server CHECKED them. So the
+// caveat is drawn in the unknown colour, beside the single thing the operator does to settle it,
+// replay with a second identity and diff the body. Ownership is never asserted here: a candidate is
+// "a real id that is swappable", and whose object it is belongs to the operator and the authz model.
+const TIER_TONE = { HIGH: ACCENT, MED: UNKNOWN, LOW: 'rgba(255,255,255,0.55)' };
+
+export const IdentityBlock = ({ identity }) => {
+  const id = identity || {};
+  const tier = String(id.guess_tier || '').toUpperCase();
+  return (
+    <Section title="The object reference, and the id to swap">
+      <div className="d-flex gap-1 flex-wrap mb-1">
+        {tier && (
+          <Chip
+            text={`guessability ${tier}`}
+            why={id.guess_note}
+            tone={TIER_TONE[tier] || 'rgba(255,255,255,0.55)'}
+          />
+        )}
+        {id.id_location && <Chip text={`id in ${id.id_location}`} tone="rgba(255,255,255,0.55)" />}
+        {id.object_ref && <Chip text={`returns ${id.object_ref}`} tone="rgba(255,255,255,0.55)" />}
+        {id.id_leaked && (
+          <Chip
+            text={id.id_leak_source ? `id leaked by ${id.id_leak_source}` : 'id leaked in corpus'}
+            why="A sibling collection in the stored corpus returns this endpoint's id, so a valid id is already in hand and nothing has to be guessed."
+            tone={ACCENT}
+          />
+        )}
+      </div>
+
+      {id.guess_note && (
+        <div className="text-white-50" style={{ fontSize: '0.73rem' }}>{id.guess_note}</div>
+      )}
+
+      {id.known_id_value && (
+        <div className="mt-1" style={{ fontSize: '0.73rem' }}>
+          <span className="text-white-50">A real id to swap: </span>
+          <code className="text-light" style={{ wordBreak: 'break-all' }}>{id.known_id_value}</code>
+        </div>
+      )}
+
+      {id.auth_caveat && (
+        <div className="mt-2" style={{ fontSize: '0.73rem', color: UNKNOWN }}>
+          <strong>Auth is client-sent, not proven enforced: </strong>{id.auth_caveat}
+        </div>
+      )}
+
+      {id.operator_action && (
+        <div className="text-light mt-2" style={{ fontSize: '0.74rem' }}>
+          <strong className="text-danger">Do this: </strong>{id.operator_action}
+        </div>
+      )}
+
+      {id.ownership_note && (
+        <div className="text-white-50 mt-1" style={{ fontSize: '0.7rem' }}>{id.ownership_note}</div>
+      )}
+    </Section>
+  );
+};
+
 // --- the detail pane ------------------------------------------------------------------------
 
 export const PointerDetail = ({ detail, loading, error }) => {
@@ -487,6 +556,8 @@ export const PointerDetail = ({ detail, loading, error }) => {
       <Section title="Attack path">
         <AttackPath pointer={p} path={detail.attack_path} />
       </Section>
+
+      {detail.identity && <IdentityBlock identity={detail.identity} />}
 
       <Blob
         title="Request"

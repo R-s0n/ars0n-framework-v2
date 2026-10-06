@@ -80,6 +80,21 @@ func ComposeNucleiDast(v VectorInput, settings map[string]any, reportPath string
 
 	// Framework owned, appended last so a stored setting cannot displace them.
 	args = append(args, "-jsonl", "-o", reportPath, "-no-color")
+
+	// blind-ssrf OUT-OF-BAND coverage is DEGRADED on this build, and a clean result must not be read
+	// as proof. nuclei's ssrf set carries blind-ssrf, which proves itself only through interactsh, and
+	// this nuclei build has been seen unable to decrypt interactsh interaction data: the out-of-band
+	// arm can miss a real callback and report nothing. Said as a WARNING, not only in the tool's
+	// Limitation prose, because on a clean vector the runner writes the joined warnings as the result's
+	// reason (vectorScan.go), so this travels with the exact zero it qualifies. response-ssrf and the
+	// open-redirect pair are unaffected: they prove themselves from the response and need no callback.
+	if nucleiBlindSSRFDegraded(settings) {
+		warnings = append(warnings, "blind-ssrf OUT-OF-BAND coverage is UNTESTED on this build: nuclei "+
+			"proves blind SSRF only through interactsh, and this nuclei build has been seen unable to "+
+			"decrypt interactsh interaction data, so a clean result here is NOT evidence the target makes "+
+			"no blind out-of-band request. Cover out-of-band SSRF with the REcollapse webhook probe, or "+
+			"set a working Interactsh server. response-ssrf and open-redirect are unaffected.")
+	}
 	return args, warnings
 }
 
@@ -130,6 +145,36 @@ func nucleiTemplatePaths(settings map[string]any, warnings *[]string) []string {
 	return paths
 }
 
+// nucleiBlindSSRFDegraded reports whether this run attempts blind SSRF through interactsh, whose
+// interaction data this nuclei build has been seen unable to decrypt. True when the ssrf template set
+// is in effect (it carries blind-ssrf) and out-of-band checks are not disabled.
+//
+// The effective selection is computed the SAME way nucleiTemplatePaths computes it, not with a bare
+// len==0 check: settingValues(nil) returns a one-element [""] rather than an empty slice, so an unset
+// Template sets field must still be read as "defaults in effect", and the defaults carry ssrf.
+func nucleiBlindSSRFDegraded(settings map[string]any) bool {
+	if settingIsTrue(settings["noInteractsh"]) {
+		return false // -ni sends no out-of-band payloads at all, so nothing silently degrades
+	}
+	var known []string
+	for _, name := range settingValues(settings["templates"]) {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if _, ok := nucleiTemplateSets[name]; ok {
+			known = append(known, name)
+		}
+	}
+	effective := known
+	if len(effective) == 0 {
+		effective = nucleiDefaultTemplateSets
+	}
+	for _, name := range effective {
+		if strings.ToLower(strings.TrimSpace(name)) == "ssrf" {
+			return true
+		}
+	}
+	return false
+}
+
 // webhookHost reduces a webhook URL to the host that will appear in a Location header.
 func webhookHost(raw string) string {
 	raw = strings.TrimSpace(raw)
@@ -142,6 +187,14 @@ func webhookHost(raw string) string {
 	}
 	return strings.ToLower(parsed.Hostname())
 }
+
+// ssrfmapFetchModules are the modules SSRFmap runs when the finding that unlocked it proved a
+// server-side FETCH rather than only an open redirect. readfiles pulls a file back through the same
+// primitive the detector already exercised; aws and gce perform the IMDSv2 and computeMetadata
+// header dance a URL-only probe cannot, which is where the high-value finding on an AWS/Cognito or
+// GCP target lives. Comma-separated because SSRFmap's -m takes a module list, exactly as the single
+// portscan default below. All three names are in ssrfmapOptions.modules' own Choices.
+const ssrfmapFetchModules = "readfiles,aws,gce"
 
 // ComposeSSRFmap builds the SSRFmap argv.
 func ComposeSSRFmap(v VectorInput, settings map[string]any, reportPath string) ([]string, []string) {
@@ -156,12 +209,28 @@ func ComposeSSRFmap(v VectorInput, settings map[string]any, reportPath string) (
 
 	args := []string{"/opt/SSRFmap/ssrfmap.py", "-r", reportPath + ".req", "-p", param}
 
-	// portscan unless the operator chose otherwise. Every other module talks to an internal service
-	// on someone else's network, and a default that did that would be a default nobody asked for.
-	if len(settingValues(settings["modules"])) == 0 || stringifySetting(settings["modules"]) == "" {
-		args = append(args, "-m", "portscan")
-		warnings = append(warnings, "No modules were chosen, so this run used portscan only. The "+
-			"modules that read files or talk to internal databases are a deliberate choice.")
+	// portscan unless the operator chose otherwise, OR the cloud metadata readers when the finding
+	// that unlocked SSRFmap here proved a server-side FETCH. Every module beyond portscan talks to an
+	// internal service on someone else's network, so a blanket default that did so would be a default
+	// nobody asked for; escalating ONLY on a confirmed fetch keeps that property while reaching the
+	// IMDSv2/GCP metadata a URL-only probe cannot. An explicit module choice always wins.
+	operatorChoseModules := len(settingValues(settings["modules"])) > 0 && stringifySetting(settings["modules"]) != ""
+	if !operatorChoseModules {
+		if v.SSRFFetchConfirmed {
+			args = append(args, "-m", ssrfmapFetchModules)
+			warnings = append(warnings, "The finding that unlocked SSRFmap on this vector proved a "+
+				"server-side FETCH (a local file, a cloud metadata document, an internal service, or an "+
+				"out-of-band callback), so this run used the cloud metadata readers ("+ssrfmapFetchModules+
+				") instead of portscan: the aws and gce modules send the IMDSv2 and computeMetadata headers "+
+				"the target itself must carry, which a URL-only probe cannot reach. Choose modules "+
+				"explicitly to override.")
+		} else {
+			args = append(args, "-m", "portscan")
+			warnings = append(warnings, "No modules were chosen, so this run used portscan only. The "+
+				"modules that read files or talk to internal databases are a deliberate choice. A bare open "+
+				"redirect does not escalate here, because a redirect is a browser-side navigation rather than "+
+				"a server-side fetch.")
+		}
 	}
 
 	args = append(args, composeVectorSettings(tool, settings, "", nil, &warnings)...)

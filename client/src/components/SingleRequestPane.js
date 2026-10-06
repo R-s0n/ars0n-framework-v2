@@ -376,11 +376,57 @@ function httpSegments(text) {
   return segs;
 }
 
+// The background a highlighted parameter token gets in the request mirror. An rgba fill with alpha,
+// so the syntax colour underneath still reads through. It is a PAINT-only property, exactly like a
+// text colour, so it moves no glyph - see splitHighlightRuns and renderHttpNodes for why that matters.
+const HL_MATCH_BG = 'rgba(255,99,99,0.30)';
+
+// Partitions one already-coloured content chunk into runs, flagging the whole-token occurrences of
+// any highlight term. "Whole token" means bounded by a non-[A-Za-z0-9_] character or a string end,
+// matched case-sensitively: `token` inside `access_token` does NOT match, `access_token` as a whole
+// does. The returned run texts concatenate back to `text` EXACTLY - this only slices the string, it
+// never adds, drops or rewrites a byte - which is the invariant that keeps the coloured mirror
+// character-for-character aligned with the textarea behind it. Overlapping matches from different
+// terms merge through a per-character mark, so the partition is always clean and contiguous.
+function splitHighlightRuns(text, terms) {
+  const isWord = (ch) => ch !== undefined && /[A-Za-z0-9_]/.test(ch);
+  const marks = new Array(text.length).fill(false);
+  let any = false;
+  terms.forEach((term) => {
+    if (!term) return;
+    let from = 0;
+    let idx;
+    while ((idx = text.indexOf(term, from)) !== -1) {
+      const before = idx > 0 ? text[idx - 1] : undefined;
+      const after = idx + term.length < text.length ? text[idx + term.length] : undefined;
+      if (!isWord(before) && !isWord(after)) {
+        for (let k = idx; k < idx + term.length; k += 1) marks[k] = true;
+        any = true;
+      }
+      from = idx + term.length;
+    }
+  });
+  if (!any) return [{ text, hl: false }];
+  const runs = [];
+  let start = 0;
+  for (let i = 1; i <= text.length; i += 1) {
+    if (i === text.length || marks[i] !== marks[start]) {
+      runs.push({ text: text.slice(start, i), hl: marks[start] });
+      start = i;
+    }
+  }
+  return runs;
+}
+
 // Turns {text, cls} segments into React nodes. Splits every segment at its line breaks so a coloured
 // run that spans lines still lays out one line per break, and drops in the line-ending glyph when the
 // view asks for it. The glyph is zero-width so it never shifts the text the mirror sits behind.
-function renderHttpNodes(segments, showEol) {
+function renderHttpNodes(segments, showEol, highlightTerms) {
   const nodes = [];
+  // A non-empty term list turns parameter highlighting on; an absent or empty one is the exact prior
+  // behaviour. responseNodes calls this with two args, so its third arg is undefined and it takes the
+  // old path unchanged - the response mirror never highlights.
+  const terms = highlightTerms && highlightTerms.length ? highlightTerms : null;
   let key = 0;
   segments.forEach((seg) => {
     const color = HL[seg.cls] || HL.plain;
@@ -389,7 +435,26 @@ function renderHttpNodes(segments, showEol) {
       const content = parts[i];
       const term = parts[i + 1];
       if (content) {
-        nodes.push(<span key={`s${key}`} style={{ color }}>{content}</span>);
+        if (terms) {
+          // One span per run. A highlighted run adds ONLY backgroundColor + borderRadius on top of the
+          // SAME base colour; it sets nothing - no width, padding, margin, border, font, letter-spacing
+          // or display - that could change a glyph's advance, and the runs concatenate back to `content`
+          // byte for byte, so the mirror stays aligned under the transparent textarea.
+          splitHighlightRuns(content, terms).forEach((run, ri) => {
+            nodes.push(
+              <span
+                key={`s${key}_${ri}`}
+                style={run.hl
+                  ? { color, backgroundColor: HL_MATCH_BG, borderRadius: 2 }
+                  : { color }}
+              >
+                {run.text}
+              </span>
+            );
+          });
+        } else {
+          nodes.push(<span key={`s${key}`} style={{ color }}>{content}</span>);
+        }
         key += 1;
       }
       if (term !== undefined && term !== '') {
@@ -452,7 +517,87 @@ function variantMetaKey(method, host, path, reqSig, respSig) {
   return `${method}\u0000${host}\u0000${path}\u0000${reqSig || ''}\u0000${respSig || ''}`;
 }
 
-function buildTree(rows, variantMeta) {
+// ---------------------------------------------------------------------------
+// Attack-vector overlay. The target's modelled attack vectors (method + host + a possibly templatized
+// path, plus an insertion point and the parameter names) are matched against the sitemap's endpoints so
+// a leaf that has a vector can be flagged and its parameters highlighted in the request. Pure helpers,
+// no network and no state: buildTree takes the prebuilt index as a third argument and the caller owns
+// the fetch. With no index (the default) every leaf reports zero vectors, so behaviour is unchanged.
+
+// Strip a ":port" suffix from a sitemap host so an attack-vector domain (which never carries a port)
+// can match a capture host that does. parseUrlParts yields parsed.host, which includes the port, so a
+// capture on www.example.com:443 must still match a vector on www.example.com. An IPv6 literal is
+// bracketed ([::1]:8080); its brackets are kept and only the trailing :port is dropped.
+function hostnameOf(host) {
+  const h = String(host == null ? '' : host);
+  if (h.startsWith('[')) {
+    const end = h.indexOf(']');
+    return end === -1 ? h : h.slice(0, end + 1);
+  }
+  const colon = h.indexOf(':');
+  return colon === -1 ? h : h.slice(0, colon);
+}
+
+// Does a concrete request path fit a (possibly templatized) attack-vector path? Both are split on "/",
+// a single trailing empty segment is dropped on each so a trailing slash on either side never changes
+// the result, and the two must then have the SAME number of segments. A template segment matches when
+// it is byte-identical to the concrete one OR is a "{...}" placeholder, which stands for exactly one
+// segment. Literal segments are compared case-sensitively, because URL paths are. A segment-count
+// mismatch, or any literal that differs, is NO match: an unknown path must never borrow a vector.
+function pathMatchesTemplate(concretePath, templatePath) {
+  const norm = (p) => {
+    const parts = String(p == null ? '' : p).split('/');
+    if (parts.length > 1 && parts[parts.length - 1] === '') parts.pop();
+    return parts;
+  };
+  const a = norm(concretePath);
+  const b = norm(templatePath);
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < b.length; i += 1) {
+    const t = b[i];
+    if (t.length >= 2 && t[0] === '{' && t[t.length - 1] === '}') continue;
+    if (t !== a[i]) return false;
+  }
+  return true;
+}
+
+// Index the target's attack vectors by METHOD + hostname so a sitemap leaf can find candidates in one
+// lookup and then confirm the path against each candidate's template. The stored entry keeps the fields
+// the UI needs to explain WHY a leaf is flagged (the insertion point, the parameter names) plus a stable
+// per-vector key for React. A vector with no method defaults to GET, matching buildTree's leaf method.
+function buildAttackVectorIndex(vectors) {
+  const index = new Map();
+  (Array.isArray(vectors) ? vectors : []).forEach((v) => {
+    if (!v) return;
+    const method = String(v.method || 'GET').toUpperCase();
+    const host = hostnameOf(v.domain || '');
+    const path = v.path || '/';
+    const key = `${method}\u0000${host}`;
+    const entry = {
+      path,
+      insertion_point: v.insertion_point || '',
+      parameters: Array.isArray(v.parameters) ? v.parameters : [],
+      id: v.id != null ? v.id : null,
+      vectorKey: `${method}\u0000${host}\u0000${path}\u0000${v.insertion_point || ''}\u0000${v.id != null ? v.id : ''}`,
+    };
+    const arr = index.get(key);
+    if (arr) arr.push(entry); else index.set(key, [entry]);
+  });
+  return index;
+}
+
+// The vectors that apply to one sitemap leaf: same method, same hostname, and a path that fits the
+// vector's (templatized) path. Returns a fresh array - [] when the index is absent/empty or nothing
+// matches - and never throws on a null index, which is simply the zero-vectors case.
+function matchAttackVectors(index, method, host, path) {
+  if (!index || index.size === 0) return [];
+  const key = `${String(method || 'GET').toUpperCase()}\u0000${hostnameOf(host)}`;
+  const candidates = index.get(key);
+  if (!candidates || candidates.length === 0) return [];
+  return candidates.filter((entry) => pathMatchesTemplate(path, entry.path));
+}
+
+function buildTree(rows, variantMeta, avIndex = null) {
   const meta = variantMeta || {};
   const hosts = new Map();
 
@@ -553,8 +698,14 @@ function buildTree(rows, variantMeta) {
     // Clear any stale stored-primary flag on hidden variants so exactly one visible variant is starred.
     variants.forEach((v) => { if (v !== primary) v.isPrimary = false; });
     if (primary) primary.isPrimary = true;
+    // The attack vectors modelled for THIS endpoint (method + host + templatized path). Empty when no
+    // index was passed - the default - so a leaf looks exactly as it does today in that case. matchAttack-
+    // Vectors already returns [], the `|| []` only guards a future change to the helper.
+    const attackVectors = matchAttackVectors(avIndex, group.method, group.host, group.path) || [];
     return {
       key: group.epKey,
+      attackVectors,
+      hasAttackVector: attackVectors.length > 0,
       label: group.label,
       method: group.method,
       host: group.host,
@@ -579,11 +730,19 @@ function buildTree(rows, variantMeta) {
     // Count ENDPOINTS under this node now, not captures. Fully-hidden endpoints (every variant hidden)
     // are not counted, so the folder badge matches the default sitemap, which does not draw them.
     let count = node.leaves.filter((l) => l.hasVisible).length;
+    // Attack-vector tally is independent of the visible-endpoint count: it counts leaves that carry at
+    // least one matched vector plus the same tally from every child, so a folder badge can show how many
+    // flagged endpoints sit beneath it. avIndex null/empty => no leaf has one => this is 0 everywhere.
+    let avCount = node.leaves.filter((l) => l.hasAttackVector).length;
     const children = Array.from(node.dirs.values()).sort((a, b) => a.name.localeCompare(b.name));
-    children.forEach((child) => { count += finish(child); });
+    children.forEach((child) => {
+      count += finish(child);
+      avCount += child.attackVectorCount || 0;
+    });
     node.children = children;
     node.leaves.sort((a, b) => (a.label.localeCompare(b.label) || a.method.localeCompare(b.method)));
     node.count = count;
+    node.attackVectorCount = avCount;
     return count;
   };
 
@@ -634,6 +793,14 @@ export const SingleRequestPane = ({
   // map - only variants the operator has renamed or made primary have a row. buildTree reads it, so
   // the tree, the sitemap status and the variants column all reflect the same choices.
   const [variantMeta, setVariantMeta] = useState({});
+  // The attack-vector overlay: every vector the Consolidate/Investigate passes have modelled for this
+  // target, fetched once per target the same way variantMeta is. buildAttackVectorIndex turns it into a
+  // method+host lookup and buildTree marks the leaves whose endpoint carries one, so the sitemap, the
+  // request-mirror highlight and the "attack vectors only" filter all read the same list. Empty is the
+  // whole-feature-off state and changes nothing the operator sees today.
+  const [attackVectors, setAttackVectors] = useState([]);
+  // Sitemap filter: show only endpoints that carry an attack vector. Off by default; reset per target.
+  const [attackVectorsOnly, setAttackVectorsOnly] = useState(false);
   const [total, setTotal] = useState(0);
   const [corpusTotal, setCorpusTotal] = useState(null);
   const [truncated, setTruncated] = useState(false);
@@ -863,6 +1030,23 @@ export const SingleRequestPane = ({
 
   useEffect(() => { loadVariantMeta(); }, [loadVariantMeta]);
 
+  // The attack-vector overlay is per target, fetched once per target, exactly like loadVariantMeta.
+  // Reuses the existing GET /attack-vectors route (no server change); fail-closed to empty so a build
+  // that does not serve it, a 4xx/5xx, or a network error simply leaves every leaf unmarked.
+  const loadAttackVectors = useCallback(async () => {
+    if (!targetId) { setAttackVectors([]); return; }
+    try {
+      const res = await fetch(`/api/attack-vectors/${targetId}`);
+      if (!res.ok) { setAttackVectors([]); return; }
+      const data = await res.json().catch(() => null);
+      setAttackVectors((data && Array.isArray(data.vectors)) ? data.vectors : []);
+    } catch {
+      setAttackVectors([]);
+    }
+  }, [targetId]);
+
+  useEffect(() => { loadAttackVectors(); }, [loadAttackVectors]);
+
   // Rename a variant, or make it the endpoint's primary. Both are one POST to the overlay; the reload
   // is what makes the change show up in the sitemap and the column at once.
   const postVariantMeta = useCallback(async (variant, patch) => {
@@ -930,6 +1114,8 @@ export const SingleRequestPane = ({
     setQuery('');
     setCaptures([]);
     setVariantMeta({});
+    setAttackVectors([]);
+    setAttackVectorsOnly(false);
     setVariantRenamingId(null);
     setShowHiddenVariants(false);
     setTotal(0);
@@ -987,8 +1173,19 @@ export const SingleRequestPane = ({
     targetIdRef.current = targetId;
   });
 
-  const tree = useMemo(() => buildTree(captures, variantMeta), [captures, variantMeta]);
+  // The method+host lookup the tree uses to mark leaves. Rebuilt only when the overlay changes.
+  const avIndex = useMemo(() => buildAttackVectorIndex(attackVectors), [attackVectors]);
+  const tree = useMemo(() => buildTree(captures, variantMeta, avIndex), [captures, variantMeta, avIndex]);
   const leafCount = useMemo(() => tree.reduce((sum, node) => sum + node.count, 0), [tree]);
+
+  // How many endpoints across the whole tree carry a modelled attack vector. Drives the filter
+  // toggle's count and lets it disable itself when there is nothing to filter to. It rolls up the
+  // per-node counts buildTree already summed, so it is 0 (and the toggle inert) whenever the attack
+  // vector index is empty - exactly today's behaviour before the model is loaded.
+  const avEndpointCount = useMemo(
+    () => tree.reduce((sum, node) => sum + (node.attackVectorCount || 0), 0),
+    [tree]
+  );
 
   // The selected endpoint's variants, derived from the freshly built tree rather than snapshotted on
   // click. This is what keeps the versions column, its count, and the sitemap's own variant badge in
@@ -1008,6 +1205,45 @@ export const SingleRequestPane = ({
     };
     return findIn(tree) || [];
   }, [tree, selectedId]);
+
+  // The attack vectors that match the SELECTED endpoint. selectedId is the leaf epKey, method + host +
+  // path NUL-joined (buildTree), so it is split back into those three parts and matched. matchAttackVectors
+  // upcases the method and strips the host port itself, so the raw epKey parts can be passed straight in.
+  // Empty when nothing is selected, the index is empty, or no vector matches - the ZERO-behaviour default.
+  const selectedVectors = useMemo(() => {
+    if (!selectedId) return [];
+    const parts = String(selectedId).split('\u0000');
+    if (parts.length < 3) return [];
+    return matchAttackVectors(avIndex, parts[0], parts[1], parts.slice(2).join('\u0000'));
+  }, [selectedId, avIndex]);
+
+  // The distinct parameter names to highlight, in first-seen order. The server sends parameters as a
+  // string[], but we read defensively so a future object shape cannot throw here. Blank names drop.
+  const highlightTerms = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    selectedVectors.forEach((v) => {
+      (v.parameters || []).forEach((raw) => {
+        const name = typeof raw === 'string' ? raw : (raw && (raw.name || raw.param || raw.key));
+        const term = typeof name === 'string' ? name.trim() : '';
+        if (term && !seen.has(term)) { seen.add(term); out.push(term); }
+      });
+    });
+    return out;
+  }, [selectedVectors]);
+
+  // A one-line legend: which insertion point(s) the matched vectors use, then the highlighted names.
+  // Empty whenever nothing is highlighted, so the badge simply does not render.
+  const highlightLegend = useMemo(() => {
+    if (highlightTerms.length === 0) return '';
+    const points = [];
+    selectedVectors.forEach((v) => {
+      const p = v.insertion_point || '';
+      if (p && !points.includes(p)) points.push(p);
+    });
+    const where = points.join(', ');
+    return where ? `${where} ${highlightTerms.join(', ')}` : highlightTerms.join(', ');
+  }, [selectedVectors, highlightTerms]);
 
   // v1, v2, v3 down the column. Numbered by position rather than stored, because the number is a
   // reading aid and the identity is the id; a deletion renumbering the rows below it is exactly
@@ -1822,8 +2058,8 @@ export const SingleRequestPane = ({
   // view is toggled. It colours the EXACT bytes in the buffer, so it stays character-aligned with the
   // textarea whatever is typed. Line endings do not change the colours, so wrap is not a dependency.
   const requestNodes = useMemo(
-    () => renderHttpNodes(httpSegments(rawRequest), showEol),
-    [rawRequest, showEol]
+    () => renderHttpNodes(httpSegments(rawRequest), showEol, highlightTerms),
+    [rawRequest, showEol, highlightTerms]
   );
 
   // Which exchange the response pane is describing. With no chain that is simply the response; with
@@ -1908,6 +2144,20 @@ export const SingleRequestPane = ({
     // several statuses, but the sitemap shows the one the operator chose as representative (or the
     // newest, absent a choice). The rest are in the variants column.
     const primaryStatus = leaf.primaryStatus != null ? leaf.primaryStatus : leaf.status;
+    // An endpoint the attack-vector model knows about is drawn red - the way the rest of the
+    // framework flags a modelled vector - and carries a bullseye whose hover lists each vector's
+    // insertion point and parameters. A leaf with no modelled vector is untouched and reads exactly
+    // as before (hasAttackVector is false and attackVectors is [] when the model is not loaded).
+    const hasAv = !!leaf.hasAttackVector;
+    const avTitle = hasAv
+      ? `Attack vector${leaf.attackVectors.length === 1 ? '' : 's'}:\n${leaf.attackVectors
+          .map((v) => {
+            const params = (v.parameters || []).filter(Boolean);
+            return params.length ? `${v.insertion_point}: ${params.join(', ')}` : v.insertion_point;
+          })
+          .join('\n')}`
+      : undefined;
+    const labelClass = hasAv ? 'text-danger' : (active ? 'text-light' : 'text-white-50');
     return (
       <div
         key={`leaf-${leaf.key}`}
@@ -1920,17 +2170,24 @@ export const SingleRequestPane = ({
       >
         <Badge
           bg="dark"
-          className="border border-secondary text-white-50 me-2"
+          className={`border ${hasAv ? 'border-danger text-danger' : 'border-secondary text-white-50'} me-2`}
           style={{ fontSize: '0.55rem', minWidth: '42px' }}
         >
           {leaf.method}
         </Badge>
         <code
-          className={`flex-grow-1 text-truncate ${active ? 'text-light' : 'text-white-50'}`}
+          className={`flex-grow-1 text-truncate ${labelClass}`}
           style={{ fontSize: '0.72rem' }}
         >
           {leaf.label}{leaf.hasQuery ? '?' : ''}
         </code>
+        {hasAv && (
+          <i
+            className="bi bi-bullseye text-danger ms-1"
+            style={{ fontSize: '0.7rem' }}
+            title={avTitle}
+          />
+        )}
         {primaryStatus != null && (
           <Badge
             bg={statusVariant(primaryStatus)}
@@ -1946,7 +2203,16 @@ export const SingleRequestPane = ({
   };
 
   const renderNode = (node, depth) => {
-    const open = isOpen(node.key, depth);
+    // With the attack-vectors-only filter on, every node is forced open so the matches are always
+    // visible, and its children and leaves are pruned to only those carrying a modelled vector. With
+    // the filter off this is byte-for-byte the previous behaviour.
+    const open = attackVectorsOnly ? true : isOpen(node.key, depth);
+    const children = attackVectorsOnly
+      ? node.children.filter((child) => child.attackVectorCount > 0)
+      : node.children;
+    const leaves = attackVectorsOnly
+      ? node.leaves.filter((leaf) => leaf.hasAttackVector)
+      : node.leaves.filter((leaf) => showHiddenVariants || leaf.hasVisible);
     return (
       <div key={node.key}>
         <div
@@ -1959,17 +2225,33 @@ export const SingleRequestPane = ({
             style={{ fontSize: '0.65rem' }}
           />
           <i className={`bi ${depth === 0 ? 'bi-hdd-network' : 'bi-folder'} text-danger me-2`} style={{ fontSize: '0.7rem' }} />
-          <span className="flex-grow-1 text-truncate text-light" style={{ fontSize: '0.75rem' }}>{node.name}</span>
+          <span
+            className={`flex-grow-1 text-truncate ${node.attackVectorCount > 0 ? 'text-danger fw-semibold' : 'text-light'}`}
+            style={{ fontSize: '0.75rem' }}
+            title={node.attackVectorCount > 0
+              ? `Contains ${node.attackVectorCount} endpoint${node.attackVectorCount === 1 ? '' : 's'} with a modelled attack vector - dig in`
+              : undefined}
+          >
+            {node.name}
+          </span>
           <Badge bg="dark" className="border border-secondary text-white-50" style={{ fontSize: '0.55rem' }}>
             {node.count}
           </Badge>
+          {node.attackVectorCount > 0 && (
+            <Badge
+              bg="dark"
+              className="border border-danger text-danger ms-1"
+              style={{ fontSize: '0.55rem' }}
+              title={`${node.attackVectorCount} endpoint${node.attackVectorCount === 1 ? '' : 's'} with a modelled attack vector`}
+            >
+              <i className="bi bi-bullseye me-1" />{node.attackVectorCount}
+            </Badge>
+          )}
         </div>
         {open && (
           <div>
-            {node.children.map((child) => renderNode(child, depth + 1))}
-            {node.leaves
-              .filter((leaf) => showHiddenVariants || leaf.hasVisible)
-              .map((leaf) => renderLeaf(leaf, depth + 1))}
+            {children.map((child) => renderNode(child, depth + 1))}
+            {leaves.map((leaf) => renderLeaf(leaf, depth + 1))}
           </div>
         )}
       </div>
@@ -2467,6 +2749,28 @@ export const SingleRequestPane = ({
                 </Button>
               )}
             </InputGroup>
+            {/* Narrow the sitemap to endpoints the attack-vector model knows about. Disabled only
+                when the target has none modelled AND the filter is off, so the switch can always be
+                turned back off and can never blank the tree out from under the operator. */}
+            <Form.Check
+              type="switch"
+              id="replay-av-only"
+              className="text-white-50 mt-2"
+              style={{ fontSize: '0.72rem' }}
+              checked={!!attackVectorsOnly}
+              disabled={avEndpointCount === 0 && !attackVectorsOnly}
+              onChange={(e) => setAttackVectorsOnly(e.target.checked)}
+              label={(
+                <span>
+                  <i className="bi bi-bullseye text-danger me-1" />
+                  Attack vectors only
+                  <span className="ms-1">({avEndpointCount.toLocaleString()})</span>
+                </span>
+              )}
+              title={avEndpointCount === 0
+                ? 'No endpoints on this target have a modelled attack vector yet.'
+                : `Show only the ${avEndpointCount.toLocaleString()} endpoint${avEndpointCount === 1 ? '' : 's'} with a modelled attack vector.`}
+            />
             {queryError && (
               <div className="text-danger mt-1" style={{ fontSize: '0.72rem' }}>
                 <i className="bi bi-exclamation-triangle me-1" />
@@ -2497,7 +2801,17 @@ export const SingleRequestPane = ({
                 {searching ? 'Searching.' : 'Nothing matched. Captures come from the manual crawl, so run one first if this target has none.'}
               </div>
             ) : (
-              tree.map((node) => renderNode(node, 0))
+              (() => {
+                const shown = tree.filter((node) => !attackVectorsOnly || node.attackVectorCount > 0);
+                if (attackVectorsOnly && shown.length === 0) {
+                  return (
+                    <div className="text-white-50 small p-3">
+                      No endpoints with a modelled attack vector match the current query.
+                    </div>
+                  );
+                }
+                return shown.map((node) => renderNode(node, 0));
+              })()
             )}
           </div>
         </div>
@@ -2519,6 +2833,17 @@ export const SingleRequestPane = ({
               )}
               {dirty && <span className="text-warning ms-2" style={{ fontSize: '0.68rem' }}>edited</span>}
               {loadingCapture && <Spinner animation="border" size="sm" variant="danger" className="ms-2" />}
+              {highlightTerms.length > 0 && (
+                <Badge
+                  bg="danger"
+                  className="ms-2 text-truncate d-inline-flex align-items-center"
+                  style={{ fontSize: '0.6rem', fontWeight: 'normal', maxWidth: '320px' }}
+                  title={`Highlighted in the request below: ${highlightLegend}`}
+                >
+                  <i className="bi bi-bullseye me-1" />
+                  Attack vector: {highlightLegend}
+                </Badge>
+              )}
               <div className="ms-auto d-flex align-items-center">
                 <span className="text-white-50 me-1" style={{ fontSize: '0.68rem' }}>Base URL</span>
                 <Form.Control
@@ -3048,6 +3373,16 @@ export const SingleRequestPane = ({
       </Modal>
     </div>
   );
+};
+
+// Named exports for unit tests only. All pure module-level helpers - no component state is touched by
+// exporting them.
+export {
+  httpSegments,
+  renderHttpNodes,
+  pathMatchesTemplate,
+  buildAttackVectorIndex,
+  matchAttackVectors,
 };
 
 export default SingleRequestPane;

@@ -66,6 +66,15 @@ const (
 	// has to be edited when the system changes is a sentence that will be wrong, and wrong here
 	// means a false negative.
 	PointerSourceTriage = "triage_verdict"
+	// PointerSourceAuthz is the authorization model joined to the stored corpus: the IDOR candidate
+	// collector (CollectIDORCandidates) and the forbidden_to_do cells of authz_role_action_matrix.
+	//
+	// IT IS DELIBERATELY ABSENT FROM PointerSourceOrder. That order drives the coverage headline and
+	// the forced-zero source rows, so a fourth source there would change the headline on every target
+	// that has no authorization model at all, which is exactly the "behave as today" invariant this
+	// feature must not break. A pointer from this source still filters and counts by its own Source
+	// value like any other, it just does not appear in the ordered source vocabulary.
+	PointerSourceAuthz = "authz_model"
 )
 
 // Pointer strength NAMES THE EVIDENCE rather than grading it on an invented scale.
@@ -149,6 +158,14 @@ const (
 	pointerClassUnclassified  = "UNCLASSIFIED"
 	pointerClassLabelUnmapped = "Unclassified: this tool has no attack class mapping yet"
 	pointerNoToolReason       = "No confirmation tool is mapped for this class, so the next step is a hand review of the request and response."
+	// IDOR (object level) is an authorization class, not an injection, so like SECRET, ACCESS-BYPASS
+	// and SMUGGLING it carries its own name here rather than a triage.ClassID.
+	//
+	// IDOR IS KEPT DISTINCT FROM ACCESS-BYPASS ON PURPOSE. ACCESS-BYPASS is a refused path (a 4xx)
+	// reached by forcing the request through a bypass set, which is nomore403's job. IDOR is an
+	// ALLOWED request whose object id belongs to another identity. They are different bugs with
+	// different next steps, and merging them would point the operator at the wrong tool.
+	pointerClassIDOR = "IDOR"
 )
 
 // pointerToolClass maps the tool that wrote a vector_findings row to the attack class a pointer
@@ -233,6 +250,7 @@ var pointerClassLabels = map[string]string{
 	pointerClassSecret:           "Exposed secret",
 	pointerClassAccessBypass:     "Access control bypass",
 	pointerClassSmuggling:        "Request smuggling",
+	pointerClassIDOR:             "Insecure direct object reference",
 	pointerClassUnclassified:     pointerClassLabelUnmapped,
 }
 
@@ -373,6 +391,10 @@ func pointerClassVictimDelivered(class string) bool {
 		triage.ClassXSSStored.String(), triage.ClassCSTI.String(), triage.ClassPPClient.String():
 		return true
 	}
+	// IDOR is NOT listed above on purpose. It is exploited by the attacker sending their OWN
+	// authenticated request, exactly like SQL or SECRET, so delivery is never a gate on it and
+	// ReflectionInsertionPointDeliverable (an XSS insertion-point rule) must not be applied to it:
+	// an id carried in a cookie is still fully attacker-controlled. It falls through here.
 	return false
 }
 
@@ -471,6 +493,8 @@ func pointerNextTool(class string, declared []string) (string, string) {
 		return "smugglex", "Smugglex distinguishes a desync from a timeout, and a timeout read as a desync is this section's known trap."
 	case pointerClassSecret:
 		return "", "A secret is confirmed by reading it and using it, not by another scanner. The response body is the evidence."
+	case pointerClassIDOR:
+		return "", "No scanner can decide object ownership, so this is a hand review. Replay this exact request with a SECOND identity's session and diff the response body: another identity's object coming back under your credentials is the finding, while the same object, an empty body or a 403 is the control working."
 	}
 	return "", pointerNoToolReason
 }
@@ -586,6 +610,10 @@ type Pointer struct {
 	// rowID is the source row's primary key, kept so the detail endpoint can fetch the bytes
 	// without re-parsing ID.
 	rowID string
+	// authzCandidate is the IDOR candidate behind an authz IDOR pointer, stashed so the detail
+	// endpoint renders from the deterministic join already computed in this same request rather than
+	// scanning the corpus a second time. Nil on every other pointer. Not serialised.
+	authzCandidate *IDORCandidate
 }
 
 // pointerSeverityWeight orders severities inside one strength band. An unrecognised word sorts last
@@ -732,6 +760,11 @@ func pointerPossibleAttacks(class string, deliverable bool) []string {
 		out = []string{"Reaching the resource the access control refused, as an identity that should not have it."}
 	case pointerClassSmuggling:
 		out = []string{"Requests from other users poisoned on a shared front end connection, which is a stored attack on everyone behind it."}
+	case pointerClassIDOR:
+		out = []string{
+			"Reading another identity's object by swapping the id this endpoint trusts, starting with the PII this response already carries.",
+			"Modifying or deleting that object where the same id is accepted on a writing verb, which turns a read into a takeover of the record.",
+		}
 	default:
 		out = []string{"Not stated: this attack class has no catalogued consequence yet, so read the request and response."}
 	}
@@ -804,6 +837,7 @@ type PointerCoverage struct {
 	Reflection PointerReflectionCoverage `json:"reflection"`
 	Findings   PointerFindingCoverage    `json:"findings"`
 	Triage     PointerTriageCoverage     `json:"triage"`
+	Authz      PointerAuthzCoverage      `json:"authz"`
 	// Headline is the one sentence the card shows beside the count.
 	Headline string `json:"headline"`
 }
@@ -1124,6 +1158,27 @@ type PointerDetail struct {
 	// Reproduction is the framework's existing reproduction builder, so this screen and the
 	// findings modal hand the operator the same curl rather than two.
 	Reproduction *FindingReproduction `json:"reproduction,omitempty"`
+	// Identity is the IDOR-specific panel: the object reference, the id to swap, the guessability
+	// tier, the client-sent-not-enforced caveat and the one operator action. Present only on an IDOR
+	// pointer; nil (and the client renders nothing) for every other class. The strings are the same
+	// honesty-guarded phrasings used on the candidate, not new claims. See idorPointerDetail.
+	Identity *PointerIdentity `json:"identity,omitempty"`
+}
+
+// PointerIdentity is the IDOR detail panel the client renders off detail.identity. Every field is
+// descriptive and non-committal: it names where the id is, how guessable it is, a real id to swap,
+// and the one thing the operator must do - it NEVER asserts whose object the id points at (guard d).
+type PointerIdentity struct {
+	GuessTier      string `json:"guess_tier,omitempty"`
+	GuessNote      string `json:"guess_note,omitempty"`
+	IDLocation     string `json:"id_location,omitempty"`
+	ObjectRef      string `json:"object_ref,omitempty"`
+	IDLeaked       bool   `json:"id_leaked,omitempty"`
+	IDLeakSource   string `json:"id_leak_source,omitempty"`
+	KnownIDValue   string `json:"known_id_value,omitempty"`
+	AuthCaveat     string `json:"auth_caveat,omitempty"`
+	OperatorAction string `json:"operator_action,omitempty"`
+	OwnershipNote  string `json:"ownership_note,omitempty"`
 }
 
 // GetAttackVectorPointerDetail answers GET /attack-vectors/{scope_target_id}/pointers/{pointer_id}.
@@ -1194,6 +1249,13 @@ func buildPointers(ctx context.Context, scopeTargetID string) ([]Pointer, Pointe
 	pointers = append(pointers, triagePointers...)
 	cov.Triage = triageCov
 
+	authzPointers, authzCov, err := collectAuthzPointers(ctx, scopeTargetID)
+	if err != nil {
+		return nil, cov, err
+	}
+	pointers = append(pointers, authzPointers...)
+	cov.Authz = authzCov
+
 	rankPointers(pointers)
 	for i := range pointers {
 		pointers[i].DetailURL = fmt.Sprintf("/attack-vectors/%s/pointers/%s", scopeTargetID, pointers[i].ID)
@@ -1234,6 +1296,8 @@ func pointerSourceLabel(source string) string {
 		return "prior finding"
 	case PointerSourceTriage:
 		return "triage"
+	case PointerSourceAuthz:
+		return "authorization model"
 	}
 	return source
 }
@@ -1974,6 +2038,278 @@ func triageSlotName(slotKey string) string {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Source 4: the authorization model joined to the stored corpus (IDOR)
+// ---------------------------------------------------------------------------------------------
+//
+// THIS SOURCE IS 100% DETERMINISTIC AND SENDS NOTHING. CollectIDORCandidates reads only the stored
+// corpus (manual_crawl_captures) and the authz_* tables; this file maps its output to pointers and
+// reads the forbidden_to_do cells of the role-action matrix. No model call, no HTTP request. A
+// candidate is SURFACED and RANKED, never auto-exploited: the operator runs the id-swap.
+//
+// FOUR HONESTY GUARDS ARE BAKED IN HERE AND IN THE MAPPERS BELOW:
+//   (a) the auth is always labelled client-sent, never "enforced";
+//   (b) schema-level PII never inflates strength or grade (IDOR pointers carry no grade/severity);
+//   (c) the id-like-param blacklist lives in the collector, not here;
+//   (d) nothing asserts owned-vs-third-party ownership: a candidate is "id-bearing plus a real id to
+//       swap", and ownership is the operator's call via the two-identity replay.
+
+// PointerAuthzCoverage is what this source contributed, derived from the counts, never a sentence
+// about the state of any runner. A zero here is a gap in the authorization model, not a clean bill.
+type PointerAuthzCoverage struct {
+	IDORCandidates int `json:"idor_candidates"`
+	// ReadError is set when the authz model could not be read. NOT KNOWING IS NOT CLEAN: an
+	// unreadable table must never be mistaken for an empty one.
+	ReadError string `json:"read_error,omitempty"`
+	Note      string `json:"note"`
+}
+
+// collectAuthzPointers is source 4. IT FAILS CLOSED AND NEVER FAILS THE ENDPOINT: an unreadable
+// authz model or a candidate-collector error is recorded in coverage and returns an empty slice with
+// a nil error, because the other three sources have real pointers to show and failing the whole
+// endpoint would hide those too. This is also what makes buildPointers behave exactly as today when
+// there is no authorization data: an empty, clean return.
+func collectAuthzPointers(ctx context.Context, scopeTargetID string) ([]Pointer, PointerAuthzCoverage, error) {
+	cov := PointerAuthzCoverage{}
+
+	candidates, err := CollectIDORCandidates(ctx, scopeTargetID)
+	if err != nil {
+		cov.ReadError = err.Error()
+		cov.Note = authzCoverageNote(cov)
+		return []Pointer{}, cov, nil
+	}
+	cov.IDORCandidates = len(candidates)
+
+	cov.Note = authzCoverageNote(cov)
+	return assembleAuthzPointers(candidates), cov, nil
+}
+
+// assembleAuthzPointers is the pure mapping from the join's output to pointers, with no database, so
+// the mapping can be tested on seeded candidates. collectAuthzPointers does the read and hands the
+// rows here. Only IDOR candidates become pointers: the RBAC forbidden-cell pointer kind was removed
+// because a role-action matrix produces dozens of unattributed, ungraded rows that drown the list
+// and are not an attack-vector lead; the RBAC model stays on the Authorization view, not here.
+func assembleAuthzPointers(candidates []IDORCandidate) []Pointer {
+	out := []Pointer{}
+	for i := range candidates {
+		out = append(out, idorCandidateToPointer(candidates[i]))
+	}
+	return out
+}
+
+// idorCandidateToPointer maps one IDOR candidate to a pointer.
+//
+// STRENGTH IS prior_finding (EvidenceRank 2) AND NO HIGHER. The candidate is a stored corpus
+// observation, not a live two-identity replay diff, so it must rank below the external-tool and
+// delta-checked bands. There is NO grade and NO severity: the worth of an IDOR is the object the
+// swap reaches, which is unknown until the swap is run, and schema-level PII is a surface signal.
+func idorCandidateToPointer(c IDORCandidate) Pointer {
+	cc := c
+	rank := EvidenceRank(ProvenancePriorFinding, false)
+	nextTool, nextReason := pointerNextTool(pointerClassIDOR, nil)
+
+	url := strings.TrimSpace(c.URL)
+	urlOrigin := PointerURLFromVector
+	urlNote := ""
+	if url == "" {
+		urlOrigin = PointerURLNone
+		urlNote = pointerNoURLNote
+	}
+
+	return Pointer{
+		ID:               PointerSourceAuthz + ":idor:" + authzCandidateKey(c),
+		Source:           PointerSourceAuthz,
+		SourceDetail:     "authorization model: an id-bearing, client-sent, auth-gated endpoint that returns an owned object in the stored corpus",
+		AttackClass:      pointerClassIDOR,
+		AttackClassLabel: pointerClassLabel(pointerClassIDOR),
+		Grade:            "",
+		GradeSource:      "No grade. IDOR severity is the value of the object an id-swap reaches, which is not known until the swap is run, and schema-level PII on an unfunded account is a surface signal rather than impact.",
+		Strength:         pointerStrengthFor(rank),
+		StrengthRank:     rank,
+		DeltaChecked:     false,
+		VectorID:         c.VectorID,
+		Method:           firstNonEmpty(c.Method, "GET"),
+		URL:              url,
+		URLOrigin:        urlOrigin,
+		URLNote:          urlNote,
+		Path:             c.Path,
+		InsertionPoint:   c.InsertionPoint,
+		Parameter:        c.Param,
+		Rule:             "id-bearing, auth-gated (client-sent) endpoint returns an owned object/PII - swap the id across identities",
+		Evidence:         idorCandidateEvidence(c),
+		Deliverable:      pointerDeliverable(pointerClassIDOR, c.InsertionPoint),
+		DeliveryNote:     pointerDeliveryNote(pointerClassIDOR, nextTool, c.InsertionPoint),
+		NextTool:         nextTool,
+		NextToolReason:   nextReason,
+		severity:         "",
+		rowID:            firstNonEmpty(c.IdentityPatternID, c.VectorID),
+		authzCandidate:   &cc,
+	}
+}
+
+// authzCandidateKey is a stable, single-path-segment id for an IDOR candidate, so the detail route
+// {pointer_id} is never truncated by a slash in a url or a param name.
+func authzCandidateKey(c IDORCandidate) string {
+	key := firstNonEmpty(c.VectorID, c.URL) + "|" + c.InsertionPoint + "|" + c.Param
+	return strings.NewReplacer("/", "_", " ", "_", "?", "_", "#", "_", ":", "_").Replace(key)
+}
+
+// idorCandidateEvidence is the one-line list snippet: the observed signals, never a claim of impact.
+func idorCandidateEvidence(c IDORCandidate) string {
+	parts := []string{}
+	if c.HasOwnerField {
+		parts = append(parts, "response carries an owner field")
+	}
+	if c.HasPII {
+		parts = append(parts, "response carries PII or financial fields")
+	}
+	if c.AuthClientSent {
+		parts = append(parts, "request carried client-sent auth")
+	}
+	if strings.TrimSpace(c.KnownIDValue) != "" {
+		parts = append(parts, "a real id to swap is on hand")
+	}
+	if c.IDLeaked {
+		parts = append(parts, "a sibling response leaks the id")
+	}
+	if len(parts) == 0 {
+		return strings.Join(c.Reasons, "; ")
+	}
+	return strings.Join(parts, "; ") + "."
+}
+
+// authzCoverageNote writes the sentence from the counts. A read error says so; a double zero is a
+// gap in the model, never a clean result.
+func authzCoverageNote(cov PointerAuthzCoverage) string {
+	if cov.ReadError != "" {
+		return fmt.Sprintf("The authorization model could not be read in full (%s), so no IDOR pointer here is a count of anything. An unread table is not an empty one.", cov.ReadError)
+	}
+	if cov.IDORCandidates == 0 {
+		return "No IDOR candidate in the stored corpus on this target, so this source contributed no pointer. Capture id-bearing, auth-gated endpoints and model the identity patterns on the Authorization view to light it up. That is a gap in coverage, not a clean result."
+	}
+	return fmt.Sprintf("%d IDOR candidate(s) from the stored corpus. Every one is SURFACED for a hand review, never auto-exploited: the id-swap is yours to run. Auth on the IDOR candidates is client-sent and is NOT proven server-enforced.", cov.IDORCandidates)
+}
+
+// authzPointerDetail assembles the detail for an authz pointer. Only IDOR is served here now.
+func authzPointerDetail(ctx context.Context, p Pointer, d PointerDetail) (PointerDetail, error) {
+	return idorPointerDetail(ctx, p, d)
+}
+
+// idorPointerDetail surfaces the object-ref location, the guess tier, the id-leak source, the real
+// id value, the client-sent caveat and the one operator action. The identity-pattern replay is read
+// read-only when a pattern is attached; its absence is normal and said so.
+func idorPointerDetail(ctx context.Context, p Pointer, d PointerDetail) (PointerDetail, error) {
+	c := p.authzCandidate
+	if c == nil {
+		// Fail closed: still a valid record built from the pointer alone.
+		c = &IDORCandidate{Method: p.Method, URL: p.URL, Path: p.Path, InsertionPoint: p.InsertionPoint, Param: p.Parameter}
+	}
+
+	var rawReq, respBody string
+	var respStatus *int
+	if id := strings.TrimSpace(c.IdentityPatternID); id != "" {
+		_ = dbPool.QueryRow(ctx, `
+			SELECT COALESCE(raw_request,''), response_status, COALESCE(response_body,'')
+			FROM authz_identity_patterns WHERE id = $1`, id).Scan(&rawReq, &respStatus, &respBody)
+	}
+
+	if strings.TrimSpace(rawReq) != "" {
+		d.Request = PointerEvidenceBlob{
+			Raw:    rawReq,
+			Origin: FindingRequestOrigin(rawReq),
+			Note:   "The identity pattern's recorded request, the one whose id is swappable. Replay it under a second identity to test ownership.",
+		}
+	} else {
+		d.Request = PointerEvidenceBlob{
+			Raw:    "",
+			Origin: "none",
+			Note:   "No single stored request is attached. The id-bearing endpoint and a real id to swap are named below; build the request from the vector's capture and replay it under a second identity.",
+		}
+	}
+
+	respNote := "The object this endpoint returned for the recorded identity. The test is whether a DIFFERENT identity's object comes back when the id is swapped."
+	if respStatus != nil {
+		respNote = fmt.Sprintf("HTTP %d. ", *respStatus) + respNote
+	}
+	if strings.TrimSpace(respBody) != "" {
+		d.Response = PointerEvidenceBlob{Raw: respBody, Origin: "authz_identity_pattern_response", Note: respNote}
+	} else {
+		d.Response = PointerEvidenceBlob{Raw: p.Evidence, Origin: "idor_candidate_summary", Note: "A summary of what the stored corpus showed on this endpoint. Not a full body."}
+	}
+
+	d.Baseline = PointerBaseline{
+		Compared: false,
+		What:     "None yet. This is a candidate, not a confirmed read: the id can be swapped and the endpoint returns an owned object, but whether a SECOND identity's object comes back is the two-identity replay you have not run.",
+	}
+
+	means := []string{}
+	if loc := strings.TrimSpace(c.IDLocation); loc != "" {
+		means = append(means, "The object reference sits in "+loc+".")
+	}
+	means = append(means, authzGuessTierSentence(*c))
+	if c.IDLeaked {
+		means = append(means, "The id does not have to be guessed: a sibling collection response leaks it ("+firstNonEmpty(c.IDLeakSource, "an enumerable list endpoint")+").")
+	}
+	if v := strings.TrimSpace(c.KnownIDValue); v != "" {
+		means = append(means, "A real id to swap is already on hand: "+v+".")
+	}
+	d.Rule = PointerRule{
+		Fired:           p.Rule,
+		Means:           strings.Join(means, " "),
+		DidNotEstablish: "Server-side enforcement. The auth on this request is CLIENT-SENT (a bearer or cookie the caller supplied), and nothing here shows the server CHECKS that the caller owns the id. Schema-level PII on an unfunded account is a surface signal, not impact. Confirm by replaying with a second identity and diffing the body.",
+	}
+	d.Grade = PointerGrade{
+		Value:  "",
+		Source: "",
+		Why:    "Left ungraded on purpose: see did_not_establish. The value of an IDOR is the object the swap reaches, which the two-identity replay decides.",
+	}
+
+	// The IDOR panel. Built from the candidate only, in the same honesty-guarded phrasings used
+	// elsewhere (idorAuthCaveat, authzGuessTierSentence), so it adds no new claim. object_ref names
+	// what the endpoint returns WITHOUT asserting ownership (guard d); auth_caveat keeps it client-
+	// sent (guard a); PII alone is named as a surface signal, never impact (guard b).
+	objectRef := ""
+	switch {
+	case c.HasOwnerField:
+		objectRef = "an owned object (the body carries an owner/account reference)"
+	case c.HasPII:
+		objectRef = "a PII-shaped object (schema-level, a surface signal, not proven impact)"
+	}
+	d.Identity = &PointerIdentity{
+		GuessTier:    c.GuessTier,
+		GuessNote:    authzGuessTierSentence(*c),
+		IDLocation:   c.IDLocation,
+		ObjectRef:    objectRef,
+		IDLeaked:     c.IDLeaked,
+		IDLeakSource: c.IDLeakSource,
+		KnownIDValue: c.KnownIDValue,
+		AuthCaveat: "the corpus request carried " + idorAuthCaveat +
+			"; nothing here shows the server checks that the caller owns the id",
+		OperatorAction: "Replay this exact request with a SECOND account's session and the same id, then diff the " +
+			"response body: another identity's object coming back under your credentials is the finding; the same " +
+			"object, an empty body, or a 403 is the control working.",
+		OwnershipNote: "Whose object this id points at is for you to settle from the swapped response - it is not asserted here.",
+	}
+	return d, nil
+}
+
+// authzGuessTierSentence turns the reused analyzeIdentifiers tier into one operator sentence,
+// naming the needs-a-leak case for a UUIDv4.
+func authzGuessTierSentence(c IDORCandidate) string {
+	switch strings.ToLower(strings.TrimSpace(c.GuessTier)) {
+	case "identifier_sequential", "uuid_v1", "sequential":
+		return "Guessability: the id is sequential or time-ordered, so neighbouring ids can be walked without a leak."
+	case "object_id":
+		return "Guessability: the id is a MongoDB-style ObjectID, partly time-ordered, so its space is far smaller than it looks."
+	case "uuid_v4", "uuid", "low":
+		return "Guessability: the id is a UUIDv4, so it cannot be guessed and has to be LEAKED before it can be swapped."
+	}
+	if t := strings.TrimSpace(c.GuessTier); t != "" {
+		return "Guessability tier: " + t + "."
+	}
+	return "Guessability was not tiered for this id."
+}
+
+// ---------------------------------------------------------------------------------------------
 // The detail
 // ---------------------------------------------------------------------------------------------
 
@@ -1987,6 +2323,8 @@ func buildPointerDetail(ctx context.Context, p Pointer) (PointerDetail, error) {
 		return findingPointerDetail(ctx, p, d)
 	case PointerSourceTriage:
 		return triagePointerDetail(ctx, p, d)
+	case PointerSourceAuthz:
+		return authzPointerDetail(ctx, p, d)
 	}
 	return d, fmt.Errorf("pointers: unknown source %q", p.Source)
 }

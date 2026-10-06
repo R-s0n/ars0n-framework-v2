@@ -79,7 +79,7 @@ var ssrfBodySignals = []ssrfSignal{
 	{
 		name: "cloud-metadata",
 		why:  "the response carried a cloud instance metadata document, which is only reachable from inside the instance",
-		re:   regexp.MustCompile(`ami-id[\s\S]{0,200}placement/|instance-id[\s\S]{0,200}local-hostname|computeMetadata[\s\S]{0,200}project-id|"AccessKeyId"\s*:`),
+		re:   regexp.MustCompile(`ami-id[\s\S]{0,200}placement/|instance-id[\s\S]{0,200}local-hostname|computeMetadata[\s\S]{0,200}project-id|"AccessKeyId"\s*:|"azEnvironment"\s*:`),
 	},
 	{
 		name: "internal-service",
@@ -120,7 +120,7 @@ func ssrfProbeParams(v VectorInput) ([]string, string) {
 		}
 	}
 	if len(probe) > 0 {
-		return probe, ""
+		return orderURLShapedFirst(probe), ""
 	}
 
 	switch {
@@ -140,6 +140,51 @@ func ssrfProbeParams(v VectorInput) ([]string, string) {
 	default:
 		return nil, "This vector names no parameter to put a payload in."
 	}
+}
+
+// urlShapedParamNames are the tier-0 parameter names whose VALUE is habitually a whole URL, a host,
+// or a path the server then fetches or redirects to. They are where an SSRF or an open redirect
+// actually lives, so a scan that legitimately runs for hours or days should put a payload in them
+// FIRST and surface a lead early rather than after working through every ordinary input. This is an
+// ORDER-ONLY change: every tier-0 parameter is still probed, and the refusal rules are untouched.
+//
+// Matched as whole lowercased names, NOT substrings, so "username" is not treated as "u" and a long
+// opaque field is not promoted just because it contains "url". The set is the one the audit named.
+var urlShapedParamNames = map[string]bool{
+	"url": true, "uri": true, "link": true, "redirect": true, "redirect_uri": true,
+	"callback": true, "webhook": true, "logo": true, "image": true, "image_url": true,
+	"img": true, "src": true, "href": true, "avatar": true, "screenshot": true,
+	"screenshots": true, "feed": true, "target": true, "host": true, "proxy": true,
+	"fetch": true, "remote": true, "domain": true, "site": true, "endpoint": true,
+	"upstream": true, "origin": true, "import": true, "next": true, "dest": true,
+	"return": true, "forward": true, "goto": true, "continue": true, "cdn": true, "u": true,
+}
+
+// orderURLShapedFirst moves the url-shaped parameters to the front of the probe list, keeping the
+// relative order WITHIN each group so the result is deterministic.
+//
+// Determinism is the load-bearing property, not tidiness. collectWebhookFindings rebuilds this exact
+// list by calling ssrfProbeParams again and pairs canary index N with parameter N; if this function
+// ordered the two parameters of one vector differently on two calls, a callback would be attributed
+// to the wrong parameter. A stable partition over the same input is identical on every call. It also
+// never changes the SET of params returned, so ssrfProbeParams's refusal logic is unaffected.
+func orderURLShapedFirst(params []string) []string {
+	if len(params) < 2 {
+		return params
+	}
+	front := make([]string, 0, len(params))
+	rest := make([]string, 0, len(params))
+	for _, name := range params {
+		if urlShapedParamNames[strings.ToLower(strings.TrimSpace(name))] {
+			front = append(front, name)
+		} else {
+			rest = append(rest, name)
+		}
+	}
+	if len(front) == 0 {
+		return params
+	}
+	return append(front, rest...)
 }
 
 // ssrfProbeClient is the sender.

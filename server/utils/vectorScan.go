@@ -459,7 +459,31 @@ func runVectorScan(scanID, scopeTargetID string, tool VectorTool, vectors []vect
 	}
 
 	if tool.Key == "recollapse" && sectionWebhookConfigured(sectionSettings) {
-		found += collectWebhookFindings(ctx, scanID, tool, vectors, sentVectors, sectionSettings)
+		// TWO READS of the results URL, sharing one dedup set.
+		//
+		// The first, webhookSettleDelay after the last vector, catches the target that fetches the
+		// payload while it answers the request. A STORED / second-order SSRF does not show up then: the
+		// payload is persisted and a backend job fetches it minutes later, after the first read has
+		// already reported. The second read, webhookSecondOrderDelay later, attributes that late callback
+		// to the exact vector and parameter whose canary it carries.
+		//
+		// seen is threaded through both so a canary already filed on the first read is skipped on the
+		// second: storeVectorFindings INSERTs unconditionally and the webhook keeps every record, so
+		// without a shared set the second read would double-file every first-read hit.
+		//
+		// This runs before the scan is marked completed, so the row stays "running" for the extra settle.
+		// On a scan that already ran for hours that is the right trade for catching a stored SSRF; the
+		// alternative, firing late payloads and never reading the inbox they land in, is the silent clean
+		// this section exists to avoid. The second read's long wait is skipped on an explicit cancel,
+		// since the operator asked the run to stop; the first read still ran, so nothing already called
+		// back is lost.
+		seen := map[string]bool{}
+		found += collectWebhookFindings(ctx, scanID, tool, vectors, sentVectors, sectionSettings,
+			webhookSettleDelay, webhookPhaseFirst, seen)
+		if !vectorScanCancelled(ctx, scanID) {
+			found += collectWebhookFindings(ctx, scanID, tool, vectors, sentVectors, sectionSettings,
+				webhookSecondOrderDelay, webhookPhaseSecondOrder, seen)
+		}
 		if _, err := dbPool.Exec(ctx, `UPDATE vector_scans SET finding_count = $2 WHERE id = $1`,
 			scanID, found); err != nil {
 			log.Printf("[VECTOR] updating finding count: %v", err)
@@ -650,8 +674,9 @@ func runCanaryControl(ctx context.Context, scanID, scopeTargetID string, tool Ve
 		recordCanaryFailure(tool.Key)
 	}
 
-	status, reason := "findings", "Positive control PASSED: "+tool.Key+" found the known vulnerability "+
-		"on the canary oracle, so this run was genuinely testing something."
+	// canaryPassReason, not an inline string, so the recollapse control's coverage caveat (it proves
+	// the open-redirect path only) rides the fresh pass exactly as it rides the reused one.
+	status, reason := "findings", canaryPassReason(tool.Key, outcome)
 	if !outcome.Passed {
 		status, reason = "error", canaryFailureMessage(tool.Key, spec, targetVectors)
 		log.Printf("[VECTOR] %s FAILED its positive control", tool.Key)
@@ -751,7 +776,8 @@ func recordVectorTrace(ctx context.Context, scanID string, vector vectorRow, too
 // hand the fetched content back; everything else is invisible until the callback arrives, and the
 // token is what says WHICH vector made it.
 func collectWebhookFindings(ctx context.Context, scanID string, tool VectorTool,
-	vectors []vectorRow, sent map[string]bool, sectionSettings map[string]any) int {
+	vectors []vectorRow, sent map[string]bool, sectionSettings map[string]any,
+	settle time.Duration, phase string, seen map[string]bool) int {
 
 	// Keyed per PARAMETER, not per vector. The prober narrows each vector's token once per probeable
 	// parameter, so a cookie vector carrying five names produces five distinct canaries and a callback
@@ -800,7 +826,7 @@ func collectWebhookFindings(ctx context.Context, scanID string, tool VectorTool,
 	}
 
 	select {
-	case <-time.After(webhookSettleDelay):
+	case <-time.After(settle):
 	case <-ctx.Done():
 		return 0
 	}
@@ -812,10 +838,19 @@ func collectWebhookFindings(ctx context.Context, scanID string, tool VectorTool,
 		// answers an unauthenticated read with a 302 to its login page, and a login page contains no
 		// tokens. Swallowing that turns "we could not look" into "nothing called out", which is the
 		// whole out-of-band half of this section reporting clean without having checked.
-		log.Printf("[VECTOR] reading the webhook results: %v", err)
+		log.Printf("[VECTOR] reading the webhook results (%s): %v", phase, err)
 		detail := "UNTESTED (out of band): the webhook results URL could not be read, so it is NOT " +
 			"known whether any payload called back. The in-band findings above stand; the blind half " +
 			"of this scan produced no answer either way. " + err.Error()
+		if phase == webhookPhaseSecondOrder {
+			// The first read already happened, so only the delayed stored-SSRF window is lost here. The
+			// in-band and first-read out-of-band findings above are NOT in doubt; say so, rather than
+			// letting a failed re-poll read as the whole out-of-band half having gone unchecked.
+			detail = "UNTESTED (second-order out of band): the webhook results URL could not be re-read " +
+				"for the delayed stored-SSRF window, so it is NOT known whether a payload called back " +
+				"minutes after it was sent. Any findings above, in band and from the first webhook read, " +
+				"stand. " + err.Error()
+		}
 		if _, dbErr := dbPool.Exec(ctx, `
 			UPDATE vector_scans SET error = COALESCE(NULLIF(error, ''), $2) WHERE id = $1`,
 			scanID, detail); dbErr != nil {
@@ -826,10 +861,19 @@ func collectWebhookFindings(ctx context.Context, scanID string, tool VectorTool,
 
 	stored := 0
 	for _, hit := range hits {
+		// Already filed on an earlier read. storeVectorFindings does a plain INSERT with no dedup and
+		// the webhook keeps every record, so the second-order re-poll re-sees every token the first
+		// read did; without this guard each first-read callback would be filed a second time. The
+		// canary is unique to one vector/param, so one token is one finding no matter how many reads
+		// see it.
+		if seen[hit.Token] {
+			continue
+		}
 		vector, ok := byID[hit.Raw]
 		if !ok {
 			continue
 		}
+		seen[hit.Token] = true
 		owner := owners[hit.Token]
 
 		named := owner.param
@@ -877,6 +921,14 @@ func runVectorOnce(ctx context.Context, scanID, scopeTargetID string, tool Vecto
 	input.Section = sectionSettings
 	input.Token = vectorToken(scanID, vector.ID)
 	input.ScopeTargetID = scopeTargetID
+	// SSRFmap escalates to the cloud metadata readers when the finding that unlocked it proved a
+	// server-side FETCH rather than only an open redirect. Read per vector here (the composer is kept
+	// database-free); a false result -- no fetch signal, an open-redirect-only vector, or an
+	// unreadable row -- keeps the safe portscan-only default. Gated to ssrfmap so no other tool pays
+	// for the query, and ssrfmap has no canary spec so this never runs for a synthetic control row.
+	if tool.Key == "ssrfmap" {
+		input.SSRFFetchConfirmed = loadSSRFFetchConfirmed(ctx, scopeTargetID, vector.ID, findingCategoryFor(tool))
+	}
 	reportPath := fmt.Sprintf("/tmp/vector-%s-%s.out", scanID[:8], vector.ID[:8])
 	var warnings []string
 

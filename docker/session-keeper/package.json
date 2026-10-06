@@ -1,0 +1,11 @@
+{
+  "name": "ars0n-session-keeper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Durable headless-browser session keeper for ars0n-framework-v2",
+  "main": "keeper.mjs",
+  "dependencies": {
+    "puppeteer": "^23.0.0"
+  }
+}

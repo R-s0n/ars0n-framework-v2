@@ -403,10 +403,20 @@ function AttackVectorsModal({ show, handleClose, activeTarget, onChanged }) {
                     <code className="text-light small">
                       {(v.parameters || []).join(', ') || 'none'}
                     </code>
-                    <Assumed when={v.parameters_origin === 'union'}>
-                      Every parameter ever seen on this endpoint, not a combination observed in one
-                      request.
-                    </Assumed>
+                    {/* OBSERVED vs UNION, on the row and not only on hover. 'union' is every
+                        parameter name ever seen on this endpoint pooled together, so a multi-name
+                        union is a set the framework PLAUSIBLY assembled, not one any single request
+                        was observed carrying. Fuzzing a set that never coexists is where an
+                        afternoon goes, so union wears a visible badge; an observed set stays
+                        unmarked, because a measured set is the common case and this file's rule is
+                        that absence means observed. */}
+                    {v.parameters_origin === 'union' && (
+                      <Badge bg="dark" className="border border-warning text-warning ms-1"
+                        style={{ fontSize: '0.6rem' }}
+                        title="Every parameter ever seen on this endpoint, pooled. Not a combination observed together in one request: treat the set as plausible, not confirmed.">
+                        union · not seen together
+                      </Badge>
+                    )}
                   </td>
                   <td className="text-white-50" style={{ fontSize: '0.7rem' }}>
                     {(v.signals || []).map((sig) => {

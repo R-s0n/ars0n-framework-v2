@@ -73,6 +73,13 @@ type VectorInput struct {
 	// VectorID is the row this input came from, so a tool that reports once per vector can attribute
 	// what it produced.
 	VectorID string
+	// SSRFFetchConfirmed is set by the runner for SSRFmap when the finding that made this vector
+	// eligible proved a SERVER-SIDE FETCH (a local file read, a cloud metadata document, an internal
+	// service banner, or an out-of-band callback) rather than only an open redirect. It escalates
+	// ComposeSSRFmap from the portscan default to the cloud metadata readers. Default false keeps the
+	// safe default, so a bare open redirect, an unknown signal and an unreadable row all stay on
+	// portscan. Only SSRFmap reads it; it is meaningless for every other tool.
+	SSRFFetchConfirmed bool
 }
 
 // TargetURL rebuilds the URL to scan.

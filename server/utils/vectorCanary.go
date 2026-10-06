@@ -81,6 +81,13 @@ type CanarySpec struct {
 	// the control fails, so it is written for the person reading the results modal rather than for the
 	// person who wrote the code.
 	Why string
+	// ProvesOnly, when non-empty, is appended to the PASS message for this control. A control proves
+	// exactly the one signal path its oracle endpoint exercises; where the same tool can report OTHER
+	// signals that NO oracle route exercises, a pass that only said "this run was genuinely testing
+	// something" would overclaim, and a clean result on those other signals would be read as proven
+	// when nothing controlled it. Stating the boundary is the same remedy the domdig entry applies to
+	// its query-only gap: a KNOWN gap, not a hidden one.
+	ProvesOnly string
 }
 
 // vectorCanaryFor returns the positive control for a tool, if one is defined.
@@ -155,6 +162,12 @@ var vectorCanaries = map[string]CanarySpec{
 			"anywhere it is told with no validation. That is the whole send-and-match path failing, not " +
 			"just recollapse: check that the Listening Webhook URL is a real absolute URL, since the " +
 			"open redirect match is what compares the Location header against its host.",
+		ProvesOnly: "This control exercises the OPEN-REDIRECT send-and-match path only: a payload was " +
+			"generated, placed in the parameter, sent, the 30x was not followed, and the Location host " +
+			"was matched against the webhook. It does NOT exercise the response-body signals " +
+			"(server-side file read, cloud metadata, internal-service banner) or the out-of-band webhook " +
+			"path, because the canary oracle serves no server-side-fetch endpoint. A clean result on those " +
+			"signals is UNPROVEN by any positive control.",
 	},
 	"lfimap": {
 		Path: "/lfi", Param: "file", Method: "GET", InsertionPoint: "query",
@@ -664,13 +677,23 @@ const canaryReusedStatus = "control-reused"
 // clean result is entitled to know which one they have and how old the evidence is. Hiding the
 // difference would be the same defect as reporting an untested vector as clean, one level up.
 func canaryPassReason(toolKey string, outcome CanaryOutcome) string {
+	// A control proves exactly the one signal path its oracle endpoint exercises. Where the same tool
+	// can also report OTHER signals that no oracle route exercises, a bare "genuinely testing
+	// something" overclaims and a clean result on those other signals would be read as proven. The
+	// recollapse spec sets ProvesOnly to state that boundary; it is appended to BOTH pass messages so
+	// the caveat is legible however the pass was obtained.
+	caveat := ""
+	if spec, ok := vectorCanaryFor(toolKey); ok && strings.TrimSpace(spec.ProvesOnly) != "" {
+		caveat = " " + strings.TrimSpace(spec.ProvesOnly)
+	}
 	if !outcome.Reused {
 		return "Positive control PASSED: " + toolKey + " found the known vulnerability on the canary " +
-			"oracle, so this run was genuinely testing something."
+			"oracle, so this run was genuinely testing something." + caveat
 	}
 	return "Positive control PASSED " + canaryAgeLabel(outcome.Age) + " ago and was REUSED, not re-run: " +
 		toolKey + " proved itself on the canary oracle under these exact settings in this same " +
-		"container instance, the oracle still serves the control endpoint, and nothing has changed since."
+		"container instance, the oracle still serves the control endpoint, and nothing has changed since." +
+		caveat
 }
 
 func canaryAgeLabel(d time.Duration) string {

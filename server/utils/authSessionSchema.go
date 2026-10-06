@@ -63,6 +63,11 @@ var AuthSessionSchema = []string{
 	   NOT NULL DEFAULT 'credential';`,
 	// Opt-in unattended refresh; off by default. See sessionAutoRefreshLoop.
 	`ALTER TABLE session_tokens ADD COLUMN IF NOT EXISTS auto_refresh BOOLEAN NOT NULL DEFAULT FALSE;`,
+	// The session-keeper account a token belongs to, matching session_keepers.name. A keeper seeds
+	// ONLY the cookies tagged with its own name, so two accounts for one target (A and B for a
+	// cross-account IDOR) never seed each other's Cognito cookies into the same headless profile.
+	// '' means unassigned; the keeper's "adopt" tags a target's untagged cookies to one account.
+	`ALTER TABLE session_tokens ADD COLUMN IF NOT EXISTS keeper_name VARCHAR(128) NOT NULL DEFAULT ''`,
 	// token_role gains 'refresh'. Drop-and-recreate widens an existing two-value constraint to three.
 	`ALTER TABLE session_tokens DROP CONSTRAINT IF EXISTS session_tokens_token_role_check;`,
 	`ALTER TABLE session_tokens ADD CONSTRAINT session_tokens_token_role_check
@@ -84,6 +89,35 @@ var AuthSessionSchema = []string{
 	// --- session_token_events ---
 	`CREATE INDEX IF NOT EXISTS idx_session_token_events
 	   ON session_token_events(session_token_id, created_at DESC);`,
+
+	// --- session_keepers ---
+	// One durable headless-browser session keeper per (scope_target, account). It holds the IdP
+	// session in a headless browser, lets the UNMODIFIED SPA re-mint its short-lived bearer, harvests
+	// the fresh value from its own network, and upserts it into session_tokens under a per-keeper
+	// name (so two accounts for one target do not upsert over each other). name is the account label
+	// and the row-identity disambiguator. target_url is the SPA origin the keeper loads. cadence is
+	// how often the keeper reloads to force a re-mint; status is the keeper's own lifecycle, separate
+	// from the token's validation state. The keeper is driven by a Go scheduler over the shared
+	// temp_data volume; nothing here stores the cookie seed (it is derived from the live token store
+	// at reconcile time, so a fresh recapture is picked up automatically).
+	`CREATE TABLE IF NOT EXISTS session_keepers (
+	    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+	    scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+	    name TEXT NOT NULL,
+	    target_url TEXT NOT NULL DEFAULT '',
+	    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+	    status VARCHAR(24) NOT NULL DEFAULT 'pending'
+	      CHECK (status IN ('pending','seeding','live','needs_recapture','stopped','error')),
+	    cadence_seconds INTEGER NOT NULL DEFAULT 600,
+	    last_reload_at TIMESTAMP,
+	    last_harvest_at TIMESTAMP,
+	    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+	    last_error TEXT NOT NULL DEFAULT '',
+	    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+	    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+	    UNIQUE (scope_target_id, name)
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_session_keepers_target ON session_keepers(scope_target_id);`,
 }
 
 // EnsureAuthSessionSchema applies AuthSessionSchema. It is idempotent. The test harness calls it so a

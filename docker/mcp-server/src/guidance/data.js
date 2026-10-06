@@ -643,6 +643,49 @@ module.exports = {
     },
   },
 
+  manage_session_keeper: {
+    step: S_CRAWL,
+    tool: 'A durable headless-browser session keeper: it holds the IdP session, reloads the ' +
+      'unmodified SPA so the app re-mints its own short-lived bearer, and harvests it into the ' +
+      'session-token store on a loop, so a 5-15 minute bearer stops forcing a token paste every few ' +
+      'minutes. It only ever runs the app\'s own traffic and is egress-locked to the in-scope app ' +
+      'plus classified auth hosts; it never scans.',
+    lies: [
+      'A keeper is NOT a login. It cannot create a session, only keep a captured one warm. Capture ' +
+        'the session cookies first (manage_session_tokens parse/create, or a recapture); the keeper ' +
+        'seeds from the active cookie-type tokens, so with nothing captured it harvests nothing.',
+      'needs_recapture is a real end state, not a crash. When the long-lived IdP cookie finally dies ' +
+        '(a Cognito refresh token defaults to 30 days) the keeper parks and waits for the operator to ' +
+        're-capture in the browser; it NEVER attempts a headless IdP login (scope + bot detection).',
+    ],
+    next: 'check_session_tokens action:"validate" to confirm the kept token is honoured',
+    rule: SESSION_DECAY_RULE,
+    derived: false,
+    actions: {
+      create: {
+        tool: 'Start keeping a (target, account) session warm. name is the account label and the row ' +
+          'identity, so two accounts for one target do not upsert over each other; target_url is the ' +
+          'SPA origin to load; cadence_seconds is how often to reload to force a re-mint (default 600, ' +
+          'keep it inside the bearer lifetime).',
+        next: 'manage_session_keeper action:"list"',
+      },
+      list: {
+        tool: 'The keepers for a target, with status and last_harvest. status "live" means the bearer ' +
+          'is being kept fresh; "needs_recapture" means the IdP session died and must be re-captured.',
+        next: 'check_session_tokens action:"validate"',
+      },
+      adopt_cookies: {
+        tool: 'Claim the target\'s currently-untagged cookie tokens for this keeper\'s account, so the ' +
+          'keeper seeds ONLY them. This is the multi-account step: a keeper seeds the cookies tagged ' +
+          'with its own name, and a keeper with none of its own falls back to the untagged pool. For ' +
+          'A and B on one target, capture A then adopt into keeper A, capture B then adopt into keeper ' +
+          'B; otherwise both keepers would seed each other\'s cookies and mint the wrong identity. A ' +
+          'single account needs no adopt. Only ever moves untagged rows, so it cannot steal B\'s cookies.',
+        next: 'manage_session_keeper action:"start", then check_session_tokens action:"validate"',
+      },
+    },
+  },
+
   manage_auth_recording: {
     step: S_CRAWL,
     tool: 'Records an authentication flow as it happens, or inspects and imports one the browser ' +

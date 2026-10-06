@@ -236,6 +236,10 @@ function compactVector(v, bodyLimit, full) {
     insertion_confidence: v.insertion_confidence,
     parameters: v.parameters,
     parameters_origin: v.parameters_origin,
+    // signals names why a span is worth testing: jwt, uuid, numeric_id, high_entropy,
+    // custom_header, server_set. dropEmpty removes it when the vector carries none, so a row with a
+    // signals array is one consolidation tagged and a row without simply has nothing to report.
+    signals: v.signals,
     sources: v.sources,
     evidence_url: v.evidence_url,
     notes: v.notes,

@@ -144,6 +144,9 @@ type SessionToken struct {
 	// AutoRefresh opts this token into unattended refresh as it nears expiry, applied only when its flow
 	// is fully automatable and a refresh has worked before. Off by default. See sessionAutoRefreshLoop.
 	AutoRefresh bool `json:"auto_refresh"`
+	// KeeperName is the session-keeper account this token belongs to (session_keepers.name); '' = not
+	// assigned to any keeper. A keeper seeds only the cookies tagged with its own name. See keeperCookieSeed.
+	KeeperName string `json:"keeper_name"`
 	// OAuth access/refresh-token model (docs/OAUTH_REFRESH_DESIGN.md). All optional; empty means unset.
 	// RefreshTokenID / RefreshFlowID are stored as UUID strings ('' = NULL), like AuthFlowID.
 	RefreshTokenID     string    `json:"refresh_token_id"`     // the refresh-role row that renews this one
@@ -208,7 +211,7 @@ const sessionTokenCols = `t.id::text, t.scope_target_id::text, COALESCE(t.auth_f
 	t.last_refreshed_at, COALESCE(t.auto_refresh,false),
 	COALESCE(t.refresh_token_id::text,''), COALESCE(t.refresh_flow_id::text,''),
 	COALESCE(t.refresh_strategy,''), COALESCE(t.refresh_transport,''),
-	COALESCE(t.refresh_material_key,''), COALESCE(t.credential_kind,''),
+	COALESCE(t.refresh_material_key,''), COALESCE(t.credential_kind,''), COALESCE(t.keeper_name,''),
 	t.created_at, t.updated_at`
 
 const sessionTokenFrom = ` FROM session_tokens t LEFT JOIN auth_flows f ON f.id = t.auth_flow_id `
@@ -244,6 +247,7 @@ type SessionTokenView struct {
 	LastValidationDetail string     `json:"last_validation_detail"`
 	LastRefreshedAt      *time.Time `json:"last_refreshed_at"`
 	AutoRefresh          bool       `json:"auto_refresh"`
+	KeeperName           string     `json:"keeper_name"`
 	RefreshTokenID       string     `json:"refresh_token_id"`
 	RefreshFlowID        string     `json:"refresh_flow_id"`
 	RefreshStrategy      string     `json:"refresh_strategy"`
@@ -315,6 +319,7 @@ func sessionTokenView(t SessionToken) SessionTokenView {
 		LastValidationDetail: t.LastValidationDetail,
 		LastRefreshedAt:      t.LastRefreshedAt,
 		AutoRefresh:          t.AutoRefresh,
+		KeeperName:           t.KeeperName,
 		RefreshTokenID:       t.RefreshTokenID,
 		RefreshFlowID:        t.RefreshFlowID,
 		RefreshStrategy:      t.RefreshStrategy,
@@ -850,6 +855,10 @@ func ParseSessionTokens(w http.ResponseWriter, r *http.Request) {
 		AuthFlowID string `json:"auth_flow_id"`
 		Name       string `json:"name"`
 		Activate   *bool  `json:"activate"`
+		// KeeperName tags the parsed COOKIE rows with a session-keeper account so the keeper of that
+		// name seeds exactly these cookies. Optional; '' leaves them unassigned (the single-account
+		// keeper still picks them up via its untagged fallback). See keeperCookieSeed.
+		KeeperName string `json:"keeper_name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -896,6 +905,14 @@ func ParseSessionTokens(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("[SESSION-TOKEN] Failed to store parsed token %q: %v", token.Name, err)
 			continue
+		}
+		if keeperName := strings.TrimSpace(payload.KeeperName); keeperName != "" && stored.TokenType == "cookie" && stored.ID != "" {
+			if _, err := dbPool.Exec(r.Context(),
+				`UPDATE session_tokens SET keeper_name = $1 WHERE id = $2`, keeperName, stored.ID); err != nil {
+				log.Printf("[SESSION-TOKEN] keeper_name tag failed for %q: %v", stored.Name, err)
+			} else {
+				stored.KeeperName = keeperName
+			}
 		}
 		tokens = append(tokens, stored)
 	}
@@ -2088,7 +2105,7 @@ func scanSessionToken(row interface{ Scan(...interface{}) error }) (SessionToken
 		&t.ExpiresAt, &t.IsActive, &t.Notes, &t.LastValidatedAt, &t.LastValidationStatus,
 		&t.LastValidationDetail, &t.LastRefreshedAt, &t.AutoRefresh,
 		&t.RefreshTokenID, &t.RefreshFlowID, &t.RefreshStrategy, &t.RefreshTransport, &t.RefreshMaterialKey,
-		&t.CredentialKind,
+		&t.CredentialKind, &t.KeeperName,
 		&t.CreatedAt, &t.UpdatedAt)
 	if t.ScopeDomains == nil {
 		t.ScopeDomains = []string{}

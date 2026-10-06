@@ -116,6 +116,40 @@ func redirectKindFor(templateID string) (kind, confidence string) {
 	return templateID, "reported by nuclei"
 }
 
+// ssrfFindingIsFetchClass reports whether one redirect-ssrf finding proved a SERVER-SIDE FETCH
+// rather than only an open redirect. It is the rule that decides whether SSRFmap escalates to the
+// cloud metadata readers, kept here beside redirectKindFor because it reasons about the same kinds.
+//
+// Allowlist, so it fails closed: an unknown kind is NOT treated as a fetch. Open redirect is named
+// out explicitly and first, because a redirect is a browser-side navigation (the server makes no
+// onward request) and must never reach the cloud modules, however the row is otherwise shaped. The
+// positive set is exactly the signals this section writes for a fetch: the in-band body signals
+// (file read / cloud metadata / internal service), the out-of-band callback, and nuclei's own
+// response-ssrf and blind-ssrf. rfi/xxe/xinclude are left out on purpose: their nuclei template-ids
+// are unverified and the escalation is about the HTTP-fetch primitive the aws/gce modules exploit.
+func ssrfFindingIsFetchClass(kind, injectType, detectionMethod string) bool {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	injectType = strings.ToLower(strings.TrimSpace(injectType))
+	detectionMethod = strings.ToLower(strings.TrimSpace(detectionMethod))
+
+	if kind == "open-redirect" {
+		return false
+	}
+	if injectType == "open-redirect" || injectType == "open-redirect-bypass" {
+		return false
+	}
+
+	switch kind {
+	case "ssrf", "response-ssrf", "blind-ssrf", "ssrf-exploitation":
+		return true
+	}
+	switch injectType {
+	case "local-file-read", "cloud-metadata", "internal-service", "response-ssrf", "blind-ssrf":
+		return true
+	}
+	return detectionMethod == "out-of-band callback"
+}
+
 // parseREcollapseOutput is DELIBERATELY UNREACHABLE, and exists only to satisfy the runner.
 //
 // REcollapse is the one tool whose scan is not its exec. The runner special-cases it and calls

@@ -182,6 +182,17 @@ function validationVariant(status) {
 // graded on its own, so it must not read as expired.
 const REJECTED_STATUSES = new Set(['expired', 'not_honoured', 'invalid', 'unauthorized', 'rejected', 'failed', 'revoked']);
 
+// keeperStatusVariant maps a session keeper's lifecycle state to a Bootstrap badge colour.
+function keeperStatusVariant(status) {
+  switch (status) {
+    case 'live': return 'success';
+    case 'needs_recapture': return 'warning';
+    case 'error': return 'danger';
+    case 'stopped': return 'secondary';
+    default: return 'info'; // pending / seeding
+  }
+}
+
 // isTokenExpired: the token's own clock has passed, or its last validation verdict was a rejection.
 // This is the check Manage Sessions was missing, so an on-but-dead token read as a green "active".
 function isTokenExpired(t) {
@@ -208,6 +219,11 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
   const [pasteFlowId, setPasteFlowId] = useState('');
   const [pasteName, setPasteName] = useState('');
   const [pasteResult, setPasteResult] = useState(null);
+
+  // Durable session keepers: a framework-run headless browser that holds the IdP session and keeps
+  // the bearer fresh on a loop so a short-lived token stops forcing a manual paste.
+  const [keepers, setKeepers] = useState([]);
+  const [keeperForm, setKeeperForm] = useState({ name: '', target_url: '', cadence_seconds: 600 });
 
   const targetHost = useMemo(() => hostFromUrl(scopeTargetUrl), [scopeTargetUrl]);
   const expiredActiveCount = useMemo(
@@ -256,10 +272,67 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
     }
   }, [scopeTargetId]);
 
+  const fetchKeepers = useCallback(async () => {
+    if (!scopeTargetId) return;
+    try {
+      const res = await fetch(`/api/session-keepers/target/${scopeTargetId}`);
+      const data = res.ok ? await res.json() : {};
+      setKeepers(Array.isArray(data.keepers) ? data.keepers : []);
+    } catch (e) {
+      console.error('[ManageSessions] fetchKeepers failed:', e);
+      setKeepers([]);
+    }
+  }, [scopeTargetId]);
+
+  const createKeeper = useCallback(async () => {
+    if (!scopeTargetId) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/session-keepers/target/${scopeTargetId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: keeperForm.name.trim() || 'default',
+          target_url: keeperForm.target_url.trim(),
+          cadence_seconds: Number(keeperForm.cadence_seconds) || 600,
+        }),
+      });
+      if (!res.ok) throw new Error(`framework returned ${res.status}`);
+      setNotice('Session keeper created. It will hold the session and keep the bearer fresh.');
+      setKeeperForm({ name: '', target_url: '', cadence_seconds: 600 });
+      await fetchKeepers();
+    } catch (e) {
+      setError(`Could not create the keeper: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [scopeTargetId, keeperForm, fetchKeepers]);
+
+  const keeperAction = useCallback(async (id, action) => {
+    setBusy(true);
+    try {
+      const method = action === 'delete' ? 'DELETE' : 'POST';
+      const path = action === 'delete' ? `/api/session-keepers/${id}` : `/api/session-keepers/${id}/${action}`;
+      const res = await fetch(path, { method });
+      if (!res.ok) throw new Error(`framework returned ${res.status}`);
+      if (action === 'adopt-cookies') {
+        const data = await res.json().catch(() => ({}));
+        setNotice(`Claimed ${data.claimed ?? 0} untagged cookie(s) for keeper "${data.account}" (now owns ${data.owned ?? 0}). The keeper will seed only these on its next reload.`);
+      }
+      await fetchKeepers();
+      await fetchTokens();
+    } catch (e) {
+      setError(`Keeper ${action} failed: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [fetchKeepers, fetchTokens]);
+
   useEffect(() => {
     if (show && scopeTargetId) {
       fetchTokens();
       fetchFlows();
+      fetchKeepers();
     }
     if (!show) {
       setForm(EMPTY_FORM);
@@ -271,8 +344,9 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
       setPasteResult(null);
       setError('');
       setNotice('');
+      setKeeperForm({ name: '', target_url: '', cadence_seconds: 600 });
     }
-  }, [show, scopeTargetId, fetchTokens, fetchFlows]);
+  }, [show, scopeTargetId, fetchTokens, fetchFlows, fetchKeepers]);
 
   const flowsById = useMemo(() => {
     const m = {};
@@ -542,6 +616,71 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
             {error && <Alert variant="danger" dismissible onClose={() => setError('')}>{error}</Alert>}
             {notice && <Alert variant="info" dismissible onClose={() => setNotice('')} className="py-2 small">{notice}</Alert>}
 
+            <div className="border border-secondary rounded p-2 mb-3" style={{ background: 'rgba(13,202,240,0.06)' }}>
+              <div className="d-flex align-items-center mb-2">
+                <strong className="text-info"><i className="bi bi-arrow-repeat me-1" />Session keepers</strong>
+                <span className="text-white-50 small ms-2">a headless browser that keeps a short-lived bearer fresh, hands-free</span>
+                <Button size="sm" variant="outline-secondary" className="ms-auto py-0 px-2" onClick={fetchKeepers} disabled={busy}>Refresh</Button>
+              </div>
+              <Alert variant="warning" className="py-1 px-2 small mb-2">
+                A keeper holds your IdP session in a framework-run browser, including a long-lived refresh cookie that is an
+                account-takeover credential for your own test account. It is stored like all captured material (not encrypted),
+                and its egress is locked to the in-scope app plus classified auth hosts only. Capture the session cookies first
+                (New token / Paste raw cookie); the keeper seeds from them and parks as <em>needs_recapture</em> when the IdP
+                session finally dies. <strong>Two accounts (A and B) for one target:</strong> capture A, add keeper "A", click
+                <em>Adopt cookies</em>; then capture B, add keeper "B", <em>Adopt cookies</em> again. Each keeper then seeds only
+                its own account, so their sessions never collide. A single account needs no tagging.
+              </Alert>
+              {keepers.length > 0 && (
+                <Table size="sm" variant="dark" bordered className="mb-2" style={{ fontSize: '0.75rem' }}>
+                  <thead><tr><th>Account</th><th>Status</th><th>Last harvest</th><th>Target</th><th /></tr></thead>
+                  <tbody>
+                    {keepers.map((k) => (
+                      <tr key={k.id}>
+                        <td>{k.name}</td>
+                        <td>
+                          <Badge bg={keeperStatusVariant(k.status)}>{k.status}</Badge>
+                          {!k.enabled && <Badge bg="secondary" className="ms-1">off</Badge>}
+                          {k.last_error && <i className="bi bi-exclamation-triangle text-warning ms-1" title={k.last_error} />}
+                        </td>
+                        <td className="text-white-50">{k.last_harvest_at ? new Date(k.last_harvest_at).toLocaleTimeString() : 'none yet'}</td>
+                        <td className="text-truncate" style={{ maxWidth: 160 }} title={k.target_url}>{hostFromUrl(k.target_url) || k.target_url}</td>
+                        <td className="text-end" style={{ whiteSpace: 'nowrap' }}>
+                          <Button size="sm" variant="outline-light" className="py-0 px-1 me-1" disabled={busy}
+                            title="Claim the target's currently-untagged cookies for this account, so this keeper seeds only them. Do this right after capturing the session for this account."
+                            onClick={() => keeperAction(k.id, 'adopt-cookies')}>Adopt cookies</Button>
+                          {k.enabled
+                            ? <Button size="sm" variant="outline-warning" className="py-0 px-1 me-1" disabled={busy} onClick={() => keeperAction(k.id, 'stop')}>Stop</Button>
+                            : <Button size="sm" variant="outline-success" className="py-0 px-1 me-1" disabled={busy} onClick={() => keeperAction(k.id, 'start')}>Start</Button>}
+                          <Button size="sm" variant="outline-danger" className="py-0 px-1" disabled={busy} onClick={() => keeperAction(k.id, 'delete')}>Delete</Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              )}
+              <Row className="g-1 align-items-end">
+                <Col xs={3}>
+                  <Form.Label className="small mb-0 text-white-50">Account label</Form.Label>
+                  <Form.Control size="sm" placeholder="default" value={keeperForm.name}
+                    onChange={(e) => setKeeperForm({ ...keeperForm, name: e.target.value })} />
+                </Col>
+                <Col xs={5}>
+                  <Form.Label className="small mb-0 text-white-50">SPA URL (blank = target host)</Form.Label>
+                  <Form.Control size="sm" placeholder="https://app.example.com" value={keeperForm.target_url}
+                    onChange={(e) => setKeeperForm({ ...keeperForm, target_url: e.target.value })} />
+                </Col>
+                <Col xs={2}>
+                  <Form.Label className="small mb-0 text-white-50">Reload (s)</Form.Label>
+                  <Form.Control size="sm" type="number" min={120} value={keeperForm.cadence_seconds}
+                    onChange={(e) => setKeeperForm({ ...keeperForm, cadence_seconds: e.target.value })} />
+                </Col>
+                <Col xs={2}>
+                  <Button size="sm" variant="outline-info" className="w-100" disabled={busy} onClick={createKeeper}>Add keeper</Button>
+                </Col>
+              </Row>
+            </div>
+
             <div className="d-flex flex-wrap gap-2 align-items-center mb-3">
               <Button size="sm" variant="outline-danger" onClick={newToken} disabled={busy}>
                 <i className="bi bi-plus-lg me-1" />New token
@@ -701,6 +840,9 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                               )}
                               {t.credential_kind === 'oauth_access_token' && (
                                 <Badge bg="dark" className="border border-info text-info" title="An OAuth access token captured from a token endpoint response.">OAuth access</Badge>
+                              )}
+                              {t.keeper_name && (
+                                <Badge bg="dark" className="border border-light text-white-50" title={`Belongs to session-keeper account "${t.keeper_name}". Only that keeper seeds this cookie.`}>acct: {t.keeper_name}</Badge>
                               )}
                               {t.is_active !== false
                                 ? <Badge bg={isTokenExpired(t) ? 'secondary' : 'success'}>active</Badge>

@@ -450,3 +450,65 @@ func TestBuildVectorEligibilityUnchangedWithoutSelection(t *testing.T) {
 		t.Errorf("the two entry points disagree: %d vs %d", old.Eligible, new.Eligible)
 	}
 }
+
+// The classifier that decides SSRFmap's escalation: every signal this section writes for a
+// server-side fetch is fetch-class; an open redirect and an empty shape are not.
+func TestSSRFFindingFetchClassification(t *testing.T) {
+	fetch := []struct{ kind, inject, detection string }{
+		{"ssrf", "local-file-read", "framework SSRF probe (local-file-read)"},
+		{"ssrf", "cloud-metadata", "framework SSRF probe (cloud-metadata)"},
+		{"ssrf", "internal-service", "framework SSRF probe (internal-service)"},
+		{"blind-ssrf", "", "out-of-band callback"},
+		{"ssrf", "response-ssrf", "nuclei response-ssrf (query)"},
+		{"blind-ssrf", "blind-ssrf", "nuclei blind-ssrf (query)"},
+	}
+	for _, f := range fetch {
+		if !ssrfFindingIsFetchClass(f.kind, f.inject, f.detection) {
+			t.Errorf("%+v should be fetch-class", f)
+		}
+	}
+	notFetch := []struct{ kind, inject, detection string }{
+		{"open-redirect", "open-redirect", "framework SSRF probe (open-redirect)"},
+		{"open-redirect", "open-redirect-bypass", "nuclei open-redirect-bypass (query)"},
+		{"", "", ""},
+	}
+	for _, f := range notFetch {
+		if ssrfFindingIsFetchClass(f.kind, f.inject, f.detection) {
+			t.Errorf("%+v must not be fetch-class", f)
+		}
+	}
+}
+
+// A confirmed fetch escalates SSRFmap to the cloud readers; an open redirect does not; an explicit
+// operator module choice always wins.
+func TestSSRFmapEscalatesOnAFetchFinding(t *testing.T) {
+	base := VectorInput{Method: "GET", Scheme: "https", Domain: "x.example.com", Path: "/fetch",
+		InsertionPoint: "query", Parameters: []string{"url"}, Section: webhookSection()}
+
+	fetch := base
+	fetch.SSRFFetchConfirmed = true
+	args, warnings := ComposeSSRFmap(fetch, map[string]any{}, "/tmp/rep")
+	if !argsContainPair(args, "-m", ssrfmapFetchModules) {
+		t.Fatalf("a confirmed fetch must escalate to %q: %v", ssrfmapFetchModules, args)
+	}
+	if argsContainPair(args, "-m", "portscan") {
+		t.Errorf("a confirmed fetch must not also default to portscan: %v", args)
+	}
+	if len(warnings) == 0 {
+		t.Error("escalating the module set on the operator's behalf must be reported")
+	}
+
+	redirectOnly := base // SSRFFetchConfirmed stays false
+	ra, _ := ComposeSSRFmap(redirectOnly, map[string]any{}, "/tmp/rep")
+	if !argsContainPair(ra, "-m", "portscan") {
+		t.Errorf("an open-redirect-only finding must stay on portscan: %v", ra)
+	}
+	if argsContainPair(ra, "-m", ssrfmapFetchModules) {
+		t.Errorf("an open-redirect-only finding must never reach the cloud readers: %v", ra)
+	}
+
+	chosen, _ := ComposeSSRFmap(fetch, map[string]any{"modules": "readfiles"}, "/tmp/rep")
+	if argsContainPair(chosen, "-m", "portscan") || argsContainPair(chosen, "-m", ssrfmapFetchModules) {
+		t.Errorf("the operator's explicit module choice was overridden: %v", chosen)
+	}
+}

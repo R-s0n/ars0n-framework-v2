@@ -324,6 +324,63 @@ func (s *ScanScope) AllowsForAuth(host string) bool {
 	return s.Allows(host)
 }
 
+// SuffixesByEffect returns the concrete host suffixes a durable session keeper may let its headless
+// browser reach, split into the IN-SCOPE (allow) side and the AUTH-only side. The keeper's egress
+// allowlist is the union of the two (fail-closed: anything matching neither is aborted); the
+// attribution header is attached only on the in-scope side, never to an auth host, because the keeper
+// is "using" the IdP, not testing it.
+//
+// allow = the scope target's own host and domains, operator-named in-scope hosts, and the host-shaped
+// values of enabled ALLOW rules (host/subtree/subdomains kinds). auth = the host-shaped values of
+// enabled AUTH rules plus the per-host auth_host set already loaded into the scope. Wide
+// contains/regex rules are omitted on purpose: they exist to admit unseen hosts for SCANNING, while a
+// keeper loads one concrete SPA whose own hosts are named. A host that is both allow and auth (a
+// first-party SSO host) appears on the allow side, so it correctly gets the header.
+func (s *ScanScope) SuffixesByEffect() (allow []string, auth []string) {
+	if s == nil {
+		return nil, nil
+	}
+	allowSet := map[string]bool{}
+	authSet := map[string]bool{}
+	if s.primary != "" {
+		allowSet[s.primary] = true
+	}
+	for d := range s.domains {
+		allowSet[d] = true
+	}
+	for d := range s.extra {
+		allowSet[d] = true
+	}
+	for _, r := range s.rules {
+		if !r.Enabled || r.Value == "" {
+			continue
+		}
+		if r.Kind != KindHost && r.Kind != KindSubtree && r.Kind != KindSubdomains {
+			continue
+		}
+		switch r.Effect {
+		case EffectAllow:
+			allowSet[strings.ToLower(r.Value)] = true
+		case EffectAuth:
+			authSet[strings.ToLower(r.Value)] = true
+		}
+	}
+	for h := range s.authHosts {
+		if !allowSet[h] {
+			authSet[h] = true
+		}
+	}
+	for h := range allowSet {
+		allow = append(allow, h)
+	}
+	for h := range authSet {
+		auth = append(auth, h)
+	}
+	sort.Strings(allow)
+	sort.Strings(auth)
+	return allow, auth
+}
+
 // IsAuthHost reports whether this host (or a parent domain of it) was classified as an auth host.
 // It is for rendering and for the refresh evidence line, so the operator can see a host was admitted
 // BECAUSE it is a classified auth host rather than because it is in scope. It never governs scanning.
