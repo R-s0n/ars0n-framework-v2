@@ -49,7 +49,7 @@ const {
 // The standing "there is no exhausted" constraint, applied to the decide tools where a premature
 // "nothing left" conclusion is born. Delivered in full once per session (rule never hits the compact
 // line); the repeating pressure is the keep_hunting heartbeat attached to every result in index.js.
-const { NO_EXHAUSTED_RULE } = require('./keepHunting');
+const { NO_EXHAUSTED_RULE, TIME_OFF_FRAME_RULE } = require('./keepHunting');
 
 module.exports = {
 
@@ -264,7 +264,7 @@ module.exports = {
     tool: 'What to do next on THIS target, decided from its stored data rather than from a ' +
       'checklist, ordered blockers then gaps then notes. Call it when picking up a target and ' +
       'whenever a section reports nothing.',
-    rule: NO_EXHAUSTED_RULE,
+    rule: NO_EXHAUSTED_RULE + ' ' + TIME_OFF_FRAME_RULE,
     lies: 'It reports what the database can see, so work done outside the framework looks undone, ' +
       'and a step whose rows were written by a tool that tested nothing looks done.',
     next: 'get_methodology, then run_url_workflow',

@@ -54,6 +54,12 @@ const (
 	keeperDefaultCad   = 600 // seconds; a 10-min reload comfortably re-mints a 15-min bearer
 	keeperMinCadence   = 120
 	keeperDeadFailures = 5 // consecutive keeper-reported failures before the row is parked as error
+	// keeperMaxLoginAttempts caps CONSECUTIVE auto-login attempts before the keeper is parked as error
+	// and DISARMED. This is the lockout guard: a bad credential, a changed form, or a CAPTCHA/MFA login
+	// prompt must never be retried in a loop against the real account. The keeper enforces a per-episode
+	// cap in process; this durable count makes the cap survive a container restart (an in-process
+	// counter would reset and could re-hammer the login).
+	keeperMaxLoginAttempts = 2
 )
 
 // SessionKeeper is one durable keeper row: a (scope target, account) whose session is kept warm.
@@ -71,6 +77,20 @@ type SessionKeeper struct {
 	LastError           string     `json:"last_error"`
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
+
+	// Auto-login (operator-configured headless re-login when the refresh token itself expires). The
+	// PASSWORD is deliberately NOT a field here: it is read only internally (keeperLoginSecrets) to
+	// shape the keeper's desired file, never serialised to a list/read response. HasPassword (exposed as
+	// has_credentials) is the only password signal that ever leaves the DB. FillSequence + SuccessProbe
+	// are unpacked from the login_config JSONB column for the UI, which reads them at the top level.
+	AutoLoginEnabled         bool               `json:"auto_login_enabled"`
+	LoginURL                 string             `json:"login_url"`
+	FillSequence             []KeeperLoginStep  `json:"fill_sequence"`
+	SuccessProbe             KeeperSuccessProbe `json:"success_probe"`
+	LoginUsername            string             `json:"username"`
+	HasPassword              bool               `json:"has_credentials"`
+	ConsecutiveLoginFailures int                `json:"consecutive_login_failures"`
+	LastLoginAttemptAt       *time.Time         `json:"last_login_attempt_at,omitempty"`
 }
 
 // keeperCookie is one seeded cookie, shaped for Puppeteer/CDP setCookie on the keeper side.
@@ -97,6 +117,24 @@ type keeperDesired struct {
 	ProgramHeaders map[string]string `json:"program_headers"` // attribution, in-scope requests only
 	MaxRPS         float64           `json:"max_rps"`
 	Generation     string            `json:"generation"` // bumped when the cookie seed changes -> re-seed
+	// Present ONLY when auto-login is armed for this keeper; nil (omitempty) otherwise, so a keeper with
+	// auto-login off produces a desired file byte-identical to the pre-feature file (backward-safe).
+	AutoLogin *keeperAutoLogin `json:"auto_login,omitempty"`
+}
+
+// keeperAutoLogin is the auto-login block in the desired file, present ONLY when auto-login is armed.
+// It carries the credentials to the keeper container over the same temp_data volume contract the
+// cookie seed already uses; the password is used solely in page.type on the keeper side and is NEVER
+// logged, echoed, or written to a status/harvest file. max_attempts tells the keeper the per-episode
+// cap; the durable cap is additionally enforced Go-side (see buildKeeperAutoLogin). The field names
+// (login_url, steps, success) are exactly what keeper.mjs reads from desired.auto_login.
+type keeperAutoLogin struct {
+	LoginURL    string             `json:"login_url"`
+	Steps       []KeeperLoginStep  `json:"steps"`
+	Success     KeeperSuccessProbe `json:"success"`
+	Username    string             `json:"username"`
+	Password    string             `json:"password"`
+	MaxAttempts int                `json:"max_attempts"`
 }
 
 // keeperHarvest is what the keeper writes when it captures a fresh credential from its own network.
@@ -119,6 +157,12 @@ type keeperStatusFile struct {
 	LastHarvestAt       string   `json:"last_harvest_at"`
 	ConsecutiveFailures int      `json:"consecutive_failures"`
 	AbortedSample       []string `json:"aborted_sample"`
+	// Auto-login reporting. login_phase: "" | logging_in | login_ok | login_failed. last_login_attempt_at
+	// (RFC3339) is the timestamp of the most recent login ATTEMPT and is what makes the Go-side failure
+	// count edge-triggered (one increment per NEW attempt, never once per tick). The keeper MUST NOT put
+	// credentials in Detail or anywhere else in this file.
+	LoginPhase         string `json:"login_phase"`
+	LastLoginAttemptAt string `json:"last_login_attempt_at"`
 }
 
 func keeperSubdir(sub string) string { return filepath.Join(keeperIPCRoot, sub) }
@@ -137,15 +181,39 @@ func ensureKeeperDirs() error {
 
 func scanSessionKeeper(row interface{ Scan(...interface{}) error }) (SessionKeeper, error) {
 	var k SessionKeeper
+	var loginConfigJSON []byte
 	err := row.Scan(&k.ID, &k.ScopeTargetID, &k.Name, &k.TargetURL, &k.Enabled, &k.Status,
 		&k.CadenceSeconds, &k.LastReloadAt, &k.LastHarvestAt, &k.ConsecutiveFailures, &k.LastError,
-		&k.CreatedAt, &k.UpdatedAt)
-	return k, err
+		&k.CreatedAt, &k.UpdatedAt,
+		&k.AutoLoginEnabled, &k.LoginURL, &loginConfigJSON, &k.LoginUsername, &k.HasPassword,
+		&k.ConsecutiveLoginFailures, &k.LastLoginAttemptAt)
+	if err != nil {
+		return k, err
+	}
+	// login_config holds {steps, success_probe}; unpack to the flat fields the UI reads.
+	if len(loginConfigJSON) > 0 {
+		var cfg KeeperLoginConfig
+		if json.Unmarshal(loginConfigJSON, &cfg) == nil {
+			k.FillSequence = cfg.Steps
+			k.SuccessProbe = cfg.SuccessProbe
+		}
+	}
+	if k.FillSequence == nil {
+		k.FillSequence = []KeeperLoginStep{}
+	}
+	return k, nil
 }
 
+// sessionKeeperCols selects a BOOLEAN (login_password_enc is present) in place of the ciphertext, so
+// every list/read path (GetSessionKeepers, GetSessionKeeper, reconcileKeepers) is structurally
+// incapable of returning the password while still telling the UI a credential is stored.
 const sessionKeeperCols = `SELECT id::text, scope_target_id::text, name, target_url, enabled, status,
 	cadence_seconds, last_reload_at, last_harvest_at, consecutive_failures, last_error,
-	created_at, updated_at FROM session_keepers `
+	created_at, updated_at,
+	auto_login_enabled, COALESCE(login_url,''), COALESCE(login_config,'{}'::jsonb),
+	COALESCE(login_username,''), (COALESCE(octet_length(login_password_enc),0) > 0),
+	consecutive_login_failures, last_login_attempt_at
+	FROM session_keepers `
 
 // GetSessionKeepers lists the keepers for a scope target, newest first.
 func GetSessionKeepers(ctx context.Context, scopeTargetID string) ([]SessionKeeper, error) {
@@ -236,6 +304,8 @@ func UpdateSessionKeeper(ctx context.Context, id string, enabled *bool, targetUR
 		  status = CASE WHEN COALESCE($2, enabled) = FALSE THEN 'stopped'
 		                WHEN $2 IS TRUE THEN 'pending' ELSE status END,
 		  consecutive_failures = CASE WHEN $2 IS TRUE THEN 0 ELSE consecutive_failures END,
+		  consecutive_login_failures = CASE WHEN $2 IS TRUE THEN 0 ELSE consecutive_login_failures END,
+		  last_login_attempt_at = CASE WHEN $2 IS TRUE THEN NULL ELSE last_login_attempt_at END,
 		  last_error = CASE WHEN $2 IS TRUE THEN '' ELSE last_error END,
 		  updated_at = NOW()
 		WHERE id = $1`, id, enabled, targetURL, cad)
@@ -243,6 +313,69 @@ func UpdateSessionKeeper(ctx context.Context, id string, enabled *bool, targetUR
 		return zero, err
 	}
 	return GetSessionKeeper(ctx, id)
+}
+
+// SetKeeperLoginConfig stores/updates the NON-secret auto-login configuration (login_url, the fill
+// sequence + success probe as login_config JSONB, and the auto_login_enabled toggle). Pointer args
+// give partial-update safety (the partial-update-wipes rule): a nil pointer leaves that column
+// unchanged. Any change resets the login-failure latch so a corrected form gets a fresh set of
+// attempts and lifts a parked auto-login error. It never touches the credentials.
+func SetKeeperLoginConfig(ctx context.Context, id string, autoLogin *bool, loginURL *string, config *KeeperLoginConfig) (SessionKeeper, error) {
+	var zero SessionKeeper
+	if dbPool == nil {
+		return zero, fmt.Errorf("no database connection")
+	}
+	var cfgJSON []byte
+	if config != nil {
+		b, err := json.Marshal(config)
+		if err != nil {
+			return zero, err
+		}
+		cfgJSON = b
+	}
+	_, err := dbPool.Exec(ctx, `
+		UPDATE session_keepers SET
+		  auto_login_enabled = COALESCE($2, auto_login_enabled),
+		  login_url = COALESCE($3, login_url),
+		  login_config = COALESCE($4::jsonb, login_config),
+		  consecutive_login_failures = 0,
+		  last_login_attempt_at = NULL,
+		  status = CASE WHEN status = 'error' THEN 'pending' ELSE status END,
+		  last_error = CASE WHEN status = 'error' THEN '' ELSE last_error END,
+		  updated_at = NOW()
+		WHERE id = $1`, id, autoLogin, loginURL, cfgJSON)
+	if err != nil {
+		return zero, err
+	}
+	return GetSessionKeeper(ctx, id)
+}
+
+// SetKeeperCredentials stores/updates the keeper's login credentials. The password is encrypted at rest
+// with the install-local key; its plaintext is used only here and in keeperLoginSecrets, never logged,
+// never returned by a read. An empty password is refused (use SetKeeperLoginConfig to toggle, and the
+// delete path to forget). Any change resets the failure latch and lifts a parked auto-login error.
+func SetKeeperCredentials(ctx context.Context, id, username, password string) error {
+	if dbPool == nil {
+		return fmt.Errorf("no database connection")
+	}
+	if strings.TrimSpace(password) == "" {
+		return fmt.Errorf("a password is required to store credentials")
+	}
+	enc, err := encryptCredential(ctx, password)
+	if err != nil {
+		return err
+	}
+	_, err = dbPool.Exec(ctx, `
+		UPDATE session_keepers SET
+		  login_username = $2,
+		  login_password_enc = $3,
+		  consecutive_login_failures = 0,
+		  last_login_attempt_at = NULL,
+		  status = CASE WHEN status = 'error' THEN 'pending' ELSE status END,
+		  last_error = CASE WHEN status = 'error' THEN '' ELSE last_error END,
+		  updated_at = NOW()
+		WHERE id = $1`, id, strings.TrimSpace(username), enc)
+	return err
 }
 
 // DeleteSessionKeeper removes the row and its desired file, so the keeper container tears the browser
@@ -391,8 +524,96 @@ func keeperDesiredFor(ctx context.Context, k SessionKeeper) (keeperDesired, erro
 		ProgramHeaders: headers,
 		MaxRPS:         maxRPS,
 	}
+	// Arm auto-login only when it is enabled, fully configured, in scope, and under the failure cap. The
+	// password is read ONLY here (keeperLoginSecrets) and placed straight into the desired struct; it is
+	// never held on SessionKeeper and never logged. When not armable, d.AutoLogin stays nil and the
+	// desired file is byte-identical to the pre-feature file (backward-safe).
+	if k.AutoLoginEnabled {
+		if username, password, ok, serr := keeperLoginSecrets(ctx, k.ID); serr == nil && ok {
+			d.AutoLogin = buildKeeperAutoLogin(k, allow, username, password)
+		}
+	}
+	// Generation deliberately ignores AutoLogin (see keeperGeneration): a changed login config or
+	// credential applies LIVE on the same-generation reconcile path, with no pointless profile re-seed.
 	d.Generation = keeperGeneration(d)
 	return d, nil
+}
+
+// buildKeeperAutoLogin returns the auto-login block for the desired file, or nil when auto-login is not
+// armable. It is PURE (no DB), so the arm/disarm state machine is unit-testable: it arms only when
+// enabled, the fill sequence and BOTH credentials are present, the login host is on the egress
+// allowlist (fail-closed - the keeper would abort an off-allowlist navigation anyway), and the
+// consecutive-failure count is below the cap. Returning nil at the cap is the durable lockout guard:
+// once the cap is hit the desired file stops carrying auto_login, so the keeper cannot attempt again
+// even across a container restart, until the operator re-enables or reconfigures (which resets the
+// count). nil => the desired file has no auto_login key at all, unchanged from before this feature.
+func buildKeeperAutoLogin(k SessionKeeper, allow []string, username, password string) *keeperAutoLogin {
+	if !k.AutoLoginEnabled {
+		return nil
+	}
+	if len(k.FillSequence) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(username) == "" || password == "" {
+		return nil
+	}
+	if k.ConsecutiveLoginFailures >= keeperMaxLoginAttempts {
+		return nil
+	}
+	lh := hostOfURL(k.LoginURL)
+	if lh == "" || !hostAllowed(lh, allow) {
+		return nil
+	}
+	return &keeperAutoLogin{
+		LoginURL:    strings.TrimSpace(k.LoginURL),
+		Steps:       k.FillSequence,
+		Success:     k.SuccessProbe,
+		Username:    username,
+		Password:    password,
+		MaxAttempts: keeperMaxLoginAttempts,
+	}
+}
+
+// keeperLoginSecrets reads and DECRYPTS the credentials for ONE keeper. It is the ONLY query in the
+// codebase that returns the plaintext login password, called solely from keeperDesiredFor to shape the
+// desired file. ok is false when no password is stored OR when the stored ciphertext cannot be
+// decrypted on this install (a bundle restored elsewhere), so the reconcile path treats that exactly
+// like no credential and parks rather than looping, lockout-safe. The password is never carried on
+// SessionKeeper and never serialised to a list/read response, log, status file, or error.
+func keeperLoginSecrets(ctx context.Context, id string) (username, password string, ok bool, err error) {
+	var enc []byte
+	err = dbPool.QueryRow(ctx,
+		`SELECT COALESCE(login_username,''), login_password_enc FROM session_keepers WHERE id = $1`,
+		id).Scan(&username, &enc)
+	if err != nil {
+		return "", "", false, err
+	}
+	if len(enc) == 0 {
+		return username, "", false, nil
+	}
+	password, derr := decryptCredential(ctx, enc)
+	if derr != nil {
+		return username, "", false, nil // undecryptable => treat as no credential (park), never a hard error
+	}
+	return username, password, password != "", nil
+}
+
+// hostAllowed is the fail-closed egress predicate on the Go side, mirroring keeperLib.hostMatches: a
+// host is allowed only if it equals, or is a dotted subdomain of, an allowlist suffix (label boundary,
+// never a bare suffix, so "notexample.com" is not inside "example.com"). Used to refuse arming
+// auto-login for a login URL the keeper could not navigate to anyway.
+func hostAllowed(host string, suffixes []string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	for _, s := range suffixes {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s != "" && (host == s || strings.HasSuffix(host, "."+s)) {
+			return true
+		}
+	}
+	return false
 }
 
 // keeperGeneration is a short digest of ONLY the seed-affecting fields (target URL + cookies), so a
@@ -527,9 +748,13 @@ func pollKeeperHarvests() {
 			}
 			continue
 		}
+		// A genuine harvest means the session is live (whether from a successful auto-login or a
+		// self-recovered IdP session), so clear the auto-login failure latch too, or the next expiry
+		// would start already part-way to the cap.
 		_, _ = dbPool.Exec(ctx, `
 			UPDATE session_keepers SET last_harvest_at = NOW(), status = 'live',
-			  consecutive_failures = 0, last_error = '', updated_at = NOW() WHERE id = $1`, k.ID)
+			  consecutive_failures = 0, consecutive_login_failures = 0, last_login_attempt_at = NULL,
+			  last_error = '', updated_at = NOW() WHERE id = $1`, k.ID)
 		_ = os.Remove(path)
 		log.Printf("[SESSION-KEEPER] keeper %s (%s) harvested a fresh %s and stored it", k.ID, k.Name, h.Kind)
 	}
@@ -559,6 +784,11 @@ func pollKeeperStatus() {
 		if status == "" {
 			status = "live"
 		}
+		// The keeper reports it is mid-login; surface the phase so the UI shows "logging in" instead of a
+		// bare seeding/needs_recapture.
+		if st.LoginPhase == "logging_in" {
+			status = "logging_in"
+		}
 		// A run of keeper-reported failures parks the row as error so the UI stops claiming it is live.
 		if st.ConsecutiveFailures >= keeperDeadFailures && status != "needs_recapture" {
 			status = "error"
@@ -574,17 +804,52 @@ func pollKeeperStatus() {
 			tu := t.UTC()
 			lastReload = &tu
 		}
+		// Base health write. The guard keeps a LATCHED auto-login failure (status=error at the cap) from
+		// being flipped back to the keeper's fallback needs_recapture once auto-login has been disarmed,
+		// so the "auto-login failed" message survives until the operator re-enables/reconfigures. It does
+		// not touch consecutive_login_failures / last_login_attempt_at (owned by the branches below).
 		_, _ = dbPool.Exec(ctx, `
 			UPDATE session_keepers SET status = $2, consecutive_failures = $3,
 			  last_error = $4, last_reload_at = COALESCE($5, last_reload_at), updated_at = NOW()
-			WHERE id = $1 AND enabled = TRUE`,
-			st.KeeperID, status, st.ConsecutiveFailures, truncateKeeperErr(st.Detail), lastReload)
+			WHERE id = $1 AND enabled = TRUE
+			  AND NOT (status = 'error' AND consecutive_login_failures >= $6)`,
+			st.KeeperID, status, st.ConsecutiveFailures, truncateKeeperErr(st.Detail), lastReload,
+			keeperMaxLoginAttempts)
+
+		// Auto-login outcome, edge-triggered on the attempt timestamp so a status file that keeps
+		// reporting the same failure every tick increments exactly once per NEW attempt.
+		switch st.LoginPhase {
+		case "login_failed":
+			if at, perr := time.Parse(time.RFC3339, st.LastLoginAttemptAt); perr == nil {
+				atu := at.UTC()
+				// +1 only when this attempt is newer than the one we already counted. At the cap the row
+				// latches to error with a clear message; keeperDesiredFor then stops arming auto-login, so
+				// the keeper cannot attempt again - no hammering the real account.
+				_, _ = dbPool.Exec(ctx, `
+					UPDATE session_keepers SET
+					  consecutive_login_failures = consecutive_login_failures + 1,
+					  last_login_attempt_at = $2,
+					  status = CASE WHEN consecutive_login_failures + 1 >= $3 THEN 'error' ELSE status END,
+					  last_error = CASE WHEN consecutive_login_failures + 1 >= $3 THEN $4 ELSE last_error END,
+					  updated_at = NOW()
+					WHERE id = $1 AND enabled = TRUE
+					  AND (last_login_attempt_at IS NULL OR last_login_attempt_at < $2)`,
+					st.KeeperID, atu, keeperMaxLoginAttempts,
+					"Auto-login failed (bad credentials or a changed login form) and is now stopped. "+
+						"Re-check the credentials and the login steps, then re-enable the keeper.")
+			}
+		case "login_ok":
+			// The login episode resolved; clear the failure latch. A harvest write will set live.
+			_, _ = dbPool.Exec(ctx, `
+				UPDATE session_keepers SET consecutive_login_failures = 0, last_login_attempt_at = NULL,
+				  updated_at = NOW() WHERE id = $1 AND enabled = TRUE`, st.KeeperID)
+		}
 	}
 }
 
 func keeperStatusValid(s string) bool {
 	switch s {
-	case "pending", "seeding", "live", "needs_recapture", "stopped", "error":
+	case "pending", "seeding", "live", "logging_in", "needs_recapture", "stopped", "error":
 		return true
 	}
 	return false

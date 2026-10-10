@@ -47,7 +47,7 @@ const {
   BYPASS: S_BYPASS,
   THREAT: S_THREAT,
 } = require('./steps');
-const { SESSION_DECAY_RULE, GOAL_RULE } = require('./keepHunting');
+const { SESSION_DECAY_RULE, GOAL_RULE, TIME_OFF_FRAME_RULE } = require('./keepHunting');
 
 module.exports = {
 
@@ -162,7 +162,7 @@ module.exports = {
     tool: 'The engagement GOAL for a scope target: the one specific, PoC-backed objective the hunt ' +
       'converges on, and the one legitimate finish line. Set and ACTIVATE a goal before hunting; when ' +
       'the goal gate is on, the scan and attack tools refuse to run until this target has an active one.',
-    rule: GOAL_RULE,
+    rule: GOAL_RULE + ' ' + TIME_OFF_FRAME_RULE,
     lies: 'A goal is reached only when captured artifacts prove its GIVEN/WHEN/THEN success_criteria ' +
       'AND the operator signs off. The hunter can reach candidate and record a verify verdict, but ' +
       '"verified" is a proposal, not a win, and the AI can never set "met". A failed verify closes the ' +
@@ -649,14 +649,27 @@ module.exports = {
       'unmodified SPA so the app re-mints its own short-lived bearer, and harvests it into the ' +
       'session-token store on a loop, so a 5-15 minute bearer stops forcing a token paste every few ' +
       'minutes. It only ever runs the app\'s own traffic and is egress-locked to the in-scope app ' +
-      'plus classified auth hosts; it never scans.',
+      'plus classified auth hosts; it never scans. It can also be given an optional hands-free ' +
+      'auto-login (configure_login + set_credentials): a login URL, an ordered form fill sequence, a ' +
+      'success probe and a stored account password, so when the session can no longer be kept warm it ' +
+      'drives the app\'s own login form in the headless browser and continues, instead of parking for ' +
+      'a human. This is the standard authenticated-scan login sequence that Burp, ZAP and Caido have.',
     lies: [
-      'A keeper is NOT a login. It cannot create a session, only keep a captured one warm. Capture ' +
-        'the session cookies first (manage_session_tokens parse/create, or a recapture); the keeper ' +
-        'seeds from the active cookie-type tokens, so with nothing captured it harvests nothing.',
-      'needs_recapture is a real end state, not a crash. When the long-lived IdP cookie finally dies ' +
-        '(a Cognito refresh token defaults to 30 days) the keeper parks and waits for the operator to ' +
-        're-capture in the browser; it NEVER attempts a headless IdP login (scope + bot detection).',
+      'Without auto-login configured, a keeper is NOT a login: it cannot create a session, only keep ' +
+        'a captured one warm. Capture the session cookies first (manage_session_tokens parse/create, ' +
+        'or a recapture); the keeper seeds from the active cookie-type tokens, so with nothing ' +
+        'captured and no auto-login it harvests nothing.',
+      'needs_recapture is a real end state, not a crash. When the long-lived IdP session finally dies ' +
+        'and no auto-login is configured, the keeper parks and waits for the operator to re-capture in ' +
+        'the browser. With auto-login configured (a stored password plus a form fill sequence) it ' +
+        'instead re-logs in on its own and continues, which is what a DAST login sequence is for.',
+      'Auto-login is opt-in, generic and lockout-safe. It stays off until the operator stores ' +
+        'credentials and enables it; it is driven entirely by the operator-supplied form fill sequence ' +
+        'and success probe, with no built-in knowledge of any one identity provider; and it is ' +
+        'attempt-capped, so after one or two failed logins the keeper parks itself in error rather ' +
+        'than retrying, so a changed form, a wrong password, or an MFA or CAPTCHA prompt can never ' +
+        'lock the real account out. The stored password is write-only and is never returned by list ' +
+        'or any read.',
     ],
     next: 'check_session_tokens action:"validate" to confirm the kept token is honoured',
     rule: SESSION_DECAY_RULE,

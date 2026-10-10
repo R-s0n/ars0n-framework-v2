@@ -68,6 +68,7 @@ const { listWorkflowsSchema, listWorkflows, getWorkflowSchema, getWorkflow } = r
 const guidance = require('./guidance');
 const guidanceSession = require('./guidance/session');
 const keepHunting = require('./guidance/keepHunting');
+const huntCoverage = require('./guidance/coverage');
 
 const pkg = require('../package.json');
 
@@ -117,7 +118,7 @@ function isEmptyResult(parsed) {
 // would be re-emitted as 12345678901234567000. Nothing served here produces one (ids are UUID
 // strings and the only bigint column is content_length), which is why the simpler code won, but a
 // future route returning epoch nanoseconds or a snowflake id would need the splice.
-function attachGuidance(toolName, params, extra, envelope, goalInfo) {
+async function attachGuidance(toolName, params, extra, envelope, goalInfo) {
   // Envelope eligibility is checked BEFORE the per-tool lookup now, because two things ride this
   // hook: the per-tool guidance (entry, may be absent) and the always-on keep_hunting heartbeat
   // (never absent). The old code returned early when there was no entry, which is exactly the set of
@@ -185,8 +186,18 @@ function attachGuidance(toolName, params, extra, envelope, goalInfo) {
     parsed.blocked === 0 && parsed.gaps === 0;
   const loud = (keepHunting.TERMINAL_PRONE.has(toolName) && (empty || softDone)) || quit >= 2;
   const targetId = params && (params.target_id || params.targetId || params.scope_target_id);
+  // THE HARD EXHAUSTION GATE rides the loud block. When a goal is active and a "nothing left"
+  // conclusion is forming, read the hunt coverage (completed automated runs per required axis) and
+  // attach it, so "done" is answered with X of Y axes completed and the exact commands still to
+  // launch, not a feeling. Fetched ONLY at the loud moment and ONLY with an active goal, so an
+  // ordinary call pays nothing and the no-goal / gate-off path is unchanged. fetchCoverage never
+  // throws and fails closed (an unreadable coverage is NOT complete), so this cannot break a tool.
+  let coverageFragment;
+  if (loud && goalInfo && goalInfo.active) {
+    coverageFragment = huntCoverage.coverageBlock(await huntCoverage.fetchCoverage(targetId));
+  }
   const heartbeat = loud
-    ? keepHunting.loudBlock(targetId, rot, goalInfo && goalInfo.active)
+    ? keepHunting.loudBlock(targetId, rot, goalInfo && goalInfo.active, coverageFragment)
     : keepHunting.heartbeat(rot);
 
   // Guidance and the heartbeat go FIRST. A caller that reads the head of a five hundred line result
@@ -294,14 +305,14 @@ function teach(toolName, handler) {
       // so no traffic leaves. The refusal still rides the guidance + goal line (hence attachGuidance).
       if (GATE_MODE === 'hard' && !active && isHuntAction(toolName, params)) {
         const refusal = goalGateRefusal(toolName, targetId);
-        try { return attachGuidance(toolName, params, extra, refusal, goalInfo); }
+        try { return await attachGuidance(toolName, params, extra, refusal, goalInfo); }
         catch (err) { return refusal; }
       }
     }
 
     const envelope = await handler(params, extra);
     try {
-      return attachGuidance(toolName, params, extra, envelope, goalInfo);
+      return await attachGuidance(toolName, params, extra, envelope, goalInfo);
     } catch (err) {
       console.error(`[MCP] guidance failed for ${toolName}, returning result unchanged:`, err && err.message);
       return envelope;
@@ -913,7 +924,7 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool('manage_session_keeper', 'Durable headless session keeper: a framework-run headless browser that holds the IdP session, reloads the UNMODIFIED SPA so the app re-mints its own short-lived bearer, and harvests it into the session-token store on a loop - so a 5-15 minute bearer stops forcing a token paste every few minutes and refresh is hands-free without your browser open. It only ever runs the app\'s own traffic and is egress-locked to {in-scope} UNION {classified auth hosts} (it never scans). Precondition: capture the session cookies first (the keeper seeds from them, via manage_session_tokens/recapture); when the long-lived IdP cookie finally dies the keeper parks as needs_recapture and you re-capture. For two accounts on one target (A and B for a cross-account IDOR), capture A, create keeper A, call adopt_cookies, then do the same for B - each keeper then seeds only its own account and the two sessions never collide. Actions: list/create/start/stop/update/delete/adopt_cookies.', manageSessionKeeperSchema.shape, async (params) => {
+  server.tool('manage_session_keeper', 'Durable headless session keeper: a framework-run headless browser that holds the IdP session, reloads the UNMODIFIED SPA so the app re-mints its own short-lived bearer, and harvests it into the session-token store on a loop - so a 5-15 minute bearer stops forcing a token paste every few minutes and refresh is hands-free without your browser open. It only ever runs the app\'s own traffic and is egress-locked to {in-scope} UNION {classified auth hosts} (it never scans). Precondition: capture the session cookies first (the keeper seeds from them, via manage_session_tokens/recapture); when the long-lived IdP cookie finally dies the keeper parks as needs_recapture and you re-capture. For two accounts on one target (A and B for a cross-account IDOR), capture A, create keeper A, call adopt_cookies, then do the same for B - each keeper then seeds only its own account and the two sessions never collide. Actions: list/create/start/stop/update/delete/adopt_cookies. Optional hands-free auto-login: configure_login sets a login URL, an ordered form fill sequence and a success probe (generic and form-driven, any app, no built-in identity-provider knowledge); set_credentials stores a reusable account password (write-only, encrypted at rest, never returned by any read) so the keeper re-logs in on its own when the session can no longer be kept warm, instead of parking needs_recapture. Auto-login is attempt-capped and parks the keeper in error on failure, so it can never loop and lock the real account out.', manageSessionKeeperSchema.shape, async (params) => {
     const result = await manageSessionKeeper(params);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });

@@ -86,12 +86,101 @@ func TestKeeperGenerationChangesWithSeed(t *testing.T) {
 }
 
 func TestKeeperStatusValidation(t *testing.T) {
-	for _, s := range []string{"pending", "seeding", "live", "needs_recapture", "stopped", "error"} {
+	for _, s := range []string{"pending", "seeding", "live", "logging_in", "needs_recapture", "stopped", "error"} {
 		if !keeperStatusValid(s) {
 			t.Errorf("%q should be a valid keeper status", s)
 		}
 	}
 	if keeperStatusValid("bogus") {
 		t.Error("an unknown status must be rejected so a bad keeper report cannot write garbage")
+	}
+}
+
+// buildKeeperAutoLogin is the arm/disarm state machine for the desired file. It must arm only when the
+// keeper is fully configured, in scope, credentialled, and under the failure cap, and must return nil
+// (no auto_login key -> byte-identical pre-feature desired file) otherwise. This is the lockout and
+// egress safety guard, so it is pinned.
+func TestBuildKeeperAutoLogin(t *testing.T) {
+	allow := []string{"app.example.com", "login.example.com"}
+	base := SessionKeeper{
+		AutoLoginEnabled: true,
+		LoginURL:         "https://login.example.com/login",
+		FillSequence: []KeeperLoginStep{
+			{Selector: "#user", Action: "type", ValueRef: "username"},
+			{Selector: "#pass", Action: "type", ValueRef: "password"},
+			{Selector: "#submit", Action: "click"},
+		},
+		SuccessProbe: KeeperSuccessProbe{Kind: "bearer"},
+	}
+
+	// Disabled: nil, so the desired file carries no auto_login key (backward-safe).
+	off := base
+	off.AutoLoginEnabled = false
+	if buildKeeperAutoLogin(off, allow, "u", "p") != nil {
+		t.Error("auto-login disabled must not arm")
+	}
+
+	// Fully armable: carries the creds and the cap.
+	al := buildKeeperAutoLogin(base, allow, "u", "p")
+	if al == nil || al.Username != "u" || al.Password != "p" || al.MaxAttempts != keeperMaxLoginAttempts {
+		t.Fatalf("expected an armed auto-login block, got %#v", al)
+	}
+	if len(al.Steps) != 3 || al.LoginURL != "https://login.example.com/login" {
+		t.Errorf("login config was not conveyed verbatim: %#v", al)
+	}
+
+	// Missing either credential: nil.
+	if buildKeeperAutoLogin(base, allow, "", "p") != nil {
+		t.Error("no username must not arm")
+	}
+	if buildKeeperAutoLogin(base, allow, "u", "") != nil {
+		t.Error("no password must not arm")
+	}
+
+	// No fill sequence: nil.
+	nosteps := base
+	nosteps.FillSequence = nil
+	if buildKeeperAutoLogin(nosteps, allow, "u", "p") != nil {
+		t.Error("no login steps must not arm")
+	}
+
+	// Login host off the egress allowlist: nil (fail-closed).
+	oos := base
+	oos.LoginURL = "https://evil.example.net/login"
+	if buildKeeperAutoLogin(oos, allow, "u", "p") != nil {
+		t.Error("an out-of-scope login host must not arm")
+	}
+	// A lookalike suffix must not satisfy the label-boundary match.
+	lookalike := base
+	lookalike.LoginURL = "https://notlogin.example.com.evil.com/login"
+	if buildKeeperAutoLogin(lookalike, allow, "u", "p") != nil {
+		t.Error("a lookalike host must not satisfy the allowlist")
+	}
+
+	// At the attempt cap: nil (durable lockout guard).
+	capped := base
+	capped.ConsecutiveLoginFailures = keeperMaxLoginAttempts
+	if buildKeeperAutoLogin(capped, allow, "u", "p") != nil {
+		t.Error("at the attempt cap auto-login must be disarmed so it cannot hammer the account")
+	}
+}
+
+// hostAllowed is the Go-side fail-closed egress predicate; it must match on a label boundary only.
+func TestHostAllowedLabelBoundary(t *testing.T) {
+	allow := []string{"app.example.com", "example.com"}
+	if !hostAllowed("app.example.com", allow) {
+		t.Error("an exact host must be allowed")
+	}
+	if !hostAllowed("x.example.com", allow) {
+		t.Error("a subdomain of an allowed suffix must be allowed")
+	}
+	if hostAllowed("notexample.com", allow) {
+		t.Error("a bare-suffix lookalike must be refused")
+	}
+	if hostAllowed("example.com.evil.com", allow) {
+		t.Error("a trailing lookalike must be refused")
+	}
+	if hostAllowed("app.example.com", []string{}) {
+		t.Error("an empty allowlist must refuse everything (fail closed)")
 	}
 }

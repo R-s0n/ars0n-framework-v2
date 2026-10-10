@@ -186,6 +186,7 @@ const REJECTED_STATUSES = new Set(['expired', 'not_honoured', 'invalid', 'unauth
 function keeperStatusVariant(status) {
   switch (status) {
     case 'live': return 'success';
+    case 'logging_in': return 'primary';
     case 'needs_recapture': return 'warning';
     case 'error': return 'danger';
     case 'stopped': return 'secondary';
@@ -224,6 +225,12 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
   // the bearer fresh on a loop so a short-lived token stops forcing a manual paste.
   const [keepers, setKeepers] = useState([]);
   const [keeperForm, setKeeperForm] = useState({ name: '', target_url: '', cadence_seconds: 600 });
+
+  // Per-keeper auto-login configuration (login URL + form fill sequence + success probe + credentials).
+  // null = panel closed. The password is WRITE-ONLY: it is never loaded from the server (no read ever
+  // returns it), so an empty password box on an already-configured keeper means "keep the stored
+  // password", exactly like the token Value box. The username is not a secret, so it is loaded as a hint.
+  const [loginCfg, setLoginCfg] = useState(null);
 
   const targetHost = useMemo(() => hostFromUrl(scopeTargetUrl), [scopeTargetUrl]);
   const expiredActiveCount = useMemo(
@@ -328,6 +335,94 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
     }
   }, [fetchKeepers, fetchTokens]);
 
+  const openLoginConfig = useCallback((k) => {
+    setLoginCfg({
+      keeper_id: k.id,
+      name: k.name,
+      login_url: k.login_url || '',
+      steps: Array.isArray(k.fill_sequence) && k.fill_sequence.length
+        ? k.fill_sequence.map((s) => ({
+            selector: s.selector || '', action: s.action || 'type',
+            value_ref: s.value_ref || 'literal', literal: s.literal || '',
+          }))
+        : [
+            { selector: '', action: 'type', value_ref: 'username', literal: '' },
+            { selector: '', action: 'type', value_ref: 'password', literal: '' },
+            { selector: '', action: 'click', value_ref: 'literal', literal: '' },
+          ],
+      probe_kind: (k.success_probe && k.success_probe.kind) || 'bearer',
+      probe_value: (k.success_probe && k.success_probe.value) || '',
+      username: k.username || '',
+      password: '',
+      auto_login_enabled: k.auto_login_enabled === true,
+      has_credentials: k.has_credentials === true,
+    });
+    setError('');
+    setNotice('');
+  }, []);
+
+  const addLoginStep = () => setLoginCfg((p) => p && ({
+    ...p, steps: [...p.steps, { selector: '', action: 'type', value_ref: 'literal', literal: '' }],
+  }));
+  const removeLoginStep = (i) => setLoginCfg((p) => p && ({
+    ...p, steps: p.steps.filter((_, idx) => idx !== i),
+  }));
+  const updateLoginStep = (i, patch) => setLoginCfg((p) => p && ({
+    ...p, steps: p.steps.map((s, idx) => (idx === i ? { ...s, ...patch } : s)),
+  }));
+
+  const saveLoginConfig = useCallback(async () => {
+    if (!loginCfg) return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      // 1) Credentials FIRST when a password was typed, so that if auto-login is being enabled in the
+      // same save the credential is already stored when the login-config enable check runs. The box is
+      // write-only, so an empty box leaves the stored password untouched; the username rides along only
+      // with a password so an account is never half-saved without the secret that pairs with it.
+      if (loginCfg.password !== '') {
+        const credRes = await fetch(`/api/session-keepers/${loginCfg.keeper_id}/credentials`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: loginCfg.username.trim(), password: loginCfg.password }),
+        });
+        if (!credRes.ok) throw new Error((await credRes.text()) || `framework returned ${credRes.status}`);
+      }
+
+      // 2) The non-secret configuration. A submit step may legitimately have no selector (it presses
+      // Enter), so keep submit steps even when their selector is blank.
+      const steps = loginCfg.steps
+        .filter((s) => s.selector.trim() !== '' || s.action === 'submit')
+        .map((s) => {
+          const out = { selector: s.selector.trim(), action: s.action, value_ref: s.value_ref };
+          if (s.action === 'type' && s.value_ref === 'literal') out.literal = s.literal;
+          return out;
+        });
+      const probe = { kind: loginCfg.probe_kind };
+      if (loginCfg.probe_kind !== 'bearer') probe.value = loginCfg.probe_value.trim();
+      const cfgRes = await fetch(`/api/session-keepers/${loginCfg.keeper_id}/login-config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          login_url: loginCfg.login_url.trim(),
+          fill_sequence: steps,
+          success_probe: probe,
+          auto_login_enabled: loginCfg.auto_login_enabled,
+        }),
+      });
+      if (!cfgRes.ok) throw new Error((await cfgRes.text()) || `framework returned ${cfgRes.status}`);
+
+      setNotice('Auto-login configuration saved. The keeper re-logs in on its own only when auto-login is enabled, credentials are stored, and the session cannot be kept warm any other way.');
+      setLoginCfg(null);
+      await fetchKeepers();
+    } catch (e) {
+      setError(`Could not save the auto-login configuration: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [loginCfg, fetchKeepers]);
+
   useEffect(() => {
     if (show && scopeTargetId) {
       fetchTokens();
@@ -345,8 +440,15 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
       setError('');
       setNotice('');
       setKeeperForm({ name: '', target_url: '', cadence_seconds: 600 });
+      setLoginCfg(null);
     }
   }, [show, scopeTargetId, fetchTokens, fetchFlows, fetchKeepers]);
+
+  // A login URL and at least one step with a selector are the floor for saving. The enable checks
+  // (credentials stored, host in scope) are enforced by the framework and surfaced as a save error.
+  const canSaveLogin = !!loginCfg
+    && loginCfg.login_url.trim() !== ''
+    && loginCfg.steps.some((s) => s.selector.trim() !== '');
 
   const flowsById = useMemo(() => {
     const m = {};
@@ -641,6 +743,7 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                         <td>
                           <Badge bg={keeperStatusVariant(k.status)}>{k.status}</Badge>
                           {!k.enabled && <Badge bg="secondary" className="ms-1">off</Badge>}
+                          {k.auto_login_enabled && <Badge bg="dark" className="border border-info text-info ms-1" title="Auto-login is enabled: when the session cannot be kept warm any other way, the keeper re-logs in on its own with the stored credentials, attempt-capped and lockout-safe.">auto-login</Badge>}
                           {k.last_error && <i className="bi bi-exclamation-triangle text-warning ms-1" title={k.last_error} />}
                         </td>
                         <td className="text-white-50">{k.last_harvest_at ? new Date(k.last_harvest_at).toLocaleTimeString() : 'none yet'}</td>
@@ -649,6 +752,9 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                           <Button size="sm" variant="outline-light" className="py-0 px-1 me-1" disabled={busy}
                             title="Claim the target's currently-untagged cookies for this account, so this keeper seeds only them. Do this right after capturing the session for this account."
                             onClick={() => keeperAction(k.id, 'adopt-cookies')}>Adopt cookies</Button>
+                          <Button size="sm" variant="outline-info" className="py-0 px-1 me-1" disabled={busy}
+                            title="Configure hands-free auto-login for this keeper: a login URL, a form fill sequence, a success probe and stored credentials, so it re-logs in on its own when the session expires."
+                            onClick={() => openLoginConfig(k)}>Auto-login</Button>
                           {k.enabled
                             ? <Button size="sm" variant="outline-warning" className="py-0 px-1 me-1" disabled={busy} onClick={() => keeperAction(k.id, 'stop')}>Stop</Button>
                             : <Button size="sm" variant="outline-success" className="py-0 px-1 me-1" disabled={busy} onClick={() => keeperAction(k.id, 'start')}>Start</Button>}
@@ -659,6 +765,121 @@ const ManageSessionsModal = ({ show, handleClose, scopeTargetId, scopeTargetUrl 
                   </tbody>
                 </Table>
               )}
+
+              {loginCfg && (
+                <div className="border border-danger rounded p-3 mb-2" style={{ background: 'rgba(220,53,69,0.06)' }}>
+                  <div className="d-flex align-items-center mb-2">
+                    <strong className="text-danger"><i className="bi bi-box-arrow-in-right me-1" />Auto-login for "{loginCfg.name}"</strong>
+                    <Button size="sm" variant="outline-secondary" className="ms-auto py-0 px-2" onClick={() => setLoginCfg(null)} disabled={busy}>Close</Button>
+                  </div>
+                  <Alert variant="danger" className="py-2 small mb-2">
+                    <strong>This stores a reusable account password, not a session token.</strong> Anyone with access to
+                    this framework or its database can log in as this account for as long as the password is valid, a
+                    wider account-takeover exposure than a captured session. Use a dedicated test account you control,
+                    never a shared or production login. The password is stored encrypted at rest, is used only to drive
+                    this app's own login form in the headless keeper, is never sent to any host outside this target's
+                    scope, and is never shown again once saved. Auto-login is attempt-capped: after one or two failed
+                    logins the keeper stops and parks itself in error rather than retrying, so a changed form, a wrong
+                    password, or an MFA or CAPTCHA prompt can never lock the real account out by repeated attempts.
+                  </Alert>
+                  <Row className="g-2 mb-2">
+                    <Col md={12}>
+                      <Form.Label className="text-white small mb-1">Login URL</Form.Label>
+                      <Form.Control size="sm" placeholder="https://app.example.com/login"
+                        value={loginCfg.login_url}
+                        onChange={(e) => setLoginCfg({ ...loginCfg, login_url: e.target.value })} />
+                      <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
+                        Must be inside this target's scope. The keeper aborts any host it is not allowed to reach.
+                      </div>
+                    </Col>
+                  </Row>
+                  <Form.Label className="text-white small mb-1">Form fill sequence</Form.Label>
+                  <div className="text-white-50 mb-2" style={{ fontSize: '0.7rem' }}>
+                    The steps the headless browser runs on the login page, in order. A type step with "username" or
+                    "password" fills a field from the stored credentials; a literal type step is for anything else (a
+                    tenant slug); a click or submit step sends the form. Form-driven, so it works on any login page.
+                  </div>
+                  <Table size="sm" variant="dark" bordered className="mb-2" style={{ fontSize: '0.72rem' }}>
+                    <thead><tr><th style={{ width: '42%' }}>CSS selector</th><th>Action</th><th>Value</th><th /></tr></thead>
+                    <tbody>
+                      {loginCfg.steps.map((s, i) => (
+                        <tr key={i}>
+                          <td><Form.Control size="sm" placeholder="#username, input[name=email]"
+                            value={s.selector} onChange={(e) => updateLoginStep(i, { selector: e.target.value })} /></td>
+                          <td><Form.Select size="sm" value={s.action} onChange={(e) => updateLoginStep(i, { action: e.target.value })}>
+                            <option value="type">type</option><option value="click">click</option>
+                            <option value="waitFor">waitFor</option><option value="submit">submit</option>
+                          </Form.Select></td>
+                          <td>{s.action === 'type' ? (
+                            <div className="d-flex gap-1">
+                              <Form.Select size="sm" value={s.value_ref} onChange={(e) => updateLoginStep(i, { value_ref: e.target.value })}>
+                                <option value="username">username</option><option value="password">password</option><option value="literal">literal</option>
+                              </Form.Select>
+                              {s.value_ref === 'literal' && (
+                                <Form.Control size="sm" placeholder="literal value" value={s.literal}
+                                  onChange={(e) => updateLoginStep(i, { literal: e.target.value })} />)}
+                            </div>) : <span className="text-white-50">n/a</span>}</td>
+                          <td className="text-end"><i role="button" className="bi bi-trash text-danger" title="Remove step" onClick={() => removeLoginStep(i)} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </Table>
+                  <Button size="sm" variant="outline-light" className="py-0 px-2 mb-3" onClick={addLoginStep}>
+                    <i className="bi bi-plus-lg me-1" />Add step
+                  </Button>
+                  <Row className="g-2 mb-2">
+                    <Col md={5}>
+                      <Form.Label className="text-white small mb-1">Success probe</Form.Label>
+                      <Form.Select size="sm" value={loginCfg.probe_kind} onChange={(e) => setLoginCfg({ ...loginCfg, probe_kind: e.target.value })}>
+                        <option value="bearer">a fresh bearer is harvested (default)</option>
+                        <option value="url">the URL contains</option>
+                        <option value="selector">an element matches</option>
+                        <option value="cookie">a cookie is set</option>
+                      </Form.Select>
+                    </Col>
+                    <Col md={7}>
+                      <Form.Label className="text-white small mb-1">Probe value</Form.Label>
+                      <Form.Control size="sm"
+                        placeholder={loginCfg.probe_kind === 'url' ? '/dashboard'
+                          : loginCfg.probe_kind === 'selector' ? '[data-testid=app-shell]'
+                          : loginCfg.probe_kind === 'cookie' ? 'session' : 'not needed for this probe'}
+                        disabled={loginCfg.probe_kind === 'bearer'}
+                        value={loginCfg.probe_value} onChange={(e) => setLoginCfg({ ...loginCfg, probe_value: e.target.value })} />
+                    </Col>
+                  </Row>
+                  <Row className="g-2 mb-2">
+                    <Col md={6}>
+                      <Form.Label className="text-white small mb-1">Username</Form.Label>
+                      <Form.Control size="sm" autoComplete="off" placeholder="the test account username"
+                        value={loginCfg.username} onChange={(e) => setLoginCfg({ ...loginCfg, username: e.target.value })} />
+                    </Col>
+                    <Col md={6}>
+                      <Form.Label className="text-white small mb-1">Password</Form.Label>
+                      <Form.Control size="sm" type="password" autoComplete="new-password"
+                        placeholder={loginCfg.has_credentials
+                          ? 'A password is stored. Leave blank to keep it, or type a new one to replace it.'
+                          : 'The account password. Stored encrypted, never shown again.'}
+                        value={loginCfg.password} onChange={(e) => setLoginCfg({ ...loginCfg, password: e.target.value })} />
+                      <div className="text-white-50" style={{ fontSize: '0.7rem' }}>
+                        {loginCfg.has_credentials
+                          ? `Credentials are stored for ${loginCfg.username || 'this account'}. The password is never shown.`
+                          : 'No credentials stored yet.'}
+                      </div>
+                    </Col>
+                  </Row>
+                  <div className="d-flex align-items-center gap-3">
+                    <Form.Check type="switch" id="keeper-auto-login" className="text-white small" label="Enable auto-login"
+                      checked={loginCfg.auto_login_enabled} onChange={(e) => setLoginCfg({ ...loginCfg, auto_login_enabled: e.target.checked })} />
+                    <Button size="sm" variant="danger" onClick={saveLoginConfig} disabled={busy || !canSaveLogin}>
+                      {busy ? <Spinner size="sm" animation="border" /> : 'Save auto-login'}
+                    </Button>
+                    {loginCfg.auto_login_enabled && !loginCfg.has_credentials && loginCfg.password === '' && (
+                      <span className="text-warning small">Enabling does nothing until a password is stored.</span>)}
+                    {!canSaveLogin && <span className="text-white-50 small">A login URL and at least one step with a selector are required.</span>}
+                  </div>
+                </div>
+              )}
+
               <Row className="g-1 align-items-end">
                 <Col xs={3}>
                   <Form.Label className="small mb-0 text-white-50">Account label</Form.Label>

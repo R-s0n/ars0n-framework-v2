@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -105,6 +106,130 @@ func AdoptKeeperCookiesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{
 		"success": true, "claimed": claimed, "owned": owned, "account": account})
+}
+
+// SetSessionKeeperLoginConfigHandler: PUT /session-keepers/{id}/login-config
+// Body (any subset): { "login_url": "...", "fill_sequence": [{selector,action,value_ref,literal}],
+//   "success_probe": {kind,value}, "auto_login_enabled": bool }
+// This is the NON-secret half of auto-login. Enabling is validated LOUDLY here (validate, do not warn):
+// the login host must be in scope (the keeper refuses to navigate off its egress allowlist) and the
+// fill sequence + stored credentials must be present. The response returns the keeper via
+// sessionKeeperCols, so it never carries the password.
+func SetSessionKeeperLoginConfigHandler(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	if _, err := uuid.Parse(id); err != nil {
+		writeSessionTokenJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "id must be a UUID"})
+		return
+	}
+	var body struct {
+		AutoLoginEnabled *bool               `json:"auto_login_enabled"`
+		LoginURL         *string             `json:"login_url"`
+		FillSequence     []KeeperLoginStep   `json:"fill_sequence"`
+		SuccessProbe     *KeeperSuccessProbe `json:"success_probe"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeSessionTokenJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "invalid body"})
+		return
+	}
+	k, err := GetSessionKeeper(context.Background(), id)
+	if err != nil {
+		writeSessionTokenJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+		return
+	}
+
+	// A config object is passed to the store only when at least one of its parts was sent, so a bare
+	// enable/disable toggle leaves the stored fill sequence alone.
+	var cfgPtr *KeeperLoginConfig
+	if body.FillSequence != nil || body.SuccessProbe != nil {
+		cfg := KeeperLoginConfig{Steps: k.FillSequence, SuccessProbe: k.SuccessProbe}
+		if body.FillSequence != nil {
+			cfg.Steps = body.FillSequence
+		}
+		if body.SuccessProbe != nil {
+			cfg.SuccessProbe = *body.SuccessProbe
+		}
+		cfgPtr = &cfg
+	}
+
+	// Effective values = what is being set in this call, else what is already stored.
+	effURL := k.LoginURL
+	if body.LoginURL != nil {
+		effURL = *body.LoginURL
+	}
+	effSteps := k.FillSequence
+	effProbe := k.SuccessProbe
+	if cfgPtr != nil {
+		effSteps = cfgPtr.Steps
+		effProbe = cfgPtr.SuccessProbe
+	}
+
+	// Structural validation of a non-empty config, so a half-built sequence is rejected at save time.
+	if effURL != "" || len(effSteps) > 0 {
+		if problem := validateKeeperLoginConfig(effURL, effSteps, effProbe); problem != "" {
+			writeSessionTokenJSON(w, http.StatusBadRequest, map[string]interface{}{"error": problem})
+			return
+		}
+	}
+
+	// Enabling has extra preconditions: credentials stored and the login host in scope.
+	if body.AutoLoginEnabled != nil && *body.AutoLoginEnabled {
+		if len(effSteps) == 0 {
+			writeSessionTokenJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"error": "auto-login needs a login fill sequence (record the login or enter the selector steps) before it can be enabled"})
+			return
+		}
+		if !k.HasPassword {
+			writeSessionTokenJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"error": "auto-login needs stored credentials (set a username and password) before it can be enabled"})
+			return
+		}
+		lh := hostOfURL(effURL)
+		scope := LoadScanScope(k.ScopeTargetID)
+		inScope, authSuffixes := scope.SuffixesByEffect()
+		allow := append(append([]string{}, inScope...), authSuffixes...)
+		if lh == "" || !hostAllowed(lh, allow) {
+			writeSessionTokenJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"error": "the login host is not in scope; add it to the scope (in-scope or as an auth host) so the keeper is allowed to navigate to it"})
+			return
+		}
+	}
+
+	updated, err := SetKeeperLoginConfig(context.Background(), id, body.AutoLoginEnabled, body.LoginURL, cfgPtr)
+	if err != nil {
+		writeSessionTokenJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{"keeper": updated})
+}
+
+// SetSessionKeeperCredentialsHandler: PUT /session-keepers/{id}/credentials
+// Body: { "username": "...", "password": "..." }
+// The SECRET half of auto-login. The password is write-only: it is stored encrypted at rest and never
+// returned by any read. The response confirms storage without echoing the password.
+func SetSessionKeeperCredentialsHandler(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	if _, err := uuid.Parse(id); err != nil {
+		writeSessionTokenJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "id must be a UUID"})
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeSessionTokenJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "invalid body"})
+		return
+	}
+	if strings.TrimSpace(body.Password) == "" {
+		writeSessionTokenJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "a password is required"})
+		return
+	}
+	if err := SetKeeperCredentials(context.Background(), id, body.Username, body.Password); err != nil {
+		writeSessionTokenJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	writeSessionTokenJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true, "has_credentials": true, "username": strings.TrimSpace(body.Username)})
 }
 
 // SetSessionKeeperEnabledHandler handles the start/stop convenience routes by toggling enabled.

@@ -367,6 +367,63 @@ maybe('the last validation sentence on a token row is not shortened', async () =
   assert.strictEqual(out.data[0].last_validation_detail, LONG_DETAIL);
 });
 
+// ---------------------------------------------------------------------------------------------
+// 6. Keeper auto-login: the config is forwarded and the password is write-only
+// ---------------------------------------------------------------------------------------------
+
+const KEEPER_ID = 'bb22cc33-dd44-4e55-8f66-001122334455';
+const KEEPER_PASSWORD = 'reusable-account-pw-9!';
+
+maybe('configure_login forwards the login config to the login-config route', async () => {
+  const stub = stubAPI({ [`/session-keepers/${KEEPER_ID}/login-config`]: { keeper: { id: KEEPER_ID, auto_login_enabled: true } } });
+  await authsessions.manageSessionKeeper({
+    action: 'configure_login', keeper_id: KEEPER_ID,
+    login_url: 'https://app.example.com/login',
+    fill_sequence: [{ selector: '#u', action: 'type', value_ref: 'username' }],
+    success_probe: { kind: 'bearer' },
+    auto_login_enabled: true,
+  });
+  stub.restore();
+  assert.strictEqual(stub.calls.length, 1);
+  assert.strictEqual(stub.calls[0].path, `/session-keepers/${KEEPER_ID}/login-config`);
+  assert.strictEqual(stub.calls[0].method, 'PUT');
+});
+
+maybe('set_credentials stores the password but never echoes it back', async () => {
+  const stub = stubAPI({ [`/session-keepers/${KEEPER_ID}/credentials`]: { success: true, has_credentials: true, username: 'alice' } });
+  const out = await authsessions.manageSessionKeeper({
+    action: 'set_credentials', keeper_id: KEEPER_ID, login_username: 'alice', login_password: KEEPER_PASSWORD,
+  });
+  stub.restore();
+  assert.strictEqual(stub.calls[0].path, `/session-keepers/${KEEPER_ID}/credentials`);
+  assert.strictEqual(stub.calls[0].method, 'PUT');
+  assert.strictEqual(out.has_credentials, true);
+  assert.ok(!allStrings(out).some((s) => s.includes(KEEPER_PASSWORD)),
+    'the password must never appear anywhere in the set_credentials result');
+});
+
+maybe('set_credentials with no password is refused and sends nothing', async () => {
+  const stub = stubAPI({});
+  const out = await authsessions.manageSessionKeeper({ action: 'set_credentials', keeper_id: KEEPER_ID });
+  stub.restore();
+  assert.ok(out.error, 'a set_credentials with no password must error');
+  assert.strictEqual(stub.calls.length, 0, 'nothing should be sent when the password is missing');
+});
+
+maybe('a listed keeper carrying a secret-shaped key has it stripped', async () => {
+  const stub = stubAPI({
+    [`/session-keepers/target/${TARGET_ID}`]: {
+      keepers: [{ id: KEEPER_ID, name: 'A', status: 'live', login_password: KEEPER_PASSWORD, has_credentials: true }],
+    },
+  });
+  const out = await authsessions.manageSessionKeeper({ action: 'list', target_id: TARGET_ID });
+  stub.restore();
+  assert.strictEqual(out.keepers[0].login_password, undefined, 'the password key must be stripped from a list');
+  assert.ok(!allStrings(out).some((s) => s.includes(KEEPER_PASSWORD)),
+    'no secret value may survive a keeper list');
+  assert.strictEqual(out.keepers[0].has_credentials, true, 'the non-secret has_credentials flag survives');
+});
+
 maybe('a captured request body past the default budget is reachable with max_body_chars', async () => {
   const RECORDING_ID = 'aa11bb22-cc33-4d44-8e55-ff6677889900';
   // The value worth reading sits past the listing default, which is the whole reason the parameter

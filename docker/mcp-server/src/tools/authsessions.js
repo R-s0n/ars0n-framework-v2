@@ -1228,14 +1228,26 @@ function apiError(err) {
 // operator must have captured the session cookies first (the keeper seeds from them); when the
 // long-lived IdP cookie finally dies, the keeper parks as needs_recapture and the operator re-captures.
 const manageSessionKeeperSchema = z.object({
-  action: z.enum(['list', 'create', 'start', 'stop', 'update', 'delete', 'adopt_cookies']).describe(
+  action: z.enum(['list', 'create', 'start', 'stop', 'update', 'delete', 'adopt_cookies',
+                  'configure_login', 'set_credentials']).describe(
     'list: the keepers for a target, with status/last_harvest. create: start keeping a (target, ' +
     'account) session warm. start/stop: enable or disable one keeper. update: change ' +
     'target_url/cadence/enabled. delete: remove it and tear down its browser. adopt_cookies: claim the ' +
     "target's currently-untagged cookies for this keeper's account so it seeds ONLY them - the " +
-    'multi-account step (A and B for one target): capture A, create keeper A, adopt_cookies; then B.'),
+    'multi-account step (A and B for one target): capture A, create keeper A, adopt_cookies; then B. ' +
+    'configure_login: set the OPTIONAL hands-free auto-login for a keeper (login_url + an ordered ' +
+    'fill_sequence + a success_probe + auto_login_enabled). This is generic and form-driven, so it ' +
+    'works on any app login page; it holds NO built-in knowledge of any one identity provider. When ' +
+    'enabled AND credentials are set, the keeper drives the app login form in its headless browser and ' +
+    're-logs in on its own once the session can no longer be kept warm, instead of parking ' +
+    'needs_recapture. set_credentials: store the reusable account username + password for that ' +
+    'auto-login. SECURITY: the password is a reusable account credential with a wider ' +
+    'account-takeover blast radius than a session token. It is stored encrypted at rest, is write-only ' +
+    '(no list or read ever returns it), and is used only to drive this one app login. Use a dedicated ' +
+    'test account. Auto-login is attempt-capped and parks the keeper in error on failure, so it can ' +
+    'never loop and lock the real account out.'),
   target_id: z.string().uuid().optional().describe('Scope target UUID. Required for list and create.'),
-  keeper_id: z.string().uuid().optional().describe('Keeper UUID. Required for start, stop, update, delete.'),
+  keeper_id: z.string().uuid().optional().describe('Keeper UUID. Required for start, stop, update, delete, configure_login, set_credentials.'),
   name: z.string().optional().describe(
     'create: the account label (e.g. "account-A"), which is the row identity so two accounts for one ' +
     'target do not upsert over each other. Defaults to "default".'),
@@ -1246,26 +1258,75 @@ const manageSessionKeeperSchema = z.object({
     'create/update: how often to reload the SPA to force a re-mint. Default 600 (10 min), minimum 120; ' +
     'keep it inside the bearer lifetime (e.g. 600 for a 15-minute bearer).'),
   enabled: z.boolean().optional().describe('update: enable or disable the keeper.'),
+  login_url: z.string().optional().describe(
+    'configure_login: the login page URL the headless browser navigates to. Must be inside the target ' +
+    'scope; the keeper aborts any host not on its egress allowlist.'),
+  fill_sequence: z.array(z.object({
+    selector: z.string().describe('CSS selector for the element this step acts on.'),
+    action: z.enum(['type', 'click', 'waitFor', 'submit']).describe(
+      'type fills the element; click clicks it; waitFor waits for it to appear; submit submits its form.'),
+    value_ref: z.enum(['username', 'password', 'literal']).optional().describe(
+      'type only: username/password fill from the stored credentials; literal uses the literal field. ' +
+      'The password is referenced here, NEVER stored as a literal, so the secret lives only in the ' +
+      'encrypted credential store.'),
+    literal: z.string().optional().describe('type + value_ref=literal: the literal text to type (a non-secret value such as a tenant slug).'),
+  })).optional().describe(
+    'configure_login: the ordered DOM steps the keeper runs on the login page. This is what makes ' +
+    'auto-login generic: any login form is expressed as type/click/submit steps rather than a ' +
+    'provider-specific code path.'),
+  success_probe: z.object({
+    kind: z.enum(['bearer', 'url', 'selector', 'cookie']).describe(
+      'How the keeper knows login succeeded: bearer (the keeper observed a fresh bearer, the default ' +
+      'and most generic), url (post-login URL contains value), selector (an element matches value), or ' +
+      'cookie (a cookie named value is set).'),
+    value: z.string().optional().describe('The substring / selector / cookie name the probe checks. Omit for bearer.'),
+  }).optional().describe('configure_login: the post-login success check.'),
+  auto_login_enabled: z.boolean().optional().describe(
+    'configure_login: turn auto-login on or off for this keeper. Off by default and a no-op until ' +
+    'credentials are stored. When off, the keeper behaves exactly as before (re-mint from the stored ' +
+    'session, park needs_recapture on expiry).'),
+  login_username: z.string().optional().describe('set_credentials: the account username for auto-login. Not a secret; may be returned on reads.'),
+  login_password: z.string().optional().describe(
+    'set_credentials: the account password. Write-only and stored encrypted at rest. It is NEVER ' +
+    'returned by list or any read, never logged, and never written to a status or harvest file. ' +
+    'Required for set_credentials.'),
 });
+
+// The keeper's auto-login password is write-only: set by set_credentials and never read back. The Go
+// API does not return it, but this strips any secret-shaped key defensively so a future API change can
+// never leak it through this tool. Walks a { keepers: [...] } list, a { keeper: {...} } object, and the
+// top-level object.
+const KEEPER_SECRET_KEYS = ['password', 'login_password', 'auth_password', 'login_password_enc'];
+function scrubKeeperSecrets(out) {
+  const strip = (o) => {
+    if (!o || typeof o !== 'object') return o;
+    for (const k of KEEPER_SECRET_KEYS) if (k in o) delete o[k];
+    return o;
+  };
+  if (out && Array.isArray(out.keepers)) out.keepers.forEach(strip);
+  if (out && out.keeper) strip(out.keeper);
+  strip(out);
+  return out;
+}
 
 async function manageSessionKeeper(params) {
   switch (params.action) {
     case 'list':
       if (!params.target_id) return { error: 'list needs target_id' };
-      return apiGet(`/session-keepers/target/${params.target_id}`);
+      return scrubKeeperSecrets(await apiGet(`/session-keepers/target/${params.target_id}`));
     case 'create':
       if (!params.target_id) return { error: 'create needs target_id' };
-      return apiPost(`/session-keepers/target/${params.target_id}`, {
+      return scrubKeeperSecrets(await apiPost(`/session-keepers/target/${params.target_id}`, {
         name: params.name || '',
         target_url: params.target_url || '',
         cadence_seconds: params.cadence_seconds || 0,
-      });
+      }));
     case 'start':
       if (!params.keeper_id) return { error: 'start needs keeper_id' };
-      return apiPost(`/session-keepers/${params.keeper_id}/start`, {});
+      return scrubKeeperSecrets(await apiPost(`/session-keepers/${params.keeper_id}/start`, {}));
     case 'stop':
       if (!params.keeper_id) return { error: 'stop needs keeper_id' };
-      return apiPost(`/session-keepers/${params.keeper_id}/stop`, {});
+      return scrubKeeperSecrets(await apiPost(`/session-keepers/${params.keeper_id}/stop`, {}));
     case 'update': {
       if (!params.keeper_id) return { error: 'update needs keeper_id' };
       const body = {};
@@ -1273,7 +1334,7 @@ async function manageSessionKeeper(params) {
       if (params.target_url !== undefined) body.target_url = params.target_url;
       if (params.cadence_seconds !== undefined) body.cadence_seconds = params.cadence_seconds;
       if (Object.keys(body).length === 0) return { error: 'update needs at least one of enabled/target_url/cadence_seconds' };
-      return apiPut(`/session-keepers/${params.keeper_id}`, body);
+      return scrubKeeperSecrets(await apiPut(`/session-keepers/${params.keeper_id}`, body));
     }
     case 'delete':
       if (!params.keeper_id) return { error: 'delete needs keeper_id' };
@@ -1281,6 +1342,33 @@ async function manageSessionKeeper(params) {
     case 'adopt_cookies':
       if (!params.keeper_id) return { error: 'adopt_cookies needs keeper_id' };
       return apiPost(`/session-keepers/${params.keeper_id}/adopt-cookies`, {});
+    case 'configure_login': {
+      if (!params.keeper_id) return { error: 'configure_login needs keeper_id' };
+      const body = {};
+      if (params.login_url !== undefined) body.login_url = params.login_url;
+      if (params.fill_sequence !== undefined) body.fill_sequence = params.fill_sequence;
+      if (params.success_probe !== undefined) body.success_probe = params.success_probe;
+      if (params.auto_login_enabled !== undefined) body.auto_login_enabled = params.auto_login_enabled;
+      if (Object.keys(body).length === 0) {
+        return { error: 'configure_login needs login_url, fill_sequence, success_probe or auto_login_enabled' };
+      }
+      return scrubKeeperSecrets(await apiPut(`/session-keepers/${params.keeper_id}/login-config`, body));
+    }
+    case 'set_credentials': {
+      if (!params.keeper_id) return { error: 'set_credentials needs keeper_id' };
+      if (!params.login_password) return { error: 'set_credentials needs login_password' };
+      const out = await apiPut(`/session-keepers/${params.keeper_id}/credentials`, {
+        username: params.login_username || '',
+        password: params.login_password,
+      });
+      // Confirm storage WITHOUT ever echoing the password back, whatever the API returned.
+      return clean({
+        keeper_id: params.keeper_id,
+        has_credentials: true,
+        username: (out && out.username) || params.login_username || undefined,
+        note: 'Password stored (write-only, encrypted at rest). It is never returned by any read.',
+      });
+    }
     default:
       return { error: `unknown action: ${params.action}` };
   }

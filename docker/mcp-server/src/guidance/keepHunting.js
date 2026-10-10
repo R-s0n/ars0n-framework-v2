@@ -6,8 +6,9 @@
 // "the target has nothing left", and reports the second. In bug bounty that is always wrong: the
 // search space is fractal and effectively unbounded. Another header, parameter, value, encoding,
 // endpoint, verb, wordlist, host, path depth, auth state, timing or chain ALWAYS exists. Real
-// engagements run for days, weeks, months across many targets. "Exhausted" is a feeling that arrives
-// at hour two; the bug arrives around hour forty.
+// engagements run for days, weeks and months across many targets. "Exhausted" is not a function of
+// elapsed time, which this model cannot perceive; it is earned only by completed automated runs over
+// every required hunting axis, and asserting it from effort spent is the exact failure this layer fixes.
 //
 // WHY A PUSH, NOT A PULL. The documented root cause is that the AI does NOT call the help tools when
 // it concludes done: not knowing a next move exists is exactly the state in which you do not ask for
@@ -32,7 +33,7 @@
 // The rotating reframe pool. Each line is a complete thought that reframes stopping as the error.
 const HEARTBEAT = [
   'Clean is not a finding, it is the absence of one. You tested one shape of one input in one state. That is tier one of twelve.',
-  'Exhausted is a feeling, not a fact. It arrives at hour two. The bug arrives around hour forty. Keep going.',
+  'Exhausted is a feeling, not a fact. You cannot perceive the time you have spent, so do not judge by it. Judge by completed automated runs and coverage.',
   'The search space is fractal: every endpoint hides params, every param hides values, every value hides an encoding, every encoding hides a parser.',
   'A WAF blocking your payload confirms the param reaches something sensitive. You found a live wire, not a wall.',
   '"No other way" has never once been true on a real web app. Another header, param, value, verb, host, path depth or auth state always exists.',
@@ -43,7 +44,7 @@ const HEARTBEAT = [
   'Stopping is the one move that is always wrong. Every other move at least gathers information.',
   'A guard that held on fifteen endpoints says nothing about the sixteenth. Authorization is per handler, not transitive. Test the next one.',
   'Needing the operator for one thing is not being blocked on everything. Name the blocker AND the next un-blocked move in the same breath.',
-  'You have done minutes of an unbounded search. Do not hand a target back as tested. There is always another pod.',
+  'Effort spent is not a measure you can read. Completeness is completed runs over required axes. Launch the unfinished axis as a long background run and let it run.',
   'A negative result is data about your test, not a verdict on the target. Change the test: new value class, new encoding, new insertion point.',
 ];
 
@@ -102,6 +103,25 @@ const GOAL_RULE =
   'your own goal met. A failed verify closes that attempt, not the goal, so keep hunting the open ' +
   'criteria. Achieving the goal (with its PoC) is the sanctioned stop; an operator abort is the only ' +
   'other one.';
+
+// The standing TIME-OFF-THE-FRAME rule. The deepest recurring failure is concluding a goal
+// "exhausted" after a short burst of manual probing, because the model judges completeness by ELAPSED
+// TIME or effort spent, a frame it cannot actually perceive. This rule moves the measure off time and
+// onto COMPLETED AUTOMATED RUNS and coverage. Delivered once per session on the tools where a "done"
+// conclusion is born (whats_next) and where the goal lives (manage_goals). No em dashes.
+const TIME_OFF_FRAME_RULE =
+  'You do NOT perceive wall-clock time, so never judge a goal complete by elapsed time or by effort ' +
+  'spent: that frame is unavailable to you and any estimate of it is a guess. Judge completeness ONLY ' +
+  'by completed automated runs and coverage, where a required hunting axis counts only once its run ' +
+  'reached a terminal completed state for THIS target. At any near-stop do not conclude anything; ' +
+  'LAUNCH the next not-started axis (content discovery, parameter enumeration, the full vector scan ' +
+  'for the class, nuclei, the per-parameter canary fuzz) as a long-running background run and let it ' +
+  'run for hours or days, because you are notified when it completes. Hunt THROUGH the framework ' +
+  'tools: their runs are logged, rate-limited and counted toward coverage. A raw one-off request ' +
+  'only verifies a single lead and NEVER counts as coverage or justifies a done, exhausted, blocked, ' +
+  'clean or no-path verdict. Real engagements run for weeks; exhausted is earned by completed runs, ' +
+  'not by elapsed time. Read manage_goals action:"coverage" for the axes left, and report a goal ' +
+  'exhausted only through manage_goals action:"report_exhausted", which is hard-gated by coverage.';
 
 // Return the heartbeat line for a rotation index. Handles any integer (including negatives) safely.
 function heartbeat(idx) {
@@ -163,7 +183,7 @@ const TERMINAL_PRONE = new Set([
 
 // Build the loud block. targetId (if known) makes the "next move" one-click; axisOffset rotates the
 // three axes shown. Returns a plain object attached in place of the heartbeat string.
-function loudBlock(targetId, axisOffset, goal) {
+function loudBlock(targetId, axisOffset, goal, coverageFragment) {
   const idPart = targetId ? ` target_id:${targetId}` : '';
   const block = {
     reframe: 'A clean or empty result is coverage of ONE axis, not a finished target. "Done" is not a ' +
@@ -192,10 +212,19 @@ function loudBlock(targetId, axisOffset, goal) {
         'propose then an isolated verify then the operator sign-off; you cannot mark it met yourself.',
     };
   }
+  // The hunt-coverage gate (exhaustion-gate layer). coverageFragment is built by
+  // guidance/coverage.js and passed in by index.js ONLY when a goal is active, so an inactive-goal
+  // or gate-off call is exactly the generic block it has always been. It carries the coverage
+  // summary, the axes still to launch with their exact commands, and the "earned by completed runs,
+  // not elapsed time" line, so an empty result is answered with X of Y axes completed rather than a
+  // feeling of done.
+  if (coverageFragment && typeof coverageFragment === 'object') {
+    Object.assign(block, coverageFragment);
+  }
   return block;
 }
 
 module.exports = {
-  HEARTBEAT, heartbeat, NO_EXHAUSTED_RULE, SESSION_DECAY_RULE, GOAL_RULE,
+  HEARTBEAT, heartbeat, NO_EXHAUSTED_RULE, SESSION_DECAY_RULE, GOAL_RULE, TIME_OFF_FRAME_RULE,
   AXES, pickAxes, TERMINAL_PRONE, loudBlock,
 };

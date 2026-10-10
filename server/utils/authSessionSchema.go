@@ -107,7 +107,7 @@ var AuthSessionSchema = []string{
 	    target_url TEXT NOT NULL DEFAULT '',
 	    enabled BOOLEAN NOT NULL DEFAULT TRUE,
 	    status VARCHAR(24) NOT NULL DEFAULT 'pending'
-	      CHECK (status IN ('pending','seeding','live','needs_recapture','stopped','error')),
+	      CHECK (status IN ('pending','seeding','live','logging_in','needs_recapture','stopped','error')),
 	    cadence_seconds INTEGER NOT NULL DEFAULT 600,
 	    last_reload_at TIMESTAMP,
 	    last_harvest_at TIMESTAMP,
@@ -118,6 +118,51 @@ var AuthSessionSchema = []string{
 	    UNIQUE (scope_target_id, name)
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_session_keepers_target ON session_keepers(scope_target_id);`,
+
+	// --- framework_secrets ---
+	// Install-local secret material. The only row today is the AES-256 key that encrypts a stored keeper
+	// login PASSWORD at rest (session_keepers.login_password_enc). This table deliberately has NO
+	// scope_target_id and NO foreign key to anything the export walks, so the generic v2 bundle engine
+	// (dbBundle.go) never pulls it: an exported .rs0n/CSV/MCP bundle therefore carries only ciphertext,
+	// and the key never leaves this install. A bundle restored onto a DIFFERENT install cannot decrypt
+	// the password (different key), which is the right property: the operator re-enters it, and the
+	// keeper treats an undecryptable credential as no credential (it parks, never loops).
+	`CREATE TABLE IF NOT EXISTS framework_secrets (
+	    key_name TEXT PRIMARY KEY,
+	    key_material BYTEA NOT NULL,
+	    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+	);`,
+
+	// --- session_keepers: auto-login (operator-configured headless re-login) ---
+	// When the IdP REFRESH token itself expires (its hard TTL), the keeper can log in again on its own
+	// with operator-stored credentials instead of parking needs_recapture - the standard authenticated-
+	// scan login-sequence behaviour (Burp/ZAP/Caido). All additive and backward-safe: auto_login_enabled
+	// defaults FALSE, so an existing keeper behaves exactly as before (re-mint from the refresh token,
+	// park needs_recapture on expiry).
+	//
+	// login_config holds the GENERIC form fill sequence + success probe, no app/IdP specifics in the
+	// schema: {"steps":[{"selector","action","value_ref","literal"}],"success_probe":{"kind","value"}}.
+	// login_username is the account username (low value, stored plain). login_password_enc is the account
+	// PASSWORD, a REUSABLE credential of higher blast radius than a bounded session token, so it is stored
+	// AES-256-GCM encrypted (nonce||ciphertext; NULL = none) with the install-local framework_secrets key
+	// and is NEVER selected into a list/read response, log, status file, or export in the clear. See
+	// keeperLoginConfig.go. consecutive_login_failures + last_login_attempt_at drive the lockout-safe
+	// attempt cap: the keeper is DISARMED after a small number of consecutive failed logins so a bad
+	// credential, a changed form, or a CAPTCHA/MFA prompt can never hammer the real account into lockout.
+	`ALTER TABLE session_keepers
+	   ADD COLUMN IF NOT EXISTS auto_login_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+	   ADD COLUMN IF NOT EXISTS login_url TEXT NOT NULL DEFAULT '',
+	   ADD COLUMN IF NOT EXISTS login_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+	   ADD COLUMN IF NOT EXISTS login_username TEXT NOT NULL DEFAULT '',
+	   ADD COLUMN IF NOT EXISTS login_password_enc BYTEA,
+	   ADD COLUMN IF NOT EXISTS consecutive_login_failures INTEGER NOT NULL DEFAULT 0,
+	   ADD COLUMN IF NOT EXISTS last_login_attempt_at TIMESTAMP;`,
+	// 'logging_in' joins the status set. Drop-and-recreate widens the inline CHECK on existing DBs; the
+	// CREATE TABLE above already lists it for fresh DBs. Same drop-and-recreate pattern as the
+	// session_tokens_token_role_check widen earlier in this file.
+	`ALTER TABLE session_keepers DROP CONSTRAINT IF EXISTS session_keepers_status_check;`,
+	`ALTER TABLE session_keepers ADD CONSTRAINT session_keepers_status_check
+	   CHECK (status IN ('pending','seeding','live','logging_in','needs_recapture','stopped','error'));`,
 }
 
 // EnsureAuthSessionSchema applies AuthSessionSchema. It is idempotent. The test harness calls it so a

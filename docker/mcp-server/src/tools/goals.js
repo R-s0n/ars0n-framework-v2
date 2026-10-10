@@ -1,5 +1,6 @@
 const { z } = require('zod');
 const { apiGet, apiPost, apiPut, apiPatch, apiDelete } = require('../api');
+const huntCoverage = require('../guidance/coverage');
 
 // THE ENGAGEMENT GOAL for a scope target: the one specific, PoC-backed objective the hunter is trying
 // to reach, and the finish line the never-give-up layer otherwise lacks. A goal is a red-team "flag"
@@ -22,7 +23,8 @@ const { apiGet, apiPost, apiPut, apiPatch, apiDelete } = require('../api');
 // the open criteria named so the loop continues.
 
 const manageGoalsSchema = z.object({
-  action: z.enum(['list', 'get', 'create', 'update', 'delete', 'activate', 'propose', 'verify']).describe(
+  action: z.enum(['list', 'get', 'create', 'update', 'delete', 'activate', 'propose', 'verify',
+    'coverage', 'report_exhausted']).describe(
     'list: every goal on a target, active one first, plus which is active. ' +
     'get: one goal in full (its criteria and any attached evidence). ' +
     'create: add a goal (always starts as draft and inactive). ' +
@@ -38,7 +40,16 @@ const manageGoalsSchema = z.object({
     'a subagent, that sees only the artifacts and is told to assume the hunter is gaming it). ' +
     'verdict:"pass" -> status verified (awaiting the operator sign-off that alone sets met); ' +
     'verdict:"fail" -> status back to active with verifier_notes naming what is still unproven. ' +
-    'There is NO action that sets met: that is the operator\'s sign-off alone.'),
+    'There is NO action that sets met: that is the operator\'s sign-off alone. ' +
+    'coverage: the hunt-coverage for the active goal - each required automated hunting axis and ' +
+    'whether it has a COMPLETED run for this target, with counts (completed/total) and the exact ' +
+    'launch command for every axis not yet started. Read this to know what to fire next. ' +
+    'report_exhausted: the ONLY sanctioned way to conclude a goal exhausted, blocked, clean, or ' +
+    'done with no PoC. It is HARD GATED: it refuses, loudly, while any required axis is incomplete, ' +
+    'naming the exact commands to launch and the line that exhausted is earned by completed runs and ' +
+    'not elapsed time; it succeeds only when every required axis has a completed run. A confirmed ' +
+    'candidate short-circuits it (that is a finding, not an exhaustion) and the operator is never ' +
+    'gated (GOAL_GATE=off disables it).'),
 
   target_id: z.string().uuid().optional().describe('The scope target UUID. Required for list, get and create.'),
   goal_id: z.string().uuid().optional().describe(
@@ -212,6 +223,86 @@ async function manageGoals(params) {
             + 'criteria named in verifier_notes; a fail closes this attempt, not the goal.';
         return { verified: params.verdict === 'pass', goal, note };
       } catch (err) { return apiError(err, 'goal_id'); }
+    }
+
+    case 'coverage': {
+      if (!params.target_id) return { error: 'coverage needs target_id' };
+      try {
+        const { active_goal } = await goalsFor(params.target_id);
+        if (!active_goal) {
+          return { error: 'no active goal on this target; set and activate one first, then hunt' };
+        }
+        const cov = await huntCoverage.fetchCoverage(params.target_id);
+        return {
+          goal: { title: active_goal.title, status: active_goal.status,
+            vuln_class: active_goal.vuln_class },
+          hunt_coverage: huntCoverage.summary(cov),
+          completed: cov && cov.completed, total: cov && cov.total,
+          exhaustible: huntCoverage.isExhaustible(cov),
+          launch_these: (cov && cov.launch_these ? cov.launch_these : [])
+            .map((a) => ({ axis: a.axis, launch: a.launch })),
+          already_running: cov && cov.running ? cov.running : [],
+          note: 'Launch every axis in launch_these as a long-running background run and let it run. '
+            + 'You do NOT perceive wall-clock time; judge this goal only by completed runs and '
+            + 'coverage, never by elapsed time or effort spent. ' + huntCoverage.EARNED_LINE,
+        };
+      } catch (err) { return apiError(err, 'target_id'); }
+    }
+
+    case 'report_exhausted': {
+      if (!params.target_id) return { error: 'report_exhausted needs target_id' };
+      let active_goal;
+      try { ({ active_goal } = await goalsFor(params.target_id)); }
+      catch (err) { return apiError(err, 'target_id'); }
+      if (!active_goal) {
+        return { error: 'no active goal on this target, so there is nothing to report exhausted' };
+      }
+      // PoC / candidate short-circuit: a finding is ALWAYS allowed. If the goal already reached
+      // candidate or beyond, the honest move is propose/verify and the operator sign-off, not an
+      // exhausted-empty report. Not blocked, just redirected.
+      if (['candidate', 'verified', 'met'].includes(active_goal.status)) {
+        return { blocked: false, status: active_goal.status,
+          note: 'This goal already has a candidate or better, so "exhausted" is the wrong verdict: '
+            + 'you have a finding. Surface it (propose then an isolated verify) and let the operator '
+            + 'sign off. A confirmed PoC always short-circuits the exhaustion gate.' };
+      }
+      const cov = await huntCoverage.fetchCoverage(params.target_id);
+      const mode = huntCoverage.gateMode();
+      const earned = huntCoverage.isExhaustible(cov);
+      // OPERATOR OVERRIDE: GOAL_GATE=off disables the hard refusal. The env is operator-controlled
+      // and the AI cannot change it, so this is the human's switch, not the agent's. The operator's
+      // own web-UI / direct-API path to abandon or sign off a goal never passes through this tool,
+      // so the operator is never gated here either way.
+      if (!earned && mode !== 'off') {
+        return {
+          blocked: true,
+          error: 'EXHAUSTION_NOT_EARNED',
+          hunt_coverage: huntCoverage.summary(cov),
+          completed: cov && cov.completed, total: cov && cov.total,
+          launch_these: (cov && cov.launch_these ? cov.launch_these : [])
+            .map((a) => ({ axis: a.axis, launch: a.launch })),
+          already_running: cov && cov.running ? cov.running : [],
+          refusal: 'You cannot report this goal exhausted, blocked, clean, or done while required '
+            + 'automated hunting axes have not completed. ' + huntCoverage.EARNED_LINE,
+          gate: `GOAL_GATE=${mode} (operator-controlled; off disables this gate).`,
+        };
+      }
+      // EARNED, or the operator disabled the gate. An honest report that WRITES NOTHING: only the
+      // operator abandons or signs off a goal, so the goal stays active and the human can always
+      // exit the state. This is the sanctioned "ran everything, coverage N/N, no PoC" conclusion.
+      return {
+        exhausted_earned: earned,
+        gate: `GOAL_GATE=${mode}`,
+        hunt_coverage: huntCoverage.summary(cov),
+        completed: cov && cov.completed, total: cov && cov.total,
+        note: earned
+          ? `Every required axis has a completed run and none produced a PoC. Legitimately EARNED: `
+            + `"ran everything, coverage ${cov.completed}/${cov.total}, no PoC". Surface it for the `
+            + `operator; it does not end the goal by itself, because only the operator abandons or `
+            + `signs one off.`
+          : 'GOAL_GATE is off: the operator has disabled the exhaustion gate, so this report is '
+            + 'allowed without earned coverage. Nothing was written and the goal is unchanged.',
+      };
     }
 
     default:

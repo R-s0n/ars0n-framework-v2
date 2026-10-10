@@ -697,6 +697,8 @@ func main() {
 	r.HandleFunc("/session-keepers/target/{scope_target_id}", utils.GetSessionKeepersHandler).Methods("GET", "OPTIONS")
 	r.HandleFunc("/session-keepers/target/{scope_target_id}", utils.CreateSessionKeeperHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/session-keepers/{id}/adopt-cookies", utils.AdoptKeeperCookiesHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/session-keepers/{id}/login-config", utils.SetSessionKeeperLoginConfigHandler).Methods("PUT", "OPTIONS")
+	r.HandleFunc("/session-keepers/{id}/credentials", utils.SetSessionKeeperCredentialsHandler).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/session-keepers/{id}/start", utils.SetSessionKeeperEnabledHandler(true)).Methods("POST", "OPTIONS")
 	r.HandleFunc("/session-keepers/{id}/stop", utils.SetSessionKeeperEnabledHandler(false)).Methods("POST", "OPTIONS")
 	r.HandleFunc("/session-keepers/{id}", utils.UpdateSessionKeeperHandler).Methods("PUT", "OPTIONS")
@@ -948,6 +950,9 @@ func main() {
 	r.HandleFunc("/goals/{goal_id}", utils.UpdateGoal).Methods("PUT", "OPTIONS")
 	r.HandleFunc("/goals/{goal_id}", utils.DeleteGoal).Methods("DELETE", "OPTIONS")
 	r.HandleFunc("/goals/{goal_id}/activate", utils.ActivateGoal).Methods("PATCH", "OPTIONS")
+	r.HandleFunc("/goals/{scope_target_id}/coverage", utils.GetHuntCoverage).Methods("GET", "OPTIONS")
+	r.HandleFunc("/hunt-coverage/{scope_target_id}", utils.GetHuntCoverage).Methods("GET", "OPTIONS")
+	r.HandleFunc("/scope-targets/{scope_target_id}/hunt-coverage", utils.GetHuntCoverage).Methods("GET", "OPTIONS")
 
 	// Notes on a single threat, which are a different thing from the scope target notes above and are
 	// stored in their own table. Same shape ambiguity, same reason: the path variable is named for what

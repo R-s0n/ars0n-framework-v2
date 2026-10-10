@@ -3,7 +3,7 @@
 // session somewhere it should not go.
 
 import assert from 'assert';
-import { hostMatches, hostOf, toPuppeteerCookie, accessTokenFromBody, stripBearer } from './keeperLib.mjs';
+import { hostMatches, hostOf, toPuppeteerCookie, accessTokenFromBody, stripBearer, validateLoginConfig, buildLoginPlan, loginUrlAllowed } from './keeperLib.mjs';
 
 let pass = 0;
 const ok = (label, cond) => { assert.ok(cond, label); pass++; };
@@ -44,5 +44,56 @@ ok('sameSite normalised to Chromium casing', c1.sameSite === 'None');
 const c2 = toPuppeteerCookie({ name: 'a', value: 'b', sameSite: 'weird' }, 'https://app.example.com');
 ok('domainless cookie gets a url fallback', c2.url === 'https://app.example.com' && c2.domain === undefined);
 ok('unrecognised sameSite omitted', c2.sameSite === undefined);
+
+// --- login config validation (the sequence interpreter, no network) ---
+const goodLogin = {
+  login_url: 'https://app.staging-v2.tradetalk.us/login',
+  steps: [
+    { selector: '#username', action: 'type', value_ref: 'username' },
+    { selector: '#password', action: 'type', value_ref: 'password' },
+    { selector: '#remember', action: 'click' },
+    { selector: 'button[type=submit]', action: 'submit' },
+  ],
+  success: { kind: 'bearer' },
+  username: 'u', password: 'p',
+};
+ok('a complete login config validates', validateLoginConfig(goodLogin).ok);
+ok('a login config with no url is rejected', !validateLoginConfig({ ...goodLogin, login_url: '' }).ok);
+ok('a login config with no steps is rejected', !validateLoginConfig({ ...goodLogin, steps: [] }).ok);
+ok('a type step with no value_ref is rejected',
+  !validateLoginConfig({ ...goodLogin, steps: [{ selector: '#u', action: 'type' }] }).ok);
+ok('a literal type step with no literal is rejected',
+  !validateLoginConfig({ ...goodLogin, steps: [{ selector: '#u', action: 'type', value_ref: 'literal' }] }).ok);
+ok('an unknown action is rejected',
+  !validateLoginConfig({ ...goodLogin, steps: [{ selector: '#u', action: 'frobnicate' }] }).ok);
+ok('a type step with no selector is rejected',
+  !validateLoginConfig({ ...goodLogin, steps: [{ action: 'type', value_ref: 'username' }] }).ok);
+ok('a url success probe with no value is rejected',
+  !validateLoginConfig({ ...goodLogin, success: { kind: 'url' } }).ok);
+ok('a bearer success probe needs no value', validateLoginConfig({ ...goodLogin, success: { kind: 'bearer' } }).ok);
+ok('an unknown success probe kind is rejected',
+  !validateLoginConfig({ ...goodLogin, success: { kind: 'telepathy' } }).ok);
+
+// --- the fill-sequence interpreter resolves creds and never exposes the password in a label ---
+const plan = buildLoginPlan(goodLogin, { username: 'alice', password: 's3cr3t-pw' });
+ok('plan has one instruction per step', plan.length === goodLogin.steps.length);
+ok('username step resolves to the stored username', plan[0].value === 'alice');
+ok('password step resolves to the stored password', plan[1].value === 's3cr3t-pw');
+ok('the password step is marked secret', plan[1].secret === true);
+ok('a non-password step is not marked secret', plan[0].secret === false);
+ok('NO plan label contains the password value', plan.every((i) => !String(i.label).includes('s3cr3t-pw')));
+ok('a literal step resolves to its literal, not a credential',
+  buildLoginPlan({ steps: [{ selector: '#x', action: 'type', value_ref: 'literal', literal: 'LIT' }] },
+    { username: 'a', password: 'b' })[0].value === 'LIT');
+ok('a missing credential resolves to empty, never undefined',
+  buildLoginPlan({ steps: [{ selector: '#u', action: 'type', value_ref: 'username' }] }, {})[0].value === '');
+
+// --- login_url egress is fail-closed, reusing the same allowlist match ---
+ok('login_url on an allowed in-scope host passes', loginUrlAllowed(goodLogin, allow));
+ok('login_url on an allowed auth host passes',
+  loginUrlAllowed({ login_url: 'https://cognito-idp.us-east-1.amazonaws.com/' }, allow));
+ok('login_url on an off-scope host is REFUSED', !loginUrlAllowed({ login_url: 'https://evil.example.com/login' }, allow));
+ok('login_url against an empty allowlist is refused (fail closed)', !loginUrlAllowed(goodLogin, []));
+ok('a junk login_url is refused', !loginUrlAllowed({ login_url: 'not a url' }, allow));
 
 console.log(`${pass} passed, 0 failed`);
