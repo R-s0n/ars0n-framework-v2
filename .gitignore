@@ -36,7 +36,16 @@ wordlists/sniper_test.txt
 /run*.json
 /repro.txt
 /probe_post.py
-/server/run_live.json
+# /server/run_live.json was too specific: server-side flow-run dumps (server/runA.json etc.) slipped
+# through because /run*.json is root-anchored. Match any run dump written under server/.
+/server/run*.json
+# Attack-vector scratch dumps written while working a target (UUID lists, captured-vector TSVs).
+# A committed .av2.tsv once shipped real captured auth-cookie names from a live engagement.
+.av2.tsv
+.av_ids.txt
+# Root-level duplicate of client/public/images/bblp (only the client/public copies are served; the
+# root copies were ~14MB of dead weight in the release zip). Keep the served copies tracked.
+/bblp/
 
 # misc
 .DS_Store

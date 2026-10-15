@@ -16,7 +16,7 @@ Ars0n Framework v2
 </p>
 
 <p align="center">
-    <em>🚨 Beta 0.1.0 Out Now!! 🚨</em>
+    <em>🚨 Beta 0.1.1 Out Now!! 🚨</em>
 </p>
 
 <div align="center"><img src="ai-native.png" alt="three pillars of the framework" width="600"></div>
@@ -148,7 +148,7 @@ My hope is that this modular framework will act as a canvas to help share what I
 
 This framework consists of 50+ Docker containers along w/ a Docker Compose Manifest to automate the process of deploying these containers.
 
-1. Download the Zip File for the <a href="https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.0/ars0n-framework-v2-beta-0.1.0.zip">latest release</a>
+1. Download the Zip File for the <a href="https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.1/ars0n-framework-v2-beta-0.1.1.zip">latest release</a>
 2. Unzip the files
 3. Navigate to the directory with the `docker-compose.yml` file
 4. Build and start it with `.\build.ps1` (Windows) or `./build.sh` (Mac/Linux) - a sequential build that avoids the parallel-build races on Docker's containerd image store (see the OS-specific steps below)
@@ -160,12 +160,12 @@ This framework consists of 50+ Docker containers along w/ a Docker Compose Manif
 
 **Step 1:** Download the framework
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.0/ars0n-framework-v2-beta-0.1.0.zip" -OutFile "ars0n-framework-v2-beta-0.1.0.zip"
+Invoke-WebRequest -Uri "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.1/ars0n-framework-v2-beta-0.1.1.zip" -OutFile "ars0n-framework-v2-beta-0.1.1.zip"
 ```
 
 **Step 2:** Extract the zip file
 ```powershell
-Expand-Archive -Path "ars0n-framework-v2-beta-0.1.0.zip" -DestinationPath "."
+Expand-Archive -Path "ars0n-framework-v2-beta-0.1.1.zip" -DestinationPath "."
 ```
 
 **Step 3:** Navigate to the framework directory
@@ -185,12 +185,12 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 **Step 1:** Download the framework
 ```bash
-curl -L -o ars0n-framework-v2-beta-0.1.0.zip "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.0/ars0n-framework-v2-beta-0.1.0.zip"
+curl -L -o ars0n-framework-v2-beta-0.1.1.zip "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.1/ars0n-framework-v2-beta-0.1.1.zip"
 ```
 
 **Step 2:** Extract the zip file
 ```bash
-unzip ars0n-framework-v2-beta-0.1.0.zip
+unzip ars0n-framework-v2-beta-0.1.1.zip
 ```
 
 **Step 3:** Navigate to the framework directory
@@ -210,12 +210,12 @@ chmod +x build.sh && ./build.sh
 
 **Step 1:** Download the framework
 ```bash
-wget "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.0/ars0n-framework-v2-beta-0.1.0.zip"
+wget "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.1/ars0n-framework-v2-beta-0.1.1.zip"
 ```
 
 **Step 2:** Extract the zip file
 ```bash
-unzip ars0n-framework-v2-beta-0.1.0.zip
+unzip ars0n-framework-v2-beta-0.1.1.zip
 ```
 
 **Step 3:** Navigate to the framework directory
@@ -476,10 +476,10 @@ The framework ships with a **Model Context Protocol (MCP) server** that exposes 
 
 ### What it exposes
 
-The server registers **154 tools** across twelve categories:
+The server registers **157 tools** across twelve categories:
 
 - **Scope and targets** (9): list, add, activate and delete scope targets, update ROI scores, manage scope rules, read scope overview and per-target statistics
-- **Scan execution and workflows** (11): run any individual tool (amass, subfinder, httpx, nuclei, katana, ffuf, arjun, etc.), check or cancel a running scan, read raw tool output, run the full Company / Wildcard / URL workflows or individual phases, drive auto-scan sessions
+- **Scan execution and workflows** (12): run any individual tool (amass, subfinder, httpx, nuclei, katana, ffuf, arjun, etc.), check or cancel a running scan, read overall per-target scan status, read raw tool output, run the full Company / Wildcard / URL workflows or individual phases, drive auto-scan sessions
 - **Recon data queries** (21): subdomains, company domains, network ranges, live servers, target URLs, endpoints, parameters, DNS records, discovered IPs, technologies, cloud assets, Nuclei findings and the consolidated attack surface
 - **Bug bounty analysis** (13): subdomain-takeover candidates, exposed panels, API endpoints, sensitive files, interesting responses, unique hosts, queries by CIDR or tech stack, cross-target search and scan diffing
 - **Endpoints and attack surface** (12): consolidate discovered endpoints, run endpoint validation and investigation scans, read their results, manage attack vectors, capture and manage a manual crawl, manage client identifiers
@@ -488,7 +488,7 @@ The server registers **154 tools** across twelve categories:
 - **Authentication and authorization** (23): document and replay register/login/MFA/reset flows step by step, manage auth recordings and session tokens, check token validity, and manage identity patterns plus role, policy and discretionary access models
 - **Target behaviour probe** (9): configure, dry run and execute the WAF and rate-limit probe, list its targets and read run status and results
 - **Threat model and notes** (3): create, read, update and delete STRIDE threat model entries and their notes
-- **Methodology and guidance** (10): the built-in methodology, "what should I do next" guidance, the attack vector model and per-tool guidance, the vendored bug-bounty knowledge base (browse/read/search), the per-class attack playbook and the XSS/SQLi workflow runbooks
+- **Methodology and guidance** (12): the built-in methodology, "what should I do next" guidance, the attack vector model and per-tool guidance, the vendored bug-bounty knowledge base (browse/read/search), the per-class attack playbook, the session-refresh playbook, the XSS/SQLi workflow runbooks, and the per-target engagement goal gate that holds hunting until a PoC-backed objective is set
 - **Settings and configuration** (20): read all settings and modify rate limits, custom HTTP (user-agent/header), Burp Suite config, recon API keys and AI provider API keys (`get_settings`, `update_settings`, `set_api_key`/`delete_api_key`, `set_ai_api_key`/`delete_ai_api_key`), plus tool configs, wordlists, database bundles, HackerOne scope import, screenshots and scan exports. The MCP Server section itself is read-only via MCP.
 
 The count is not hardcoded: `/health` reports the number of tools actually registered at startup, so it cannot drift from the code.
@@ -498,7 +498,7 @@ The count is not hardcoded: `/health` reports the number of tools actually regis
 The MCP server **starts automatically** with `docker-compose up` and listens on **port 3001** using the SSE transport:
 
 - SSE endpoint: `http://localhost:3001/sse`
-- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.0.0","tools":154}`
+- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.1.0","tools":157}`
 
 Verify it's up:
 ```bash
