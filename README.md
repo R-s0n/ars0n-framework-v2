@@ -177,7 +177,7 @@ cd ars0n-framework-v2
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
-> This builds the tool images **one at a time**, then starts the stack. A plain `docker compose up -d --build` builds all ~17 source-compiled tools in parallel, which on Docker Desktop's containerd image store (the default since v29) can fail with `image "...": already exists` or a build timeout under the load. The script sidesteps both; cached images make re-runs fast. On a powerful machine you can still run `docker compose up -d --build` directly.
+> This builds the tool images **one at a time**, then starts the stack. **Build with the script — do not run `docker compose up -d --build`.** That parallel build compiles all ~57 services at once, and on Docker Desktop 29's containerd image store two builds exporting at the same time race and fail with `image "...": already exists` or `failed to prepare extraction snapshot ... parent snapshot does not exist`; heavy parallel compiles can also trip a BuildKit `context deadline exceeded`. These are **concurrency races, not a resource shortage — a more powerful machine does not avoid them**, and no Compose setting throttles the parallel build on Docker 29 (`COMPOSE_PARALLEL_LIMIT` bounds container start/pull, not builds). The script builds serially instead, and it retries transient failures and clears a corrupted build cache automatically. Cached images make re-runs fast.
 
 **Step 5:** Access the framework at `http://localhost`
 
@@ -202,7 +202,7 @@ cd ars0n-framework-v2
 ```bash
 chmod +x build.sh && ./build.sh
 ```
-> This builds the tool images **one at a time**, then starts the stack, avoiding the parallel-build failures (`image "...": already exists` or a build timeout) that Docker's containerd image store hits when ~17 source tools compile at once. Cached images make re-runs fast. On a powerful machine you can still run `docker compose up -d --build` directly.
+> This builds the tool images **one at a time**, then starts the stack. **Build with the script — do not run `docker compose up -d --build`.** That parallel build compiles all ~57 services at once, and Docker's containerd image store (default since Docker 29) races when two builds export at the same time (`image "...": already exists` or `failed to prepare extraction snapshot ... parent snapshot does not exist`); heavy parallel compiles can also trip a BuildKit `context deadline exceeded`. These are **concurrency races, not a resource shortage — a more powerful machine does not avoid them**, and no Compose setting throttles the parallel build on Docker 29 (`COMPOSE_PARALLEL_LIMIT` bounds container start/pull, not builds). The script builds serially instead, and it retries transient failures and clears a corrupted build cache automatically. Cached images make re-runs fast.
 
 **Step 5:** Access the framework at `http://localhost`
 
@@ -227,7 +227,7 @@ cd ars0n-framework-v2
 ```bash
 chmod +x build.sh && ./build.sh
 ```
-> This builds the tool images **one at a time**, then starts the stack, avoiding the parallel-build failures (`image "...": already exists` or a build timeout) that Docker's containerd image store hits when ~17 source tools compile at once. Cached images make re-runs fast. On a powerful machine you can still run `docker compose up -d --build` directly.
+> This builds the tool images **one at a time**, then starts the stack. **Build with the script — do not run `docker compose up -d --build`.** That parallel build compiles all ~57 services at once, and Docker's containerd image store (default since Docker 29) races when two builds export at the same time (`image "...": already exists` or `failed to prepare extraction snapshot ... parent snapshot does not exist`); heavy parallel compiles can also trip a BuildKit `context deadline exceeded`. These are **concurrency races, not a resource shortage — a more powerful machine does not avoid them**, and no Compose setting throttles the parallel build on Docker 29 (`COMPOSE_PARALLEL_LIMIT` bounds container start/pull, not builds). The script builds serially instead, and it retries transient failures and clears a corrupted build cache automatically. Cached images make re-runs fast.
 
 **Step 5:** Access the framework at `http://localhost`
 
@@ -741,7 +741,7 @@ You should see the same hello-world message. If both tests pass, your Docker ins
 - For enterprise environments, configure Docker BuildKit:
   ```bash
   export DOCKER_BUILDKIT=1
-  docker-compose up --build
+  ./build.sh        # Windows: .\build.ps1  — always build via the script, not `docker compose up --build`
   ```
 
 ### Database Connection Issues
@@ -867,7 +867,7 @@ If you're having trouble getting the Ars0n Framework to run, create a **Discussi
 - [ ] Verified Docker Compose with test manifest
 - [ ] Checked container logs: `docker-compose logs [service-name]`
 - [ ] Verified system meets minimum requirements
-- [ ] Tried running with verbose output: `docker-compose up --build --verbose`
+- [ ] Tried a clean build with the script: `./build.sh` (Mac/Linux) or `.\build.ps1` (Windows)
 
 ## Container Logs
     [Paste the output of: docker-compose logs [relevant-service-name]]

@@ -8,7 +8,11 @@ FROM golang:1.25-bookworm AS build
 # Cloned and built rather than `go install`: trufflehog's go.mod contains replace directives, and
 # go install refuses those outright ("It must not contain directives that would cause it to be
 # interpreted differently than if it were the main module").
-RUN apt-get update && apt-get install -y --no-install-recommends git     && git clone --depth 1 https://github.com/trufflesecurity/trufflehog.git /src     && cd /src && go build -o /out/trufflehog .     && /out/trufflehog --version
+# The network fetches (apt, git clone, go build's module downloads) are each wrapped in a bounded
+# retry so a transient proxy/registry hiccup does not abort the whole image build. `rm -rf /src`
+# makes each clone attempt idempotent after a partial failure.
+RUN for i in 1 2 3 4 5; do apt-get update && apt-get install -y --no-install-recommends git && break; [ "$i" = 5 ] && exit 1; echo "retry $i: transient apt error"; sleep $((i * 5)); done
+RUN for i in 1 2 3 4 5; do rm -rf /src && git clone --depth 1 https://github.com/trufflesecurity/trufflehog.git /src && (cd /src && go build -o /out/trufflehog .) && break; [ "$i" = 5 ] && exit 1; echo "retry $i: transient clone/build error"; sleep $((i * 5)); done && /out/trufflehog --version
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git \

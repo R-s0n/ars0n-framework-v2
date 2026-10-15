@@ -1,3 +1,20 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# BUILD THIS STACK WITH  ./build.sh  (Mac/Linux)  OR  .\build.ps1  (Windows) — NOT `docker compose up -d --build`.
+#
+# This stack has ~57 locally-built services (~17 compile Go/Rust/Python from source, with no shared
+# base image). A cold `docker compose up --build` compiles them ALL in parallel, which on Docker
+# Desktop 29's containerd image store fails two ways that are about CONCURRENCY, not hardware:
+#   • heavy compiles starve each other until BuildKit's solver deadline fires
+#     ("Internal: context deadline exceeded"), and
+#   • simultaneous image exports race the containerd snapshotter
+#     ("image ... already exists" / "failed to prepare extraction snapshot ... parent snapshot does
+#     not exist"), which also leaves the build cache corrupted.
+# There is NO Compose or daemon setting that throttles the parallel build on Docker 29
+# (COMPOSE_PARALLEL_LIMIT bounds container create/start/pull, NOT the build phase — verified on
+# Compose v2.40). Building one service at a time (what the scripts do) is the only reliable fix;
+# the scripts also retry transient failures and clear a corrupted build cache.
+# FUTURE WORK: a shared base image / prebuilt GHCR images to remove the duplicate-compile load.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
 services:
   nginx:
     container_name: ars0n-framework-v2-nginx-1

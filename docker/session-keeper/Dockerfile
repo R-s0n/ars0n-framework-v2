@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY package.json ./
-RUN npm install --omit=dev \
+RUN for i in 1 2 3 4 5; do npm install --omit=dev && break; [ "$i" = 5 ] && exit 1; echo "retry $i: transient npm/puppeteer download error"; sleep $((i * 5)); done \
     && node -e "import('puppeteer').then(m=>console.log('chrome at',m.default.executablePath()))"
 # The last line FAILS THE BUILD if puppeteer cannot resolve a browser, which is the only place that
 # failure is cheap to notice. Without it the container ships and the keeper quietly harvests nothing.
