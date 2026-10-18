@@ -127,8 +127,8 @@ function asLies(value) {
 // brief is tracked per TOOL (guidance/session.js), so the full entry goes out once and every later
 // call gets the one-line reminder. Ordering tool-level first therefore meant the tool-level lie led
 // every reminder and an action-specific lie reached a caller only if that action happened to be the
-// first call of the session. MEASURED on this registry: 156 action overrides define lies and the
-// action lie led 0 of the 348 compact lines. For a tool with 8 actions that is 7 lessons delivered
+// first call of the session. MEASURED on this registry: 158 action overrides define lies and the
+// action lie led 0 of the 358 compact lines. For a tool with 8 actions that is 7 lessons delivered
 // on no call at all. Leading with the action's own lie costs nothing, because the tool-level lie is
 // in the full entry that already went out on the session's first call for this tool whatever action
 // that was, while the action lie has been delivered zero times. Repeat the one nobody has heard.
@@ -280,8 +280,8 @@ function fitLead(sentence, budget) {
 // a lesson about the call that is actually running. The tool-level lie does not need the repeat: the
 // brief is tracked per tool, so it went out in full on the session's first call for this tool no
 // matter which action that was, whereas the action's lie has been delivered zero times unless that
-// first call happened to be the same action. MEASURED before this rule: 156 action overrides define
-// lies and their lie led 0 of the 348 compact lines.
+// first call happened to be the same action. MEASURED before this rule: 158 action overrides define
+// lies and their lie led 0 of the 358 compact lines.
 //
 // A caller on an action with no lies of its own still gets the tool-level lie, unchanged.
 //

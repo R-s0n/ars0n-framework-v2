@@ -64,9 +64,13 @@ const { browseKnowledgeBaseSchema, browseKnowledgeBase, readKnowledgeFileSchema,
 const { getAttackPlaybookSchema, getAttackPlaybook } = require('./tools/attackplaybook');
 const { getSessionRefreshPlaybookSchema, getSessionRefreshPlaybook } = require('./tools/sessionrefresh');
 const { listWorkflowsSchema, listWorkflows, getWorkflowSchema, getWorkflow } = require('./tools/workflowbook');
+const { manageAgentRolesSchema, manageAgentRoles } = require('./tools/roles');
+const { manageContextSchema, manageContext } = require('./tools/context');
 
 const guidance = require('./guidance');
 const guidanceSession = require('./guidance/session');
+const memory = require('./guidance/memory');
+const roles = require('./roles');
 const keepHunting = require('./guidance/keepHunting');
 const huntCoverage = require('./guidance/coverage');
 
@@ -148,7 +152,7 @@ async function attachGuidance(toolName, params, extra, envelope, goalInfo) {
   // a reframe stapled onto a lesson about not stopping would be noise.
   if (isPlainObject && Object.prototype.hasOwnProperty.call(parsed, 'guidance')) return envelope;
 
-  const sessionId = extra && typeof extra === 'object' ? extra.sessionId : undefined;
+  const sessionId = guidanceSession.principalFor(extra, params);
 
   // Per-tool guidance (optional). The brief is consumed only now, once it is certain something is
   // going to be attached. Consuming it earlier would mark a tool as taught on a call that taught
@@ -205,6 +209,12 @@ async function attachGuidance(toolName, params, extra, envelope, goalInfo) {
   const head = {};
   if (payload) head.guidance = payload;
   if (heartbeat) head.keep_hunting = heartbeat;
+  // Role hint rides every eligible result like the heartbeat, derived from the tool's guidance step.
+  // No-ops (null) when there is no entry, or the step is Any/Configuration, or no role owns the step.
+  if (entry && entry.step) {
+    const roleHint = roles.hintForStep(entry.step);
+    if (roleHint) head.role_hint = roleHint;
+  }
   // The goal line rides every result once the layer is on (goalInfo defined): the loop's north star,
   // or the NO GOAL SET reminder. A result that already speaks with its own guidance key returned
   // early above, so this only lands on ordinary results.
@@ -214,7 +224,25 @@ async function attachGuidance(toolName, params, extra, envelope, goalInfo) {
     ? { ...head, ...parsed }
     : { ...head, result: parsed };
 
-  return { ...envelope, content: [{ ...item, text: JSON.stringify(merged, null, 2) }] };
+  const outText = JSON.stringify(merged, null, 2);
+  // Ledger metering (FLOOR, server-output-only). Fail-open: metering must never break a tool.
+  // The head fields ride every result and are tiered by what they ARE (keep_hunting/role_hint are
+  // PERMANENT, goal is SCOPE_TARGET, guidance is STRATEGY) via recordHead, which keeps them out of
+  // byTool so forgetWhere never evicts them; the remaining body bytes are the tool's own output and
+  // are tiered by the tool's domain. Splitting this way is what makes by_tier reflect the real cost.
+  try {
+    const topic = guidance.DOMAIN_OF[toolName] || 'other';
+    let headChars = 0;
+    for (const field of Object.keys(head)) {
+      const c = JSON.stringify(head[field]).length;
+      headChars += c;
+      guidanceSession.recordHead(sessionId, { tier: memory.tierOfHead(field), topic, chars: c });
+    }
+    const bodyChars = Math.max(0, outText.length - headChars);
+    guidanceSession.recordOut(sessionId, {
+      tier: memory.tierOfTool(toolName), topic, tool: toolName, chars: bodyChars });
+  } catch (err) { /* fail-open */ }
+  return { ...envelope, content: [{ ...item, text: outText }] };
 }
 
 // === the per-target GOAL gate =====================================================================
@@ -311,6 +339,14 @@ function teach(toolName, handler) {
     }
 
     const envelope = await handler(params, extra);
+    // Eviction path 1: an explicit target switch clears SCOPE_TARGET + STRATEGY (keeps PERMANENT) and
+    // primes a handoff. ONLY activate_target is treated as a switch; a targetless or differing-target
+    // ordinary call is never a switch. Fail-open.
+    if (toolName === 'activate_target' && !(envelope && envelope.isError)) {
+      try {
+        guidanceSession.switchTarget(guidanceSession.principalFor(extra, params), params && params.target_id);
+      } catch (err) { /* fail-open */ }
+    }
     try {
       return await attachGuidance(toolName, params, extra, envelope, goalInfo);
     } catch (err) {
@@ -710,6 +746,14 @@ OWNED FLAGS ARE NOT OPTIONS. Pass owned_flags true to option_reference; the reas
   });
 
   methodology.register(server);
+
+  // Agent roles and the context ledger. Registered here, next to methodology.register, so the
+  // server.tool override installed above teach()-wraps both exactly like every other tool. Both
+  // handlers take (params, extra) and return the standard single-text envelope, so they ride the
+  // wrapper (guidance, goal line, metering) with no special casing.
+  server.tool('manage_agent_roles', 'Adopt and read AGENT ROLES: a methodology-anchored catalogue of hunt roles (recon, mapping, scanning, bypass, analysis, support), each with a mandate, advisory tool boundaries, entry/exit criteria, a measured definition of done, and handoffs. list the catalogue, get one role in full, assign one to this session, or release it. Tool scoping is ADVISORY only: the client still sees every tool, and the one hard gate remains the operator GOAL_GATE. Not the authz tool manage_role_access.', manageAgentRolesSchema.shape, manageAgentRoles);
+
+  server.tool('manage_context', 'Read the per-session CONTEXT BUDGET (server-output chars by tier/topic/tool, a FLOOR estimate that never gates) and record a hunting-strategy change. set_strategy is operator-gated by CONTEXT_STRATEGY_GATE (default off/advisory); when on it drops STRATEGY-tier lessons so they re-teach and returns a compaction summary. Stores counts only, never captured bodies.', manageContextSchema.shape, manageContext);
 
   // ============================================================
   // KNOWLEDGE BASE

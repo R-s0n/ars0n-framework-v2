@@ -327,6 +327,30 @@ module.exports = {
     },
   },
 
+  manage_agent_roles: {
+    step: S_CONFIG,
+    tool: 'Reads and adopts agent roles from the in-repo catalogue: a mandate, advisory tool '
+      + 'boundaries, entry and exit criteria, a measured definition of done, and handoffs, anchored to '
+      + 'a methodology step. list the catalogue, get one role, assign one to this session, release it.',
+    lies: 'Tool scoping here is advisory only and nothing is enforced: assigning a role does not hide '
+      + 'any tool and does not gate traffic, so a role you adopted cannot stop you calling a tool it '
+      + 'lists as off limits. The one hard gate is the operator GOAL_GATE.',
+    next: 'manage_goals, then whats_next',
+    derived: false,
+  },
+
+  manage_context: {
+    step: S_CONFIG,
+    tool: 'Reads the per-session context budget (server-output characters grouped by retention tier, '
+      + 'topic and tool) and records a hunting-strategy change. The budget is accounting, not a gauge '
+      + 'of the real context window.',
+    lies: 'The character count is a FLOOR, not a total: early-return result shapes bypass metering, so '
+      + 'the real output is always at least this. chars/4 is a rough token floor and gates nothing. '
+      + 'set_strategy only reclaims when the operator env gate is on; otherwise it just records.',
+    next: 'get_tool_output, then whats_next',
+    derived: false,
+  },
+
   manage_wordlists: {
     step: S_CONTENT,
     tool: 'Lists, uploads and deletes the wordlists ffuf uses for path, header and cookie fuzzing. ' +

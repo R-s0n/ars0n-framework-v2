@@ -37,6 +37,7 @@ const BYPASS = '7/8 Access Bypass';
 const THREAT = '8/8 Threat Model';
 const ANY = 'Any step';
 const CONFIG = 'Configuration, applies to every step';
+const TARGET_SELECTION = 'Target selection, before any workflow';
 
 // A few tools genuinely straddle steps or sit beside one, and saying so is more useful than picking
 // the nearest. Composed from the constants above rather than written out, so renaming a step renames
@@ -59,6 +60,7 @@ const STEPS = {
   THREAT,
   ANY,
   CONFIG,
+  TARGET_SELECTION,
   SCANNING_ANY_TABLE,
   SCANNING_BEFORE_CHOOSING,
   CONTENT_TO_PARAMS,

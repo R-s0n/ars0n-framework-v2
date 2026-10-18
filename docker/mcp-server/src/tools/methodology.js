@@ -1,5 +1,34 @@
 const { z } = require('zod');
 const { apiGet } = require('../api');
+const steps = require('../guidance/steps');
+const roles = require('../roles');
+
+// The advisor (server/utils/methodologyAdvisor.go) tags every finding with its own step key. The role
+// catalogue anchors to the steps.js vocabulary, a different spelling of the same places, so this is
+// the one bridge between them: an advisor step key maps to a steps.js label, and the roles STEP_INDEX
+// then names the role that owns it. Keys the advisor never emits (authentication, the empty note
+// step) are deliberately absent and simply get no role pointer.
+const ADVISOR_STEP_TO_LABEL = {
+  'target-selection': steps.TARGET_SELECTION,
+  'manual-crawl': steps.CRAWL,
+  'content-discovery': steps.CONTENT,
+  'archive-discovery': steps.ARCHIVE,
+  'parameter-discovery': steps.PARAMS,
+  'consolidate-vectors': steps.CONSOLIDATE,
+  'vector-scanning': steps.SCANNING,
+  'access-bypass': steps.BYPASS,
+  'threat-model': steps.THREAT,
+};
+
+// Resolve an advisor step key to the role that should clear it, or null. Pure and backend-free so a
+// test can drive it without the advice endpoint.
+function roleForAdvisorStep(stepKey) {
+  const label = ADVISOR_STEP_TO_LABEL[stepKey];
+  if (!label) return null;
+  const id = roles.STEP_INDEX[label];
+  if (!id) return null;
+  return { assume: id, how: 'manage_agent_roles action:assign, role_id:' + id, hint: roles.hintForStep(label) };
+}
 
 // THE EXPERIENCED HUNTER'S CONTEXT, delivered to whoever is driving.
 //
@@ -98,6 +127,23 @@ function register(server) {
     whatsNextSchema.shape,
     async (params) => {
       const data = await apiGet(`/methodology/${params.target_id}/advice`);
+      // Role-aware enrichment: name the role that owns each blocker/gap so the agent can assume it
+      // rather than guess who does this work. Advisory and fail-open: an enrichment error must never
+      // turn a working advice call into a failure.
+      try {
+        if (data && Array.isArray(data.advice)) {
+          let any = false;
+          for (const f of data.advice) {
+            const role = f && f.step ? roleForAdvisorStep(f.step) : null;
+            if (role) { f.role = role; any = true; }
+          }
+          if (any) {
+            data.roles_note = 'Each advice item above names the agent role that owns that methodology '
+              + 'step. Assume it with manage_agent_roles (action:assign, role_id) so the role mandate '
+              + 'and its advisory tool boundaries ride your next calls.';
+          }
+        }
+      } catch (err) { /* enrichment is advisory; never fail whats_next */ }
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     });
 
@@ -146,4 +192,4 @@ function register(server) {
     });
 }
 
-module.exports = { register, stepGuidance };
+module.exports = { register, stepGuidance, roleForAdvisorStep, ADVISOR_STEP_TO_LABEL };

@@ -631,9 +631,27 @@ function captureListing(raw, params, full) {
   }
 
   const matched = rows.length;
+  // Verb distribution over the matched corpus, BEFORE the endpoint collapse reassigns rows. Rows are
+  // counted per uppercased method so a legacy lowercase row cannot split a bucket (get vs GET). This
+  // is why an operator sees non-GET writes exist instead of inferring GET-only from a deduped list.
+  const verb_rows = {};
+  for (const c of rows) {
+    const m = (c.method || '').toUpperCase() || 'GET';
+    verb_rows[m] = (verb_rows[m] || 0) + 1;
+  }
   const collapse = params.unique_endpoints !== false;
   if (collapse) rows = groupByEndpoint(rows);
   rows.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+  // Verb distribution over DISTINCT endpoints, after the collapse. Only meaningful when collapse ran,
+  // mirroring how unique_endpoints below is undefined when collapse is off.
+  let verb_endpoints;
+  if (collapse) {
+    verb_endpoints = {};
+    for (const c of rows) {
+      const m = (c.method || '').toUpperCase() || 'GET';
+      verb_endpoints[m] = (verb_endpoints[m] || 0) + 1;
+    }
+  }
 
   const bopts = bodyOptions(params, BODY_LIMIT, rows.length || 1);
   const projected = rows.map((c) => compactCapture(c, full, bopts));
@@ -643,6 +661,8 @@ function captureListing(raw, params, full) {
     // heavily browsed application look like a tiny attack surface.
     captures_recorded: rawCount,
     captures_matched: matched,
+    verb_rows,
+    verb_endpoints,
     unique_endpoints: collapse ? rows.length : undefined,
     direct_count: rows.filter((c) => c.is_direct).length,
     adjacent_count: rows.filter((c) => !c.is_direct).length,

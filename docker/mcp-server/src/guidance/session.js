@@ -33,8 +33,23 @@ const SWEEP_AT = 64;
 
 const FALLBACK_KEY = '__no_session_id__';
 
-// sessionId -> { briefed: Set<string>, lastSeen: number }
+// Hard cap on distinct sessions. The lazy idle-2h sweep does not bound reconnect churn (each SSE
+// reconnect mints a new sessionId), so an LRU eviction of the oldest entry caps the Map regardless of
+// idle age. 512 is generous for local single-tenant use.
+const MAX_SESSIONS = 512;
+
+// sessionId -> {
+//   briefed:Set, heartbeatIdx, consecutiveEmpty, lastSeen,
+//   assignedRoleId:string|null,
+//   ledger: { charsOut, charsIn, callCount, byTier:{}, byTopic:{},
+//             byTool:{ [tool]:{tier,topic,charsOut,calls} }, strategy:string|null, lastTargetId:string|null }
+// }
 const sessions = new Map();
+
+function newLedger() {
+  return { charsOut: 0, charsIn: 0, callCount: 0, byTier: {}, byTopic: {},
+    byTool: {}, strategy: null, lastTargetId: null };
+}
 
 function sweep(now) {
   for (const [key, state] of sessions) {
@@ -52,7 +67,14 @@ function stateFor(sessionId, now) {
   }
   if (!state) {
     if (sessions.size >= SWEEP_AT) sweep(now);
-    state = { briefed: new Set(), heartbeatIdx: 0, consecutiveEmpty: 0, lastSeen: now };
+    // LRU cap: if still at the hard max after the idle sweep, evict the oldest-seen session.
+    if (sessions.size >= MAX_SESSIONS) {
+      let oldestKey; let oldest = Infinity;
+      for (const [k, s] of sessions) { if (s.lastSeen < oldest) { oldest = s.lastSeen; oldestKey = k; } }
+      if (oldestKey !== undefined) sessions.delete(oldestKey);
+    }
+    state = { briefed: new Set(), heartbeatIdx: 0, consecutiveEmpty: 0, lastSeen: now,
+      assignedRoleId: null, ledger: newLedger() };
     sessions.set(key, state);
   }
   state.lastSeen = now;
@@ -109,6 +131,127 @@ function reset() {
   sessions.clear();
 }
 
+// THE IDENTITY SEAM. The single documented swap-point for future SaaS auth. Today it returns the
+// transport sessionId (string) or undefined; stateFor applies FALLBACK_KEY as before, so behaviour is
+// unchanged. A SaaS build swaps the body to return an authenticated principal/tenant claim.
+function principalFor(extra, _params) {
+  return extra && typeof extra === 'object' && typeof extra.sessionId === 'string'
+    ? extra.sessionId : undefined;
+}
+
+// Metering. Called from attachGuidance inside a try/catch (fail-open). chars is a FLOOR estimate of
+// server OUTPUT bytes (chars/4 for a token floor); it NEVER gates anything. Stores counts+keys only,
+// NEVER captured bodies.
+function recordOut(sessionId, { tier, topic, tool, chars }, now = Date.now()) {
+  const L = stateFor(sessionId, now).ledger;
+  const n = Number(chars) || 0;
+  L.charsOut += n; L.callCount += 1;
+  L.byTier[tier] = (L.byTier[tier] || 0) + n;
+  L.byTopic[topic] = (L.byTopic[topic] || 0) + n;
+  const prev = L.byTool[tool] || { tier, topic, charsOut: 0, calls: 0 };
+  prev.tier = tier; prev.topic = topic; prev.charsOut += n; prev.calls += 1;
+  L.byTool[tool] = prev;
+}
+
+// Head fields (keep_hunting, role_hint, goal, guidance) ride EVERY result and are cross-cutting, not
+// per-tool evictable, so they update the tier and topic totals but never byTool (which forgetWhere
+// drops from). This is what makes by_tier reflect the always-on PERMANENT/SCOPE_TARGET head cost
+// instead of folding it into the emitting tool's tier.
+function recordHead(sessionId, { tier, topic, chars }, now = Date.now()) {
+  const L = stateFor(sessionId, now).ledger;
+  const n = Number(chars) || 0;
+  if (n <= 0) return;
+  L.charsOut += n;
+  L.byTier[tier] = (L.byTier[tier] || 0) + n;
+  L.byTopic[topic] = (L.byTopic[topic] || 0) + n;
+}
+
+// Record a strategy label for the budget report WITHOUT evicting. The advisory (gate off) path uses
+// this so budget().strategy actually reflects what was set; setting a label is not a reclaim, so no
+// tier is cleared and the keep-hunting counters are untouched.
+function recordStrategy(sessionId, strategyId, now = Date.now()) {
+  stateFor(sessionId, now).ledger.strategy = strategyId || null;
+}
+
+// Read-only budget snapshot for manage_context action:budget.
+function budget(sessionId, now = Date.now()) {
+  const L = stateFor(sessionId, now).ledger;
+  return {
+    chars_out: L.charsOut,
+    est_tokens_floor: Math.ceil(L.charsOut / 4),
+    call_count: L.callCount,
+    by_tier: { ...L.byTier },
+    by_topic: { ...L.byTopic },
+    by_tool: Object.fromEntries(Object.entries(L.byTool).map(([k, v]) => [k, { ...v }])),
+    strategy: L.strategy,
+    last_target_id: L.lastTargetId,
+    note: 'FLOOR, server-output-only estimate (chars/4). Early-return guards bypass metering, so this '
+      + 'is a floor not a total; it never gates eviction.',
+  };
+}
+
+// Selective forget. Clears briefed Set AND ledger meta in lockstep for every tool whose descriptor
+// matches the predicate, so a forgotten tool re-teaches (full entry) on its next call. Returns the
+// count forgotten. predicate({ tool, tier, topic }) -> boolean.
+function forgetWhere(sessionId, predicate, now = Date.now()) {
+  const state = stateFor(sessionId, now);
+  const L = state.ledger;
+  let forgotten = 0;
+  for (const [tool, meta] of Object.entries(L.byTool)) {
+    if (!predicate({ tool, tier: meta.tier, topic: meta.topic })) continue;
+    // lockstep: remove from briefed so it re-teaches, and remove its ledger accounting.
+    state.briefed.delete(tool);
+    L.charsOut -= meta.charsOut;
+    L.byTier[meta.tier] = Math.max(0, (L.byTier[meta.tier] || 0) - meta.charsOut);
+    L.byTopic[meta.topic] = Math.max(0, (L.byTopic[meta.topic] || 0) - meta.charsOut);
+    delete L.byTool[tool];
+    forgotten += 1;
+  }
+  if (L.charsOut < 0) L.charsOut = 0;
+  return forgotten;
+}
+
+// Session role state (advisory; no board).
+function assignRole(sessionId, roleId, now = Date.now()) { stateFor(sessionId, now).assignedRoleId = roleId; }
+function releaseRole(sessionId, now = Date.now()) { stateFor(sessionId, now).assignedRoleId = null; }
+function assignedRole(sessionId, now = Date.now()) { return stateFor(sessionId, now).assignedRoleId; }
+
+// Eviction path 1: explicit target switch. Clears SCOPE_TARGET + STRATEGY, keeps PERMANENT, records
+// the new target, and returns a handoff summary. memory is required lazily to avoid a load cycle.
+function switchTarget(sessionId, targetId, now = Date.now()) {
+  const memory = require('./memory');
+  const L = stateFor(sessionId, now).ledger;
+  // Re-activating the SAME target is idempotent, not a switch. Dropping this target's freshly taught
+  // SCOPE_TARGET/STRATEGY lessons and nulling its strategy on a no-op would be pure state loss, so a
+  // repeat activate_target for the current target carries everything over unchanged.
+  if (targetId && L.lastTargetId === targetId) {
+    return { target_id: targetId, carried_over: ['unchanged: same target re-activated'], dropped: [] };
+  }
+  const carried_over = ['PERMANENT (methodology, goal frame, keep_hunting, role_hint)'];
+  const dropped = [];
+  const n = forgetWhere(sessionId, (d) =>
+    d.tier === memory.TIERS.SCOPE_TARGET || d.tier === memory.TIERS.STRATEGY, now);
+  if (n > 0) dropped.push(`${n} SCOPE_TARGET/STRATEGY tool lesson(s) stop re-serving and will re-teach`);
+  L.lastTargetId = targetId || null;
+  L.strategy = null;
+  return { target_id: targetId || null, carried_over, dropped };
+}
+
+// Eviction path 2: strategy change. Clears STRATEGY only, keeps PERMANENT + SCOPE_TARGET. Returns a
+// compaction/handoff summary naming carried_over vs DROP. Does NOT reset consecutiveEmpty (anti-thrash:
+// a strategy switch must never silence the keep-hunting layer).
+function setStrategy(sessionId, strategyId, now = Date.now()) {
+  const memory = require('./memory');
+  const L = stateFor(sessionId, now).ledger;
+  const n = forgetWhere(sessionId, (d) => d.tier === memory.TIERS.STRATEGY, now);
+  L.strategy = strategyId || null;
+  return {
+    strategy: L.strategy,
+    carried_over: ['PERMANENT', 'SCOPE_TARGET (goal, recon/data lessons)'],
+    dropped: n > 0 ? [`${n} STRATEGY tool lesson(s) stop re-serving and will re-teach`] : [],
+  };
+}
+
 module.exports = {
   firstBrief,
   nextHeartbeat,
@@ -116,7 +259,19 @@ module.exports = {
   hasBriefed,
   forget,
   reset,
+  principalFor,
+  recordOut,
+  recordHead,
+  recordStrategy,
+  budget,
+  forgetWhere,
+  assignRole,
+  releaseRole,
+  assignedRole,
+  switchTarget,
+  setStrategy,
   IDLE_MS,
+  MAX_SESSIONS,
   FALLBACK_KEY,
   // Exported for the test that checks the map does not grow without bound.
   _sessions: sessions,

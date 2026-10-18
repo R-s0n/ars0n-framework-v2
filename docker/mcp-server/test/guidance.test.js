@@ -121,7 +121,7 @@ test('the action lie, not the tool lie, leads the compact line of every action t
   // The delivery guard, registry-wide. The brief is tracked per TOOL (guidance/session.js), so the
   // full entry goes out once per tool per session and every later call gets compactLine(). The
   // first version of the list change ordered tool-level lies first, so the reminder always repeated
-  // the tool lie: MEASURED, 156 action overrides define lies and the action lie led 0 of the 348
+  // the tool lie: MEASURED, 158 action overrides define lies and the action lie led 0 of the 358
   // compact lines, which for an eight-action tool means seven lessons delivered on no call at all.
   const missed = [];
   let checked = 0;
@@ -740,7 +740,7 @@ test('the measured census in the comments still matches the registry', () => {
   // is still one sentence to the regexes below.
   const source = ['src/guidance/index.js', 'test/guidance.test.js']
     .map((f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8')).join('\n')
-    .replace(/\n\s*\/\/ ?/g, ' ');
+    .replace(/\r?\n\s*\/\/ ?/g, ' ');
   const counted = [...source.matchAll(/(\d+) action overrides define/g)].map((m) => Number(m[1]));
   const totals = [...source.matchAll(/0 of the (\d+) compact lines/g)].map((m) => Number(m[1]));
   assert.ok(counted.length >= 3 && totals.length >= 3,

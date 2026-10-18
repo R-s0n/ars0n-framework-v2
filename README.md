@@ -476,7 +476,7 @@ The framework ships with a **Model Context Protocol (MCP) server** that exposes 
 
 ### What it exposes
 
-The server registers **157 tools** across twelve categories:
+The server registers **159 tools** across thirteen categories:
 
 - **Scope and targets** (9): list, add, activate and delete scope targets, update ROI scores, manage scope rules, read scope overview and per-target statistics
 - **Scan execution and workflows** (12): run any individual tool (amass, subfinder, httpx, nuclei, katana, ffuf, arjun, etc.), check or cancel a running scan, read overall per-target scan status, read raw tool output, run the full Company / Wildcard / URL workflows or individual phases, drive auto-scan sessions
@@ -488,7 +488,8 @@ The server registers **157 tools** across twelve categories:
 - **Authentication and authorization** (23): document and replay register/login/MFA/reset flows step by step, manage auth recordings and session tokens, check token validity, and manage identity patterns plus role, policy and discretionary access models
 - **Target behaviour probe** (9): configure, dry run and execute the WAF and rate-limit probe, list its targets and read run status and results
 - **Threat model and notes** (3): create, read, update and delete STRIDE threat model entries and their notes
-- **Methodology and guidance** (12): the built-in methodology, "what should I do next" guidance, the attack vector model and per-tool guidance, the vendored bug-bounty knowledge base (browse/read/search), the per-class attack playbook, the session-refresh playbook, the XSS/SQLi workflow runbooks, and the per-target engagement goal gate that holds hunting until a PoC-backed objective is set
+- **Methodology and guidance** (12): the built-in methodology, "what should I do next" guidance (which now names the agent role that should clear each blocker or gap), the attack vector model and per-tool guidance, the vendored bug-bounty knowledge base (browse/read/search), the per-class attack playbook, the session-refresh playbook, the XSS/SQLi workflow runbooks, and the per-target engagement goal gate that holds hunting until a PoC-backed objective is set
+- **Agent roles and context budget** (2): `manage_agent_roles` browses a methodology-anchored catalogue of hunt roles (recon, mapping, scanning, bypass, analysis, support) and assumes one for the session - each role carries a mandate, advisory tool boundaries, entry/exit criteria, a measured definition of done, and handoffs to the next role (a one-line hint for the role that owns the current methodology step also rides every tool result); `manage_context` reports a per-session context budget (server-output characters by tier, topic and tool, a floor estimate that never gates) and records a hunting-strategy change that drops disposable STRATEGY-tier lessons when `CONTEXT_STRATEGY_GATE=on`. Tool scoping is advisory only: the client still sees every tool, and the one hard gate remains the operator goal gate
 - **Settings and configuration** (20): read all settings and modify rate limits, custom HTTP (user-agent/header), Burp Suite config, recon API keys and AI provider API keys (`get_settings`, `update_settings`, `set_api_key`/`delete_api_key`, `set_ai_api_key`/`delete_ai_api_key`), plus tool configs, wordlists, database bundles, HackerOne scope import, screenshots and scan exports. The MCP Server section itself is read-only via MCP.
 
 The count is not hardcoded: `/health` reports the number of tools actually registered at startup, so it cannot drift from the code.
@@ -498,7 +499,7 @@ The count is not hardcoded: `/health` reports the number of tools actually regis
 The MCP server **starts automatically** with `docker-compose up` and listens on **port 3001** using the SSE transport:
 
 - SSE endpoint: `http://localhost:3001/sse`
-- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.1.0","tools":157}`
+- Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.1.0","tools":159}`
 
 Verify it's up:
 ```bash
