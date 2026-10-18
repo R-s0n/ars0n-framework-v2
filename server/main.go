@@ -954,6 +954,16 @@ func main() {
 	r.HandleFunc("/hunt-coverage/{scope_target_id}", utils.GetHuntCoverage).Methods("GET", "OPTIONS")
 	r.HandleFunc("/scope-targets/{scope_target_id}/hunt-coverage", utils.GetHuntCoverage).Methods("GET", "OPTIONS")
 
+	// Agent ROLE BOARD on a scope target: cross-agent, backend-backed role claims. The in-memory
+	// manage_agent_roles assign is session-local; this makes a claim visible and coordinated across
+	// agents on one target. Same shape-collision note as goals: GET keys on the target, POST creates,
+	// PATCH/DELETE key on the assignment id, disambiguated by method. The atomic-claim guard is the
+	// partial unique index idx_role_assignments_one_active. Advisory only; never gates a tool.
+	r.HandleFunc("/roles/{scope_target_id}", utils.GetRoleBoard).Methods("GET", "OPTIONS")
+	r.HandleFunc("/roles", utils.ClaimRole).Methods("POST", "OPTIONS")
+	r.HandleFunc("/roles/{id}", utils.UpdateRoleAssignment).Methods("PATCH", "OPTIONS")
+	r.HandleFunc("/roles/{id}", utils.ReleaseRoleAssignment).Methods("DELETE", "OPTIONS")
+
 	// Notes on a single threat, which are a different thing from the scope target notes above and are
 	// stored in their own table. Same shape ambiguity, same reason: the path variable is named for what
 	// it holds on each route, because gorilla matches on shape alone and /threat-notes/{x} is the same

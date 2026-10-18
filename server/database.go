@@ -1930,6 +1930,33 @@ func createTables() {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_target_goals_one_active
 		   ON target_goals(scope_target_id) WHERE is_active;`,
 
+		// The per-target ROLE BOARD: cross-agent role claims. manage_agent_roles assign is session-local
+		// and in-memory; this table makes "who holds which role on this target" visible and coordinated
+		// ACROSS agents working the same scope target. Advisory only: a claim never blocks a tool, it
+		// only coordinates. Cloned shape/idiom from target_goals above (partial unique index = atomic
+		// claim). SINGLE-USER OPEN SOURCE: no tenant column, no RLS.
+		`CREATE TABLE IF NOT EXISTS role_assignments (
+		    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		    scope_target_id UUID NOT NULL REFERENCES scope_targets(id) ON DELETE CASCADE,
+		    role_id TEXT NOT NULL,
+		    agent_label TEXT NOT NULL,
+		    status TEXT NOT NULL DEFAULT 'active'
+		        CHECK (status IN ('active','handed_off','done','released')),
+		    handoff_to_role TEXT NOT NULL DEFAULT '',
+		    note TEXT NOT NULL DEFAULT '',
+		    claimed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+		    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		);`,
+		// One target, its assignments, most recently touched first (matches the board list query).
+		`CREATE INDEX IF NOT EXISTS idx_role_assignments_target
+		   ON role_assignments(scope_target_id, updated_at DESC);`,
+		// ATOMIC CLAIM GUARD: at most one ACTIVE holder per (target, role). Two agents cannot both hold
+		// the same role on a target; the second INSERT is rejected by this partial unique index. A
+		// released/handed_off/done row does not occupy the slot, so the role can be re-claimed. This is
+		// the exact clone of idx_target_goals_one_active and is the whole coordination mechanism.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_role_assignments_one_active
+		   ON role_assignments(scope_target_id, role_id) WHERE status = 'active';`,
+
 		// Capture provenance and the richer fields the multi-source extension produces.
 		// `sources` records which of webrequest/hook/debugger contributed, which is how you tell a
 		// metadata-only record from one that carries real bodies.
