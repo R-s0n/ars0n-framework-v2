@@ -35,8 +35,13 @@ const FALLBACK_KEY = '__no_session_id__';
 
 // Hard cap on distinct sessions. The lazy idle-2h sweep does not bound reconnect churn (each SSE
 // reconnect mints a new sessionId), so an LRU eviction of the oldest entry caps the Map regardless of
-// idle age. 512 is generous for local single-tenant use.
-const MAX_SESSIONS = 512;
+// idle age. The default is above the ~1000-agent fleet target so one-agent-per-connection sessions are
+// not evicted (and re-taught, ledgers reset) mid-run; MCP_MAX_SESSIONS overrides. The LRU scan stays
+// trivial at a few thousand entries.
+const MAX_SESSIONS = (() => {
+  const n = parseInt(process.env.MCP_MAX_SESSIONS, 10);
+  return Number.isFinite(n) && n > 0 ? n : 2048;
+})();
 
 // sessionId -> {
 //   briefed:Set, heartbeatIdx, consecutiveEmpty, lastSeen,

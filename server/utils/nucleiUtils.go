@@ -291,17 +291,25 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 
 	log.Printf("[DEBUG] Created temp targets file: %s with %d targets", tempFile.Name(), len(targets))
 
+	// Per-scan container paths so two concurrent nuclei scans in the shared singleton container cannot
+	// clobber each other's input/output or delete each other's files mid-run. The fixed /targets.txt
+	// and /output.jsonl did exactly that, silently, and still returned success. Mirrors the per-scan
+	// path fix already applied to ffuf. The token is the unique temp-file base name.
+	scanToken := strings.TrimSuffix(filepath.Base(tempFile.Name()), filepath.Ext(tempFile.Name()))
+	containerTargets := "/" + scanToken + ".txt"
+	containerOutput := "/" + scanToken + ".jsonl"
+
 	copyCmd := exec.Command(
 		"docker", "cp",
 		tempFile.Name(),
-		"ars0n-framework-v2-nuclei-1:/targets.txt",
+		"ars0n-framework-v2-nuclei-1:"+containerTargets,
 	)
 	if err := copyCmd.Run(); err != nil {
 		return nucleiCommand, fmt.Errorf("failed to copy targets file to container: %v", err)
 	}
 
 	var args []string
-	args = append(args, "-list", "/targets.txt", "-jsonl", "-nh", "-o", "/output.jsonl")
+	args = append(args, "-list", containerTargets, "-jsonl", "-nh", "-o", containerOutput)
 
 	rateLimit := int(getFloatConfig(advancedConfig, "rate_limit", 150))
 	bulkSize := int(getFloatConfig(advancedConfig, "bulk_size", 25))
@@ -522,12 +530,12 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 
 	copyOutputCmd := exec.Command(
 		"docker", "cp",
-		"ars0n-framework-v2-nuclei-1:/output.jsonl",
+		"ars0n-framework-v2-nuclei-1:"+containerOutput,
 		outputFile,
 	)
 	if err := copyOutputCmd.Run(); err != nil {
 		log.Printf("[WARN] Failed to copy output file from container: %v", err)
-		readOutputCmd := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "cat", "/output.jsonl")
+		readOutputCmd := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "cat", containerOutput)
 		if outputContent, readErr := readOutputCmd.Output(); readErr == nil {
 			if writeErr := os.WriteFile(outputFile, outputContent, 0644); writeErr != nil {
 				return nucleiCommand, fmt.Errorf("failed to copy output from container and write to host: %v", writeErr)
@@ -562,7 +570,7 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 		log.Printf("[DEBUG] Output file does not exist: %v", err)
 	}
 
-	cleanupCmd := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "rm", "-f", "/targets.txt", "/output.jsonl")
+	cleanupCmd := exec.Command("docker", "exec", "ars0n-framework-v2-nuclei-1", "rm", "-f", containerTargets, containerOutput)
 	cleanupCmd.Run()
 
 	return nucleiCommand, nil

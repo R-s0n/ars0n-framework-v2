@@ -51,9 +51,27 @@ func main() {
 	// handlers are in main is registered through a hook before anything can start a session.
 	registerAutoScanHooks()
 
+	// Size the shared pool explicitly. pgxpool's default MaxConns is max(4, NumCPU) (~8), far too small
+	// once a fleet of agents drives the API: every MCP tool call hits the goal gate (an extra /goals
+	// read), so a few dozen tight-looping agents can exhaust the pool and stall unrelated routes.
+	// MCP_DB_MAX_CONNS overrides; default 50. Keep it below Postgres max_connections (raised in step in
+	// docker-compose.yml) or widening the pool just moves the wall to "too many clients".
+	poolCfg, cfgErr := pgxpool.ParseConfig(connStr)
+	if cfgErr != nil {
+		log.Fatalf("Invalid DATABASE_URL: %v", cfgErr)
+	}
+	maxConns := 50
+	if v := os.Getenv("MCP_DB_MAX_CONNS"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+			maxConns = n
+		}
+	}
+	poolCfg.MaxConns = int32(maxConns)
+	log.Printf("Postgres pool MaxConns set to %d (override with MCP_DB_MAX_CONNS)", maxConns)
+
 	var err error
 	for i := 0; i < 10; i++ {
-		dbPool, err = pgxpool.New(context.Background(), connStr)
+		dbPool, err = pgxpool.NewWithConfig(context.Background(), poolCfg)
 		if err == nil {
 			err = dbPool.Ping(context.Background())
 		}

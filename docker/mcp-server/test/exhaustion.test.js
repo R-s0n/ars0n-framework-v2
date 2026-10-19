@@ -23,8 +23,12 @@ api.apiGet = async (p) => {
   return {};
 };
 
-const { teach } = require('../src/index');
+const { teach, _resetGoalCache } = require('../src/index');
 const { manageGoals } = require('../src/tools/goals');
+const { _resetCoverageCache } = require('../src/guidance/coverage');
+// The goal-gate and coverage reads have short-TTL caches; clear them between cases so a case that
+// flips ACTIVE/COVERAGE is not served a stale entry from a prior case within the TTL.
+test.beforeEach(() => { _resetGoalCache(); _resetCoverageCache(); });
 
 const decode = (env) => JSON.parse(env.content[0].text);
 const handlerReturning = (obj) => async () => ({ content: [{ type: 'text', text: JSON.stringify(obj) }] });

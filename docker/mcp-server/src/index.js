@@ -310,6 +310,18 @@ function goalLine(active, targetId) {
   };
 }
 
+// Short-TTL cache for the per-call goal-gate read. Every hunting tool call reads /goals/{target}; under
+// a fleet of tight-looping agents that is the single biggest amplifier of the shared Go DB pool.
+// Caching the active goal per target for a couple of seconds collapses those repeated reads while
+// keeping gate staleness tiny, and manage_goals bypasses plus invalidates it so a set or activated goal
+// is seen at once. Only successful reads are cached, so a transient error never sticks as "no goal".
+const GOAL_CACHE_TTL_MS = 2000;
+const goalCache = new Map(); // targetId -> { active, at }
+// Test hook: clear the goal-gate cache so a test that mutates the stubbed backend between cases is not
+// served a stale entry within the TTL. Not used in production (the TTL + manage_goals invalidation
+// cover real mutations).
+function _resetGoalCache() { goalCache.clear(); }
+
 // Wrap one handler so its result carries guidance, enforces the goal gate, and carries the goal line.
 // Nothing here is allowed to change whether the tool WORKS: a throw from the guidance layer returns
 // the untouched envelope, and a throw from the tool itself propagates exactly as it did before. The
@@ -323,11 +335,24 @@ function teach(toolName, handler) {
     const targetId = params && (params.target_id || params.targetId || params.scope_target_id);
     let goalInfo;
     if (GATE_MODE !== 'off' && targetId) {
+      // A goals mutation must be seen at once, so manage_goals bypasses and clears the cache.
+      const mutatesGoal = toolName === 'manage_goals';
       let active = null;
-      try {
-        const body = await apiGet(`/goals/${targetId}`);
-        active = body && body.active_goal ? body.active_goal : null;
-      } catch (err) { active = null; }
+      const now = Date.now();
+      const cached = mutatesGoal ? null : goalCache.get(targetId);
+      if (cached && (now - cached.at) < GOAL_CACHE_TTL_MS) {
+        active = cached.active;
+      } else {
+        try {
+          const body = await apiGet(`/goals/${targetId}`);
+          active = body && body.active_goal ? body.active_goal : null;
+          if (!mutatesGoal) {
+            if (goalCache.size > 1000) goalCache.clear();
+            goalCache.set(targetId, { active, at: now });
+          }
+        } catch (err) { active = null; }
+      }
+      if (mutatesGoal) goalCache.delete(targetId);
       goalInfo = { active };
       // HARD gate: a hunt-initiating tool with no active goal is refused WITHOUT running the handler,
       // so no traffic leaves. The refusal still rides the guidance + goal line (hence attachGuidance).
@@ -1361,4 +1386,4 @@ if (require.main === module) {
   main().catch(console.error);
 }
 
-module.exports = { createServer, attachGuidance, teach };
+module.exports = { createServer, attachGuidance, teach, _resetGoalCache };

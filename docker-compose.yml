@@ -90,6 +90,10 @@ services:
     # Moving to 19 is then a deliberate pg_dump/pg_restore rather than something a prune can trigger.
     # Verified at the time of pinning: postgres:18 and postgres:latest are the same manifest.
     image: postgres:18
+    # Raise max_connections (default 100) so widening the Go pool (MCP_DB_MAX_CONNS, default 50) for a
+    # fleet of agents does not hit "sorry, too many clients already". 200 leaves headroom for the pool
+    # plus other direct connections.
+    command: ["postgres", "-c", "max_connections=200"]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

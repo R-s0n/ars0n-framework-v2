@@ -41,7 +41,11 @@ const manageAgentRolesSchema = z.object({
     '(back-compat).'),
   agent_label: z.string().optional().describe(
     'Stable, caller-supplied agent identity. REQUIRED for claim. It is what the board shows as the ' +
-    'holder and what a conflict reports in held_by. Pick one stable string per agent and reuse it.'),
+    'holder and what a conflict reports in held_by. Pick one stable string per agent and reuse it. ' +
+    'It MUST be unique per logical agent: two agents sharing a label cannot corrupt the board (the ' +
+    'one-active-holder guard is on target+role, not label), but held_by attribution becomes ambiguous ' +
+    'and a handoff cannot tell them apart. When an orchestrator fans out many agents, give each a ' +
+    'distinct label.'),
   force: z.boolean().optional().describe(
     'claim: take over a role already actively held, atomically releasing the current holder. Default ' +
     'false, which fails soft on a conflict instead of stealing the role.'),

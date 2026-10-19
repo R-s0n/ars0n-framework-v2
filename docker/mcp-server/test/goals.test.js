@@ -24,8 +24,11 @@ api.apiGet = async (p) => {
   return {};
 };
 
-const { teach } = require('../src/index');
+const { teach, _resetGoalCache } = require('../src/index');
 const { manageGoals } = require('../src/tools/goals');
+// The goal-gate has a short-TTL cache; clear it between cases so a case that flips ACTIVE is not
+// served a stale entry from a prior case within the TTL.
+test.beforeEach(() => { _resetGoalCache(); });
 
 const decode = (env) => JSON.parse(env.content[0].text);
 const handlerReturning = (obj) => async () => ({ content: [{ type: 'text', text: JSON.stringify(obj) }] });

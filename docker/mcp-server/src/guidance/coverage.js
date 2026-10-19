@@ -39,6 +39,15 @@ const COMPLETED = new Set(['completed_hits', 'completed_empty']);
 const EARNED_LINE =
   'Exhausted is earned by completed runs, not elapsed time. Launch these and let them run.';
 
+// Short-TTL cache so the loud-path coverage read does not pile a third Go-API round-trip onto the
+// shared DB pool under a looping fleet. Only readable results are cached (an error retries next time),
+// and the window is short enough that a run completing is reflected quickly. Keyed by target id.
+const COVERAGE_CACHE_TTL_MS = 5000;
+const coverageCache = new Map(); // targetId -> { cov, at }
+// Test hook: clear the coverage cache so a test mutating the stubbed coverage body between cases is not
+// served a stale entry within the TTL. Not used in production.
+function _resetCoverageCache() { coverageCache.clear(); }
+
 // Normalise a coverage body into the shape the gate and the loud block use. Pure and defensive: a
 // missing or malformed axes array degrades to readable:false, which is NOT complete.
 function normalize(body) {
@@ -76,11 +85,21 @@ function normalize(body) {
 // exhaustible. undefined only when there is no target to ask about.
 async function fetchCoverage(targetId) {
   if (!targetId) return undefined;
+  const now = Date.now();
+  const hit = coverageCache.get(targetId);
+  if (hit && (now - hit.at) < COVERAGE_CACHE_TTL_MS) return hit.cov;
   try {
     const body = await apiGet(`/goals/${targetId}/coverage`);
     // The Go handler nests the report under "coverage"; a flat body (tests) is accepted as-is.
     const cov = body && typeof body === 'object' && body.coverage ? body.coverage : body;
-    return normalize(cov);
+    const normalized = normalize(cov);
+    // Only cache a readable report, so a transient fetch error or a not-yet-built endpoint retries
+    // next time instead of sticking as not-readable for the whole TTL.
+    if (normalized.readable) {
+      if (coverageCache.size > 1000) coverageCache.clear();
+      coverageCache.set(targetId, { cov: normalized, at: now });
+    }
+    return normalized;
   } catch (err) {
     return { readable: false, error: String(err && err.message ? err.message : err).slice(0, 200),
       axes: [], completed: 0, total: 0, launch_these: [], running: [], exhaustible: false };
@@ -121,4 +140,4 @@ function coverageBlock(cov, cap = 6) {
 }
 
 module.exports = { fetchCoverage, normalize, isExhaustible, coverageBlock, summary,
-  gateMode, EARNED_LINE, COMPLETED };
+  gateMode, EARNED_LINE, COMPLETED, _resetCoverageCache };

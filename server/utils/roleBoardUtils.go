@@ -32,6 +32,15 @@ import (
 // PATCH bumps updated_at). A const so the threshold lives in one place.
 const roleStaleAfter = 20 * time.Minute
 
+// Bounded timeout for every role-board DB operation, derived from the request context, so an
+// abandoned or blocked request sheds its pooled connection instead of pinning it. The pool is shared
+// by the whole Go API, so a stuck acquire here would stall unrelated routes.
+const roleOpTimeout = 5 * time.Second
+
+// Long-settled terminal rows (released/handed_off/done) are pruned opportunistically on claim so the
+// table cannot grow without bound. Active rows are never pruned.
+const roleRetention = 14 * 24 * time.Hour
+
 // RoleAssignment is the wire shape. Timestamps are RFC3339 strings to match the rest of this API.
 // Stale is computed at read time (never stored) and is only ever true for an active row.
 type RoleAssignment struct {
@@ -80,9 +89,9 @@ func writeRoleJSON(w http.ResponseWriter, status int, body interface{}) {
 // roleActiveHolder reads the current active holder of (target, role) for a conflict message. Best
 // effort: a missing row leaves label empty. Runs on its own pooled connection, so it is safe to call
 // after an aborted claim transaction.
-func roleActiveHolder(scopeTargetID, roleID string) (label string, stale bool) {
+func roleActiveHolder(ctx context.Context, scopeTargetID, roleID string) (label string, stale bool) {
 	cutoff := time.Now().Add(-roleStaleAfter)
-	_ = dbPool.QueryRow(context.Background(),
+	_ = dbPool.QueryRow(ctx,
 		`SELECT agent_label, (updated_at < $3)
 		   FROM role_assignments
 		  WHERE scope_target_id = $1 AND role_id = $2 AND status = 'active'
@@ -99,12 +108,15 @@ func GetRoleBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx, cancel := context.WithTimeout(r.Context(), roleOpTimeout)
+	defer cancel()
 	cutoff := time.Now().Add(-roleStaleAfter)
-	rows, err := dbPool.Query(context.Background(),
+	rows, err := dbPool.Query(ctx,
 		`SELECT `+roleColumns+`, (status = 'active' AND updated_at < $2) AS stale
 		   FROM role_assignments
 		  WHERE scope_target_id = $1
-		  ORDER BY (status = 'active') DESC, updated_at DESC, claimed_at DESC`, scopeTargetID, cutoff)
+		  ORDER BY (status = 'active') DESC, updated_at DESC, claimed_at DESC
+		  LIMIT 200`, scopeTargetID, cutoff)
 	if err != nil {
 		log.Printf("[ROLES] Failed to read role board for target %s: %v", scopeTargetID, err)
 		http.Error(w, "Failed to read the role board", http.StatusInternalServerError)
@@ -170,7 +182,8 @@ func ClaimRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(r.Context(), roleOpTimeout)
+	defer cancel()
 	tx, err := dbPool.Begin(ctx)
 	if err != nil {
 		log.Printf("[ROLES] Failed to begin claim tx for target %s role %s: %v", scopeTargetID, roleID, err)
@@ -206,7 +219,7 @@ func ClaimRole(w http.ResponseWriter, r *http.Request) {
 			// Already actively held and force was not set. Roll back the aborted tx, then read the
 			// holder on a fresh connection for the conflict message.
 			tx.Rollback(ctx)
-			heldBy, stale := roleActiveHolder(scopeTargetID, roleID)
+			heldBy, stale := roleActiveHolder(ctx, scopeTargetID, roleID)
 			writeRoleJSON(w, http.StatusConflict, map[string]interface{}{
 				"error":   "role already held",
 				"held_by": heldBy,
@@ -224,6 +237,20 @@ func ClaimRole(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to claim the role", http.StatusInternalServerError)
 		return
 	}
+
+	// Opportunistic retention: drop this target's long-settled terminal rows so released/handed_off/done
+	// history cannot grow without bound. Best effort on its own bounded context so it neither blocks nor
+	// fails the claim, and detached from the request so it survives the response.
+	go func(target string) {
+		pruneCtx, cancel := context.WithTimeout(context.Background(), roleOpTimeout)
+		defer cancel()
+		if _, err := dbPool.Exec(pruneCtx,
+			`DELETE FROM role_assignments
+			  WHERE scope_target_id = $1 AND status <> 'active' AND updated_at < $2`,
+			target, time.Now().Add(-roleRetention)); err != nil {
+			log.Printf("[ROLES] retention prune for target %s skipped: %v", target, err)
+		}
+	}(scopeTargetID)
 
 	writeRoleJSON(w, http.StatusCreated, ra)
 }
@@ -248,7 +275,9 @@ func UpdateRoleAssignment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ra, err := scanRole(dbPool.QueryRow(context.Background(),
+	ctx, cancel := context.WithTimeout(r.Context(), roleOpTimeout)
+	defer cancel()
+	ra, err := scanRole(dbPool.QueryRow(ctx,
 		`UPDATE role_assignments SET
 		   status          = COALESCE($2, status),
 		   handoff_to_role = COALESCE($3, handoff_to_role),
@@ -264,6 +293,14 @@ func UpdateRoleAssignment(w http.ResponseWriter, r *http.Request) {
 		}
 		if strings.Contains(err.Error(), "role_assignments_status_check") {
 			http.Error(w, "status must be one of active, handed_off, done, released.", http.StatusBadRequest)
+			return
+		}
+		if strings.Contains(err.Error(), "idx_role_assignments_one_active") {
+			// Tried to set this row back to 'active' while another agent actively holds the same
+			// (target, role). The partial unique index is the arbiter; report a conflict, not a 500.
+			writeRoleJSON(w, http.StatusConflict, map[string]interface{}{
+				"error": "role already held by another active assignment; claim with force to take it over",
+			})
 			return
 		}
 		log.Printf("[ROLES] Failed to update role assignment %s: %v", id, err)
@@ -285,7 +322,9 @@ func ReleaseRoleAssignment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tag, err := dbPool.Exec(context.Background(), `DELETE FROM role_assignments WHERE id = $1`, id)
+	ctx, cancel := context.WithTimeout(r.Context(), roleOpTimeout)
+	defer cancel()
+	tag, err := dbPool.Exec(ctx, `DELETE FROM role_assignments WHERE id = $1`, id)
 	if err != nil {
 		log.Printf("[ROLES] Failed to delete role assignment %s: %v", id, err)
 		http.Error(w, "Failed to delete the role assignment", http.StatusInternalServerError)
