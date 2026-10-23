@@ -33,9 +33,9 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6 // indirect
 	github.com/projectdiscovery/blackrock v0.0.2 // indirect
-	github.com/projectdiscovery/goflags v0.2.0 // indirect
-	github.com/projectdiscovery/gologger v1.1.72 // indirect
-	github.com/projectdiscovery/utils v0.11.2 // indirect
+	github.com/projectdiscovery/goflags v0.2.1 // indirect
+	github.com/projectdiscovery/gologger v1.1.73 // indirect
+	github.com/projectdiscovery/utils v0.11.9 // indirect
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d // indirect
 	github.com/shirou/gopsutil/v4 v4.26.8 // indirect
 	github.com/tidwall/gjson v1.19.0 // indirect
