@@ -11,7 +11,7 @@
 # go.mod and go.sum next to this file are upstream's at the pinned commit plus three `go get` bumps
 # (x/net v0.60.0, goldmark v1.7.17, klauspost/compress v1.18.7). -mod=readonly fails the build rather
 # than re-resolving anything, and every module is checked against go.sum and the Go checksum DB.
-FROM golang:1.26.9-trixie@sha256:f89535b7caea67fa9ff0ba009894bff8f3be915e49cb635477c8ce04e045db5d AS build
+FROM golang:1.27.1-trixie@sha256:8f58fd67ea075142d947a60e0caa4317746a55118d312f027793d382c7741734 AS build
 ENV GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOPROXY=https://proxy.golang.org CGO_ENABLED=0
 # v1.3.1. The tag is created LOCALLY on the asserted commit only so `go build` stamps the real
 # version into the build info instead of a v0.0.0-<date>-<sha>+dirty pseudo-version.

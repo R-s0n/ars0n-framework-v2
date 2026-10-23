@@ -10,7 +10,7 @@
 # Verified: the built image's binary reports mod github.com/edoardottt/pphack v0.1.5.
 # Do NOT roll back to v0.1.4 without re-checking those three field names.
 # Go 1.26.9 on Debian trixie, pinned by multi-arch index digest (linux/amd64 + linux/arm64).
-FROM golang:1.26.9-trixie@sha256:f89535b7caea67fa9ff0ba009894bff8f3be915e49cb635477c8ce04e045db5d AS build
+FROM golang:1.27.1-trixie@sha256:8f58fd67ea075142d947a60e0caa4317746a55118d312f027793d382c7741734 AS build
 # GOTOOLCHAIN=local fails the build instead of downloading a different Go toolchain; -mod=readonly and
 # the public proxy keep module resolution to what go.sum and the checksum database already pin.
 ENV GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOPROXY=https://proxy.golang.org
