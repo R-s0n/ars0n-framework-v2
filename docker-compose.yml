@@ -19,6 +19,8 @@ services:
   nginx:
     container_name: ars0n-framework-v2-nginx-1
     build: ./nginx
+    # All interfaces, so the UI works from other machines on the LAN. The UI/API have no login: on a
+    # VPS use "127.0.0.1:80:80" and an SSH tunnel, or a cloud firewall (see README "Remote Access").
     ports:
       - "80:80"
     depends_on:
@@ -62,8 +64,10 @@ services:
   ai_service:
     container_name: ars0n-framework-v2-ai-service-1
     build: ./ai_service
+    # Loopback only. POST /question fetches any URL it is given with no auth (CORS *), and nothing on
+    # the host calls it. Its traffic to api goes over ars0n-network, which this binding does not affect.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       - api
     environment:
@@ -76,20 +80,19 @@ services:
 
   db:
     container_name: ars0n-framework-v2-db-1
-    # PINNED TO THE MAJOR, deliberately, and this is the highest-consequence pin in the file.
+    # NEVER CHANGE THE MAJOR. This is the highest-consequence pin in the file.
     #
     # The postgres_data volume was initialised by PostgreSQL 18 (it contains a "18" directory).
-    # PostgreSQL ships a new major every September or October and the official :latest follows within
-    # days, so on a `docker compose pull` after that release this service would start a PG19 container
-    # against a PG18 data directory. Postgres refuses that outright, the healthcheck never passes, and
-    # both api and mcp-server gate on `condition: service_healthy` - so the whole stack stops, holding
-    # every scan result, with nothing in the repo having changed. Same shape as the bullseye
-    # expiry that broke the x8 build, with a bigger blast radius.
+    # A PG19 image started against that PG18 data directory refuses it outright, the healthcheck never
+    # passes, and both api and mcp-server gate on `condition: service_healthy` - so the whole stack
+    # stops, holding every scan result.
     #
-    # Pinned to the MAJOR and not to a patch, so Debian and PostgreSQL security rebuilds still arrive.
-    # Moving to 19 is then a deliberate pg_dump/pg_restore rather than something a prune can trigger.
-    # Verified at the time of pinning: postgres:18 and postgres:latest are the same manifest.
-    image: postgres:18
+    # Pinned to a PostgreSQL 18 patch tag by its multi-arch index digest (amd64 + arm64), like every
+    # other image, so a pull can never change what runs. The digest also freezes Debian and PostgreSQL
+    # security fixes: move to the next 18.x patch tag and its digest, validated like any other pin.
+    # Moving to 19 is a deliberate pg_dump/pg_restore, never an image bump; Dependabot ignores
+    # postgres majors, so reject any PR that proposes one.
+    image: postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     # Raise max_connections (default 100) so widening the Go pool (MCP_DB_MAX_CONNS, default 50) for a
     # fleet of agents does not hit "sorry, too many clients already". 200 leaves headroom for the pool
     # plus other direct connections.
@@ -126,13 +129,20 @@ services:
         condition: service_healthy
       api:
         condition: service_started
+    # Loopback only, because MCP_AUTH_TOKEN is unset by default and every tool is then open. For remote
+    # use see README "Authentication and remote access" (SSH tunnel, or token + explicit IP + MCP_ALLOWED_HOSTS).
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001"
     environment:
       DATABASE_URL: postgres://postgres:postgres@db:5432/ars0n
       MCP_PORT: "3001"
       API_URL: http://api:8443
     restart: unless-stopped
+    # Tool calls write exports under /app/exports (owned by the non-root node user). A named volume
+    # keeps them across `docker compose up -d` recreation; a host bind mount would re-introduce the
+    # EACCES that USER node otherwise avoids.
+    volumes:
+      - mcp_exports:/app/exports
     networks:
       - ars0n-network
 
@@ -149,16 +159,6 @@ services:
   metabigor:
     container_name: ars0n-framework-v2-metabigor-1
     build: ./docker/metabigor
-    depends_on:
-      - api
-    entrypoint: ["sleep", "infinity"]
-    restart: "no"
-    networks:
-      - ars0n-network
-
-  sublist3r:
-    container_name: ars0n-framework-v2-sublist3r-1
-    build: ./docker/sublist3r
     depends_on:
       - api
     entrypoint: ["sleep", "infinity"]
@@ -838,6 +838,7 @@ services:
 volumes:
   postgres_data:
   temp_data:
+  mcp_exports:
 
 networks:
   ars0n-network:

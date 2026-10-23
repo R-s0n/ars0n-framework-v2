@@ -9,7 +9,8 @@ import "strings"
 // that found one and not another was telling us about itself rather than about the app:
 //
 //   - sqlmap 1.10.8.45#dev, 271 options in 16 groups, taken from its own lib/parse/cmdline.py rather
-//     than from -hh, whose output truncates long option names to "--hea..".
+//     than from -hh, whose output truncates long option names to "--hea..". The image now pins
+//     1.10.10#stable (65b6e7b); every option this file emits still exists there.
 //   - ghauri 1.4.3, 57 options in 8 groups, from its --help.
 //   - SQLiDetector 1.0.0, 7 options, from the argparse block in core/cli.py.
 //

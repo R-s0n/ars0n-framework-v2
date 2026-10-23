@@ -149,7 +149,7 @@ beforeEach(() => {
   settingsBody = SETTINGS_BODY;
   putHandler = null;
   selectionRoute = SELECTION_ROUTE;
-  global.fetch = jest.fn((url, init) => {
+  global.fetch = vi.fn((url, init) => {
     const u = String(url);
     if (u === selectionRoute) {
       if (init && init.method === 'POST') {

@@ -8,8 +8,9 @@ beforeAll(() => { global.IS_REACT_ACT_ENVIRONMENT = true; });
 
    The module keeps the tree and the parsed documents in module scope on purpose: closing and
    reopening the reader must not re-download 1.4 MB. That cache survives a test, and it cannot be
-   reset with jest.isolateModules, which hands the re-required component its own copy of React whose
-   hook dispatcher is null under the outer react-dom.
+   reset by re-importing the module in isolation (jest.isolateModules when this ran on Jest), which
+   hands the re-required component its own copy of React whose hook dispatcher is null under the
+   outer react-dom.
 
    So the caches are treated as state the suite moves through rather than as something to clear: the
    failure case runs first while nothing is cached (a failed tree load drops the in-flight promise
@@ -132,7 +133,7 @@ let requested = [];
 
 function installFetch() {
   requested = [];
-  global.fetch = jest.fn((url) => {
+  global.fetch = vi.fn((url) => {
     requested.push(url);
     if (url === '/api/knowledge-base') {
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(TREE) });
@@ -200,7 +201,7 @@ afterEach(() => {
 // means the api is up and the corpus was never embedded in it.
 test('a tree that fails to load says so instead of showing an empty corpus', async () => {
   requested = [];
-  global.fetch = jest.fn((url) => {
+  global.fetch = vi.fn((url) => {
     requested.push(url);
     return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) });
   });
@@ -299,7 +300,7 @@ test('a search runs against the API and a hit opens that file at that line', asy
   expect(hits[1].textContent).toContain('line 4');
 
   // scrollIntoView does not exist in jsdom, and its absence would throw inside the scroll effect.
-  window.HTMLElement.prototype.scrollIntoView = jest.fn();
+  window.HTMLElement.prototype.scrollIntoView = vi.fn();
 
   // The methodology file has not been read yet, so this proves the click fetches as well as anchors.
   await click(hits[1]);

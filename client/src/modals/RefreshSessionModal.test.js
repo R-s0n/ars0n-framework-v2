@@ -75,7 +75,7 @@ function html() {
 }
 
 async function openModal(rows) {
-  global.fetch = jest.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(rows) }));
+  global.fetch = vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(rows) }));
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -98,7 +98,7 @@ afterEach(() => {
   if (container) container.remove();
   root = undefined;
   container = undefined;
-  jest.resetAllMocks();
+  vi.resetAllMocks();
   delete global.fetch;
 });
 

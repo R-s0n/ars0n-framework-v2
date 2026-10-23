@@ -1051,6 +1051,7 @@ func buildKatanaCommand(crawlURL string, cfg KatanaURLConfig, auth crawlAuth) []
 		"docker", "exec",
 		"ars0n-framework-v2-katana-1",
 		"katana",
+		"-duc", // runner-owned: no update check (phone-home) per crawl
 		"-u", crawlURL,
 		"-silent",
 		"-nc",

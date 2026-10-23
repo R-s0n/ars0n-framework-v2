@@ -221,10 +221,12 @@ func ComposeTruffleHog(v VectorInput, settings map[string]any, reportPath string
 			"tool over a pattern matcher.")
 	}
 
+	// --no-update: trufflehog's self-updater downloads replacement binaries at run time. The image
+	// builds a pinned release from source, so nothing should ever swap it out mid-scan.
 	fetched := reportPath + ".body"
 	command := strings.Join([]string{
 		"curl -sSL --max-time 60 -o " + shellQuote(fetched) + " " + shellQuote(v.EvidenceURL),
-		"trufflehog filesystem " + shellQuote(fetched) + " --json --no-color " +
+		"trufflehog filesystem " + shellQuote(fetched) + " --json --no-color --no-update " +
 			strings.Join(quoteAll(flags), " ") + " > " + shellQuote(reportPath) + " 2>/dev/null",
 	}, " ; ")
 

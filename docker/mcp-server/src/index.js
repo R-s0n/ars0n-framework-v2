@@ -1,5 +1,6 @@
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js');
+const { hostHeaderValidation } = require('@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js');
 const express = require('express');
 const { getPool } = require('./db');
 
@@ -80,6 +81,23 @@ const PORT = parseInt(process.env.MCP_PORT || '3001');
 // Optional bearer token. When set (env MCP_AUTH_TOKEN), the /sse and /messages endpoints require
 // it; when unset, they stay open (backwards-compatible with existing local setups).
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
+// Hostnames the Host header may name (port-agnostic; env MCP_ALLOWED_HOSTS, comma-separated). This
+// is the DNS-rebinding guard: without it any web page the user visits can rebind its own hostname to
+// 127.0.0.1 and drive every tool through GET /sse, which the SDK transport does not check. Add your
+// LAN IP or hostname here if a client reaches the server by something other than localhost.
+const ALLOWED_HOSTS = (process.env.MCP_ALLOWED_HOSTS || 'localhost,127.0.0.1,[::1],mcp-server')
+  .split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+// Ceiling on array elements plus object keys in one tool call's arguments (env
+// MCP_MAX_TOOL_INPUT_ELEMENTS). The SDK counts them before zod runs and rejects the call above it.
+// Unset, the SDK has no limit, and zod 3 builds one issue object per failing array element with no
+// cap (GHSA-46jr-4wx8-v453, CVE-2023-54404). Measured on this image: one 4 MB POST of `[{},{},...]`
+// to /messages ran a 2 GB heap out of memory; at 10000 the worst case is about 50 MB of heap and a
+// 0.7 MB error. Big wordlists go through the `content` string field, which is one element however
+// long it is.
+const MAX_TOOL_INPUT_ELEMENTS = (() => {
+  const n = Number(process.env.MCP_MAX_TOOL_INPUT_ELEMENTS);
+  return Number.isInteger(n) && n >= 1 ? n : 10000;
+})();
 // Real registered-tool count, set by createServer() (see the server.tool wrapper below) so /health
 // can't drift from the actual number the way a hardcoded constant did.
 let toolCount = 0;
@@ -385,7 +403,7 @@ function createServer() {
   const server = new McpServer({
     name: 'ars0n-framework',
     version: pkg.version,
-  });
+  }, { maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS });
 
   // ONE change point for all 140 registrations, not 140 edits.
   //
@@ -1327,6 +1345,10 @@ async function main() {
   }
 
   const app = express();
+  // Before every route, /health included. No body-parser middleware (express.json, urlencoded, raw)
+  // on purpose: SSEServerTransport reads the body itself, and body-parser's inflate path is where
+  // GHSA-27r3-jxmh-p828 lives.
+  app.use(hostHeaderValidation(ALLOWED_HOSTS));
 
   // Prime toolCount so /health is correct before the first SSE connection creates a server.
   createServer();
@@ -1367,11 +1389,17 @@ async function main() {
     res.json({ status: 'ok', version: pkg.version, tools: toolCount });
   });
 
-  app.listen(PORT, '0.0.0.0', () => {
+  // Express 5 hands listen errors (EADDRINUSE and the like) to this callback instead of throwing.
+  app.listen(PORT, '0.0.0.0', (err) => {
+    if (err) {
+      console.error('[MCP] Failed to listen:', err);
+      process.exit(1);
+    }
     console.log(`[MCP] Ars0n Framework MCP server v${pkg.version} running on port ${PORT}`);
     console.log(`[MCP] ${toolCount} tools available`);
     console.log(`[MCP] SSE endpoint: http://0.0.0.0:${PORT}/sse`);
     console.log(`[MCP] Health check: http://0.0.0.0:${PORT}/health`);
+    console.log(`[MCP] Accepted Host names (MCP_ALLOWED_HOSTS): ${ALLOWED_HOSTS.join(', ')}`);
     if (!AUTH_TOKEN) {
       console.warn('[MCP] WARNING: MCP_AUTH_TOKEN is not set - /sse and /messages are unauthenticated');
     }

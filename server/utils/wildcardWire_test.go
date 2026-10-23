@@ -23,14 +23,15 @@ import (
 // uses would make the test agree with itself.
 //
 // ONE TOKEN HERE IS NOT HISTORIC AND IS MEANT NOT TO BE: the image reference. The inline command said
-// `caffix/amass` with no tag; it now says `caffix/amass:v4.2.0`, which is a deliberate change to the
-// image reference and has nothing to do with the wiring this file tests. It does not weaken the
+// `caffix/amass` with no tag; it now says `caffix/amass:v4.2.0@sha256:b111...` (tag plus digest),
+// which is a deliberate change to the image reference and has nothing to do with the wiring this file
+// tests. It does not weaken the
 // nothing-changed guarantee, because the two references resolve to the same image (both tags point at
 // manifest list sha256:b11100806a4fd31990103a92d296cd5b7dd5442502e3cf51aceeeaa397305d08, both pushed
 // 2023-09-10). Everything after it is still token for token what the runner built inline.
 func amassHistoricArgs(domain string, rateLimit string) []string {
 	return []string{
-		"run", "--rm", "caffix/amass:v4.2.0",
+		"run", "--rm", "caffix/amass:v4.2.0@sha256:b11100806a4fd31990103a92d296cd5b7dd5442502e3cf51aceeeaa397305d08",
 		"enum", "-active", "-alts", "-brute", "-nocolor",
 		"-min-for-recursive", "2", "-timeout", "60",
 		"-d", domain,
@@ -280,11 +281,13 @@ func TestAmassInertOptionIsNotComposedAndSaysSo(t *testing.T) {
 // -stats. Measured, stdout is byte-for-byte identical either way (bare subdomains, one per line) so
 // the parser is untouched, while -stats fills the stderr column with the per-source table that makes
 // a silent-nothing detectable after the fact. TestSubfinderWiringAddsNothingWhenNothingIsConfigured
-// is what proves the WIRING changed nothing; this literal is what pins the deliberate change.
+// is what proves the WIRING changed nothing; this literal is what pins the deliberate change. -duc
+// was added later, also deliberately: the runner owns it so no scan makes an update check.
 func subfinderBaseArgs(domain string) []string {
 	return []string{
 		"exec", "ars0n-framework-v2-subfinder-1",
 		"subfinder",
+		"-duc",
 		"-d", domain,
 		"-stats",
 	}

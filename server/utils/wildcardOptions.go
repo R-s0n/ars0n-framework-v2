@@ -216,9 +216,11 @@ var subfinderWildcardGroups = []string{
 // subfinderSources is the source list from `subfinder -ls` on v2.14.0: 50 names, of which 37 are
 // marked key-required and 3 key-optional.
 //
-// A NOTE THE UI MUST NOT LOSE: the image is projectdiscovery/subfinder:latest, so this list WILL
-// drift on rebuild. It is served from the server precisely so that correcting it is one commit
-// rather than three, but the right long-term fix is to validate against a live `subfinder -ls`.
+// Re-checked against the pinned v2.17.0 (`subfinder -ls`: 54 sources, 37 key-required, 5
+// key-optional): all 50 names below still exist. crtname, scanmalware, shodanct and subdomaincenter
+// are new in that release and are not offered here. The image is built from a pinned commit, so this
+// list moves only when that pin is bumped; re-run `subfinder -ls` then. It is served from the server
+// precisely so that correcting it is one commit rather than three.
 var subfinderSources = []string{
 	"alienvault", "anubis", "bevigil", "bufferover", "builtwith", "c99", "censys", "certspotter",
 	"chaos", "chinaz", "commoncrawl", "crtsh", "digitalyama", "digitorus", "dnsdb", "dnsdumpster",
@@ -245,7 +247,7 @@ var subfinderWildcardOwned = map[string]string{
 	"-dL":    "One domain per scan record; the scan row is keyed to a single scope target.",
 	"-rL":    "Resolver file: a container path the runner cannot populate. Use the resolvers list.",
 	"-up":    "Would self-update the binary mid-scan and change the tool under the operator. Must never be reachable from a config screen.",
-	"-duc":   "Runner-level hygiene rather than an operator decision. Worth having the runner set permanently, since subfinder currently phones home on every scan.",
+	"-duc":   "Always set by the runner: no update check (a phone-home to ProjectDiscovery) on any scan.",
 	"-stats": "Currently inert because -silent suppresses it. This should become RUNNER-OWNED AND ALWAYS ON alongside dropping -silent: that one change makes every silent-nothing in this vocabulary detectable after the fact.",
 
 	"-config":          "Container filesystem path (/root/.config/subfinder/config.yaml). The right UI is an API-key editor that writes the file, not a path box.",
@@ -616,9 +618,13 @@ var shuffleDNSWildcardOwned = map[string]string{
 	"-ad":        "Alternate input mode: auto-extract root domains.",
 	"-directory": "Temporary directory inside the container.",
 	"-up":        "Self-update. It would change the tool under the operator mid-workflow.",
-	"-version":   "Prints the version instead of resolving.",
-	"-nc":        "Colour. Not scan behaviour.",
-	"-v":         "Verbosity, which would pollute the stdout the parser reads. Keep it paired with -silent and runner owned.",
+	"-duc":       "Always set by the runner: no update check (a phone-home to ProjectDiscovery) on any invocation. The image is pinned, so the check can only leak scan timing.",
+	// The former operator option for -duc. A stored value is dropped with this note, because a stored
+	// false would otherwise strip the runner's -duc again.
+	"disableUpdateCheck": "Always set by the runner: -duc is on every shuffledns invocation, so it is no longer a setting.",
+	"-version":           "Prints the version instead of resolving.",
+	"-nc":                "Colour. Not scan behaviour.",
+	"-v":                 "Verbosity, which would pollute the stdout the parser reads. Keep it paired with -silent and runner owned.",
 }
 
 var shuffleDNSWildcardOptions = map[string]WildcardOptionMeta{
@@ -690,12 +696,6 @@ var shuffleDNSWildcardOptions = map[string]WildcardOptionMeta{
 		Placeholder: "Off, so massdns stderr is discarded. shuffledns' own help says 'default: discard'.",
 		Why:         "THE DIRECT ANTIDOTE TO THE SILENT-CLEAN PROBLEM IN THIS TOOL. With it on, a run that resolved nothing because the resolvers were refusing has evidence attached instead of looking like a clean scan. Verified accepted. Arguably it should be runner-owned and always on rather than optional.",
 	},
-	"disableUpdateCheck": {
-		Kind: "bool", Group: "Advanced", Label: "Disable update check",
-		Flag: "-duc", Provenance: "measured",
-		Placeholder: "Off, so shuffledns phones home to check for a new version on every single invocation.",
-		Why:         "On an offline or egress-filtered host the update check is dead time on every run, and this workflow invokes shuffledns repeatedly. Verified accepted.",
-	},
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -727,7 +727,7 @@ var cewlWildcardOwned = map[string]string{
 	"--keep":          "Long form of -k.",
 	"--exclude":       "THE FLAG IS RUNNER-OWNED BUT THE CONTENT IS YOURS: send excludePaths instead. cewl.rb:682-693 reads --exclude from a FILE of paths, one per line, and compares each against a_url_parsed.request_uri, so the runner has to write the operator's list into the cewl container and pass that path. A comma-joined value on the command line would be read as a filename and silently match nothing.",
 	"<url>":           "The positional argument is one live host from the httpx results. Note bruteForceUtils.go:534 does strings.Replace(result.URL, \"www.\", \"\", 1), which strips the FIRST occurrence of 'www.' ANYWHERE in the URL, so the host actually crawled may not be the host httpx confirmed live. The config screen should show the operator the URL that is really used.",
-	"timeout 600":     "The runner wraps the invocation in `timeout 600` because CeWL 6.3.0 has no internal wall-clock cap and will crawl a large site indefinitely.",
+	"timeout 600":     "The runner wraps the invocation in `timeout 600` because CeWL 6.3.1 has no internal wall-clock cap and will crawl a large site indefinitely.",
 }
 
 var cewlWildcardOptions = map[string]WildcardOptionMeta{
@@ -842,8 +842,8 @@ var cewlWildcardOptions = map[string]WildcardOptionMeta{
 		Flag: "--auth_type", Provenance: "unverified",
 		Choices:     []string{"basic", "digest"},
 		Placeholder: "Unset, no authentication.",
-		Why:         "CeWL behind a login reads the application's real vocabulary instead of the marketing shell. Only these two values exist in CeWL 6.3.0.",
-		Danger:      "All three of authType, authUser and authPass are required together or none. There is no cookie or bearer option in 6.3.0, so anything token-based has to go through headers instead.",
+		Why:         "CeWL behind a login reads the application's real vocabulary instead of the marketing shell. Only these two values exist in CeWL 6.3.1.",
+		Danger:      "All three of authType, authUser and authPass are required together or none. There is no cookie or bearer option in 6.3.1, so anything token-based has to go through headers instead.",
 	},
 	"authUser": {
 		Kind: "string", Group: "Access", Label: "Auth username",
@@ -862,7 +862,7 @@ var cewlWildcardOptions = map[string]WildcardOptionMeta{
 		Kind: "list", Group: "Access", Label: "Extra headers",
 		Flag: "-H", Repeatable: true, Provenance: "unverified",
 		Placeholder: "None beyond the User-Agent.",
-		Why:         "Format is name:value and the flag repeats (cewl.rb:501). This is the ONLY way to give CeWL a session cookie or an Authorization header, because CeWL 6.3.0 has no --cookie flag at all.",
+		Why:         "Format is name:value and the flag repeats (cewl.rb:501). This is the ONLY way to give CeWL a session cookie or an Authorization header, because CeWL 6.3.1 has no --cookie flag at all.",
 		Danger:      "Same plaintext-at-rest caveat as authPass whenever the value carries a session cookie or a token.",
 	},
 	"proxyHost": {
@@ -1693,7 +1693,7 @@ func init() {
 	registerWildcardTools(
 		WildcardTool{
 			Key: "amass", Name: "Amass", Step: 1, Phase: "Subdomain discovery",
-			Image: "caffix/amass", Binary: "amass enum", Version: "v4.2.0 (built 2023-09-10, commit 5f1f717)",
+			Image: amassImage, Binary: "amass enum", Version: "v4.2.0 (built 2023-09-10, commit 5f1f717)",
 			Invocation: "server/utils/amassUtils.go ExecuteAndParseAmassScan",
 			Groups:     amassWildcardGroups, Options: amassWildcardOptions, OwnedFlags: amassWildcardOwned,
 			Notes: "There is no amass container and no amass service in docker-compose.yml. The api container " +
@@ -1722,8 +1722,8 @@ func init() {
 				"crt.sh and certspotter.",
 			Notes: "MEASURED: THE SUBLIST3R CONTAINER IS NEVER INVOKED. There is no exec.Command anywhere in the repo " +
 				"that touches it. docker-compose.yml:125-133 builds the service with entrypoint [\"sleep\", " +
-				"\"infinity\"], so it sits idle on an unpinned `git clone` of a community fork, and deleting the " +
-				"service and docker/sublist3r/ would remove a python:3.9-slim image from the build with zero " +
+				"\"infinity\"], so it sits idle on a `git clone` of a community fork (pinned at 40ff0fd), and deleting " +
+				"the service and docker/sublist3r/ would remove a python:3.11-slim image from the build with zero " +
 				"functional impact. What runs instead is the hardcoded source slice at subdomainScrapingUtils.go:170 " +
 				"and a literal command string, `passive sources: rapiddns, urlscan, otx, hackertarget`.\n\n" +
 				"This step is the one place in the workflow that FAILS CLOSED and it should stay that way: if every " +
@@ -1819,12 +1819,10 @@ func init() {
 		},
 		WildcardTool{
 			Key: "subfinder", Name: "Subfinder", Step: 6, Phase: "Subdomain discovery",
-			// The option vocabulary below was MEASURED ON v2.14.0 but the image now installs v2.16.0.
-			// docker/subfinder/Dockerfile pins projectdiscovery/subfinder:v2.16.0, which is what the
-			// container actually reports, so the pin is honest and the measurement provenance is not:
-			// subfinderSources in particular records "50 names, of which 37 are..." from `subfinder -ls`
-			// on v2.14.0. Re-run that against v2.16.0 and either confirm the counts or restate them.
-			Container: "ars0n-framework-v2-subfinder-1", Binary: "subfinder", Version: "v2.16.0 installed (image PINNED to :v2.16.0); option vocabulary below measured on v2.14.0",
+			// The option vocabulary below was MEASURED ON v2.14.0; the image now builds v2.17.0 from source
+			// at c97f2580 (docker/subfinder/Dockerfile asserts the commit). subfinderSources was re-checked
+			// with `subfinder -ls` on v2.17.0: every listed source still exists (see its comment).
+			Container: "ars0n-framework-v2-subfinder-1", Binary: "subfinder", Version: "v2.17.0 built from source at c97f2580; option vocabulary below measured on v2.14.0, source list re-checked on v2.17.0",
 			Invocation: "server/utils/subdomainScrapingUtils.go ExecuteAndParseSubfinderScan",
 			Groups:     subfinderWildcardGroups, Options: subfinderWildcardOptions, OwnedFlags: subfinderWildcardOwned,
 			Notes: "THE HIGHEST-VALUE FIX FOR THIS TOOL IS NOT A CONFIG OPTION. Measured: without -silent, stdout " +
@@ -1887,13 +1885,13 @@ func init() {
 		},
 		WildcardTool{
 			Key: "cewl", Name: "CeWL", Step: 10, Phase: "DNS brute force",
-			Container: "ars0n-framework-v2-cewl-1", Binary: "ruby /app/cewl.rb", Version: "CeWL 6.3.0 (Big Fixes), Ruby",
+			Container: "ars0n-framework-v2-cewl-1", Binary: "ruby /app/cewl.rb", Version: "CeWL 6.3.1 (GetOptLong Deps), Ruby",
 			Invocation: "server/utils/bruteForceUtils.go ExecuteAndParseCeWLScan",
 			Groups:     cewlWildcardGroups, Options: cewlWildcardOptions, OwnedFlags: cewlWildcardOwned,
 			Notes: "Read from the installed /app/cewl.rb GetoptLong table at lines 472-509 as well as from --help, " +
 				"because CeWL's help omits argument placeholders for several options. Help and source agree on every " +
 				"flag here; the ones marked measured were additionally run against https://example.com.\n\n" +
-				"CEWL 6.3.0 HAS NO CONCURRENCY, NO DELAY AND NO TIMEOUT FLAG. There is nothing to pace it with, and " +
+				"CEWL 6.3.1 HAS NO CONCURRENCY, NO DELAY AND NO TIMEOUT FLAG. There is nothing to pace it with, and " +
 				"the runner's only bound is the `timeout 600` wrapper. That matters because SettingsModal.js renders " +
 				"a cewl rate-limit slider that no command line can ever receive: GetCeWLRateLimit is defined at " +
 				"settings.go:84 and called from nowhere. Say so on the screen rather than leaving the slider there.\n\n" +
@@ -1938,7 +1936,7 @@ func init() {
 		WildcardTool{
 			Key: "subdomainizer", Name: "SubDomainizer", Step: 12, Phase: "JavaScript and link discovery",
 			Container: "ars0n-framework-v2-subdomainizer-1", Binary: "python3 SubDomainizer.py",
-			Version:    "SubDomainizer 2.1 on Python 3.9.25 (/app is a git clone at HEAD 455f425)",
+			Version:    "SubDomainizer 2.1 on Python 3.11.17 (/app is pinned at a53786e: 455f425, where this vocabulary was read, plus a docstring-only change)",
 			Invocation: "server/utils/javaScriptLinkDiscovery.go executeAndParseSubdomainizerScan",
 			Groups:     subdomainizerWildcardGroups, Options: subdomainizerWildcardOptions, OwnedFlags: subdomainizerWildcardOwned,
 			Notes: "Semantics were read from the INSTALLED SOURCE at /app/SubDomainizer.py rather than from --help, " +
@@ -1964,7 +1962,7 @@ func init() {
 		},
 		WildcardTool{
 			Key: "nuclei-screenshot", Name: "Nuclei Screenshot", Step: 13, Phase: "Evidence capture",
-			Container: "ars0n-framework-v2-nuclei-1", Binary: "nuclei -headless", Version: "nuclei v3.3.8",
+			Container: "ars0n-framework-v2-nuclei-1", Binary: "nuclei -headless", Version: "nuclei v3.11.1 (the -sc measurement below was taken on v3.3.8; the v3.11.1 image pre-seeds rod's browser cache with a link to Debian chromium)",
 			Invocation: "server/utils/screenshotUtils.go ExecuteAndParseNucleiScreenshotScan",
 			Groups:     screenshotWildcardGroups, Options: screenshotWildcardOptions, OwnedFlags: screenshotWildcardOwned,
 			Notes: "This is nuclei driving headless Chrome through a SINGLE template, and it is a different runner " +
@@ -1994,7 +1992,7 @@ func init() {
 		},
 		WildcardTool{
 			Key: "nuclei", Name: "Nuclei (engine flags)", Step: 15, Phase: "Vulnerability scanning",
-			Container: "ars0n-framework-v2-nuclei-1", Binary: "nuclei", Version: "v3.3.8 (templates at /root/nuclei-templates)",
+			Container: "ars0n-framework-v2-nuclei-1", Binary: "nuclei", Version: "v3.11.1 (templates v10.4.7 at /root/nuclei-templates; vocabulary measured on v3.3.8)",
 			Invocation: "server/utils/nucleiUtils.go executeNucleiScan, reached from ExecuteNucleiScanForScopeTarget",
 			Groups:     nucleiWildcardGroups, Options: nucleiWildcardOptions, OwnedFlags: nucleiWildcardOwned,
 			Notes: "ENGINE FLAGS ONLY, AND THAT BOUNDARY IS THE WHOLE POINT. Templates, tags, severities, exclusions, " +

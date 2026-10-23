@@ -1,10 +1,17 @@
 const { z } = require('zod');
 const fs = require('fs');
+const path = require('path');
 const { apiGet, apiPost } = require('../api');
 const { query } = require('../db');
 const { limitResults, clampLimit } = require('../utils/truncate');
 
 const API_BASE = () => process.env.API_URL || 'http://api:8443';
+
+// Where a relative file_path lands. The server runs as the unprivileged node user, which cannot write
+// /app (its working directory), so a relative path resolves into the one directory the image gives
+// it: /app/exports. MCP_EXPORT_DIR overrides that. An absolute path is used as given, as before.
+const exportDir = () => process.env.MCP_EXPORT_DIR || path.join(__dirname, '..', '..', 'exports');
+const resolveFilePath = (p) => path.resolve(exportDir(), p);
 
 // The parts of the Wildcard workflow that had no MCP path at all.
 //
@@ -293,7 +300,8 @@ const manageDatabaseBundleSchema = z.object({
   url: z.string().optional().describe('import_url: where to fetch the bundle from.'),
   file_path: z.string().optional().describe(
     'import_file / inspect: path to a .rs0n readable by the MCP server. ' +
-    'export: write the bundle to this path instead of returning its bytes.'),
+    'export: write the bundle to this path instead of returning its bytes. ' +
+    'A relative path is resolved under /app/exports (env MCP_EXPORT_DIR), the directory the server can write.'),
   as_base64: z.boolean().optional().describe(
     'export: also return the bundle bytes base64 encoded. Bundles are large; prefer file_path.'),
 });
@@ -321,7 +329,8 @@ async function manageDatabaseBundle(params) {
       const buf = Buffer.from(await res.arrayBuffer());
       const out = { format: 'rs0n', bytes: buf.length, scope_targets: ids.length };
       if (params.file_path) {
-        try { fs.writeFileSync(params.file_path, buf); out.saved_path = params.file_path; }
+        const target = resolveFilePath(params.file_path);
+        try { fs.writeFileSync(target, buf); out.saved_path = target; }
         catch (e) { return { error: `bundle built but could not write file_path: ${e.message}` }; }
       }
       if (params.as_base64) out.base64 = buf.toString('base64');
@@ -338,7 +347,7 @@ async function manageDatabaseBundle(params) {
     case 'import_file': {
       if (!params.file_path) return { error: 'import_file needs file_path' };
       let data;
-      try { data = fs.readFileSync(params.file_path); }
+      try { data = fs.readFileSync(resolveFilePath(params.file_path)); }
       catch (e) { return { error: `cannot read file_path: ${e.message}` }; }
       return apiPost('/api/database-import-base64', { data: data.toString('base64') });
     }
@@ -346,7 +355,7 @@ async function manageDatabaseBundle(params) {
     case 'inspect': {
       if (!params.file_path) return { error: 'inspect needs file_path' };
       let data;
-      try { data = fs.readFileSync(params.file_path); }
+      try { data = fs.readFileSync(resolveFilePath(params.file_path)); }
       catch (e) { return { error: `cannot read file_path: ${e.message}` }; }
       return apiPost('/api/debug-export-file', { data: data.toString('base64') });
     }
@@ -366,7 +375,8 @@ const exportScanDataSchema = z.object({
   curated_only: z.boolean().optional()
     .describe('Drop the long recon/ per-table dump and keep the high-signal folders (auth, urls, findings, threat, config).'),
   file_path: z.string().optional()
-    .describe('Write the CSV zip to this path (readable by the MCP server) instead of returning its bytes.'),
+    .describe('Write the CSV zip to this path (readable by the MCP server) instead of returning its bytes. ' +
+      'A relative path is resolved under /app/exports (env MCP_EXPORT_DIR), the directory the server can write.'),
   as_base64: z.boolean().optional()
     .describe('Also return the ZIP bytes base64. Large; prefer file_path, or the query_* tools to read rows.'),
 });
@@ -392,7 +402,8 @@ async function exportScanData(params) {
 
   const out = { format: 'zip', bytes: buf.length };
   if (params.file_path) {
-    try { fs.writeFileSync(params.file_path, buf); out.saved_path = params.file_path; }
+    const target = resolveFilePath(params.file_path);
+    try { fs.writeFileSync(target, buf); out.saved_path = target; }
     catch (e) { return { error: `export ok but could not write file_path: ${e.message}` }; }
   }
   if (params.as_base64) out.base64 = buf.toString('base64');
@@ -496,4 +507,5 @@ module.exports = {
   exportScanDataSchema, exportScanData,
   hackeroneScopeSchema, hackeroneScope,
   manageMcpConfigSchema, manageMcpConfig,
+  resolveFilePath,
 };

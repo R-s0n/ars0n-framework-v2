@@ -96,9 +96,9 @@ func TestAmassIntelCompanyDefaultCommandIsUnchanged(t *testing.T) {
 	want := []string{
 		"docker", "run", "--rm",
 		// The tag is the one token here that is not the runner's original: the inline command was
-		// untagged and is now pinned to :v4.2.0. Both references resolve to the same image, so
-		// "unchanged" still holds for everything this test is actually guarding.
-		"caffix/amass:v4.2.0",
+		// untagged and is now pinned to :v4.2.0 and its digest. Both references resolve to the same
+		// image, so "unchanged" still holds for everything this test is actually guarding.
+		"caffix/amass:v4.2.0@sha256:b11100806a4fd31990103a92d296cd5b7dd5442502e3cf51aceeeaa397305d08",
 		"intel",
 		"-org", "Acme Widgets",
 		"-whois",
@@ -495,7 +495,7 @@ func TestAmassEnumCompanyDefaultCommandIsUnchanged(t *testing.T) {
 		"docker", "run", "--rm",
 		// Pinned tag, same as amass intel above: a deliberate change to the image reference, not a
 		// change to the composed command. Both references resolve to the same image.
-		"caffix/amass:v4.2.0",
+		"caffix/amass:v4.2.0@sha256:b11100806a4fd31990103a92d296cd5b7dd5442502e3cf51aceeeaa397305d08",
 		"enum", "-passive", "-alts", "-brute", "-nocolor",
 		"-min-for-recursive", "2", "-timeout", "300",
 		"-d", "example.com",
@@ -527,6 +527,7 @@ func TestDNSxCompanyDefaultCommandIsUnchanged(t *testing.T) {
 		"docker", "exec", "-i",
 		"ars0n-framework-v2-dnsx-1",
 		"dnsx",
+		"-duc",
 		"-a", "-aaaa", "-cname", "-mx", "-ns", "-txt", "-ptr", "-srv",
 		"-re", "-j",
 		"-retry", "3",
@@ -570,6 +571,7 @@ func TestKatanaCompanyDefaultCommandIsUnchanged(t *testing.T) {
 	want := []string{
 		"docker", "exec", "ars0n-framework-v2-katana-1",
 		"katana",
+		"-duc",
 		"-u", "https://example.com",
 		"-d", "3",
 		"-jc",

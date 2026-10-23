@@ -78,7 +78,7 @@ const SETTINGS = {
 
 const mockFetch = (overrides = {}) => {
   const calls = [];
-  global.fetch = jest.fn((url, init) => {
+  global.fetch = vi.fn((url, init) => {
     calls.push({ url: String(url), init });
     if (String(url).endsWith('/wildcard-tools')) return jsonResponse(REGISTRY);
     if (init && init.method === 'POST') {
@@ -283,7 +283,7 @@ test('a tool that delegates links out instead of rendering a form', async () => 
       runner_reads_settings: true,
     },
   });
-  const onDelegate = jest.fn();
+  const onDelegate = vi.fn();
   openModal({ tool: { key: 'httpx', name: 'httpx' }, onDelegate });
 
   await waitFor(() => expect(

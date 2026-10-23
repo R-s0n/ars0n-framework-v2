@@ -570,7 +570,7 @@ let posted = [];
 const serve = ({ status = EXAM_STATUS, verdicts = VERDICTS } = {}) => {
   requested = [];
   posted = [];
-  global.fetch = jest.fn((url, opts) => {
+  global.fetch = vi.fn((url, opts) => {
     const u = String(url);
     requested.push(u);
     if (opts && opts.method === 'POST') posted.push(u);
@@ -619,7 +619,7 @@ afterEach(() => {
   root = null;
   container = null;
   document.body.innerHTML = '';
-  jest.restoreAllMocks();
+  vi.restoreAllMocks();
 });
 
 const click = async (el) => {
@@ -829,7 +829,7 @@ test('a target that has never run the classifiers is told so, not shown an empty
 
 test('a status endpoint that fails says the coverage is unknown rather than showing none', async () => {
   requested = [];
-  global.fetch = jest.fn((url) => {
+  global.fetch = vi.fn((url) => {
     requested.push(String(url));
     return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
   });

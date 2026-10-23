@@ -120,7 +120,7 @@ const RANGES = {
 
 const mockFetch = (overrides = {}) => {
   const calls = [];
-  global.fetch = jest.fn((url, init) => {
+  global.fetch = vi.fn((url, init) => {
     const u = String(url);
     calls.push({ url: u, init });
     if (u.endsWith('/company-tools')) {
@@ -498,7 +498,12 @@ test('the Amass Enum domain picker still works when the company registry is miss
     />,
   );
   await waitFor(() => expect(screen.getByText('invented-domain.example')).toBeInTheDocument());
-  expect(screen.getByRole('button', { name: /Save Configuration \(0 domains\)/ })).toBeInTheDocument();
+  // The picker's own saved selection still loads: /api/amass-enum-config/ answers with the `other`
+  // body above, so once it settles the saved domain is selected. Asserting right after the first
+  // render would only see the empty selection from before the saved config arrived.
+  await waitFor(() => expect(
+    screen.getByRole('button', { name: /Save Configuration \(1 domains\)/ }),
+  ).toBeInTheDocument());
 });
 
 test('the Amass Enum modal carries the served settings as extra tabs beside its picker', async () => {

@@ -612,3 +612,40 @@ func TestAZeroFindingsRunIsNotMistakenForACrash(t *testing.T) {
 		}
 	}
 }
+
+// dalfox 3.2.4, measured. These are real report lines from ghcr.io/hahwul/dalfox:v3.2.4 run against a
+// local reflecting fixture (complete, --limit 1, --scan-timeout on a slow page, a --session-check
+// marker that never matches, and an unresolvable host). Compared with 3.2.1 the finding lines and
+// exit codes are unchanged; what is new is that --limit and --scan-timeout now set meta.incomplete
+// with the target still "findings" and no error_code. That run must read as incomplete (a limit
+// hides findings) and must still keep the finding it reports.
+func TestDalfox324ReportsAreClassifiedAsMeasured(t *testing.T) {
+	cases := []struct {
+		name       string
+		report     string
+		incomplete string // "" = must read as complete; otherwise a substring of the reason
+		findings   int
+	}{
+		{"complete", `{"meta":{"dalfox_version":"3.2.4","dedup_mode":"exact","failed_requests":0,"findings_count":1,"incomplete":false,"scan_duration_ms":1073,"target_summary":[{"findings_count":1,"status":"findings","target":"http://r2srv-fix:8080/?q=a"}],"targets":["http://r2srv-fix:8080/?q=a"],"targets_deduplicated":0,"total_requests":20}}` + "\n" +
+			`{"confidence":"high","confidence_reason":"payload reached an executable position in the parsed response","cwe":"CWE-79","data":"http://r2srv-fix:8080/?q=%3Csvg%20onload%3Dalert%281%29%20class%3Ddlx233427aa%3E","detection_method":"reflection","evidence":"DOM verification successful for param q (DOM marker)","inject_type":"inHTML","location":"Query","message_id":606,"message_str":"Triggered XSS Payload (DOM marker): q=<svg onload=alert(1) class=dlx233427aa>","method":"GET","param":"q","payload":"<svg onload=alert(1) class=dlx233427aa>","request":"GET /?q=%3Csvg%20onload%3Dalert%281%29%20class%3Ddlx233427aa%3E HTTP/1.1\r\nHost: r2srv-fix:8080\r\n","response":"<html><body><div><svg onload=alert(1) class=dlx233427aa></div></body></html>","severity":"High","type":"V","type_description":"Vulnerable - dalfox asserts this input is exploitable; act on it"}`, "", 1},
+		{"limit", `{"meta":{"dalfox_version":"3.2.4","dedup_mode":"exact","failed_requests":0,"findings_count":1,"incomplete":true,"scan_duration_ms":1077,"target_summary":[{"findings_count":1,"status":"findings","target":"http://r2srv-fix:8080/?q=a"}],"targets":["http://r2srv-fix:8080/?q=a"],"targets_deduplicated":0,"total_requests":20}}` + "\n" +
+			`{"confidence":"high","confidence_reason":"payload reached an executable position in the parsed response","cwe":"CWE-79","data":"http://r2srv-fix:8080/?q=%3Csvg%20onload%3Dalert%281%29%20class%3Ddlx49f39aca%3E","detection_method":"reflection","evidence":"DOM verification successful for param q (DOM marker)","inject_type":"inHTML","location":"Query","message_id":606,"message_str":"Triggered XSS Payload (DOM marker): q=<svg onload=alert(1) class=dlx49f39aca>","method":"GET","param":"q","payload":"<svg onload=alert(1) class=dlx49f39aca>","request":"GET /?q=%3Csvg%20onload%3Dalert%281%29%20class%3Ddlx49f39aca%3E HTTP/1.1\r\nHost: r2srv-fix:8080\r\n","response":"<html><body><div><svg onload=alert(1) class=dlx49f39aca></div></body></html>","severity":"High","type":"V","type_description":"Vulnerable - dalfox asserts this input is exploitable; act on it"}`, "--limit", 1},
+		{"scan-timeout", `{"meta":{"dalfox_version":"3.2.4","dedup_mode":"exact","failed_requests":0,"findings_count":1,"incomplete":true,"scan_duration_ms":28084,"target_summary":[{"findings_count":1,"status":"findings","target":"http://r2srv-fix:8080/slow?q=a"}],"targets":["http://r2srv-fix:8080/slow?q=a"],"targets_deduplicated":0,"total_requests":21}}` + "\n" +
+			`{"confidence":"high","confidence_reason":"payload reached an executable position in the parsed response","cwe":"CWE-79","data":"http://r2srv-fix:8080/slow?q=%3Csvg%20onload%3Dalert%281%29%20class%3Ddlx3af7e31a%3E","detection_method":"reflection","evidence":"DOM verification successful for param q (DOM marker)","inject_type":"inHTML","location":"Query","message_id":606,"message_str":"Triggered XSS Payload (DOM marker): q=<svg onload=alert(1) class=dlx3af7e31a>","method":"GET","param":"q","payload":"<svg onload=alert(1) class=dlx3af7e31a>","request":"GET /slow?q=%3Csvg%20onload%3Dalert%281%29%20class%3Ddlx3af7e31a%3E HTTP/1.1\r\nHost: r2srv-fix:8080\r\n","response":"<html><body><div><svg onload=alert(1) class=dlx3af7e31a></div></body></html>","severity":"High","type":"V","type_description":"Vulnerable - dalfox asserts this input is exploitable; act on it"}`, "--scan-timeout", 1},
+		{"session lost", `{"meta":{"dalfox_version":"3.2.4","dedup_mode":"exact","failed_requests":0,"findings_count":1,"incomplete":true,"scan_duration_ms":1059,"target_summary":[{"error_code":"SESSION_LOST","error_message":"--session-check pattern did not match the baseline response (HTTP 200, 38 bytes from http://r2srv-fix:8080/?q=a) — the marker is wrong, is on a different page, or the credentials are already invalid","findings_count":1,"status":"incomplete","target":"http://r2srv-fix:8080/?q=a"}],"targets":["http://r2srv-fix:8080/?q=a"],"targets_deduplicated":0,"total_requests":20}}` + "\n" +
+			`{"confidence":"high","confidence_reason":"payload reached an executable position in the parsed response","cwe":"CWE-79","data":"http://r2srv-fix:8080/?q=%3Csvg%20onload%3Dalert%281%29%20class%3Ddlx5135283e%3E","detection_method":"reflection","evidence":"DOM verification successful for param q (DOM marker)","inject_type":"inHTML","location":"Query","message_id":606,"message_str":"Triggered XSS Payload (DOM marker): q=<svg onload=alert(1) class=dlx5135283e>","method":"GET","param":"q","payload":"<svg onload=alert(1) class=dlx5135283e>","request":"GET /?q=%3Csvg%20onload%3Dalert%281%29%20class%3Ddlx5135283e%3E HTTP/1.1\r\nHost: r2srv-fix:8080\r\n","response":"<html><body><div><svg onload=alert(1) class=dlx5135283e></div></body></html>","severity":"High","type":"V","type_description":"Vulnerable - dalfox asserts this input is exploitable; act on it"}`, "SESSION_LOST", 1},
+		{"unreachable host", `{"meta":{"dalfox_version":"3.2.4","dedup_mode":"exact","failed_requests":0,"findings_count":0,"incomplete":false,"scan_duration_ms":10209,"target_summary":[{"error_code":"DNS_RESOLUTION_FAILED","findings_count":0,"status":"skipped","target":"http://r2srv-nohost:8080/?q=a"}],"targets":["http://r2srv-nohost:8080/?q=a"],"targets_deduplicated":0,"total_requests":2}}`, "", 0},
+	}
+	for _, c := range cases {
+		why := dalfoxIncomplete("", c.report)
+		switch {
+		case c.incomplete == "" && why != "":
+			t.Errorf("%s: a finished run was reported incomplete (%q)", c.name, why)
+		case c.incomplete != "" && !strings.Contains(why, c.incomplete):
+			t.Errorf("%s: the run must read as incomplete with a reason naming %q, got %q", c.name, c.incomplete, why)
+		}
+		if got := len(parseDalfoxJSONL("", c.report, vectorRow{InsertionPoint: "query"})); got != c.findings {
+			t.Errorf("%s: expected %d findings, got %d", c.name, c.findings, got)
+		}
+	}
+}

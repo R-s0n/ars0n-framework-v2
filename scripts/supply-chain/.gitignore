@@ -1,0 +1,3 @@
+.sccache/
+# Release-review notes (residuals, exceptions, follow-ups) stay local, never committed.
+residuals.local.md

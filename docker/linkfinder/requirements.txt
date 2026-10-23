@@ -1,0 +1,9 @@
+# Hash-locked dependencies of the linkfinder image. Do not edit by hand: resolved inside the pinned
+# python:3.11.17-slim-trixie base with pip --uploaded-prior-to=2026-10-15T00:00:00Z, hashed from PyPI.
+# Install: pip install --no-deps --require-hashes --only-binary=:all: -r requirements.txt
+editorconfig==0.17.1 \
+    --hash=sha256:1eda9c2c0db8c16dbd50111b710572a5e6de934e39772de1959d41f64fc17c82 \
+    --hash=sha256:23c08b00e8e08cc3adcddb825251c497478df1dada6aefeb01e626ad37303745
+jsbeautifier==2.0.3 \
+    --hash=sha256:f0190e279a2cdb827556ada63f41c9c63c11f8116ee06e264b24aa50311cbee3 \
+    --hash=sha256:9579d4e9dbaa00383f3efdff4c98c8140bb85ba319398e8b97cdaba27abd6ba3

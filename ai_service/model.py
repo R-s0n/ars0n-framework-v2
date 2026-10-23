@@ -6,11 +6,15 @@ import logging
 import time
 import threading
 import re
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, T5ForConditionalGeneration
+from transformers import AutoTokenizer, T5ForConditionalGeneration
 import torch
 
 # Global timeout flag
 TIMEOUT_OCCURRED = False
+
+# google-t5/t5-small baked into the image at a pinned, sha256-verified revision (see Dockerfile).
+# Loaded from disk only: no Hub download at runtime, safetensors only, never trust_remote_code.
+MODEL_DIR = "/opt/models/t5-small"
 
 class LlamaDocumentProcessor:
     def __init__(self):
@@ -32,15 +36,16 @@ class LlamaDocumentProcessor:
             
             # Initialize tokenizer
             logging.debug("Loading tokenizer...")
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, local_files_only=True)
             logging.debug("Tokenizer loaded successfully")
             
             # Initialize model
             logging.debug("Loading model weights...")
             self.model = T5ForConditionalGeneration.from_pretrained(
-                self.model_name,
-                torch_dtype=torch.float32,  # Use regular precision for CPU
-                device_map="auto"
+                MODEL_DIR,
+                dtype=torch.float32,  # Use regular precision for CPU
+                use_safetensors=True,
+                local_files_only=True
             )
             logging.debug("Model weights loaded successfully")
             

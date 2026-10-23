@@ -123,6 +123,9 @@ func TestTruffleHogFetchesBeforeScanning(t *testing.T) {
 	if !strings.Contains(command, "--json") {
 		t.Errorf("findings are read from the JSON output: %q", command)
 	}
+	if !strings.Contains(command, "--no-update") {
+		t.Errorf("the self-updater must stay off so the pinned binary is what runs: %q", command)
+	}
 
 	// Turning verification off removes the reason to prefer this tool over a pattern matcher.
 	_, warnings := ComposeTruffleHog(v, map[string]any{"noVerification": true}, "/tmp/rep")

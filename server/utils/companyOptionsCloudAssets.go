@@ -226,7 +226,7 @@ var dnsxCompanyOwned = map[string]string{
 	"-auth":    "BLACKLISTED. Measured: exits 1 with '[FTL] Could not read input from terminal: open /dev/tty' because it tries to prompt for a ProjectDiscovery Cloud key over a stdin the runner is using for the target. The runner would log the failure and SKIP that domain while still finishing the scan as 'success'.",
 	"-up":      "Rewrites the binary inside the container. Never a per-scan choice.",
 	"-update":  "Alias of -up.",
-	"-duc":     "Not a per-scan choice, it is a defect to fix in the runner. dnsx performs a version check on EVERY invocation and the runner invokes it once per selected domain, so a 40-domain company sweep makes 40 outbound update checks. Measured: -duc suppresses it cleanly with results unaffected, and the runner should pass it unconditionally.",
+	"-duc":     "Always set by the runner. Without it dnsx performs a version check on EVERY invocation and the runner invokes it once per selected domain, so a 40-domain company sweep made 40 outbound update checks. Measured: -duc suppresses it cleanly with results unaffected.",
 	"-hc":      "Runs a diagnostic and exits without scanning.",
 	"-version": "Prints the version and exits.",
 }

@@ -131,8 +131,7 @@ def _cert_facts(cert_dict, der, host):
             parsed = x509.load_der_x509_certificate(der, default_backend())
             ext = parsed.extensions.get_extension_for_class(x509.SubjectAlternativeName)
             out["sans"] = sorted(set(ext.value.get_values_for_type(x509.DNSName)))
-            out["not_after"] = str(getattr(parsed, "not_valid_after_utc",
-                                           parsed.not_valid_after))
+            out["not_after"] = str(parsed.not_valid_after_utc)
             out["self_signed"] = parsed.subject == parsed.issuer
         except Exception:
             pass

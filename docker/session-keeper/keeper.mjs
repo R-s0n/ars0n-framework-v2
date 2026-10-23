@@ -123,7 +123,7 @@ async function startKeeper(desired) {
 
   try {
     state.browser = await puppeteer.launch({
-      headless: 'new',
+      headless: true, // new headless mode (--headless=new); since v22 the option is boolean | 'shell'
       userDataDir,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
     });

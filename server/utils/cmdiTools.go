@@ -12,7 +12,8 @@ import (
 // points, so a tool that found one and not another was telling us about itself:
 //
 //   - commix v4.2.dev76, 99 flags in 9 groups, from `commix.py -hh`.
-//   - SSTImap 1.3.3.7, from `sstimap.py --help` and `--version` in the shipped container. The table
+//   - SSTImap 1.3.3.7, from `sstimap.py --help` and `--version` in the shipped container (the image
+//     now pins 1.4.0 at 1c27fdb, the same commit the deployed container already ran). The table
 //     below was written against 1.2.3 and re-read against the running container on 2026-08-23: every
 //     flag it names still exists. 1.3.x adds --bool-match-min, --bool-fuzzy, --bool-samples,
 //     -L/--force-level, --verify-blind-delay and --data-params, none of which are offered here yet.

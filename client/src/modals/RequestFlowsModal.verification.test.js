@@ -21,7 +21,8 @@ import RequestFlowsModal from './RequestFlowsModal';
 //
 // The chart is mocked because nothing here is about a DETECTED flow's graph. BuiltFlowRunMap is
 // deliberately NOT mocked: it is the thing under test.
-jest.mock('../components/RequestFlowChart', () => () => null);
+// Vitest mocks an ES module, so the factory returns its exports: the default export is the component.
+vi.mock('../components/RequestFlowChart', () => ({ default: () => null }));
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -301,10 +302,10 @@ describe('a built flow\'s map and its verification state', () => {
   let replayResponse;
 
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
     calls = [];
     replayResponse = null;
-    global.fetch = jest.fn((url, init) => {
+    global.fetch = vi.fn((url, init) => {
       const u = String(url);
       const method = (init && init.method) || 'GET';
       calls.push({ url: u, method, body: init && init.body ? JSON.parse(init.body) : null });
@@ -339,13 +340,13 @@ describe('a built flow\'s map and its verification state', () => {
   afterEach(() => {
     act(() => { root.unmount(); });
     container.remove();
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   const settle = async (ms = 400) => {
     for (let i = 0; i < 3; i += 1) {
       // eslint-disable-next-line no-await-in-loop
-      await act(async () => { jest.advanceTimersByTime(ms); });
+      await act(async () => { vi.advanceTimersByTime(ms); });
     }
   };
 
@@ -396,7 +397,7 @@ describe('a built flow\'s map and its verification state', () => {
   });
 
   test('a list where nothing is verified says so at a glance, without opening a row', async () => {
-    global.fetch = jest.fn((url) => (String(url).includes('/flows?')
+    global.fetch = vi.fn((url) => (String(url).includes('/flows?')
       ? respond({
         ...FLOWS_RESPONSE,
         flows: FLOWS_RESPONSE.flows.map((f) => ({
@@ -418,7 +419,7 @@ describe('a built flow\'s map and its verification state', () => {
   });
 
   test('a build that reports no verification field accuses nothing', async () => {
-    global.fetch = jest.fn((url) => (String(url).includes('/flows?')
+    global.fetch = vi.fn((url) => (String(url).includes('/flows?')
       ? respond({
         ...FLOWS_RESPONSE,
         flows: FLOWS_RESPONSE.flows.map(({ verification, ...rest }) => rest),
@@ -469,7 +470,7 @@ describe('a built flow\'s map and its verification state', () => {
       step('bbbb0000-0000-0000-0000-000000000002', 2, 'Write it back', { enabled: false }),
     ];
     const base = global.fetch;
-    global.fetch = jest.fn((url, init) => (String(url).includes(`/flow/${UNVERIFIED_ID}`)
+    global.fetch = vi.fn((url, init) => (String(url).includes(`/flow/${UNVERIFIED_ID}`)
       && !String(url).includes('/runs') && !String(url).includes('/replay')
       ? respond(detailFor(UNVERIFIED_ID, off))
       : base(url, init)));
@@ -494,7 +495,7 @@ describe('a built flow\'s map and its verification state', () => {
       }),
     ];
     const base = global.fetch;
-    global.fetch = jest.fn((url, init) => (String(url).includes(`/flow/${UNVERIFIED_ID}`)
+    global.fetch = vi.fn((url, init) => (String(url).includes(`/flow/${UNVERIFIED_ID}`)
       && !String(url).includes('/runs') && !String(url).includes('/replay')
       ? respond(detailFor(UNVERIFIED_ID, withWrite))
       : base(url, init)));
@@ -625,7 +626,7 @@ describe('a built flow\'s map and its verification state', () => {
       requests_sent: 3,
     };
     const base = global.fetch;
-    global.fetch = jest.fn((url, init) => (String(url).includes(`/flow/${VERIFIED_ID}/runs`)
+    global.fetch = vi.fn((url, init) => (String(url).includes(`/flow/${VERIFIED_ID}/runs`)
       ? respond({ flow_id: VERIFIED_ID, count: 1, runs: [capped], verification: 'verified' })
       : base(url, init)));
 
@@ -732,7 +733,7 @@ describe('a built flow\'s map and its verification state', () => {
   test('the server\'s verdict on a fresh run wins over the fact that it is fresh', async () => {
     const freshRun = { ...STALE_RUN, run_id: 'fresh-run', flow_id: UNVERIFIED_ID };
     let ran = false;
-    global.fetch = jest.fn((url, init) => {
+    global.fetch = vi.fn((url, init) => {
       const u = String(url);
       const method = (init && init.method) || 'GET';
       calls.push({ url: u, method });
@@ -771,7 +772,7 @@ describe('a built flow\'s map and its verification state', () => {
 
   test('a replay that fails says so and does not invent a map', async () => {
     replayResponse = null;
-    global.fetch = jest.fn((url, init) => {
+    global.fetch = vi.fn((url, init) => {
       const u = String(url);
       calls.push({ url: u, method: (init && init.method) || 'GET' });
       if (u.includes('/flows?')) return respond(FLOWS_RESPONSE);

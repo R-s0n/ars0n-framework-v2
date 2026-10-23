@@ -64,7 +64,7 @@ func amassIntelCompanyCommandArgs(companyName string, tool CompanyTool, settings
 		// becomes while the notes, the arity table and the parser stayed written for this one, and a
 		// changed CLI would surface as an empty result rather than an error. :v4.2.0 and :latest are
 		// the same image today, so this changes no behaviour now.
-		"caffix/amass:v4.2.0",
+		amassImage,
 		"intel",
 		"-org", companyName,
 		"-whois",

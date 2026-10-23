@@ -42,16 +42,23 @@ This service can be used by other components in the ars0n framework to:
 
 ## Development
 
-To run the service locally:
+The Docker image is the supported way to run it (`docker compose --profile ai up ai_service`). To run
+it locally on Linux with Python 3.14, install both hash-locked files, each from its own single index,
+and put the pinned model files (see the `ADD --checksum` lines in the Dockerfile) in `/opt/models/t5-small`:
 
 ```bash
-pip install -r requirements.txt
-uvicorn main:app --reload
+pip install --no-deps --require-hashes --only-binary=:all: --index-url https://download.pytorch.org/whl/cpu -r requirements-torch.txt
+pip install --no-deps --require-hashes --only-binary=:all: --index-url https://pypi.org/simple -r requirements.txt
+HF_HUB_OFFLINE=1 uvicorn main:app --reload
 ```
+
+`requirements.in` lists the direct pins `requirements.txt` was resolved from. Never combine the two
+indexes with `--extra-index-url`.
 
 ## Model Details
 
-This service uses the `t5-small` model, which is better at generating meaningful answers from raw HTML:
+This service uses the `t5-small` model (`google-t5/t5-small` at commit `df1b051c`, safetensors weights,
+baked into the image and loaded offline), which is better at generating meaningful answers from raw HTML:
 
 1. Preserves the full HTML structure for technical analysis
 2. Uses sequence-to-sequence generation to produce more coherent answers

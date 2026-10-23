@@ -6,4 +6,4 @@
 // library only, no requires, so this file exists purely to make `go test ./...` work here.
 module oracle
 
-go 1.23
+go 1.26.0

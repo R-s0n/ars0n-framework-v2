@@ -1,0 +1,5 @@
+# torch CPU build, installed ONLY from https://download.pytorch.org/whl/cpu (see Dockerfile).
+# Hashes: cp314 manylinux_2_28 x86_64, cp314 manylinux_2_28 aarch64. Its dependencies are in requirements.txt.
+torch==2.14.1+cpu \
+    --hash=sha256:35103e180214793207f95d7e12e100ecba3ace6f5fb37e1fcefbb07e096ed180 \
+    --hash=sha256:f56cd23a3bf003bfbed3da0645ba09b3ccc66c0a2f2ac726a9b98f34e0e4926f

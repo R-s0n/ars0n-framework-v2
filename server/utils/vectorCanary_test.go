@@ -471,7 +471,7 @@ func TestAFreshPassIsReusedWhenNothingHasChanged(t *testing.T) {
 			"case this exists for")
 	}
 	if !outcome.Ran || !outcome.Passed || !outcome.Reused {
-		t.Errorf("a reused pass must still read as a control that ran and passed, and must say it was " +
+		t.Error("a reused pass must still read as a control that ran and passed, and must say it was " +
 			"reused; got " + fmt.Sprintf("%#v", outcome))
 	}
 	if outcome.Age != 9*time.Minute {

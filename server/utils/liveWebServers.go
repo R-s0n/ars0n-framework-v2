@@ -291,6 +291,7 @@ func ExecuteAndParseHttpxScan(scanID, domain string, scanConfig *HttpxScanConfig
 		"docker", "exec",
 		"ars0n-framework-v2-httpx-1",
 		"httpx",
+		"-duc", // runner-owned: no update check (phone-home) on any scan
 		"-l", filepath.Join("/tmp", fmt.Sprintf("httpx-%s", scanID), "domains.txt"),
 		"-json",
 		"-no-color",
@@ -472,7 +473,10 @@ func ExecuteAndParseHttpxScan(scanID, domain string, scanConfig *HttpxScanConfig
 
 		if scanConfig.Headless != nil {
 			if val, ok := scanConfig.Headless["screenshot"].(bool); ok && val {
-				dockerCmd = append(dockerCmd, "-screenshot")
+				// -system-chrome stops httpx (rod) from downloading an unverified Chromium build at
+				// runtime. The httpx image ships no browser, so a screenshot request now fails with
+				// "chrome browser is not installed" instead of fetching one.
+				dockerCmd = append(dockerCmd, "-screenshot", "-system-chrome")
 				if st, ok := scanConfig.Headless["screenshotTimeout"].(float64); ok && int(st) != 10 {
 					dockerCmd = append(dockerCmd, "-screenshot-timeout", fmt.Sprintf("%d", int(st)))
 				}

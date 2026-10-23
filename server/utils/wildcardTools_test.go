@@ -197,7 +197,7 @@ func TestWildcardVocabularySizes(t *testing.T) {
 	// atLeast rather than exact: adding a measured option must not break the build, dropping half a
 	// tool's vocabulary must.
 	atLeast := map[string]int{
-		"gau": 12, "ctl": 13, "shuffledns": 11, "cewl": 22, "gospider": 23,
+		"gau": 12, "ctl": 13, "shuffledns": 10, "cewl": 22, "gospider": 23,
 		"subdomainizer": 9, "nuclei": 43,
 	}
 	for key, want := range atLeast {
