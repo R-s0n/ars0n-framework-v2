@@ -148,7 +148,7 @@ My hope is that this modular framework will act as a canvas to help share what I
 
 This framework consists of 50+ Docker containers along w/ a Docker Compose Manifest to automate the process of deploying these containers.
 
-1. Download the Zip File for the <a href="https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.1/ars0n-framework-v2-beta-0.1.1.zip">latest release</a>
+1. Download the Zip File for the <a href="https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.2/ars0n-framework-v2-beta-0.1.2.zip">latest release</a>
 2. Unzip the files
 3. Navigate to the directory with the `docker-compose.yml` file
 4. Build and start it with `.\build.ps1` (Windows) or `./build.sh` (Mac/Linux) - a sequential build that avoids the parallel-build races on Docker's containerd image store (see the OS-specific steps below)
@@ -160,12 +160,12 @@ This framework consists of 50+ Docker containers along w/ a Docker Compose Manif
 
 **Step 1:** Download the framework
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.1/ars0n-framework-v2-beta-0.1.1.zip" -OutFile "ars0n-framework-v2-beta-0.1.1.zip"
+Invoke-WebRequest -Uri "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.2/ars0n-framework-v2-beta-0.1.2.zip" -OutFile "ars0n-framework-v2-beta-0.1.2.zip"
 ```
 
 **Step 2:** Extract the zip file
 ```powershell
-Expand-Archive -Path "ars0n-framework-v2-beta-0.1.1.zip" -DestinationPath "."
+Expand-Archive -Path "ars0n-framework-v2-beta-0.1.2.zip" -DestinationPath "."
 ```
 
 **Step 3:** Navigate to the framework directory
@@ -185,12 +185,12 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 **Step 1:** Download the framework
 ```bash
-curl -L -o ars0n-framework-v2-beta-0.1.1.zip "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.1/ars0n-framework-v2-beta-0.1.1.zip"
+curl -L -o ars0n-framework-v2-beta-0.1.2.zip "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.2/ars0n-framework-v2-beta-0.1.2.zip"
 ```
 
 **Step 2:** Extract the zip file
 ```bash
-unzip ars0n-framework-v2-beta-0.1.1.zip
+unzip ars0n-framework-v2-beta-0.1.2.zip
 ```
 
 **Step 3:** Navigate to the framework directory
@@ -210,12 +210,12 @@ chmod +x build.sh && ./build.sh
 
 **Step 1:** Download the framework
 ```bash
-wget "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.1/ars0n-framework-v2-beta-0.1.1.zip"
+wget "https://github.com/R-s0n/ars0n-framework-v2/releases/download/beta-0.1.2/ars0n-framework-v2-beta-0.1.2.zip"
 ```
 
 **Step 2:** Extract the zip file
 ```bash
-unzip ars0n-framework-v2-beta-0.1.1.zip
+unzip ars0n-framework-v2-beta-0.1.2.zip
 ```
 
 **Step 3:** Navigate to the framework directory
@@ -496,7 +496,7 @@ The count is not hardcoded: `/health` reports the number of tools actually regis
 
 ### Connecting
 
-The MCP server **starts automatically** with `docker-compose up` and listens on **port 3001** using the SSE transport:
+The MCP server **starts automatically** with the stack and listens on **port 3001** using the SSE transport. `docker-compose.yml` publishes it on `127.0.0.1` only (see [Authentication and remote access](#authentication-and-remote-access)):
 
 - SSE endpoint: `http://localhost:3001/sse`
 - Health check: `http://localhost:3001/health` → `{"status":"ok","version":"2.1.0","tools":159}`
@@ -513,20 +513,22 @@ Most clients that support **remote SSE MCP servers** can point directly at the S
   "mcpServers": {
     "ars0n-framework": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "http://localhost:3001/sse"]
+      "args": ["-y", "--before=2026-10-15T00:00:00Z", "mcp-remote@0.1.38", "http://localhost:3001/sse"]
     }
   }
 }
 ```
+
+`npx` runs `mcp-remote` on your host, outside Docker, so keep both pins: `mcp-remote@0.1.38` is the vetted version, and `--before` stops npm from resolving its dependencies to releases newer than the vetted date. See [scripts/supply-chain](scripts/supply-chain/README.md). If your `~/.npmrc` sets `min-release-age`, run that command with `--userconfig` pointing at an empty file (add `"--userconfig=/path/to/empty-npmrc"` to `args`), because npm 11.10+ rejects `min-release-age` together with `--before`.
 
 Claude Code (CLI):
 ```bash
 claude mcp add --transport sse ars0n-framework http://localhost:3001/sse
 ```
 
-### Authentication (optional but recommended for shared/remote hosts)
+### Authentication and remote access
 
-By default the MCP server is **unauthenticated** - anyone who can reach port 3001 can run scans and delete targets, so only expose it on trusted networks. To require a token, set `MCP_AUTH_TOKEN` in the `mcp-server` service environment in `docker-compose.yml`:
+By default the MCP server is **unauthenticated** - anyone who can reach port 3001 can run scans and delete targets, which is why `docker-compose.yml` publishes it as `"127.0.0.1:3001:3001"`. To require a token, set `MCP_AUTH_TOKEN` in the `mcp-server` service environment in `docker-compose.yml`:
 
 ```yaml
   mcp-server:
@@ -539,9 +541,29 @@ By default the MCP server is **unauthenticated** - anyone who can reach port 300
 
 Then supply the token from the client as `Authorization: Bearer your-secret-token` or as a `?token=your-secret-token` query parameter on the SSE URL (e.g. `http://localhost:3001/sse?token=your-secret-token`). The startup logs print a warning whenever no token is set.
 
+| Variable | Default | What it does |
+|---|---|---|
+| `MCP_AUTH_TOKEN` | unset (no auth) | When set, `/sse` and `/messages` need `Authorization: Bearer <token>` or `?token=<token>`. `/health` needs no token. |
+| `MCP_ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1],mcp-server` | Comma-separated host names the `Host` header may carry (any port). It is the DNS-rebinding guard: any other name gets `403`, on every route. |
+| `MCP_MAX_TOOL_INPUT_ELEMENTS` | `10000` | Cap on array elements plus object keys in one tool call, so a huge argument cannot run the server out of memory. Pass big wordlists in the `content` string instead. |
+
+**Using it from another machine.** The simplest way needs no config change: an SSH tunnel, then use `http://localhost:3001/sse` as usual:
+```bash
+ssh -N -L 3001:127.0.0.1:3001 user@server
+```
+
+To expose it directly instead, do all three:
+1. Set a long random `MCP_AUTH_TOKEN` (e.g. `openssl rand -hex 32`).
+2. Publish it on one explicit interface, `"<server-ip>:3001:3001"`, never a bare `"3001:3001"`.
+3. Add that IP or hostname to `MCP_ALLOWED_HOSTS`, keeping the defaults (e.g. `localhost,127.0.0.1,[::1],mcp-server,192.168.1.100`).
+
+The token travels in cleartext over plain HTTP, so only do this on a trusted network or behind TLS, and prefer the header over `?token=`, which ends up in logs.
+
 ## Remote Access
 
 The Ars0n Framework v2 supports remote access from any machine on your network using an nginx reverse proxy architecture.
+
+> **Security:** the UI and API have no login, and the API controls the host's Docker. `docker-compose.yml` publishes port 80 on all interfaces so LAN access works. On a VPS or any untrusted network, change it to `"127.0.0.1:80:80"` and use an SSH tunnel (`ssh -N -L 8080:127.0.0.1:80 user@server`, then browse `http://localhost:8080`), or restrict port 80 with your cloud provider's firewall. Host firewalls such as `ufw` do **not** filter Docker-published ports ([Docker docs](https://docs.docker.com/engine/network/packet-filtering-firewalls/)).
 
 ### Accessing the Framework
 
@@ -618,15 +640,16 @@ This section covers common issues you may encounter when setting up and running 
 
 ### Docker Not Installed
 
-**Error:** `docker: command not found` or `docker-compose: command not found`
+**Error:** `docker: command not found`, `docker-compose: command not found` or `docker: 'compose' is not a docker command`
 
 **Solution:**
 - **Windows:** Download and install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/)
 - **Mac:** Download and install [Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac-install/)
-- **Linux (Ubuntu/Debian):**
+- **Linux (Ubuntu/Debian):** install Docker Engine and the Compose v2 plugin from Docker's apt repository. Set the repository up first by following [Ubuntu](https://docs.docker.com/engine/install/ubuntu/) or [Debian](https://docs.docker.com/engine/install/debian/). The old `docker-compose` (v1) package is end-of-life and cannot run the build scripts, which call `docker compose`.
   ```bash
   sudo apt update
-  sudo apt install docker.io docker-compose
+  sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  docker compose version
   sudo systemctl start docker
   sudo systemctl enable docker
   sudo usermod -aG docker $USER
@@ -659,7 +682,7 @@ services:
 
 Then run:
 ```bash
-docker-compose -f test-docker-compose.yml up
+docker compose -f test-docker-compose.yml up
 ```
 
 You should see the same hello-world message. If both tests pass, your Docker installation is working correctly and you can proceed with the Ars0n Framework.
@@ -757,7 +780,7 @@ You should see the same hello-world message. If both tests pass, your Docker ins
   ```
 - Restart the database service:
   ```bash
-  docker-compose restart db
+  docker compose restart db
   ```
 
 ### Container Build Failures
@@ -766,11 +789,12 @@ You should see the same hello-world message. If both tests pass, your Docker ins
 
 **Solution:**
 - Ensure all required files are present in the project directory
+- `toomanyrequests` or HTTP 429 from Docker Hub means anonymous pulls are rate-limited: run `docker login` and re-run the build script
 - Check Dockerfile syntax and dependencies
 - Clear Docker build cache:
   ```bash
   docker builder prune
-  docker-compose build --no-cache
+  docker compose build --no-cache <service>   # one service at a time; to rebuild everything, re-run ./build.sh (Windows: .\build.ps1)
   ```
 
 ### Network Connectivity Issues
@@ -791,7 +815,7 @@ You should see the same hello-world message. If both tests pass, your Docker ins
 **Error:** Cannot connect from another machine on the network
 
 **Solution:**
-- Verify all containers are running: `docker-compose ps`
+- Verify all containers are running: `docker compose ps`
 - Check that port 80 is open in your firewall (see Remote Access section above)
 - Confirm you're using the correct server IP address
 - Test local access first: `http://localhost`
@@ -854,7 +878,7 @@ If you're having trouble getting the Ars0n Framework to run, create a **Discussi
 ## System Information
 - Operating System: [Windows 11 / macOS 14.1 / Ubuntu 22.04 / etc.]
 - Docker Version: [Output of `docker --version`]
-- Docker Compose Version: [Output of `docker-compose --version`]
+- Docker Compose Version: [Output of `docker compose version`]
 - Available RAM: [How much RAM your system has]
 - Available Disk Space: [How much free disk space]
 
@@ -866,12 +890,12 @@ If you're having trouble getting the Ars0n Framework to run, create a **Discussi
 ## Troubleshooting Steps Taken
 - [ ] Verified Docker installation with `docker run hello-world`
 - [ ] Verified Docker Compose with test manifest
-- [ ] Checked container logs: `docker-compose logs [service-name]`
+- [ ] Checked container logs: `docker compose logs [service-name]`
 - [ ] Verified system meets minimum requirements
 - [ ] Tried a clean build with the script: `./build.sh` (Mac/Linux) or `.\build.ps1` (Windows)
 
 ## Container Logs
-    [Paste the output of: docker-compose logs [relevant-service-name]]
+    [Paste the output of: docker compose logs [relevant-service-name]]
 
 ## Additional Context
 - Are you running this in a corporate/enterprise environment?
@@ -887,7 +911,7 @@ If the Ars0n Framework is running but you're experiencing issues with the tool i
 ## Environment
 - Operating System: [Windows 11 / macOS 14.1 / Ubuntu 22.04 / etc.]
 - Docker Version: [Output of `docker --version`]
-- Docker Compose Version: [Output of `docker-compose --version`]
+- Docker Compose Version: [Output of `docker compose version`]
 - Ars0n Framework Version: [Current version you're running]
 
 ## Bug Description
@@ -1002,8 +1026,8 @@ A: The framework supports importing `.rs0n` files and has some compatibility wit
 A: 
 1. Verify Docker is running: `docker run hello-world`
 2. Check available resources (8GB+ RAM, sufficient disk space)
-3. Review container logs: `docker-compose logs [service-name]`
-4. Ensure ports 3000, 8000, 8443, and 5432 aren't in use by other applications
+3. Review container logs: `docker compose logs [service-name]`
+4. Ensure the published ports aren't in use by other applications: 80 (all interfaces), and 3001 and 8000 (`127.0.0.1` only; 8000 only with the `ai` profile). Other ports stay inside the Docker network and are not published.
 
 **Q: Scans are failing or producing no results. What's wrong?**  
 A: Common causes include:
@@ -1015,7 +1039,7 @@ A: Common causes include:
 **Q: The web interface is slow or unresponsive. How can I fix this?**  
 A: Try:
 - Increase Docker memory allocation to 8GB or more
-- Restart the framework: `docker-compose restart`
+- Restart the framework: `docker compose restart`
 - Clear browser cache and reload the page
 - Check system resources aren't exhausted
 

@@ -48,10 +48,10 @@ describe('the repeater display controls do not change the bytes', () => {
   let captureRaw;
 
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
     calls = [];
     captureRaw = RAW;
-    global.fetch = jest.fn((url, init) => {
+    global.fetch = vi.fn((url, init) => {
       const u = String(url);
       const method = (init && init.method) || 'GET';
       calls.push({ url: u, method, body: init && init.body ? JSON.parse(init.body) : null });
@@ -78,13 +78,13 @@ describe('the repeater display controls do not change the bytes', () => {
   afterEach(() => {
     act(() => { root.unmount(); });
     container.remove();
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   const settle = async (ms = 400) => {
     for (let i = 0; i < 3; i += 1) {
       // eslint-disable-next-line no-await-in-loop
-      await act(async () => { jest.advanceTimersByTime(ms); });
+      await act(async () => { vi.advanceTimersByTime(ms); });
     }
   };
 

@@ -1,0 +1,25 @@
+# Applies only to the services whose build context is the repository root (docker-compose.yml
+# `context: .`): gospider, subdomainizer and cloud_enum. Every other service builds from its own
+# directory, and client/ and docker/mcp-server/ have their own .dockerignore.
+#
+# What those three COPY from the context, none of which may be excluded here:
+#   gospider:      docker/gospider/pin/go.mod, docker/gospider/pin/go.sum
+#   subdomainizer: docker/subdomainizer/pip-bootstrap.txt, docker/subdomainizer/requirements.txt
+#   cloud_enum:    docker/cloud_enum/pip-bootstrap.txt, docker/cloud_enum/requirements.txt,
+#                  docker/cloud_enum/rs0nfuzz.txt, docker/shuffledns/wordlists/resolvers.txt
+# If one of those Dockerfiles gains a COPY, check its source is not excluded below.
+
+.git
+.claude
+**/node_modules
+**/__pycache__
+**/.sccache
+client/build
+apktool_mcp_server_workspace
+/*.png
+
+# Gitignored scratch from live testing: captured request bodies and cookies, never build input.
+run*.json
+repro.txt
+probe_post.py
+server/run*.json

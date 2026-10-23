@@ -256,6 +256,30 @@ func composeNucleiWildcardArgs(tool WildcardTool, settings map[string]any, args 
 	return out, notes
 }
 
+// nucleiUnsignedJSTemplateNote returns a note when an uploaded template is one nuclei v3.11 will not
+// run: a javascript-protocol template (a top-level `javascript:` key) without the `# digest:`
+// signature line `nuclei -sign` appends. That refusal is the secure default and stays on. What it
+// must not be is silent. Measured on v3.11.1: mixed with an http template, the unsigned javascript
+// template is dropped with no output unless -v is set and the scan exits 0. On its own, nuclei exits
+// 1 with "no templates provided". Returns "" for every other template.
+func nucleiUnsignedJSTemplateNote(content, name string) string {
+	javascript, signed := false, false
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "javascript:") {
+			javascript = true
+		}
+		if strings.HasPrefix(line, "# digest:") {
+			signed = true
+		}
+	}
+	if !javascript || signed {
+		return ""
+	}
+	return "skipped: unsigned - nuclei v3.11 refuses unsigned javascript templates (" + name +
+		"); sign it with nuclei -sign and a key trusted in the nuclei container"
+}
+
 func executeNucleiScan(targets []string, templates []string, severities []string,
 	templateIDs []string, excludeIDs []string, excludeTags []string,
 	uploadedTemplates []map[string]interface{}, advancedConfig map[string]interface{},
@@ -275,6 +299,9 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 	// time anyone asks. It is set as soon as there is a command, so an error path still reports the
 	// vector that failed.
 	var nucleiCommand string
+	// Uploaded templates nuclei will refuse (see nucleiUnsignedJSTemplateNote). They are still copied
+	// in; the notes go onto the recorded command and any error so the skip is never silent.
+	var templateNotes []string
 
 	tempFile, err := os.CreateTemp("", "nuclei_targets_*.txt")
 	if err != nil {
@@ -462,6 +489,15 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 
 		for i, template := range uploadedTemplates {
 			if content, ok := template["content"].(string); ok {
+				name, _ := template["name"].(string)
+				if name == "" {
+					name = fmt.Sprintf("custom_%d.yaml", i)
+				}
+				if note := nucleiUnsignedJSTemplateNote(content, name); note != "" {
+					log.Printf("[WARN] %s", note)
+					templateNotes = append(templateNotes, note)
+				}
+
 				tempTemplateFile, err := os.CreateTemp("", fmt.Sprintf("nuclei_template_%d_*.yaml", i))
 				if err != nil {
 					log.Printf("[WARN] Failed to create temp template file %d: %v", i, err)
@@ -502,6 +538,9 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 
 	nucleiCommand = "docker " + strings.Join(dockerArgs, " ")
 	log.Printf("[INFO] Executing Nuclei command: %s", nucleiCommand)
+	if len(templateNotes) > 0 {
+		nucleiCommand += "\n# " + strings.Join(templateNotes, "\n# ")
+	}
 	dockerCmd := exec.Command("docker", dockerArgs...)
 
 	stdoutWriter := &capturingLogWriter{prefix: "[NUCLEI]"}
@@ -519,6 +558,11 @@ func executeNucleiScan(targets []string, templates []string, severities []string
 
 	if err = dockerCmd.Wait(); err != nil {
 		log.Printf("[ERROR] Nuclei command failed: %v", err)
+		if len(templateNotes) > 0 {
+			// Measured: when every uploaded template is an unsigned javascript one, nuclei exits 1 with
+			// "no templates provided for scan", so the reason belongs on the error.
+			return nucleiCommand, fmt.Errorf("nuclei execution failed: %v (%s)", err, strings.Join(templateNotes, "; "))
+		}
 		return nucleiCommand, fmt.Errorf("nuclei execution failed: %v", err)
 	}
 

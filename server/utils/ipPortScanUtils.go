@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -339,7 +340,7 @@ func isHostAlive(ip string, discoveryPorts []int, timeout time.Duration) bool {
 	// Each port gets the full timeout (1 second)
 
 	for _, port := range discoveryPorts {
-		address := fmt.Sprintf("%s:%d", ip, port)
+		address := net.JoinHostPort(ip, strconv.Itoa(port))
 		conn, err := net.DialTimeout("tcp", address, timeout)
 		if err == nil {
 			conn.Close()
@@ -462,7 +463,7 @@ func scanTCPPorts(ip string, ports []int, timeout time.Duration) []int {
 			semaphore <- struct{}{}        // Acquire
 			defer func() { <-semaphore }() // Release
 
-			address := fmt.Sprintf("%s:%d", ip, p)
+			address := net.JoinHostPort(ip, strconv.Itoa(p))
 			conn, err := net.DialTimeout("tcp", address, timeout)
 			if err == nil {
 				conn.Close()

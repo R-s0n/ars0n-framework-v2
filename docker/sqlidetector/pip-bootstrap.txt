@@ -1,0 +1,11 @@
+# pip itself, replacing the base image's pip 24.0, plus setuptools 84.0.0 as the build backend for the
+# exurl sdist (built with --no-build-isolation, then uninstalled). Installed first, with:
+#   python -m pip install --no-deps --require-hashes --only-binary=:all: -r pip-bootstrap.txt
+# pip 26.2.2 is a documented young-version exception: its vendored CA bundle drops the compromised
+# emSign ECC Root CA - G3 (same fix as certifi 2026.10.19, GHSA-6q48-6c7w-9gw2).
+pip==26.2.2 \
+    --hash=sha256:fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70 \
+    --hash=sha256:3a8e5c800492787f33a4114ef54444546c340df428974ebba17e0fd47e11af2f
+setuptools==84.0.0 \
+    --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670 \
+    --hash=sha256:f4695c21257f0d9b537ec2692c941d02ee143b7cc1276941349a546573b2ef73

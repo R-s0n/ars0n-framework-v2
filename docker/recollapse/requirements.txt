@@ -1,0 +1,16 @@
+# Hash-locked dependencies of the recollapse image. Do not edit by hand: resolved inside the pinned
+# python:3.11.17-slim-trixie base with pip --uploaded-prior-to=2026-10-15T00:00:00Z, hashed from PyPI.
+# wcwidth is held at 0.8.5, the last pure-Python release: 0.9.x adds a new C extension uploaded without provenance.
+# Install: pip install --no-deps --require-hashes --only-binary=:all: -r requirements.txt
+prettytable==3.18.0 \
+    --hash=sha256:b3346e0e6f79180833aebaac088ae926340586cf6d7d991b9eb125b65f72313a \
+    --hash=sha256:439217116152244369caf3d9f1caf2f9fe29b03bd79e88d2928c8e718c95d680
+recollapse==1.0.0 \
+    --hash=sha256:6e978f4bf77fa6fb57ff86d7460a52fe12115487553df23b5725625a65a5ef7d \
+    --hash=sha256:4098735d86ae97e5e73922f1ee5cf0914ef25c840e1aa5619dee413975e9fc94
+unidecode==1.4.0 \
+    --hash=sha256:c3c7606c27503ad8d501270406e345ddb480a7b5f38827eafe4fa82a137f0021 \
+    --hash=sha256:ce35985008338b676573023acc382d62c264f307c8f7963733405add37ea2b23
+wcwidth==0.8.5 \
+    --hash=sha256:04c88cff9dc3766fe621898afcaff8af3d803b4268804c348f6d973d61e862dc \
+    --hash=sha256:720336056169eac7744c5a84165d563cc6f569652615071cbfd575f131e7537f

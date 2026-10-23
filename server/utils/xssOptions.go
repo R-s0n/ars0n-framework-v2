@@ -123,7 +123,7 @@ var dalfoxOptions = map[string]VectorOptionMeta{
 
 	// Network
 	"timeout":         {Kind: "int", Group: "Network", Label: "Request timeout", Flag: "--timeout", Placeholder: "10 seconds"},
-	"scanTimeout":     {Kind: "int", Group: "Network", Label: "Injection stage cap", Flag: "--scan-timeout", Placeholder: "0, disabled. Caps only the injection stage, not discovery or mining"},
+	"scanTimeout":     {Kind: "int", Group: "Network", Label: "Injection stage cap", Flag: "--scan-timeout", Placeholder: "0, disabled. Caps only the injection stage, not discovery or mining. dalfox 3.2.4 marks a target this cap cuts short as incomplete, so the vector is reported incomplete (its findings are kept)"},
 	"delay":           {Kind: "int", Group: "Network", Label: "Delay between requests", Flag: "--delay", Placeholder: "0 milliseconds"},
 	"rateLimit":       {Kind: "int", Group: "Network", Label: "Rate limit", Flag: "--rate-limit", Placeholder: "0, unlimited. Requests per second across all workers"},
 	"retries":         {Kind: "int", Group: "Network", Label: "Retries", Flag: "--retries", Placeholder: "0. HTTP 429 is always retried regardless"},
@@ -165,7 +165,7 @@ var dalfoxOptions = map[string]VectorOptionMeta{
 
 	// Output
 	"pocType":         {Kind: "enum", Group: "Output", Label: "Proof of concept format", Flag: "--poc-type", Choices: []string{"plain", "curl", "httpie", "http-request"}, Placeholder: "plain"},
-	"limit":           {Kind: "int", Group: "Output", Label: "Limit findings", Flag: "--limit", Placeholder: "unlimited. A limit HIDES findings from the framework as well as from the screen"},
+	"limit":           {Kind: "int", Group: "Output", Label: "Limit findings", Flag: "--limit", Placeholder: "unlimited. A limit HIDES findings from the framework as well as from the screen. dalfox 3.2.4 marks a target the limit cuts short as incomplete, so the vector is reported incomplete (its findings are kept)"},
 	"limitResultType": {Kind: "enum", Group: "Output", Label: "Limit counts which types", Flag: "--limit-result-type", Choices: []string{"all", "v", "r", "a", "i"}, Placeholder: "all"},
 	"onlyPoc":         {Kind: "csv", Group: "Output", Label: "Only these finding types", Flag: "--only-poc", Choices: []string{"v", "r", "a", "i"}, Placeholder: "all types stored"},
 }

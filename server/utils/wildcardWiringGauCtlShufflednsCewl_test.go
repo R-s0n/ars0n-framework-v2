@@ -56,6 +56,7 @@ var (
 		"docker", "exec",
 		"ars0n-framework-v2-shuffledns-1",
 		"shuffledns",
+		"-duc",
 		"-d", "example.com",
 		"-w", "/app/wordlists/all.txt",
 		"-r", "/app/wordlists/resolvers.txt",

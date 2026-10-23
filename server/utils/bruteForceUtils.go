@@ -179,6 +179,7 @@ func ExecuteAndParseShuffleDNSWithWordlist(scanID, wordlist string) {
 		"docker", "exec",
 		"ars0n-framework-v2-shuffledns-1",
 		"shuffledns",
+		"-duc", // runner-owned: no update check (phone-home) on any run
 		"-d", wordlistFile,
 		"-w", "/app/wordlists/all.txt",
 		"-r", "/app/wordlists/resolvers.txt",
@@ -270,6 +271,7 @@ func ExecuteAndParseShuffleDNSScan(scanID, domain string) {
 		"docker", "exec",
 		"ars0n-framework-v2-shuffledns-1",
 		"shuffledns",
+		"-duc", // runner-owned: no update check (phone-home) on any run
 		"-d", domain,
 		"-w", "/app/wordlists/all.txt",
 		"-r", "/app/wordlists/resolvers.txt",
@@ -830,6 +832,7 @@ func ExecuteAndParseCeWLScan(scanID, domain string) {
 		"docker", "exec",
 		"ars0n-framework-v2-shuffledns-1",
 		"shuffledns",
+		"-duc", // runner-owned: no update check (phone-home) on any run
 		"-d", domain,
 		"-w", containerWordlist,
 		"-r", "/app/wordlists/resolvers.txt",

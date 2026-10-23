@@ -4,7 +4,8 @@ import { act } from 'react';
 import RequestFlowsModal from './RequestFlowsModal';
 
 // The chart is a shared component with its own layout pass and nothing here asserts on it.
-jest.mock('../components/RequestFlowChart', () => () => null);
+// Vitest mocks an ES module, so the factory returns its exports: the default export is the component.
+vi.mock('../components/RequestFlowChart', () => ({ default: () => null }));
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -176,11 +177,11 @@ describe('the Request Flows list', () => {
   let detectedDesc;
 
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
     calls = [];
     detectedName = '';
     detectedDesc = '';
-    global.fetch = jest.fn((url, init) => {
+    global.fetch = vi.fn((url, init) => {
       const u = String(url);
       const method = (init && init.method) || 'GET';
       calls.push({ url: u, method, body: init && init.body ? JSON.parse(init.body) : null });
@@ -229,13 +230,13 @@ describe('the Request Flows list', () => {
   afterEach(() => {
     act(() => { root.unmount(); });
     container.remove();
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   const settle = async (ms = 400) => {
     for (let i = 0; i < 3; i += 1) {
       // eslint-disable-next-line no-await-in-loop
-      await act(async () => { jest.advanceTimersByTime(ms); });
+      await act(async () => { vi.advanceTimersByTime(ms); });
     }
   };
 

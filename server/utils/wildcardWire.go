@@ -211,6 +211,13 @@ func wildcardWireStoredSettings(ctx context.Context, scanTable, scanID, toolKey 
 // amass  (step 1)
 // ---------------------------------------------------------------------------------------------
 
+// amassImage is the one amass image all three runners pull (wildcard enum, company enum, company
+// intel). The tag says which release the composers and parsers were written against; the digest is
+// what docker actually resolves, so a re-pushed or overwritten :v4.2.0 tag on Docker Hub cannot swap
+// a different image onto the user's host daemon. sha256:b111... is the v4.2.0 manifest list
+// (linux/amd64 + linux/arm64, pushed 2023-09-10), re-checked 2026-10-22.
+const amassImage = "caffix/amass:v4.2.0@sha256:b11100806a4fd31990103a92d296cd5b7dd5442502e3cf51aceeeaa397305d08"
+
 // amassWildcardResolvers is the twenty-resolver pool the wildcard amass runner has always passed,
 // in the order it has always passed it. It is a variable only so the builder and its
 // nothing-changed test can refer to the same list; the ORDER is part of the byte-identical
@@ -269,7 +276,7 @@ func amassWildcardCommandArgs(domain string, rateLimit int, stored map[string]an
 	// list sha256:b11100806a4fd31990103a92d296cd5b7dd5442502e3cf51aceeeaa397305d08 and both pushed
 	// 2023-09-10 (Docker Hub v2 API, checked 2026-09-08). It is fixed here so it is already right
 	// whenever upstream does push again.
-	return append([]string{"run", "--rm", "caffix/amass:v4.2.0"}, enum...), notes
+	return append([]string{"run", "--rm", amassImage}, enum...), notes
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -326,6 +333,8 @@ func subfinderWildcardCommandArgs(domain string, globalRateLimit int, stored map
 	args := []string{
 		"exec", "ars0n-framework-v2-subfinder-1",
 		"subfinder",
+		// Runner-owned: no update check (a phone-home to ProjectDiscovery) on any scan.
+		"-duc",
 		"-d", domain,
 		// Was -silent. See the comment above: same stdout, and stderr becomes a per-source table
 		// instead of nothing at all.

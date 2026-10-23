@@ -1,0 +1,38 @@
+{
+  "name": "domdig",
+  "version": "2.0.0",
+  "description": "DOM XSS scanner for Single Page Applications",
+  "main": "domdig.js",
+  "dependencies": {
+    "better-sqlite3": "^11.1.2",
+    "chalk": "^2.4.2",
+    "htcrawl": "^1.3.0",
+    "minimist": "^1.2.0"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Filippo Cavallarin",
+  "license": "GPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fcavallarin/domdig.git"
+  },
+  "keywords": [
+    "DOM XSS",
+    "XSS",
+    "Cross Site Scripting",
+    "scanner",
+    "vulnerability",
+    "htcrawl",
+    "puppeteer",
+    "SPA",
+    "headless-chrome"
+  ],
+  "bugs": {
+    "url": "https://github.com/fcavallarin/domdig/issues"
+  },
+  "overrides": {
+    "basic-ftp": "6.2.2"
+  }
+}

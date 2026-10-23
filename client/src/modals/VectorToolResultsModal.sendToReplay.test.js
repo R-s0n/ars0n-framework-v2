@@ -57,7 +57,7 @@ const STATUS = { tool: 'nomore403', scan: { scan_id: 's1', status: 'completed' }
 const jsonResponse = (body) => Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
 
 beforeEach(() => {
-  global.fetch = jest.fn((url) => {
+  global.fetch = vi.fn((url) => {
     if (String(url).endsWith('/results')) return jsonResponse(RESULTS);
     if (String(url).endsWith('/status')) return jsonResponse(STATUS);
     return jsonResponse({});

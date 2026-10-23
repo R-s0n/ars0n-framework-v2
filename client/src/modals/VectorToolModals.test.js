@@ -67,7 +67,7 @@ const STATUS = {
 };
 
 beforeEach(() => {
-  global.fetch = jest.fn((url) => {
+  global.fetch = vi.fn((url) => {
     if (String(url).endsWith('/results')) return jsonResponse(RESULTS);
     if (String(url).endsWith('/status')) return jsonResponse(STATUS);
     if (String(url).endsWith('/selection')) return jsonResponse(SELECTION);
@@ -219,7 +219,7 @@ test('a group action names only that group vectors', async () => {
 // row is locked all the same, since no checkbox on this screen fixes it, but nothing may claim the
 // tool cannot reach body or the operator will never find the setting that does fix it.
 test('a vector held back by a setting is locked, and nothing calls that unreachable', async () => {
-  global.fetch = jest.fn((url) => {
+  global.fetch = vi.fn((url) => {
     if (String(url).endsWith('/selection')) {
       return jsonResponse({
         tool: 'dalfox', tool_name: 'Dalfox', category: 'xss',
@@ -256,7 +256,7 @@ test('a vector held back by a setting is locked, and nothing calls that unreacha
 // to redo work already finished, and the promise that every vector produced "will be selected for
 // nomore403" is one the backend never keeps. scan_unit is what separates the two cases.
 const renderEmpty = async (scanUnit) => {
-  global.fetch = jest.fn((url) => {
+  global.fetch = vi.fn((url) => {
     if (String(url).endsWith('/selection')) {
       return jsonResponse({
         tool: 'nomore403', tool_name: 'nomore403', category: 'access-bypass',
@@ -396,7 +396,7 @@ test('every wired section has at least one tool to draw', () => {
 // This is the helper that addresses both, mounted for real because a modal that compiles and then
 // throws on mount is how this file came to exist.
 test('the graphql endpoint helper lets you PICK an endpoint rather than type it', async () => {
-  global.fetch = jest.fn((url) => {
+  global.fetch = vi.fn((url) => {
     if (String(url).includes('candidate-endpoints')) {
       return jsonResponse({
         count: 2,
@@ -413,7 +413,7 @@ test('the graphql endpoint helper lets you PICK an endpoint rather than type it'
     return jsonResponse({ found: [], output: '' });
   });
 
-  const onAppend = jest.fn();
+  const onAppend = vi.fn();
   render(
     <GraphQLEndpointHelper
       activeTarget={{ id: TARGET.id, scope_target: 'https://x.test' }}
@@ -453,7 +453,7 @@ test('appending endpoints keeps the list unique', () => {
 // the endpoints that ALREADY answered 401 or 403 are offered, because those are the ones where
 // something is actually being denied.
 test('the picker offers endpoints that already denied us, for the bypass section', async () => {
-  global.fetch = jest.fn((url) => {
+  global.fetch = vi.fn((url) => {
     if (String(url).includes('denied-endpoints')) {
       return jsonResponse({
         count: 2,

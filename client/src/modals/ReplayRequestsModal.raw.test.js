@@ -41,9 +41,9 @@ describe('handing raw request bytes to the repeater', () => {
   let calls;
 
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
     calls = [];
-    global.fetch = jest.fn((url, init) => {
+    global.fetch = vi.fn((url, init) => {
       const u = String(url);
       const method = (init && init.method) || 'GET';
       calls.push({ url: u, method, body: init && init.body ? JSON.parse(init.body) : null });
@@ -70,13 +70,13 @@ describe('handing raw request bytes to the repeater', () => {
   afterEach(() => {
     act(() => { root.unmount(); });
     container.remove();
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   const settle = async (ms = 400) => {
     for (let i = 0; i < 3; i += 1) {
       // eslint-disable-next-line no-await-in-loop
-      await act(async () => { jest.advanceTimersByTime(ms); });
+      await act(async () => { vi.advanceTimersByTime(ms); });
     }
   };
 
@@ -179,7 +179,7 @@ describe('handing raw request bytes to the repeater', () => {
     await paint({ initialRawRequest: handover(RAW) });
     expect(area().value).toBe(asDom(RAW));
 
-    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     await paint({ initialRawRequest: null, initialCaptureId: CAPTURE });
     expect(area().value).toBe(asDom(CAPTURE_RAW));
 
@@ -194,7 +194,7 @@ describe('handing raw request bytes to the repeater', () => {
     await paint({ initialRawRequest: handover(RAW) });
     await act(async () => { typeInto('GET /edited HTTP/1.1\n\n'); });
 
-    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     await act(async () => {
       root.render(
         <ReplayRequestsModal

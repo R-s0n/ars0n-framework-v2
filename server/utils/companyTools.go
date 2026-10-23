@@ -219,10 +219,10 @@ func CompanyAdvisories(tool CompanyTool, settings map[string]any) map[string]str
 				"rateLimit on its own will not speed the crawl up."
 		}
 		if truthySetting(settings["headless"]) && strings.TrimSpace(stringifySetting(settings["systemChromePath"])) == "" {
-			out["headless"] = "MEASURED: headless without systemChromePath makes katana DOWNLOAD a Chromium " +
-				"build through rod at scan time (chromium-1321438 into /root/.cache/rod/browser). -sc does " +
-				"not prevent it on this image because it looks for google-chrome and the container ships only " +
-				"/usr/bin/chromium. Set systemChromePath."
+			out["headless"] = "headless without systemChromePath leaves the browser to rod. The pinned image " +
+				"pre-seeds rod's cache with a link to Debian chromium, so nothing downloads; if that browser " +
+				"fails to start, rod DOWNLOADS an unverified Chromium at scan time (chromium-1321438 into " +
+				"/root/.cache/rod/browser). Set systemChromePath to make the browser explicit."
 		}
 		if depth, ok := numericSetting(settings["depth"]); ok && depth < 3 {
 			if kf := strings.TrimSpace(stringifySetting(settings["knownFiles"])); kf != "" {

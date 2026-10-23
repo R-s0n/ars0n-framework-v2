@@ -66,7 +66,7 @@ function html() {
 
 function mockFetch(rows) {
   calls = [];
-  global.fetch = jest.fn((url, init) => {
+  global.fetch = vi.fn((url, init) => {
     calls.push({ url: String(url), init });
     if (String(url).includes('/auth-flows/')) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(FLOWS) });
@@ -137,7 +137,7 @@ afterEach(() => {
   if (container) container.remove();
   root = undefined;
   container = undefined;
-  jest.resetAllMocks();
+  vi.resetAllMocks();
   delete global.fetch;
 });
 

@@ -65,7 +65,7 @@ var katanaCompanyOwned = map[string]string{
 	"-em":              "Extension MATCH restricts output to only the named extensions, which for a cloud-asset crawl discards the HTML pages whose bodies carry the bucket URLs. -ef, the subtractive half of the same idea, is exposed instead.",
 	"-ns":              "No-scope removes host-based scoping entirely, so a crawl of a company's domain can wander onto anything it links to. That is a scope decision, not a tuning knob, and the framework has no consent model for it.",
 
-	"-duc":          "Should be runner-owned and currently is not passed at all, so every katana process may perform an update check before it crawls. Fix it in the runner rather than exposing it.",
+	"-duc":          "Always set by the runner: no katana process performs an update check (a phone-home to ProjectDiscovery) before it crawls.",
 	"-up":           "Self-update. It would change the tool under the operator mid-scan.",
 	"-resume":       "Engine lifecycle, not per-scan configuration, and it reads a resume.cfg path that does not exist in this container.",
 	"-config":       "Host filesystem path. The scan runs inside the katana container via docker exec and the runner copies nothing in, so a host path is meaningless there.",
@@ -78,7 +78,7 @@ var katanaCompanyOwned = map[string]string{
 	"-version":      "Prints and exits.",
 	"-ed":           "Enable-diagnostics is a debug switch whose output nothing collects.",
 
-	"-sc":            "MEASURED INEFFECTIVE ON THIS IMAGE, WHICH MAKES IT A PHANTOM CONTROL. `katana -hl -sc -nos` still downloaded chromium-1321438 into /root/.cache/rod/browser at scan time, byte for byte the same as without it, because katana's system-chrome looks for google-chrome and this image ships only /usr/bin/chromium and /usr/bin/chromium-browser. Offering it would be a switch the operator turns on believing it stops the download when it does not. Use systemChromePath instead, which was measured to work. Note also that unlike nuclei, -sc WITHOUT -hl is not fatal on katana: it crawls normally and ignores the flag.",
+	"-sc":            "REDUNDANT WITH systemChromePath, SO NOT A SECOND CONTROL. On the pinned v1.8.0 image /usr/bin/google-chrome (what -sc looks for) is a link to Debian chromium, and `katana -hl -sc` was measured to crawl with no browser download. (On the old v1.7.0 image it had no google-chrome and still downloaded chromium-1321438.) systemChromePath is the explicit form of the same choice and is the one offered. Note also that unlike nuclei, -sc WITHOUT -hl is not fatal on katana: it crawls normally and ignores the flag.",
 	"-system-chrome": "Long form of -sc.",
 	"-cwu":           "Chrome websocket URL: it points katana at a browser running somewhere else entirely, which is an infrastructure decision and not a scan setting.",
 	"-sb":            "Show-browser requires a display. There is none in this container.",
@@ -371,7 +371,7 @@ var katanaCompanyOptions = map[string]CompanyOptionMeta{
 		Flag: "-hl", Provenance: "measured",
 		Placeholder: "Off. Every company crawl today is a plain HTTP crawl.",
 		Why:         "Same key spelling as the URL workflow's headless. A React or Angular company site renders nothing useful without a browser, and the storage URLs an SPA fetches only appear once the JS has run.",
-		Danger:      "MEASURED: turning this on WITHOUT systemChromePath makes katana DOWNLOAD a Chromium build through rod at scan time ('Downloaded: /root/.cache/rod/browser/chromium-1321438'). Adding -sc did NOT prevent it; `-scp /usr/bin/chromium` did. On an egress-filtered host that download is also how a headless crawl comes to produce nothing. katana marks headless experimental.",
+		Danger:      "WITHOUT systemChromePath katana asks rod for its own browser. On the pinned image rod's cache is pre-seeded with a link to Debian chromium, so nothing is downloaded (measured on v1.8.0); but if that browser fails to start, rod deletes the link and DOWNLOADS an unverified Chromium at scan time (measured on the old image: 'Downloaded: /root/.cache/rod/browser/chromium-1321438'). `-scp /usr/bin/chromium` is the explicit form. On an egress-filtered host a failed download is also how a headless crawl comes to produce nothing. katana marks headless experimental.",
 	},
 	"hybrid": {
 		Kind: "bool", Group: "Headless Browser", Label: "Hybrid headless crawling",
@@ -384,8 +384,8 @@ var katanaCompanyOptions = map[string]CompanyOptionMeta{
 		Kind: "enum", Group: "Headless Browser", Label: "Browser binary to use for headless",
 		Choices: []string{"/usr/bin/chromium", "/usr/bin/chromium-browser"},
 		Flag:    "-scp", Provenance: "measured", RequiresKey: "headless",
-		Placeholder: "Not sent, so katana asks rod to fetch and manage its own Chromium build, downloading it at scan time.",
-		Why:         "THE FLAG THAT MAKES HEADLESS USABLE ON THIS IMAGE, and the only one measured to work. `which google-chrome chromium chromium-browser` in the container returns /usr/bin/chromium and /usr/bin/chromium-browser and NOTHING for google-chrome, which is exactly why -sc does not help. With -scp the same command returned results with no download.",
+		Placeholder: "Not sent, so katana asks rod for its own browser: the pre-seeded link to Debian chromium on the pinned image, or a scan-time download if that browser fails to start.",
+		Why:         "THE EXPLICIT BROWSER CHOICE FOR HEADLESS. Both offered paths exist on the pinned v1.8.0 image (each a link to Debian chromium 156), and with -scp katana launches that binary directly instead of rod's managed browser (on the old image this was the only setting measured to stop the download). Measured: -scp /usr/bin/chromium and -scp /usr/bin/chromium-browser both crawled with no download.",
 		Danger:      "Restricted to the two paths that were measured to exist. A free-text path that is wrong sends headless back to downloading a browser, or fails the launch, and neither is announced.",
 	},
 	"noSandbox": {

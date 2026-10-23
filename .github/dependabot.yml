@@ -1,0 +1,90 @@
+# Dependabot version updates. Policy and the pre-merge checklist: scripts/supply-chain/README.md.
+# - cooldown: a release must be 14 days old (30 for a semver-major) before Dependabot proposes it.
+#   Security updates ignore cooldown, so run the checker on those PRs before merging.
+# - "/docker/*" matches ONE path segment (every docker/<tool> directory, not docker/<tool>/pin); deeper
+#   module dirs are listed explicitly. Directories without that ecosystem's manifest are skipped.
+# - Not covered here (pin and refresh by hand each release): go install @versions, git clone SHAs,
+#   curl/ADD downloads, inline pip/npm -g installs, base-image digest refreshes on the same tag,
+#   torch +cpu (ignored below), docker/x8 and docker/smugglex Cargo.lock (no Cargo.toml, which
+#   Dependabot needs), and CeWL's Gemfile.lock (upstream's file at the pinned SHA, not in this repo).
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directories: ["/client", "/docker/*"]
+    schedule: { interval: "weekly", day: "monday", time: "06:00" }
+    cooldown: { default-days: 14, semver-major-days: 30 }
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      npm-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  - package-ecosystem: "gomod"
+    directories: ["/server", "/docker/*", "/docker/*/pin", "/docker/waybackurls/archivefetch"]
+    schedule: { interval: "weekly", day: "monday", time: "06:00" }
+    cooldown: { default-days: 14, semver-major-days: 30 }
+    open-pull-requests-limit: 5
+    groups:
+      go-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      go-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  - package-ecosystem: "pip"
+    directories: ["/ai_service", "/docker/*"]
+    # Wordlists are .txt files that are not requirements. requirements.in files are resolver inputs
+    # for our hash locks; if Dependabot sees one it switches to pip-compile and rewrites the lock.
+    exclude-paths: ["**/wordlists/**", "**/rs0nfuzz.txt", "**/requirements.in"]
+    schedule: { interval: "weekly", day: "monday", time: "06:00" }
+    cooldown: { default-days: 14, semver-major-days: 30 }
+    open-pull-requests-limit: 10
+    groups:
+      pip-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      pip-security:
+        applies-to: security-updates
+        patterns: ["*"]
+    ignore:
+      # ai_service/requirements-torch.txt locks the +cpu build from download.pytorch.org/whl/cpu.
+      # Dependabot would propose PyPI's torch (CUDA build, nvidia-* deps) with PyPI hashes that break
+      # that lock. ignore (unlike exclude-paths) also covers security updates; torch is re-locked by
+      # hand from the CPU index when an alert fires (scripts/supply-chain/README.md).
+      - dependency-name: "torch"
+
+  - package-ecosystem: "docker"
+    directories: ["/ai_service", "/client", "/nginx", "/server", "/docker/*"]
+    schedule: { interval: "weekly", day: "monday", time: "06:00" }
+    cooldown: { default-days: 14 }
+    open-pull-requests-limit: 10
+    groups:
+      # One PR per base image across every Dockerfile that uses it.
+      base-images:
+        group-by: dependency-name
+    ignore:
+      # Odd Node majors are not LTS.
+      - dependency-name: "*node"
+        update-types: ["version-update:semver-major"]
+      # A Python minor bump invalidates the cpXY wheels in the hash-locked requirements.
+      - dependency-name: "*python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      # A PostgreSQL major needs a pg_dump/pg_upgrade of the data volume.
+      - dependency-name: "*postgres"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule: { interval: "weekly", day: "monday", time: "06:00" }
+    cooldown: { default-days: 14 }
+    open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: "*postgres"
+        update-types: ["version-update:semver-major"]

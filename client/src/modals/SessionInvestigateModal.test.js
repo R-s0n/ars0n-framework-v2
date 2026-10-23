@@ -351,7 +351,7 @@ let reportBody;
 beforeEach(() => {
   settingsBody = { renewal_gate: deepCopy(GATE) };
   reportBody = deepCopy(REPORT);
-  global.fetch = jest.fn((url) => {
+  global.fetch = vi.fn((url) => {
     if (String(url).startsWith(SETTINGS_URL)) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(settingsBody) });
     }
@@ -361,7 +361,7 @@ beforeEach(() => {
 
 afterEach(() => {
   unmount();
-  jest.resetAllMocks();
+  vi.resetAllMocks();
 });
 
 async function openModal(overrides = {}) {
@@ -544,7 +544,7 @@ test('a credential that will not be sent says so and does not read as a live ses
 // ---------------------------------------------------------------------------------------------
 
 test('a failed load says so instead of rendering an empty screen that reads as no credentials', async () => {
-  global.fetch = jest.fn((url) => (String(url).startsWith(SETTINGS_URL)
+  global.fetch = vi.fn((url) => (String(url).startsWith(SETTINGS_URL)
     ? Promise.resolve({ ok: true, json: () => Promise.resolve({ renewal_gate: deepCopy(GATE) }) })
     : Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve('boom') })));
   await openModal();
@@ -562,7 +562,7 @@ test('a target with no credentials is told that, and not shown a blank lifetime'
     notes: ['No session tokens are stored for this target, so every scan runs anonymously.'],
     ttl_metric: { value: 'NO SESSION', known: false, state: 'none', detail: 'no session tokens stored', explain: 'Nothing would go on the wire.' },
   };
-  global.fetch = jest.fn((url) => (String(url).startsWith(SETTINGS_URL)
+  global.fetch = vi.fn((url) => (String(url).startsWith(SETTINGS_URL)
     ? Promise.resolve({ ok: true, json: () => Promise.resolve({ renewal_gate: deepCopy(GATE) }) })
     : Promise.resolve({ ok: true, json: () => Promise.resolve(empty) })));
   await openModal();
@@ -652,7 +652,7 @@ test('the screen asks the server about the measured run and says so beside every
 
 test('a settings endpoint that cannot be read leaves the run length UNKNOWN rather than guessing', async () => {
   settingsBody = null;
-  global.fetch = jest.fn((url) => (String(url).startsWith(SETTINGS_URL)
+  global.fetch = vi.fn((url) => (String(url).startsWith(SETTINGS_URL)
     ? Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve(null) })
     : Promise.resolve({ ok: true, json: () => Promise.resolve(deepCopy(REPORT)) })));
   await openModal();

@@ -298,7 +298,7 @@ func dalfoxIncomplete(stdout, report string) string {
 				return reason
 			}
 		}
-		return "dalfox reported the run incomplete without naming a reason"
+		return "dalfox reported the run incomplete without naming a reason (dalfox 3.2.4 does this when --limit or --scan-timeout cut a target short)"
 	}
 	return ""
 }

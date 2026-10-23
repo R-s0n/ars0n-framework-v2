@@ -14,7 +14,7 @@ func init() {
 	registerCompanyTools(
 		CompanyTool{
 			Key: "amass_intel", Name: "Amass Intel", Step: 1, Phase: "ASN (On-Prem) Network Ranges",
-			Image: "caffix/amass:v4.2.0", Binary: "amass intel", Version: "OWASP Amass v4.2.0 (image PINNED to :v4.2.0)",
+			Image: amassImage, Binary: "amass intel", Version: "OWASP Amass v4.2.0 (image PINNED to :v4.2.0)",
 			Invocation: "server/utils/amassIntelUtils.go ExecuteAmassIntelScan",
 			Groups:     amassIntelCompanyGroups, Options: amassIntelCompanyOptions, OwnedFlags: amassIntelCompanyOwned,
 			Notes: "THERE IS NO AMASS CONTAINER. The api container mounts /var/run/docker.sock and shells out " +
@@ -187,7 +187,7 @@ func init() {
 			Key: "github_recon", Name: "GitHub Recon Tools", Step: 6,
 			Phase:     "Root Domain Discovery (API Key)",
 			Container: "ars0n-framework-v2-github-recon-1", Binary: "python3 /app/github-search/github-endpoints.py",
-			Version:    "gwen001/github-search 2.0.1 (commit a02b8f3, Feb 2023) on Python 3.11.15. The Dockerfile clones master with NO pin, so a rebuild moves this version and this flag list with it.",
+			Version:    "gwen001/github-search 2.0.1 (commit a02b8f3, Feb 2023) on Python 3.11.17. The Dockerfile fetches that exact commit and asserts it with rev-parse, so a rebuild cannot move this version or this flag list.",
 			Invocation: "server/utils/githubReconUtils.go ExecuteGitHubReconScan",
 			Groups:     githubReconCompanyGroups, Options: githubReconCompanyOptions, OwnedFlags: githubReconCompanyOwned,
 			Notes: "THE ONLY TOOL IN THIS PHASE WITH A REAL COMMAND LINE, and its real flags (-e, -a) are genuinely " +
@@ -272,7 +272,7 @@ func init() {
 		CompanyTool{
 			Key: "amass_enum_company", Name: "Amass Enum (Company)", Step: 9,
 			Phase: "Cloud Asset Enumeration (DNS)",
-			Image: "caffix/amass:v4.2.0", Binary: "amass enum", Version: "v4.2.0 (image PINNED to :v4.2.0)",
+			Image: amassImage, Binary: "amass enum", Version: "v4.2.0 (image PINNED to :v4.2.0)",
 			Invocation: "server/utils/amassEnumUtils.go ExecuteAmassEnumCompanyScan",
 			Groups:     amassEnumCompanyGroups, Options: amassEnumCompanyOptions, OwnedFlags: amassEnumCompanyOwned,
 			Notes: "THE HEADLINE IS THE TIMEOUT. The runner hardcodes -timeout 300, which is FIVE HOURS PER DOMAIN, " +
@@ -302,28 +302,29 @@ func init() {
 			Key: "dnsx_company", Name: "DNSx (Company)", Step: 10,
 			Phase:     "Cloud Asset Enumeration (DNS)",
 			Container: "ars0n-framework-v2-dnsx-1", Binary: "dnsx",
-			Version:    "v1.2.2 (the binary's own update check reports it as outdated on every run)",
+			Version:    "v1.3.1 (built from source at 01e315f2; the runner passes -duc, so no update check runs)",
 			Invocation: "server/utils/dnsxUtils.go ExecuteDNSxCompanyScan",
 			Groups:     dnsxCompanyGroups, Options: dnsxCompanyOptions, OwnedFlags: dnsxCompanyOwned,
 			Notes: "THE VOCABULARY IS SMALLER THAN IT FIRST APPEARS AND THAT IS DELIBERATE. The eight record-type " +
 				"toggles, the resolver list, retries and -omit-raw are real; -rl and -t are MEASURED INERT " +
 				"because the runner feeds exactly one hostname per docker exec, so both are owned WITH the " +
 				"measurement and the unlock condition rather than shipped as dead sliders.\n\n" +
-				"THE ONE-HOSTNAME-PER-EXEC LOOP IS THE ROOT CAUSE OF THREE FINDINGS AT ONCE: -rl and -t are " +
-				"provably inert, dnsx's update check fires once per domain (40 outbound checks on a 40-domain " +
-				"sweep), and every domain pays a full process spawn. Batching the selected domains into a single " +
-				"invocation would fix all three and immediately promote -rl and -t into real options.\n\n" +
-				"dnsx v1.2.2 HAS NO TIMEOUT FLAG OF ANY KIND, and the runner uses plain exec.Command with no " +
-				"context deadline. A hung resolver path has nothing to stop it: no CLI cap, no Go cap, no " +
-				"per-domain cap and no aggregate cap. That is a runner defect this screen cannot fix and must not " +
-				"pretend to.\n\n" +
+				"THE ONE-HOSTNAME-PER-EXEC LOOP WAS THE ROOT CAUSE OF THREE FINDINGS AT ONCE: -rl and -t are " +
+				"provably inert, dnsx's update check fired once per domain (40 outbound checks on a 40-domain " +
+				"sweep; FIXED, the runner now always passes -duc), and every domain pays a full process spawn. " +
+				"Batching the selected domains into a single invocation would fix the other two and immediately " +
+				"promote -rl and -t into real options.\n\n" +
+				"dnsx v1.3.1 HAS A PER-QUERY -timeout (default 3s) THAT THE RUNNER DOES NOT SET, and the runner " +
+				"uses plain exec.Command with no context deadline. Only each DNS query is bounded: there is " +
+				"still no per-domain cap and no aggregate cap. That is a runner defect this screen cannot fix " +
+				"and must not pretend to.\n\n" +
 				"BAD VALUES ARE LOUD, BLINDING CONFIGURATIONS ARE SILENT. `-rc totallybogus` exits 1 and " +
 				"`-retry 0` exits 1, but -rc nxdomain, -wd, -t 0, a dead resolver and a missing resolver file all " +
 				"exit 0 with ZERO bytes of stdout, which the runner stores as a successfully scanned domain with " +
 				"no records.\n\n" +
 				"THE PARSER HANDLES EXACTLY THE EIGHT TYPES THE RUNNER ASKS FOR. Every additional type dnsx can " +
-				"query (soa, caa, any, axfr) is discarded, and soa is being fetched and thrown away on every " +
-				"domain today.\n\n" +
+				"query (soa, caa, any, axfr) is discarded. Measured on v1.3.1: dnsx returns only the requested " +
+				"types, so soa (and raw_resp) no longer appear in the JSON at all.\n\n" +
 				"ZERO KEY COLLISIONS with dnsx_configs (selected_domains, include_wildcard_results, " +
 				"wildcard_domains), which is byte-for-byte the same shape as amass_enum_configs and contains not " +
 				"one CLI flag.",
@@ -332,7 +333,7 @@ func init() {
 			Key: "cloud_enum", Name: "Cloud Enum", Step: 11,
 			Phase:     "Cloud Asset Enumeration (Brute-Force & Crawl)",
 			Container: "ars0n-framework-v2-cloud_enum-1", Binary: "python cloud_enum.py",
-			Version:    "A FORK, not upstream: 'github.com/initstring / forked by github.com/R-s0n', pinned by git HEAD bcbbc0e inside the image, on Python 3.9.25.",
+			Version:    "A FORK, not upstream: 'github.com/initstring / forked by github.com/R-s0n', pinned by git HEAD bcbbc0e inside the image, on Python 3.11.17.",
 			Invocation: "server/utils/cloudEnumUtils.go ExecuteAndParseCloudEnumScan",
 			Groups:     cloudEnumCompanyGroups, Options: cloudEnumCompanyOptions, OwnedFlags: cloudEnumCompanyOwned,
 			Limitation: "EIGHT OPTIONS IS THE HONEST ANSWER HERE, NOT AN UNFINISHED ONE. CloudEnumConfigModal " +
@@ -362,8 +363,6 @@ func init() {
 				"five seconds, exits 0 and writes a header-only log file, and a nonexistent -nsf path made the " +
 				"Azure DNS brute-force produce no output and not complete within 60 seconds against about five " +
 				"for the default resolvers.\n\n" +
-				"boto3 inside the image warns that it stops supporting Python 3.9 on 29 April 2026 and the image " +
-				"is on Python 3.9.25, so that date has passed.\n\n" +
 				"NO KEY COLLISIONS, BY CONSTRUCTION: every cloud_enum_configs column corresponds to a flag that " +
 				"is declared framework-owned above, and the two wordlist presets deliberately carry NO flag " +
 				"because -m and -b already belong to that table.",
@@ -371,7 +370,7 @@ func init() {
 		CompanyTool{
 			Key: "katana_company", Name: "Katana (Company)", Step: 12,
 			Phase:     "Cloud Asset Enumeration (Brute-Force & Crawl)",
-			Container: "ars0n-framework-v2-katana-1", Binary: "katana", Version: "v1.7.0",
+			Container: "ars0n-framework-v2-katana-1", Binary: "katana", Version: "v1.8.0 (built from source at 35267ac5, Debian chromium 156)",
 			Invocation: "server/utils/katanaCompanyUtils.go ExecuteKatanaCompanyScan",
 			Groups:     katanaCompanyGroups, Options: katanaCompanyOptions, OwnedFlags: katanaCompanyOwned,
 			Notes: "SAME CONTAINER AND SAME BINARY AS THE URL WORKFLOW'S KATANA, so the two workflows can never be " +
@@ -389,7 +388,8 @@ func init() {
 				"time bound of any kind, which is why crawlDurationSeconds matters more here.\n" +
 				"5. It never passes -kf, so robots.txt and sitemap.xml are never crawled, while the URL workflow " +
 				"defaults knownFiles to 'all'. Two workflows, same binary, different behaviour, no stated reason.\n" +
-				"6. It never passes -duc, so every katana process may contact the update endpoint before crawling.\n" +
+				"6. FIXED: it never passed -duc, so every katana process could contact the update endpoint before " +
+				"crawling. The runner now always passes -duc.\n" +
 				"7. Katana's DEFAULT extension filter is hiding just over half the output: 10928 lines against " +
 				"22878 with -ndef on the same target and depth, and nothing tells the operator.\n" +
 				"8. A per-domain failure is handled with `continue` and the scan is still finalised as 'success', " +
@@ -404,7 +404,7 @@ func init() {
 		CompanyTool{
 			Key: "nuclei", Name: "Nuclei (engine flags)", Step: 13, Phase: "Vulnerability scanning",
 			Container: "ars0n-framework-v2-nuclei-1", Binary: "nuclei",
-			Version:    "v3.3.8 (templates at /root/nuclei-templates, google-chrome present at /usr/bin/google-chrome)",
+			Version:    "v3.11.1 (built from source at a8c88feb; templates v10.4.7 at 83234ce4 in /root/nuclei-templates; /usr/bin/google-chrome links to Debian chromium). v3.11 refuses unsigned javascript templates, so an uploaded one is reported as 'skipped: unsigned' on the scan's recorded command.",
 			Invocation: "server/utils/nucleiUtils.go executeNucleiScan, reached from ExecuteNucleiScanForScopeTarget",
 
 			// THE SAME MAPS, BY REFERENCE. Not copies. See companyNucleiShare.go.

@@ -26,6 +26,8 @@ import (
 //     every position it is not currently fuzzing
 //
 // Verified against ffuf v2.2.1 (its banner says 2.1.0-dev; the version constant was never bumped).
+// The image now builds v2.3.0: URL scan, -request, -mode and -od smoke tests gave the same results
+// and evidence format (its JSON only gains preflight keys).
 
 // fuzzTokenRe matches the neutral position token. Zero padded to two digits so no token is a prefix
 // of another: ffuf substitutes with a plain strings.ReplaceAll, so a keyword that is a prefix of a

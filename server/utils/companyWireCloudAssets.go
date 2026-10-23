@@ -82,7 +82,7 @@ func amassEnumCompanyCommandArgs(domain string, rateLimit int, tool CompanyTool,
 		// would let the binary move to whatever :latest becomes while the composer and the parser
 		// stood still, and the visible result would be a scan that exits 0 having parsed nothing.
 		// :v4.2.0 and :latest resolve to the same image today, so nothing about this run changes.
-		"caffix/amass:v4.2.0",
+		amassImage,
 		"enum", "-passive", "-alts", "-brute", "-nocolor",
 		"-min-for-recursive", "2", "-timeout", "300",
 		"-d", domain,
@@ -117,16 +117,17 @@ func amassEnumCompanyCommandArgs(domain string, rateLimit int, tool CompanyTool,
 // dnsx_company  (step 10)
 // ---------------------------------------------------------------------------------------------
 
-// dnsxCompanyBaseArity is the arity of the flags the RUNNER hardcodes. The eight record types and the
-// two output flags are switches; only -retry takes a value.
+// dnsxCompanyBaseArity is the arity of the flags the RUNNER hardcodes. The eight record types, the
+// two output flags and -duc are switches; only -retry takes a value.
 var dnsxCompanyBaseArity = map[string]int{
 	"-a": 0, "-aaaa": 0, "-cname": 0, "-mx": 0, "-ns": 0, "-txt": 0, "-ptr": 0, "-srv": 0,
-	"-re": 0, "-j": 0, "-retry": 1,
+	"-re": 0, "-j": 0, "-retry": 1, "-duc": 0,
 }
 
 // dnsxCompanyCommandArgs builds the argv for ONE domain of a Company dnsx scan.
 //
-// With no stored settings this is token for token what ExecuteDNSxCompanyScan built inline. The
+// With no stored settings this is token for token what ExecuteDNSxCompanyScan built inline, plus
+// the runner-owned -duc (no update check per domain; the image is pinned). The
 // target is NOT on the command line at all: the runner writes the hostname to the process's STDIN,
 // one per invocation, which is why -l and -d are framework-owned and why -rl and -t are owned as
 // MEASURED INERT (a worker pool and a per-host rate limit can do nothing with one host).
@@ -139,6 +140,7 @@ func dnsxCompanyCommandArgs(tool CompanyTool, settings map[string]any) ([]string
 		"docker", "exec", "-i",
 		"ars0n-framework-v2-dnsx-1",
 		"dnsx",
+		"-duc",
 		"-a", "-aaaa", "-cname", "-mx", "-ns", "-txt", "-ptr", "-srv",
 		"-re", "-j",
 		"-retry", "3",
@@ -304,14 +306,15 @@ func cloudEnumRedactCredentials(command string, settings map[string]any) string 
 // katanaCompanyBaseArity is the arity of the flags the RUNNER hardcodes.
 var katanaCompanyBaseArity = map[string]int{
 	"-u": 1, "-d": 1, "-jc": 0, "-j": 0, "-v": 0,
-	"-timeout": 1, "-c": 1, "-p": 1, "-retry": 1, "-rd": 1, "-rl": 1,
+	"-timeout": 1, "-c": 1, "-p": 1, "-retry": 1, "-rd": 1, "-rl": 1, "-duc": 0,
 }
 
 // katanaCompanyCommandArgs builds the argv for ONE domain of a Company katana crawl.
 //
-// With no stored settings this is token for token what ExecuteKatanaCompanyScan built inline:
+// With no stored settings this is token for token what ExecuteKatanaCompanyScan built inline, plus
+// the runner-owned -duc (no update check per process):
 //
-//	docker exec ars0n-framework-v2-katana-1 katana -u <url> -d 3 -jc -j -v -timeout 120 -c 20 -p 20 -retry 3 -rd 1 -rl 10
+//	docker exec ars0n-framework-v2-katana-1 katana -duc -u <url> -d 3 -jc -j -v -timeout 120 -c 20 -p 20 -retry 3 -rd 1 -rl 10
 //
 // THREE OF THOSE ARE ALREADY DOING NOTHING AND THE VOCABULARY SAYS SO RATHER THAN QUIETLY FIXING IT:
 // -p 20 has nothing to parallelise because the runner passes one -u per process; -v was measured to
@@ -322,6 +325,7 @@ func katanaCompanyCommandArgs(targetURL string, tool CompanyTool, settings map[s
 	base := []string{
 		"docker", "exec", "ars0n-framework-v2-katana-1",
 		"katana",
+		"-duc",
 		"-u", targetURL,
 		"-d", "3",
 		"-jc",

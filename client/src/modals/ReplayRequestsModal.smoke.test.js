@@ -45,10 +45,10 @@ describe('the repeater versions column', () => {
   let versionsStatus;
 
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
     calls = [];
     versionsStatus = 200;
-    global.fetch = jest.fn((url, init) => {
+    global.fetch = vi.fn((url, init) => {
       const u = String(url);
       const method = (init && init.method) || 'GET';
       calls.push({ url: u, method, body: init && init.body ? JSON.parse(init.body) : null });
@@ -77,13 +77,13 @@ describe('the repeater versions column', () => {
   afterEach(() => {
     act(() => { root.unmount(); });
     container.remove();
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   const settle = async (ms = 400) => {
     for (let i = 0; i < 3; i += 1) {
       // eslint-disable-next-line no-await-in-loop
-      await act(async () => { jest.advanceTimersByTime(ms); });
+      await act(async () => { vi.advanceTimersByTime(ms); });
     }
   };
 
@@ -208,7 +208,7 @@ describe('the repeater versions column', () => {
 
   test('loading another request saves the edit instead of asking about it', async () => {
     await open();
-    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     await act(async () => { typeInto(EDITED); });
 
     const OTHER = 'c1e1b0a2-1111-2222-3333-999999999999';

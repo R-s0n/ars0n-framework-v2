@@ -64,10 +64,11 @@ var truffleHogOptions = map[string]VectorOptionMeta{
 }
 
 var truffleHogOwned = map[string]string{
-	"--json":     "Findings are read from the JSON output, so the format is fixed.",
-	"-j":         "Findings are read from the JSON output, so the format is fixed.",
-	"--no-color": "Escape codes would end up in the evidence.",
-	"filesystem": "The framework fetches what you pointed it at and scans that, because TruffleHog has no URL source of its own.",
+	"--json":      "Findings are read from the JSON output, so the format is fixed.",
+	"-j":          "Findings are read from the JSON output, so the format is fixed.",
+	"--no-color":  "Escape codes would end up in the evidence.",
+	"--no-update": "Always set. The self-updater would replace the pinned binary with an unverified download.",
+	"filesystem":  "The framework fetches what you pointed it at and scans that, because TruffleHog has no URL source of its own.",
 }
 
 var gitDumperOptions = map[string]VectorOptionMeta{

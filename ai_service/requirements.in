@@ -1,0 +1,21 @@
+# Direct pins for requirements.txt (hash-locked). torch is NOT here: it installs from the PyTorch CPU
+# index via requirements-torch.txt; its Requires-Dist is listed below so the PyPI lock covers it.
+# Regenerate: resolve inside a disposable linux container (amd64 and arm64) with
+#   pip install --dry-run --only-binary=:all: --uploaded-prior-to <cutoff> --report r.json -r requirements.in
+# after installing torch==2.14.1+cpu --no-deps, then hash every resolved pin from PyPI.
+fastapi==0.141.1
+starlette==1.7.0
+uvicorn==0.54.0
+pydantic==2.13.5
+requests==2.34.2
+transformers==5.19.0
+# certifi 2026.10.19 (GHSA-6q48-6c7w-9gw2 fix) is younger than the resolver cutoff; it is pinned in
+# requirements.txt by hand after the resolve.
+# torch 2.14.1+cpu Requires-Dist
+filelock
+typing-extensions>=4.10.0
+setuptools>=77.0.3
+sympy>=1.13.3
+networkx>=2.5.1
+jinja2
+fsspec>=0.8.5
