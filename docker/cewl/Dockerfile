@@ -1,6 +1,6 @@
 # Ruby 3.4 pinned by digest; Ruby 3.2 reached end of life on 2026-03-31. 3.4 ships resolv 0.7.2 and
 # racc 1.8.1, and every gem in CeWL's lock supports it.
-FROM ruby:3.4.11-slim-trixie@sha256:976f45719573889b0ef02fcff5fd7a486cb09a56ad11c472d51d49604c31d6ab
+FROM ruby:4.0.0-slim-trixie@sha256:fe89c3e461b5258352ed5cbe0355fe239a0c7d0ca6c4d9fa22537b98d4432a6c
 
 # CeWL is fetched at a pinned commit (current master, the one this image already ran: it reports
 # "CeWL 6.3.1 (GetOptLong Deps)") instead of master HEAD, and asserted, because a branch moves and a
