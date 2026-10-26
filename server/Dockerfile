@@ -1,6 +1,6 @@
 # Build stage: compiles the server and nothing from it ships except the binary.
 # Pinned by multi-arch index digest (linux/amd64 + linux/arm64, go1.26.9, published 2026-10-08).
-FROM golang:1.26.9-alpine3.24@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0 AS build
+FROM golang:1.27.2-alpine3.24@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build
 
 # GOTOOLCHAIN=local: never download a different Go toolchain at build time (go.mod needs go 1.26.0,
 # which this image already satisfies). No ",direct" in GOPROXY, so modules come only from the proxy

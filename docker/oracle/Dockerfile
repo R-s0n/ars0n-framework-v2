@@ -8,7 +8,7 @@
 # canary check for a reason that has nothing to do with the scanners.
 # Go 1.26.9 on Alpine 3.24, pinned by multi-arch index digest (linux/amd64 + linux/arm64). Only the
 # static binary leaves this stage. GOTOOLCHAIN=local fails the build rather than download a toolchain.
-FROM golang:1.26.9-alpine3.24@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0 AS build
+FROM golang:1.27.2-alpine3.24@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build
 ENV GOTOOLCHAIN=local
 WORKDIR /src
 # go.mod is COMMITTED rather than created here by `go mod init`, so main_test.go can run outside

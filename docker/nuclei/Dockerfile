@@ -12,7 +12,7 @@
 # BEHAVIOUR CHANGES FROM 3.3.8 THAT REACH THE FRAMEWORK: since v3.11 nuclei skips UNSIGNED
 # javascript: templates (that is the RCE fix), so unsigned custom JS templates under /custom_templates
 # no longer run; sign them with `nuclei -sign`. Since v3.10, MySQL allowAllFiles needs -lfa.
-FROM golang:1.26.9-trixie@sha256:f89535b7caea67fa9ff0ba009894bff8f3be915e49cb635477c8ce04e045db5d AS build
+FROM golang:1.27.1-trixie@sha256:8f58fd67ea075142d947a60e0caa4317746a55118d312f027793d382c7741734 AS build
 ENV GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOPROXY=https://proxy.golang.org CGO_ENABLED=0
 # v3.11.1. A tag can be moved upstream, a commit cannot, so the fetch is by SHA and asserted.
 # The tag is then created LOCALLY on that commit only so `go build` stamps the real version into
