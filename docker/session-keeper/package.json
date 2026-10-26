@@ -6,6 +6,6 @@
   "description": "Durable headless-browser session keeper for ars0n-framework-v2",
   "main": "keeper.mjs",
   "dependencies": {
-    "puppeteer": "25.12.0"
+    "puppeteer": "25.13.0"
   }
 }
