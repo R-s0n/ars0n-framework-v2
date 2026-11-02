@@ -24,7 +24,7 @@ RUN npm run build
 # nginx 1.31.6 on Alpine 3.24, the same pinned image as nginx/. The -slim variant has the same nginx
 # binary, mime.types and built-in gzip as the full one; it drops curl and the njs, xslt,
 # image-filter and geoip modules, none of which nginx.conf loads.
-FROM nginx:1.31.6-alpine3.24-slim@sha256:f761b94f2cb9e8e05e2943d5f773609596113ef69b54e2433a996d109a8f78b7
+FROM nginx:1.31.7-alpine3.24-slim@sha256:ebd058041a732a2b2dc0b606e34572dd8e0034de6a4aa4d50d8c13a240ac6005
 
 # Take Alpine's current security updates (signed distro repos). In particular ca-certificates
 # 20261020 drops the compromised emSign ECC Root CA - G3. The bundle carries no labels, so the build
