@@ -7,7 +7,7 @@
 # v3.2.1: GHSA-mph2-gf5w-6f9f and GHSA-69jp-6fh7-wjpm (both HIGH, fixed in 3.2.3) let a scanned host
 # receive the operator --cookies / -H values, which ComposeDalfox passes. Neither advisory is in OSV.
 # The scan flags are identical between the two releases (diffed from --help).
-FROM ghcr.io/hahwul/dalfox:v3.2.4@sha256:d932c680426d514634b4f4fc81803ccfba304c697afdb4e65082b2cf81084d3f
+FROM ghcr.io/hahwul/dalfox:v3.3.0@sha256:d96c50f558c4162eb03d37cec226b4edb5765680f01a3a086ada140485702100
 
 # The published image sets Cmd to ["./dalfox"] with no Entrypoint, so the binary is only on the
 # relative path from its WORKDIR. `docker exec dalfox --help` would fail with "executable not found"
