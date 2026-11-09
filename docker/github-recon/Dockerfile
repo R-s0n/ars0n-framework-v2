@@ -2,7 +2,7 @@
 # requirements.txt. The two scripts the framework runs (github-endpoints.py, github-subdomains.py)
 # import only requests, colored and tldextract, so selenium and beautifulsoup4 are no longer installed.
 # This image sends the operator's GitHub token to api.github.com.
-FROM python:3.11.17-slim-trixie@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce
+FROM python:3.11.17-slim-trixie@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377
 
 WORKDIR /app
 

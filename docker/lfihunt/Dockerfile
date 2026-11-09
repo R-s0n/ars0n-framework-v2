@@ -5,7 +5,7 @@
 # urllib3 2.8.0 and Pygments 2.21.0. grapheme (via alive_progress) only ships an sdist, so it is
 # built with the base image's setuptools rather than letting pip fetch an unpinned build backend;
 # setuptools, wheel and packaging are then removed.
-FROM python:3.11.17-slim-trixie@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce
+FROM python:3.11.17-slim-trixie@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377
 
 # The base digest predates DSA-6572-1 (ca-certificates 20250419+deb13u1, which drops the compromised
 # emSign ECC Root CA - G3 and Comodo AAA roots) and DSA-6549-1 (liblzma5). The upgrade brings both in

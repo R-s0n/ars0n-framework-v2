@@ -6,7 +6,7 @@
 # dnspython 2.9.0 is younger than the usual 14-day bar: it is the only release fixing HIGH
 # GHSA-45c3-73f7-pv4m, which is reachable here because cloud_enum parses replies from third-party
 # public resolvers (resolvers.txt). Same Trusted Publisher workflow as 2.8.0; recorded as an exception.
-FROM python:3.11.17-slim-trixie@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce
+FROM python:3.11.17-slim-trixie@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377
 
 # The base digest predates DSA-6572-1 (ca-certificates 20250419+deb13u1, which drops the compromised
 # emSign ECC Root CA - G3 and Comodo AAA roots) and DSA-6549-1 (liblzma5). The upgrade brings both in

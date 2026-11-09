@@ -1,7 +1,7 @@
 # python 3.14.8 (Debian 13.7), pinned to the 2026-10-06 multi-arch index (linux/amd64 + linux/arm64).
 # Never resolve by tag: 3.14.8-slim-trixie was re-pushed 2026-10-21. It ships pip 26.2.1 and nothing
 # else (no setuptools/wheel). The same digest is on public.ecr.aws/docker/library/python if Hub rate-limits.
-FROM python:3.14.8-slim-trixie@sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2
+FROM python:3.14.9-slim-trixie@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8
 
 WORKDIR /app
 
