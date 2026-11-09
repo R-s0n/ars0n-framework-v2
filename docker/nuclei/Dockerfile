@@ -61,7 +61,7 @@ RUN git init -q /root/nuclei-templates \
 # certificate's first base64 line; the bundle has no names, so grepping the CA name could never
 # fail). bash is part of the base image and is needed: the server runs `bash -c` here and
 # entrypoint.sh is a bash script.
-FROM debian:trixie-20261005-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+FROM debian:trixie-20261020-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 
 ENV DEBIAN_FRONTEND=noninteractive
 

@@ -85,7 +85,7 @@ RUN cd /app/x8 \
     && cargo build --release --locked \
     && strip target/release/x8
 
-FROM debian:bookworm-20261005-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+FROM debian:bookworm-20261020-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
 
 # libssl3 is listed explicitly because the binary genuinely needs it: `ldd /usr/local/bin/x8` in this
 # image reports libssl.so.3 and libcrypto.so.3. Nothing here asked for OpenSSL - x8 enables reqwest's
