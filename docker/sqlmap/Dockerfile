@@ -1,6 +1,6 @@
 # Base pinned by its multi-arch index digest (linux/amd64 + linux/arm64, built 2026-10-06). Python 3.11
 # is supported until 2027-10.
-FROM python:3.11.17-slim-trixie@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce
+FROM python:3.11.17-slim-trixie@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377
 
 # Supply chain: everything fetched at build time is pinned. ca-certificates and liblzma5 come from
 # trixie-security (the base predates the removal of the compromised emSign ECC Root CA - G3). pip is

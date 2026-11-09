@@ -1,7 +1,7 @@
 # Everything fetched here is pinned: the base by digest, Arjun by a commit on the canonical
 # repository, and every Python dependency by hash in requirements.txt (regenerate it rather than
 # editing it by hand). Nothing is resolved at build time.
-FROM python:3.11.17-slim-trixie@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce
+FROM python:3.11.17-slim-trixie@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377
 
 # The base digest predates DSA-6572-1 (ca-certificates 20250419+deb13u1, which drops the compromised
 # emSign ECC Root CA - G3 and Comodo AAA roots) and DSA-6549-1 (liblzma5). The upgrade brings both in
