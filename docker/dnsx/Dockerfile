@@ -32,7 +32,7 @@ RUN go mod download && go mod verify \
 # including the ca-certificates release that drops the compromised emSign ECC Root CA - G3. The build
 # fails if that root is still trusted or the bundle is missing (matched by the certificate's first
 # base64 line; the bundle has no names, so grepping the CA name could never fail).
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 RUN apk upgrade --no-cache \
     && test -s /etc/ssl/certs/ca-certificates.crt \
     && ! grep -qF 'MIICTjCCAdOgAwIBAgIKPPYHqWhwDtqLhDAKBggqhkjOPQQDAzBrMQswCQYDVQQG' /etc/ssl/certs/ca-certificates.crt
