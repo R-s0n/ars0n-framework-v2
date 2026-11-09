@@ -36,7 +36,7 @@ RUN go mod download && go mod verify \
 # ECC Root CA - G3; the build fails if that root is still trusted or the bundle is missing (matched by
 # the certificate's first base64 line; the bundle has no names, so grepping the CA name could never
 # fail).
-FROM debian:trixie-20261005-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+FROM debian:trixie-20261020-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 ARG DEBIAN_FRONTEND=noninteractive
 # HEADLESS MODE MUST NEVER DOWNLOAD A BROWSER AT SCAN TIME.
 #
