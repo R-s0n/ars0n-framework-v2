@@ -7,7 +7,7 @@
 # the release that fixes CVE-2026-111497 (Brotli out-of-bounds write) and three other HIGH issues,
 # none of which has a fix on an older 24.x. Trixie because its security archive ships a current,
 # signed chromium on both amd64 and arm64.
-FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea
+FROM node:24.22.1-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a
 
 # THE BROWSER IS DEBIAN'S, AND PUPPETEER IS TOLD SO EXPLICITLY.
 #
