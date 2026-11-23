@@ -43,7 +43,7 @@ ARG X8_COMMIT=c78f246a497196d1658aec32ab7ed76fbac0a11e
 #
 # Both images are pinned by digest (a tag can be re-pushed, a digest cannot). Rust 1.88 was out of
 # support; 1.99.0 is current stable on the same Debian release.
-FROM rust:1.99.0-slim-bookworm@sha256:2c3a22f0a5533ea2dd5a16627bc841228151faa2d4de2644ac9987e4a2f1f2fa AS builder
+FROM rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS builder
 
 ARG X8_COMMIT
 
